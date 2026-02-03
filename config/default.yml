@@ -1,0 +1,119 @@
+# Telegram Chat Companion - Default Configuration
+# Override these settings in local.yml (gitignored) or via environment variables
+
+# Bot behavior
+bot:
+  # Words that trigger the bot to respond (case-insensitive)
+  trigger_words:
+    - "bot"
+    - "бот"
+
+  # Chance to respond randomly to non-triggered messages (0.0 to 1.0)
+  random_response_chance: 0.05
+
+  # Minimum seconds between random responses in the same chat
+  random_response_min_interval: 300
+
+# AI Provider Configuration (January 2026)
+#
+# COST POLICY: Always use the cheapest model that covers the task.
+# Expensive models (gpt-5.2, gemini-3-pro, claude-opus, grok-4, o4-mini)
+# require explicit approval — never set them as defaults.
+ai:
+  # Default provider for text generation
+  default_provider: "gemini"
+
+  # Task-specific provider configuration
+  # All defaults use cheapest available models (nano/flash tier)
+  tasks:
+    text_generation:
+      provider: "gemini"
+      model: "gemini-3-flash-preview"      # cheap: flash tier
+      fallback:
+        - "openai"
+        - "deepseek"
+      fallback_models:
+        openai: "gpt-5-nano"               # cheapest OpenAI text model
+        deepseek: "deepseek-v3.2"
+      max_tokens: 500
+      temperature: 0.9
+
+    embeddings:
+      provider: "gemini"
+      model: "gemini-embedding-001"         # free/cheapest embedding model
+      dimensions: 768
+      fallback:
+        - "openai"
+      fallback_models:
+        openai: "text-embedding-3-small"    # cheaper than text-embedding-3-large
+
+    vision:
+      provider: "gemini"
+      model: "gemini-3-flash-preview"       # cheap: flash tier
+      fallback:
+        - "openai"
+        - "grok"
+      fallback_models:
+        openai: "gpt-5-nano"               # nano has multimodal, no need for gpt-5.2
+        grok: "grok-2-vision-1212"
+      max_tokens: 200
+
+    transcription:
+      provider: "openai"
+      model: "whisper-1"
+      # No fallback - only OpenAI supports this
+
+# RAG Memory Configuration
+rag:
+  # Minimum similarity score for relevant memories (0.0 to 1.0)
+  min_similarity: 0.7
+
+  # Maximum memories to retrieve per query
+  max_results: 5
+
+  # Memory importance scoring
+  default_importance: 0.5
+
+# Module Configuration
+# Set enabled: false to disable a module entirely
+modules:
+  # Core modules (always enabled)
+  text_responses:
+    enabled: true
+
+  rag_memory:
+    enabled: true
+
+  # Optional modules
+  voice_transcription:
+    enabled: true
+    requires:
+      - "transcription"
+
+  sticker_intelligence:
+    enabled: false  # Disabled by default (requires vision + embeddings)
+    requires:
+      - "vision"
+      - "embeddings"
+    response_chance: 0.15
+
+  image_analysis:
+    enabled: true
+    requires:
+      - "vision"
+
+  abuse_filter:
+    enabled: false  # Disabled by default
+    requires:
+      - "embeddings"
+
+  link_comments:
+    enabled: false
+
+  admin_panel:
+    enabled: true
+
+# Logging
+logging:
+  level: "INFO"
+  format: "json"  # "json" or "console"

@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+config/local.yml
+*.pem
+*.key
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.override.yml
+
+# ===========================================
+# INTERNAL / MIGRATION FILES (not for public)
+# ===========================================
+
+# Project instructions (internal use only)
+CLAUDE.md
+
+# n8n migration artifacts
+n8n-migration/
+*.n8n.json
+workflow-*.json
+
+# Legacy database exports
+*_backup.dump
+*_backup.sql
+schema_backup.sql
+
+# Internal notes and planning
+.internal/
+internal/
+migration-notes/
