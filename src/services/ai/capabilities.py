@@ -137,4 +137,4 @@ def provider_supports(provider: str, capability: str) -> bool:
     """Check if a provider supports a capability."""
     if provider not in PROVIDER_CAPABILITIES:
         return False
-    return PROVIDER_CAPABILITIES[provider].get(capability, False)
+    return bool(PROVIDER_CAPABILITIES[provider].get(capability, False))

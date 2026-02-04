@@ -8,9 +8,13 @@ Routes AI requests to the appropriate provider based on:
 4. Automatic fallback on errors
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import structlog
 
-from src.config import settings
+from src.config import Settings
 from src.services.ai.base import (
     AIProvider,
     AIProviderError,
@@ -30,30 +34,27 @@ class AIRouter:
     Routes AI requests to appropriate providers with automatic fallback.
 
     Usage:
-        router = AIRouter()
+        router = AIRouter(settings)
         result = await router.generate_text("Hello, world!")
     """
 
-    def __init__(self) -> None:
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
         self._providers: dict[str, AIProvider] = {}
         self._initialize_providers()
 
     def _initialize_providers(self) -> None:
         """Initialize available providers based on configured API keys."""
-        # Lazy import to avoid circular dependencies
-        # Providers will be imported and initialized only when needed
-
-        if settings.openai_api_key:
+        if self._settings.openai_api_key:
             logger.info("OpenAI provider available")
-            # Will initialize on first use
 
-        if settings.gemini_api_key:
+        if self._settings.gemini_api_key:
             logger.info("Gemini provider available")
 
-        if settings.grok_api_key:
+        if self._settings.grok_api_key:
             logger.info("Grok provider available")
 
-        if settings.deepseek_api_key:
+        if self._settings.deepseek_api_key:
             logger.info("DeepSeek provider available")
 
     async def _get_provider(self, provider_name: str) -> AIProvider:
@@ -62,15 +63,14 @@ class AIRouter:
             return self._providers[provider_name]
 
         # Lazy initialization of providers
-        if provider_name == "openai" and settings.openai_api_key:
+        if provider_name == "openai" and self._settings.openai_api_key:
             from src.services.ai.providers.openai import OpenAIProvider
 
-            self._providers[provider_name] = OpenAIProvider(settings.openai_api_key)
-        elif provider_name == "gemini" and settings.gemini_api_key:
+            self._providers[provider_name] = OpenAIProvider(self._settings.openai_api_key)
+        elif provider_name == "gemini" and self._settings.gemini_api_key:
             from src.services.ai.providers.gemini import GeminiProvider
 
-            self._providers[provider_name] = GeminiProvider(settings.gemini_api_key)
-        # Add more providers here as they're implemented
+            self._providers[provider_name] = GeminiProvider(self._settings.gemini_api_key)
         else:
             raise AIProviderError(
                 f"Provider {provider_name} not available or not configured",
@@ -81,7 +81,7 @@ class AIRouter:
 
     def _get_provider_chain(self, task: str) -> list[str]:
         """Get the provider chain for a task (primary + fallbacks)."""
-        task_config = settings.ai.tasks.get(task)
+        task_config = self._settings.ai.tasks.get(task)
 
         if task_config:
             chain = [task_config.provider] + task_config.fallback
@@ -89,7 +89,7 @@ class AIRouter:
             # Default chain based on capability
             chain = get_providers_for_capability(task)
             if not chain:
-                chain = [settings.ai.default_provider]
+                chain = [self._settings.ai.default_provider]
 
         # Filter to only available providers
         available = []
@@ -102,10 +102,10 @@ class AIRouter:
     def _is_provider_available(self, provider_name: str) -> bool:
         """Check if a provider is configured and available."""
         api_keys = {
-            "openai": settings.openai_api_key,
-            "gemini": settings.gemini_api_key,
-            "grok": settings.grok_api_key,
-            "deepseek": settings.deepseek_api_key,
+            "openai": self._settings.openai_api_key,
+            "gemini": self._settings.gemini_api_key,
+            "grok": self._settings.grok_api_key,
+            "deepseek": self._settings.deepseek_api_key,
         }
         return bool(api_keys.get(provider_name))
 
@@ -116,7 +116,7 @@ class AIRouter:
         **kwargs: str | int | float,
     ) -> TextGenerationResult:
         """Generate text using the configured provider with fallback."""
-        task_config = settings.ai.tasks.get("text_generation")
+        task_config = self._settings.ai.tasks.get("text_generation")
         chain = self._get_provider_chain("text_generation")
 
         if not chain:
@@ -179,7 +179,7 @@ class AIRouter:
         **kwargs: str | int,
     ) -> EmbeddingResult:
         """Generate embedding using the configured provider with fallback."""
-        task_config = settings.ai.tasks.get("embeddings")
+        task_config = self._settings.ai.tasks.get("embeddings")
         chain = self._get_provider_chain("embeddings")
 
         if not chain:
@@ -222,7 +222,7 @@ class AIRouter:
         self,
         image_data: bytes,
         prompt: str,
-        **kwargs: str | int,
+        **kwargs: Any,
     ) -> VisionResult:
         """Analyze image using the configured provider with fallback."""
         chain = self._get_provider_chain("vision")
@@ -309,7 +309,3 @@ class AIRouter:
         for provider in self._providers.values():
             await provider.close()
         self._providers.clear()
-
-
-# Global router instance
-ai_router = AIRouter()

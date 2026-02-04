@@ -61,7 +61,9 @@ INSERT INTO bot_config (key, value, description) VALUES
     ('default_sticker_learning_enabled',     'false',           'Enable sticker learning by default'),
     ('default_sticker_response_chance',      '0.15',            'Default sticker response probability'),
     ('default_image_analysis_enabled',       'true',            'Enable image analysis by default'),
-    ('default_save_messages',                'true',            'Save message history by default')
+    ('default_save_messages',                'true',            'Save message history by default'),
+    ('admin_ids',                            '""',              'Comma-separated Telegram user IDs of bot admins'),
+    ('allowed_chats',                        '""',              'Comma-separated chat IDs allowed to use the bot (empty = use per-chat enabled flag)')
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================================================
@@ -107,3 +109,78 @@ CREATE TRIGGER chat_settings_updated_at
 -- Index for listing enabled chats
 CREATE INDEX IF NOT EXISTS idx_chat_settings_enabled
     ON chat_settings (enabled) WHERE enabled = true;
+
+-- =============================================================================
+-- chat_messages — Message history per chat
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id                      BIGSERIAL PRIMARY KEY,
+    chat_id                 BIGINT NOT NULL,
+    message_id              BIGINT NOT NULL,
+    user_id                 BIGINT,
+    username                TEXT,
+    first_name              TEXT,
+    message_type            VARCHAR(20) NOT NULL DEFAULT 'text',
+    content                 TEXT,
+    raw_data                JSONB,
+    reply_to_message_id     BIGINT,
+    is_bot_message          BOOLEAN NOT NULL DEFAULT false,
+    sticker_file_id         TEXT,
+    sticker_file_unique_id  TEXT,
+    sticker_set_name        TEXT,
+    sticker_emoji           TEXT,
+
+    -- Edit tracking
+    original_content        TEXT,
+    edited_at               TIMESTAMPTZ,
+    edit_count              INTEGER NOT NULL DEFAULT 0,
+
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    UNIQUE (chat_id, message_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_created
+    ON chat_messages (chat_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_user
+    ON chat_messages (chat_id, user_id);
+
+-- =============================================================================
+-- user_activity — Activity tracking per user per chat
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS user_activity (
+    id              BIGSERIAL PRIMARY KEY,
+    chat_id         BIGINT NOT NULL,
+    user_id         BIGINT NOT NULL,
+    username        TEXT,
+    first_name      TEXT,
+    activity_type   VARCHAR(20) NOT NULL DEFAULT 'message',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_activity_chat_user_created
+    ON user_activity (chat_id, user_id, created_at DESC);
+
+-- =============================================================================
+-- response_log — AI response metadata logging
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS response_log (
+    id                BIGSERIAL PRIMARY KEY,
+    chat_id           BIGINT NOT NULL,
+    user_id           BIGINT,
+    message_id        BIGINT,
+    trigger_type      VARCHAR(20),
+    provider          VARCHAR(50),
+    model             VARCHAR(100),
+    tokens_input      INTEGER,
+    tokens_output     INTEGER,
+    response_time_ms  INTEGER,
+    was_fallback      BOOLEAN NOT NULL DEFAULT false,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_log_chat_created
+    ON response_log (chat_id, created_at DESC);

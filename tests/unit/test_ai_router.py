@@ -1,6 +1,6 @@
 """Tests for src.services.ai.router — AIRouter fallback chain logic."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -27,12 +27,11 @@ def mock_router_settings():
 
 @pytest.fixture
 def make_router(mock_router_settings):
-    """Factory: create AIRouter with patched settings."""
+    """Factory: create AIRouter with mock settings (no patching needed)."""
 
     def _factory(settings_override=None):
         s = settings_override or mock_router_settings
-        with patch("src.services.ai.router.settings", s):
-            router = AIRouter()
+        router = AIRouter(s)
         return router, s
 
     return _factory
@@ -50,21 +49,18 @@ class TestIsProviderAvailable:
     """Test _is_provider_available()."""
 
     def test_available_when_api_key_set(self, make_router):
-        router, s = make_router()
-        with patch("src.services.ai.router.settings", s):
-            assert router._is_provider_available("openai") is True
-            assert router._is_provider_available("gemini") is True
+        router, _ = make_router()
+        assert router._is_provider_available("openai") is True
+        assert router._is_provider_available("gemini") is True
 
     def test_unavailable_when_no_api_key(self, make_router):
-        router, s = make_router()
-        with patch("src.services.ai.router.settings", s):
-            assert router._is_provider_available("grok") is False
-            assert router._is_provider_available("deepseek") is False
+        router, _ = make_router()
+        assert router._is_provider_available("grok") is False
+        assert router._is_provider_available("deepseek") is False
 
     def test_unknown_provider_unavailable(self, make_router):
-        router, s = make_router()
-        with patch("src.services.ai.router.settings", s):
-            assert router._is_provider_available("unknown") is False
+        router, _ = make_router()
+        assert router._is_provider_available("unknown") is False
 
 
 class TestGetProviderChain:
@@ -76,9 +72,8 @@ class TestGetProviderChain:
         task_config.fallback = ["openai"]
         mock_router_settings.ai.tasks = {"text_generation": task_config}
 
-        router, s = make_router(mock_router_settings)
-        with patch("src.services.ai.router.settings", s):
-            chain = router._get_provider_chain("text_generation")
+        router, _ = make_router(mock_router_settings)
+        chain = router._get_provider_chain("text_generation")
         assert chain == ["gemini", "openai"]
 
     def test_filters_out_unavailable_providers(self, make_router, mock_router_settings):
@@ -87,9 +82,8 @@ class TestGetProviderChain:
         task_config.fallback = ["grok", "openai"]
         mock_router_settings.ai.tasks = {"text_generation": task_config}
 
-        router, s = make_router(mock_router_settings)
-        with patch("src.services.ai.router.settings", s):
-            chain = router._get_provider_chain("text_generation")
+        router, _ = make_router(mock_router_settings)
+        chain = router._get_provider_chain("text_generation")
         assert "grok" not in chain
         assert chain == ["gemini", "openai"]
 
@@ -115,11 +109,10 @@ class TestGenerateText:
         task_config.temperature = 0.9
         mock_router_settings.ai.tasks = {"text_generation": task_config}
 
-        router, s = make_router(mock_router_settings)
+        router, _ = make_router(mock_router_settings)
         router._providers["gemini"] = provider
 
-        with patch("src.services.ai.router.settings", s):
-            result = await router.generate_text("test prompt")
+        result = await router.generate_text("test prompt")
 
         assert result.text == "hello world"
         assert "generate_text" in provider.call_log
@@ -145,12 +138,11 @@ class TestGenerateText:
         task_config.temperature = 0.9
         mock_router_settings.ai.tasks = {"text_generation": task_config}
 
-        router, s = make_router(mock_router_settings)
+        router, _ = make_router(mock_router_settings)
         router._providers["gemini"] = failing_provider
         router._providers["openai"] = fallback_provider
 
-        with patch("src.services.ai.router.settings", s):
-            result = await router.generate_text("test")
+        result = await router.generate_text("test")
 
         assert result.text == "fallback response"
         assert result.provider == "openai"
@@ -176,13 +168,11 @@ class TestGenerateText:
         task_config.temperature = 0.9
         mock_router_settings.ai.tasks = {"text_generation": task_config}
 
-        router, s = make_router(mock_router_settings)
+        router, _ = make_router(mock_router_settings)
         router._providers["gemini"] = failing1
         router._providers["openai"] = failing2
 
-        with patch("src.services.ai.router.settings", s), pytest.raises(
-            AIProviderError, match="All providers failed",
-        ):
+        with pytest.raises(AIProviderError, match="All providers failed"):
             await router.generate_text("test")
 
     @pytest.mark.asyncio
@@ -195,10 +185,9 @@ class TestGenerateText:
         no_keys.ai.default_provider = "gemini"
         no_keys.ai.tasks = {}
 
-        with patch("src.services.ai.router.settings", no_keys):
-            router = AIRouter()
-            with pytest.raises(AIProviderError, match="No providers available"):
-                await router.generate_text("test")
+        router = AIRouter(no_keys)
+        with pytest.raises(AIProviderError, match="No providers available"):
+            await router.generate_text("test")
 
 
 class TestClose:

@@ -13,13 +13,18 @@ import structlog
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from dishka import make_async_container
+from dishka.integrations.aiogram import setup_dishka
 
 from src.bot.handlers import router as main_router
-from src.bot.middleware import ChatConfigMiddleware
-from src.config import settings
-from src.database.connection import close_pool, create_pool
-from src.database.repositories import BotConfigRepository, ChatSettingsRepository
-from src.services.chat_config import ChatConfigService
+from src.bot.middleware import (
+    AccessControlMiddleware,
+    ActivityTrackerMiddleware,
+    ChatConfigMiddleware,
+    MessageSaverMiddleware,
+)
+from src.config import Settings
+from src.di import AppProvider, RepositoryProvider, ServiceProvider
 
 _REQUIRED_TABLES = ("bot_config", "chat_settings")
 
@@ -43,6 +48,8 @@ async def _verify_schema(pool: asyncpg.Pool) -> None:
 
 async def main() -> None:
     """Initialize and start the bot."""
+    settings = Settings()
+
     # Configure logging
     structlog.configure(
         processors=[
@@ -67,22 +74,20 @@ async def main() -> None:
     logger = structlog.get_logger()
     logger.info("Starting Telegram Chat Companion", version="0.1.0")
 
-    # Initialize database pool
-    pool = await create_pool(settings.database_url)
+    # Build Dishka DI container
+    container = make_async_container(
+        AppProvider(),
+        RepositoryProvider(),
+        ServiceProvider(),
+        context={Settings: settings},
+    )
+
+    # Resolve the database pool for schema verification
+    pool = await container.get(asyncpg.Pool)
     logger.info("Database connection established")
 
-    # Verify schema
     await _verify_schema(pool)
     logger.info("Database schema verified")
-
-    # Initialize repositories and services
-    bot_config_repo = BotConfigRepository(pool)
-    chat_settings_repo = ChatSettingsRepository(pool)
-    config_service = ChatConfigService(
-        yaml_settings=settings.bot,
-        bot_config_repo=bot_config_repo,
-        chat_settings_repo=chat_settings_repo,
-    )
 
     # Initialize bot
     bot = Bot(
@@ -92,19 +97,36 @@ async def main() -> None:
 
     # Initialize dispatcher
     dp = Dispatcher()
-    dp.message.middleware(ChatConfigMiddleware(config_service))
-    dp.include_router(main_router)
 
-    # Store references for access in handlers
-    dp["db_pool"] = pool
-    dp["config_service"] = config_service
+    # Wire Dishka into aiogram (registers ContainerMiddleware as outer middleware)
+    setup_dishka(container=container, router=dp, auto_inject=True)
+
+    # Register inner middleware (runs after Dishka's ContainerMiddleware).
+    # Order matters: outer middleware runs first.
+    # 1. ChatConfig — injects chat_config into handler data
+    # 2. AccessControl — whitelist + admin check (needs chat_config)
+    # 3. ActivityTracker — tracks user activity
+    # 4. MessageSaver — saves messages to DB
+    chat_config_mw = ChatConfigMiddleware()
+    access_control_mw = AccessControlMiddleware()
+    activity_tracker_mw = ActivityTrackerMiddleware()
+    message_saver_mw = MessageSaverMiddleware()
+
+    for mw in (chat_config_mw, access_control_mw, activity_tracker_mw, message_saver_mw):
+        dp.message.middleware(mw)
+
+    # Callback queries need chat_config + access control too
+    dp.callback_query.middleware(chat_config_mw)
+    dp.callback_query.middleware(access_control_mw)
+
+    dp.include_router(main_router)
 
     try:
         logger.info("Bot started, listening for messages...")
         await dp.start_polling(bot)
     finally:
         logger.info("Shutting down...")
-        await close_pool(pool)
+        await container.close()
         await bot.session.close()
 
 
