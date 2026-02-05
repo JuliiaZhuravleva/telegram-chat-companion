@@ -105,6 +105,13 @@ class AccessControlMiddleware(BaseMiddleware):
         if now - last < _NOTIFY_COOLDOWN_SECONDS:
             return
 
+        # Prune expired entries to prevent unbounded memory growth
+        if len(self._last_notify) > 1000:
+            self._last_notify = {
+                k: v for k, v in self._last_notify.items()
+                if now - v < _NOTIFY_COOLDOWN_SECONDS
+            }
+
         try:
             container: AsyncContainer = data["dishka_container"]
             notifier = await container.get(AbuseNotificationService)

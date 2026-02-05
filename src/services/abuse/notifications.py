@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any
 
 import structlog
@@ -158,20 +159,22 @@ class AbuseNotificationService:
         lines: list[str] = ["🔒 <b>Unauthorized access</b>", ""]
 
         # -- Chat info --
-        chat_display = chat_title or str(chat_id)
+        chat_display = escape(chat_title) if chat_title else str(chat_id)
         if chat_type:
-            chat_display += f" ({chat_type})"
+            chat_display += f" ({escape(chat_type)})"
         lines.append(f"<b>Chat:</b> {chat_display}")
         lines.append(f"<b>Chat ID:</b> <code>{chat_id}</code>")
         if chat_username:
-            lines.append(f"<b>Chat link:</b> https://t.me/{chat_username}")
+            lines.append(
+                f"<b>Chat link:</b> https://t.me/{escape(chat_username)}"
+            )
 
         lines.append("")
 
         # -- User info --
-        full_name = (user_first_name or "")
+        full_name = escape(user_first_name) if user_first_name else ""
         if user_last_name:
-            full_name += f" {user_last_name}"
+            full_name += f" {escape(user_last_name)}"
         full_name = full_name.strip() or "unknown"
 
         if user_id:
@@ -183,11 +186,11 @@ class AbuseNotificationService:
             lines.append(f"<b>User:</b> {full_name}")
 
         if user_username:
-            lines.append(f"<b>Username:</b> @{user_username}")
+            lines.append(f"<b>Username:</b> @{escape(user_username)}")
 
         # -- Message preview --
         if message_text:
-            lines.append(f"\n<b>Message:</b> {message_text[:100]}")
+            lines.append(f"\n<b>Message:</b> {escape(message_text[:100])}")
 
         # -- Quick action hint --
         lines.append("")
