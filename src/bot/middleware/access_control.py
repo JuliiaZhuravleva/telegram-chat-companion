@@ -57,7 +57,7 @@ class AccessControlMiddleware(BaseMiddleware):
             if is_admin and chat_type == "private":
                 return await handler(event, data)
 
-            logger.debug(
+            logger.info(
                 "Chat not enabled, skipping",
                 chat_id=chat_id,
                 user_id=user_id,
@@ -110,22 +110,40 @@ class AccessControlMiddleware(BaseMiddleware):
             notifier = await container.get(AbuseNotificationService)
             bot = data.get("bot")
 
-            # Extract username and chat title from the event
-            username: str | None = None
+            # Extract all available info from the event
+            user_first_name: str | None = None
+            user_last_name: str | None = None
+            user_username: str | None = None
             chat_title: str | None = None
+            chat_type_str: str | None = None
+            chat_username: str | None = None
+            message_text: str | None = None
+
             if isinstance(event, Message):
                 if event.from_user:
-                    username = event.from_user.username or event.from_user.first_name
+                    user_first_name = event.from_user.first_name
+                    user_last_name = event.from_user.last_name
+                    user_username = event.from_user.username
                 if event.chat:
                     chat_title = event.chat.title or event.chat.full_name
+                    chat_type_str = event.chat.type
+                    chat_username = event.chat.username
+                message_text = (event.text or event.caption or "")[:100] or None
             elif isinstance(event, CallbackQuery) and event.from_user:
-                username = event.from_user.username or event.from_user.first_name
+                user_first_name = event.from_user.first_name
+                user_last_name = event.from_user.last_name
+                user_username = event.from_user.username
 
             await notifier.notify_unauthorized(
                 chat_id=chat_id,
                 chat_title=chat_title,
+                chat_type=chat_type_str,
+                chat_username=chat_username,
                 user_id=user_id,
-                username=username,
+                user_first_name=user_first_name,
+                user_last_name=user_last_name,
+                user_username=user_username,
+                message_text=message_text,
                 bot=bot,
             )
             self._last_notify[chat_id] = now

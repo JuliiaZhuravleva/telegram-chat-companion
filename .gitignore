@@ -32,6 +32,10 @@ env/
 *.swp
 *.swo
 *~
+*.code-workspace
+
+# Claude Code
+.claude/
 
 # Environment and secrets
 .env

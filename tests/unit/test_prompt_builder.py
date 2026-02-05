@@ -94,6 +94,17 @@ class TestBuildSystemPrompt:
         result = build_system_prompt(ctx)
         assert "bot's own message" in result
 
+    def test_image_context_included(self):
+        ctx = PromptContext(image_context="A cat sitting on a table")
+        result = build_system_prompt(ctx)
+        assert "A cat sitting on a table" in result
+        assert "image" in result.lower()
+
+    def test_no_image_context_when_none(self):
+        ctx = PromptContext(image_context=None)
+        result = build_system_prompt(ctx)
+        assert "Image description" not in result
+
     def test_rag_memories(self):
         ctx = PromptContext(
             rag_memories=[

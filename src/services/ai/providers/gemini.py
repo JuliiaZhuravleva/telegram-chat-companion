@@ -206,7 +206,7 @@ class GeminiProvider(AIProvider):
             )
 
         if resp.status_code != 200:
-            logger.debug("Gemini API error response", status=resp.status_code, body=body_text[:500])
+            logger.error("Gemini API error response", status=resp.status_code, body=body_text[:500])
             raise AIProviderError(
                 f"Gemini API error (HTTP {resp.status_code})",
                 provider=self.name,

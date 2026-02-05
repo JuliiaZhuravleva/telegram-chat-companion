@@ -22,12 +22,16 @@ from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.response_log import ResponseLogRepository
+from src.database.repositories.stickers import StickerRepository
 from src.services.abuse.checker import AntiAbuseChecker
 from src.services.abuse.filter import AbuseFilter
 from src.services.abuse.notifications import AbuseNotificationService
 from src.services.ai.router import AIRouter
 from src.services.chat_config import ChatConfigService
+from src.services.modules.image import ImageAnalysisService
+from src.services.modules.sticker import StickerLearningService
 from src.services.modules.summary import SummaryService
+from src.services.modules.voice import VoiceTranscriptionService
 from src.services.rag.memory import RAGMemoryService
 from src.services.text.pipeline import TextProcessingPipeline
 
@@ -82,6 +86,10 @@ class RepositoryProvider(Provider):
     @provide
     def response_log_repo(self, pool: asyncpg.Pool) -> ResponseLogRepository:
         return ResponseLogRepository(pool)
+
+    @provide
+    def sticker_repo(self, pool: asyncpg.Pool) -> StickerRepository:
+        return StickerRepository(pool)
 
 
 class ServiceProvider(Provider):
@@ -159,3 +167,23 @@ class ServiceProvider(Provider):
             response_log_repo=response_log_repo,
             rag_service=rag_service,
         )
+
+    @provide
+    def voice_transcription_service(
+        self,
+        ai_router: AIRouter,
+        message_repo: MessageRepository,
+    ) -> VoiceTranscriptionService:
+        return VoiceTranscriptionService(ai_router, message_repo)
+
+    @provide
+    def image_analysis_service(self, ai_router: AIRouter) -> ImageAnalysisService:
+        return ImageAnalysisService(ai_router)
+
+    @provide
+    def sticker_learning_service(
+        self,
+        ai_router: AIRouter,
+        sticker_repo: StickerRepository,
+    ) -> StickerLearningService:
+        return StickerLearningService(ai_router, sticker_repo)

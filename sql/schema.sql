@@ -184,3 +184,80 @@ CREATE TABLE IF NOT EXISTS response_log (
 
 CREATE INDEX IF NOT EXISTS idx_response_log_chat_created
     ON response_log (chat_id, created_at DESC);
+
+-- =============================================================================
+-- sticker_knowledge — Sticker intelligence catalog
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS sticker_knowledge (
+    id                          SERIAL PRIMARY KEY,
+    file_unique_id              VARCHAR(255) UNIQUE NOT NULL,
+    file_id                     VARCHAR(255) NOT NULL,
+    set_name                    VARCHAR(255),
+    emoji                       VARCHAR(50),
+    is_animated                 BOOLEAN DEFAULT false,
+    is_video                    BOOLEAN DEFAULT false,
+
+    -- AI-generated descriptions
+    visual_description          TEXT,
+    original_vision_description TEXT,
+    emotion                     VARCHAR(100),
+    suggested_contexts          TEXT[],
+    style_tags                  TEXT[],
+    character_or_meme           VARCHAR(255),
+
+    -- Embedding for semantic search
+    description_embedding       vector(768),
+
+    -- Accumulated usage contexts (max 10, FIFO)
+    usage_contexts              TEXT[] DEFAULT ARRAY[]::TEXT[],
+
+    -- Admin data
+    admin_notes                 TEXT,
+
+    -- Usage statistics
+    total_uses                  INTEGER DEFAULT 0,
+    bot_uses                    INTEGER DEFAULT 0,
+    last_used_at                TIMESTAMPTZ,
+
+    -- Metadata
+    analyzed_at                 TIMESTAMPTZ,
+    analysis_failed             BOOLEAN DEFAULT false,
+    created_at                  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at                  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sticker_knowledge_set
+    ON sticker_knowledge(set_name);
+CREATE INDEX IF NOT EXISTS idx_sticker_knowledge_emotion
+    ON sticker_knowledge(emotion);
+CREATE INDEX IF NOT EXISTS idx_sticker_knowledge_uses
+    ON sticker_knowledge(total_uses DESC);
+CREATE INDEX IF NOT EXISTS idx_sticker_knowledge_embedding
+    ON sticker_knowledge USING ivfflat (description_embedding vector_cosine_ops)
+    WITH (lists = 10);
+
+DROP TRIGGER IF EXISTS sticker_knowledge_updated_at ON sticker_knowledge;
+CREATE TRIGGER sticker_knowledge_updated_at
+    BEFORE UPDATE ON sticker_knowledge
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- =============================================================================
+-- sticker_sets — Sticker set metadata cache
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS sticker_sets (
+    set_name            VARCHAR(255) PRIMARY KEY,
+    set_title           VARCHAR(255),
+    total_count         INTEGER NOT NULL DEFAULT 0,
+    thumbnail_file_id   VARCHAR(255),
+    is_animated         BOOLEAN DEFAULT false,
+    is_video            BOOLEAN DEFAULT false,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ DEFAULT NOW()
+);
+
+DROP TRIGGER IF EXISTS sticker_sets_updated_at ON sticker_sets;
+CREATE TRIGGER sticker_sets_updated_at
+    BEFORE UPDATE ON sticker_sets
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();

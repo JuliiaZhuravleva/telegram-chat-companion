@@ -35,6 +35,12 @@ class ChatConfigMiddleware(BaseMiddleware):
         if chat_id is None:
             return await handler(event, data)
 
+        logger.info(
+            "Incoming event",
+            chat_id=chat_id,
+            event_type=type(event).__name__,
+        )
+
         container: AsyncContainer = data["dishka_container"]
         config_service = await container.get(ChatConfigService)
         chat_config = await config_service.get_config(chat_id)

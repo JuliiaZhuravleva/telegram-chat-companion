@@ -92,6 +92,7 @@ class TextProcessingPipeline:
         reply_author: str | None = None,
         reply_text: str | None = None,
         reply_is_bot: bool = False,
+        image_context: str | None = None,
     ) -> PipelineResult:
         """Run the full pipeline and return the result."""
         # --- Stage 1: Anti-abuse check ---
@@ -144,6 +145,7 @@ class TextProcessingPipeline:
             reply_author=reply_author,
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
+            image_context=image_context,
             user_name=user_name,
             user_message=message_text,
         )

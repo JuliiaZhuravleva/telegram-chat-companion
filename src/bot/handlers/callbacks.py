@@ -5,6 +5,7 @@ from __future__ import annotations
 import structlog
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
+from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.help import summary_keyboard
 from src.models.chat_config import ChatConfig
@@ -30,7 +31,7 @@ def _check_owner(callback: CallbackQuery, owner_id: int) -> bool:
 async def handle_summary_callback(
     callback: CallbackQuery,
     chat_config: ChatConfig,
-    summary_service: SummaryService,
+    summary_service: FromDishka[SummaryService],
 ) -> None:
     """Handle summary button press from help keyboard."""
     parts = (callback.data or "").split(":")

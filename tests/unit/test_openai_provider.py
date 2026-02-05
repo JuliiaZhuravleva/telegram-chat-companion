@@ -155,7 +155,13 @@ class TestAnalyzeImage:
     async def test_output_array_format(self, provider):
         mock_resp = _mock_response(
             json_data={
-                "output": [{"content": [{"text": "A sunset over mountains"}]}]
+                "output": [
+                    {"type": "reasoning", "summary": []},
+                    {
+                        "type": "message",
+                        "content": [{"text": "A sunset over mountains"}],
+                    },
+                ]
             }
         )
 

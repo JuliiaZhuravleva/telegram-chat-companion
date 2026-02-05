@@ -104,9 +104,16 @@ class AbuseNotificationService:
         *,
         chat_id: int,
         chat_title: str | None,
+        chat_type: str | None = None,
+        chat_username: str | None = None,
         user_id: int | None,
-        username: str | None,
+        user_first_name: str | None = None,
+        user_last_name: str | None = None,
+        user_username: str | None = None,
+        message_text: str | None = None,
         bot: Any = None,
+        # Legacy compat
+        username: str | None = None,
     ) -> None:
         """Notify admins about unauthorized access attempt."""
         if bot is None:
@@ -116,17 +123,80 @@ class AbuseNotificationService:
         if not admin_ids:
             return
 
-        text = (
-            f"🔒 Unauthorized access\n"
-            f"Chat: {chat_title or chat_id}\n"
-            f"User: {username or user_id or 'unknown'}"
+        text = self._format_unauthorized(
+            chat_id=chat_id,
+            chat_title=chat_title,
+            chat_type=chat_type,
+            chat_username=chat_username,
+            user_id=user_id,
+            user_first_name=user_first_name or username,
+            user_last_name=user_last_name,
+            user_username=user_username,
+            message_text=message_text,
         )
 
         for admin_id in admin_ids:
             try:
-                await bot.send_message(admin_id, text)
+                await bot.send_message(admin_id, text, parse_mode="HTML")
             except Exception:
                 logger.warning("Failed to notify admin", admin_id=admin_id)
+
+    @staticmethod
+    def _format_unauthorized(
+        *,
+        chat_id: int,
+        chat_title: str | None,
+        chat_type: str | None,
+        chat_username: str | None,
+        user_id: int | None,
+        user_first_name: str | None,
+        user_last_name: str | None,
+        user_username: str | None,
+        message_text: str | None,
+    ) -> str:
+        """Build detailed HTML notification for unauthorized access."""
+        lines: list[str] = ["🔒 <b>Unauthorized access</b>", ""]
+
+        # -- Chat info --
+        chat_display = chat_title or str(chat_id)
+        if chat_type:
+            chat_display += f" ({chat_type})"
+        lines.append(f"<b>Chat:</b> {chat_display}")
+        lines.append(f"<b>Chat ID:</b> <code>{chat_id}</code>")
+        if chat_username:
+            lines.append(f"<b>Chat link:</b> https://t.me/{chat_username}")
+
+        lines.append("")
+
+        # -- User info --
+        full_name = (user_first_name or "")
+        if user_last_name:
+            full_name += f" {user_last_name}"
+        full_name = full_name.strip() or "unknown"
+
+        if user_id:
+            lines.append(
+                f"<b>User:</b> <a href=\"tg://user?id={user_id}\">{full_name}</a>"
+            )
+            lines.append(f"<b>User ID:</b> <code>{user_id}</code>")
+        else:
+            lines.append(f"<b>User:</b> {full_name}")
+
+        if user_username:
+            lines.append(f"<b>Username:</b> @{user_username}")
+
+        # -- Message preview --
+        if message_text:
+            lines.append(f"\n<b>Message:</b> {message_text[:100]}")
+
+        # -- Quick action hint --
+        lines.append("")
+        lines.append(
+            f"<i>To enable: INSERT INTO chat_settings (chat_id, enabled) "
+            f"VALUES ({chat_id}, true) ON CONFLICT (chat_id) DO UPDATE SET enabled = true;</i>"
+        )
+
+        return "\n".join(lines)
 
     async def notify_ai_fallback(
         self,

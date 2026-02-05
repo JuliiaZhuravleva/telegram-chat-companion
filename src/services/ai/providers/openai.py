@@ -45,7 +45,6 @@ class OpenAIProvider(AIProvider):
             timeout=60.0,
             headers={
                 "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
             },
         )
 
@@ -169,7 +168,18 @@ class OpenAIProvider(AIProvider):
         response = await self._request(f"{_BASE_URL}/responses", payload)
 
         text = self._extract_vision_text(response)
+        logger.info(
+            "OpenAI vision extraction result",
+            extracted_text=text[:100] if text else None,
+            has_output_text="output_text" in response,
+            output_types=[item.get("type") for item in response.get("output", [])],
+        )
         if not text:
+            logger.error(
+                "OpenAI vision empty extraction",
+                response_keys=list(response.keys()),
+                output=str(response.get("output", []))[:500],
+            )
             raise AIProviderError(
                 "OpenAI vision returned empty response",
                 provider=self.name,
@@ -277,16 +287,24 @@ class OpenAIProvider(AIProvider):
 
     @staticmethod
     def _extract_vision_text(response: dict[str, Any]) -> str:
-        """Extract text from OpenAI Responses API vision result."""
-        # Try output_text first (newer format)
-        if "output_text" in response:
+        """Extract text from OpenAI Responses API vision result.
+
+        Note: response["text"] is a format *config* (e.g. {"format": ...}),
+        NOT generated text. The actual text lives in output_text or
+        output[type=message].content[].text.
+        """
+        # 1. Top-level "output_text" (SDK / convenience field)
+        if response.get("output_text"):
             return str(response["output_text"])
 
-        # Fallback to output[0].content[0].text
+        # 2. Find the "message" item in output array (skip "reasoning" items)
         output = response.get("output", [])
-        if output:
-            content = output[0].get("content", [])
-            if content:
-                return str(content[0].get("text", ""))
+        for item in output:
+            if item.get("type") != "message":
+                continue
+            for block in item.get("content", []):
+                text = block.get("text", "")
+                if text:
+                    return str(text)
 
         return ""

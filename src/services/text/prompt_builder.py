@@ -44,6 +44,9 @@ class PromptContext:
     reply_text: str | None = None
     reply_is_bot: bool = False
 
+    # Image context (from Vision AI analysis)
+    image_context: str | None = None
+
     # User message
     user_name: str = ""
     user_message: str = ""
@@ -82,11 +85,15 @@ def build_system_prompt(ctx: PromptContext) -> str:
     if ctx.reply_text:
         sections.append(_reply_section(ctx.reply_author, ctx.reply_text, ctx.reply_is_bot))
 
-    # 7. RAG memories
+    # 7. Image context
+    if ctx.image_context:
+        sections.append(_image_context_section(ctx.image_context))
+
+    # 8. RAG memories
     if ctx.rag_memories:
         sections.append(_rag_section(ctx.rag_memories))
 
-    # 8. Adaptive length
+    # 9. Adaptive length
     length_instruction = compute_length_instruction(ctx.message_lengths)
     if length_instruction:
         sections.append(length_instruction)
@@ -183,6 +190,13 @@ def _reply_section(author: str | None, text: str, is_bot: bool) -> str:
     source = "bot's own message" if is_bot else f"message from {author or 'unknown'}"
     truncated = text[:500]
     return f"The user is replying to a {source}:\n> {truncated}"
+
+
+def _image_context_section(description: str) -> str:
+    return (
+        "The user sent an image along with their message. "
+        f"Image description: {description}"
+    )
 
 
 def _rag_section(memories: list[dict[str, Any]]) -> str:

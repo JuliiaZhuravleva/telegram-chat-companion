@@ -6,6 +6,7 @@ import structlog
 from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
+from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.help import help_keyboard
 from src.models.chat_config import ChatConfig
@@ -117,7 +118,7 @@ async def handle_help(message: Message, chat_config: ChatConfig) -> None:
 async def handle_summary(
     message: Message,
     chat_config: ChatConfig,
-    summary_service: SummaryService,
+    summary_service: FromDishka[SummaryService],
 ) -> None:
     """Handle /summary command — generate chat summary."""
     if not chat_config.save_messages:
