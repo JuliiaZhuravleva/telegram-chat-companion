@@ -166,6 +166,58 @@ class AdminRepository:
             )
         )
 
+    # -- Whitelist management --
+
+    async def get_enabled_chats_page(
+        self, page: int, per_page: int = 5
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated enabled chats with title/type. Returns (chats, total)."""
+        total = await self._pool.fetchval(
+            "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
+        ) or 0
+        rows = await self._pool.fetch(
+            """
+            SELECT chat_id, chat_title, chat_type
+            FROM chat_settings
+            WHERE enabled = true
+            ORDER BY chat_title NULLS LAST, chat_id
+            LIMIT $1 OFFSET $2
+            """,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
+
+    async def get_pending_attempts_page(
+        self, page: int, per_page: int = 5
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated pending attempts (newest first). Returns (attempts, total)."""
+        total = await self._pool.fetchval(
+            "SELECT COUNT(*) FROM unauthorized_attempts WHERE status = 'pending'",
+        ) or 0
+        rows = await self._pool.fetch(
+            """
+            SELECT id, chat_id, chat_title, chat_type,
+                   user_id, user_first_name, user_username,
+                   message_text, created_at
+            FROM unauthorized_attempts
+            WHERE status = 'pending'
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2
+            """,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
+
+    async def get_attempt(self, attempt_id: int) -> dict[str, Any] | None:
+        """Get single unauthorized attempt by ID."""
+        row = await self._pool.fetchrow(
+            "SELECT * FROM unauthorized_attempts WHERE id = $1",
+            attempt_id,
+        )
+        return dict(row) if row else None
+
     # -- Admin language --
 
     async def get_admin_language(

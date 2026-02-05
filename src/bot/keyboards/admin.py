@@ -114,7 +114,7 @@ def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
             ),
             InlineKeyboardButton(
                 text=pending_label.get(lang, "Pending"),
-                callback_data=f"adm_wl_pending:{lang}",
+                callback_data=f"adm_wl_pending:{lang}:0",
             ),
         ],
         [
@@ -174,4 +174,141 @@ def access_keyboard(
                 callback_data=f"adm_reject:{lang}:{attempt_id}",
             ),
         ],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Whitelisted chats list (paginated)
+# ---------------------------------------------------------------------------
+
+def chats_list_keyboard(
+    lang: str,
+    chats: list[dict[str, object]],
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    """Paginated list of whitelisted chats with Remove buttons."""
+    from html import escape
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat in chats:
+        title = str(chat.get("chat_title") or chat.get("chat_id", "?"))
+        ctype = chat.get("chat_type", "")
+        label = f"{escape(title)}"
+        if ctype:
+            label += f" ({ctype})"
+        # Truncate label to fit Telegram button limits
+        if len(label) > 40:
+            label = label[:37] + "..."
+        rows.append([
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"adm_wl_chats:{lang}:{page}",
+            ),
+            InlineKeyboardButton(
+                text="❌",
+                callback_data=f"adm_wl_rm:{lang}:{chat['chat_id']}:{page}",
+            ),
+        ])
+
+    # Pagination row
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀",
+                callback_data=f"adm_wl_chats:{lang}:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop",
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="▶",
+                callback_data=f"adm_wl_chats:{lang}:{page + 1}",
+            ))
+        rows.append(nav)
+
+    # Back button
+    rows.append([
+        InlineKeyboardButton(
+            text=_t("back", lang),
+            callback_data=f"adm_wl:{lang}",
+        ),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ---------------------------------------------------------------------------
+# Pending access requests list (paginated)
+# ---------------------------------------------------------------------------
+
+def pending_list_keyboard(
+    lang: str,
+    attempts: list[dict[str, object]],
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    """Paginated list of pending requests with Approve/Reject per item."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for attempt in attempts:
+        aid = attempt["id"]
+        rows.append([
+            InlineKeyboardButton(
+                text="✅",
+                callback_data=f"adm_wl_apr:{lang}:{aid}:{page}",
+            ),
+            InlineKeyboardButton(
+                text="❌",
+                callback_data=f"adm_wl_rej:{lang}:{aid}:{page}",
+            ),
+        ])
+
+    # Pagination row
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀",
+                callback_data=f"adm_wl_pending:{lang}:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop",
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="▶",
+                callback_data=f"adm_wl_pending:{lang}:{page + 1}",
+            ))
+        rows.append(nav)
+
+    # Back button
+    rows.append([
+        InlineKeyboardButton(
+            text=_t("back", lang),
+            callback_data=f"adm_wl:{lang}",
+        ),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ---------------------------------------------------------------------------
+# Notification status indicators (replace buttons after action)
+# ---------------------------------------------------------------------------
+
+def approved_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Status indicator after approval (replaces approve/reject buttons)."""
+    label = {"ru": "✅ Одобрено", "en": "✅ Approved"}
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label.get(lang, "✅ Approved"), callback_data="noop")],
+    ])
+
+
+def rejected_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Status indicator after rejection (replaces approve/reject buttons)."""
+    label = {"ru": "❌ Отклонено", "en": "❌ Rejected"}
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=label.get(lang, "❌ Rejected"), callback_data="noop")],
     ])

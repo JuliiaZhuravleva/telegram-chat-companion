@@ -11,6 +11,7 @@ All callbacks embed language in callback_data for stateless operation:
 from __future__ import annotations
 
 from datetime import timedelta
+from html import escape
 from typing import Any
 
 import structlog
@@ -21,13 +22,18 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin import (
+    approved_notification_keyboard,
+    chats_list_keyboard,
     language_keyboard,
     main_menu_keyboard,
+    pending_list_keyboard,
+    rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
 )
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
+from src.database.repositories.chat_settings import ChatSettingsRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -83,6 +89,48 @@ _PLACEHOLDER: dict[str, str] = {
     "ru": "Функция будет доступна позже.",
     "en": "Feature coming soon.",
 }
+
+_WL_CHATS_TITLE: dict[str, str] = {
+    "ru": "<b>Чаты в whitelist</b>",
+    "en": "<b>Whitelisted chats</b>",
+}
+
+_WL_PENDING_TITLE: dict[str, str] = {
+    "ru": "<b>Ожидают одобрения</b>",
+    "en": "<b>Pending requests</b>",
+}
+
+_WL_NO_CHATS: dict[str, str] = {
+    "ru": "Нет чатов в whitelist.",
+    "en": "No whitelisted chats.",
+}
+
+_WL_NO_PENDING: dict[str, str] = {
+    "ru": "Нет ожидающих запросов.",
+    "en": "No pending requests.",
+}
+
+_WL_APPROVED: dict[str, str] = {
+    "ru": "✅ Одобрено",
+    "en": "✅ Approved",
+}
+
+_WL_REJECTED: dict[str, str] = {
+    "ru": "❌ Отклонено",
+    "en": "❌ Rejected",
+}
+
+_WL_REMOVED: dict[str, str] = {
+    "ru": "Чат удалён из whitelist.",
+    "en": "Chat removed from whitelist.",
+}
+
+_WL_ALREADY_HANDLED: dict[str, str] = {
+    "ru": "Запрос уже обработан.",
+    "en": "Request already handled.",
+}
+
+_PER_PAGE = 5
 
 
 def _get_lang(lang: str | None) -> str:
@@ -323,6 +371,383 @@ async def handle_stats(
 
 
 # ---------------------------------------------------------------------------
+# Callback: whitelisted chats list (paginated)
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_chats:"))
+async def handle_wl_chats(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Show paginated list of whitelisted chats."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+
+    await callback.answer()
+    await _render_wl_chats(callback, admin_repo, lang, page)
+
+
+async def _render_wl_chats(
+    callback: CallbackQuery,
+    admin_repo: AdminRepository,
+    lang: str,
+    page: int,
+) -> None:
+    """Render whitelisted chats list (shared by chats view and remove)."""
+    chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    # Clamp page to valid range
+    if page >= total_pages:
+        page = max(0, total_pages - 1)
+        chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
+        total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    if total == 0:
+        text = f"{_WL_CHATS_TITLE[lang]}\n\n{_WL_NO_CHATS[lang]}"
+    else:
+        lines = [f"{_WL_CHATS_TITLE[lang]} ({total})\n"]
+        offset = page * _PER_PAGE
+        for i, chat in enumerate(chats, start=offset + 1):
+            title = escape(str(chat.get("chat_title") or chat.get("chat_id", "?")))
+            ctype = chat.get("chat_type", "")
+            entry = f"{i}. {title}"
+            if ctype:
+                entry += f" <i>({escape(str(ctype))})</i>"
+            lines.append(entry)
+        text = "\n".join(lines)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=chats_list_keyboard(lang, chats, page, total_pages),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: remove chat from whitelist
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_rm:"))
+async def handle_wl_remove(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """Remove a chat from the whitelist."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2]) if len(parts) > 2 else None
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except ValueError:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    if chat_id is None:
+        await callback.answer("Invalid chat ID", show_alert=True)
+        return
+
+    await chat_settings_repo.set_field(chat_id, "enabled", False)
+    await callback.answer(_WL_REMOVED[lang])
+
+    # Re-render the chat list
+    await _render_wl_chats(callback, admin_repo, lang, page)
+
+
+# ---------------------------------------------------------------------------
+# Callback: pending access requests (paginated)
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_pending:"))
+async def handle_wl_pending(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Show paginated list of pending access requests."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+
+    await callback.answer()
+    await _render_wl_pending(callback, admin_repo, lang, page)
+
+
+async def _render_wl_pending(
+    callback: CallbackQuery,
+    admin_repo: AdminRepository,
+    lang: str,
+    page: int,
+) -> None:
+    """Render pending requests list (shared by pending view and approve/reject)."""
+    attempts, total = await admin_repo.get_pending_attempts_page(page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    # Clamp page to valid range
+    if page >= total_pages:
+        page = max(0, total_pages - 1)
+        attempts, total = await admin_repo.get_pending_attempts_page(page, _PER_PAGE)
+        total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    if total == 0:
+        text = f"{_WL_PENDING_TITLE[lang]}\n\n{_WL_NO_PENDING[lang]}"
+    else:
+        lines = [f"{_WL_PENDING_TITLE[lang]} ({total})\n"]
+        offset = page * _PER_PAGE
+        for i, attempt in enumerate(attempts, start=offset + 1):
+            title = escape(str(attempt.get("chat_title") or attempt.get("chat_id", "?")))
+            ctype = attempt.get("chat_type", "")
+            user = escape(str(attempt.get("user_first_name") or ""))
+            uname = attempt.get("user_username")
+            user_display = f"@{escape(str(uname))}" if uname else (user or "?")
+
+            entry = f"{i}. {title}"
+            if ctype:
+                entry += f" ({escape(str(ctype))})"
+            entry += f"\n    👤 {user_display}"
+
+            msg_text = attempt.get("message_text")
+            if msg_text:
+                entry += f"\n    💬 {escape(str(msg_text)[:50])}"
+            lines.append(entry)
+        text = "\n".join(lines)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=pending_list_keyboard(lang, attempts, page, total_pages),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Helpers: approve / reject logic
+# ---------------------------------------------------------------------------
+
+
+async def _do_approve(
+    admin_repo: AdminRepository,
+    chat_settings_repo: ChatSettingsRepository,
+    attempt_id: int,
+) -> dict[str, Any] | None:
+    """Approve attempt: update status + enable chat. Returns attempt or None."""
+    attempt = await admin_repo.get_attempt(attempt_id)
+    if not attempt or attempt.get("status") != "pending":
+        return None
+    await admin_repo.update_attempt_status(attempt_id, "approved")
+    chat_id = attempt["chat_id"]
+    await chat_settings_repo.upsert(chat_id, enabled=True)
+    return attempt
+
+
+async def _do_reject(
+    admin_repo: AdminRepository,
+    attempt_id: int,
+) -> dict[str, Any] | None:
+    """Reject attempt: update status. Returns attempt or None."""
+    attempt = await admin_repo.get_attempt(attempt_id)
+    if not attempt or attempt.get("status") != "pending":
+        return None
+    await admin_repo.update_attempt_status(attempt_id, "rejected")
+    return attempt
+
+
+# ---------------------------------------------------------------------------
+# Callback: approve/reject from notification messages
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_approve:"))
+async def handle_approve_notification(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """Approve access from inline notification message."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2]) if len(parts) > 2 else None
+    except ValueError:
+        attempt_id = None
+
+    if attempt_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    attempt = await _do_approve(admin_repo, chat_settings_repo, attempt_id)
+    if attempt is None:
+        await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
+        return
+
+    await callback.answer(_WL_APPROVED[lang])
+
+    # Replace buttons with status indicator
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_reply_markup(
+            reply_markup=approved_notification_keyboard(lang),
+        )
+
+
+@router.callback_query(F.data.startswith("adm_reject:"))
+async def handle_reject_notification(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Reject access from inline notification message."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2]) if len(parts) > 2 else None
+    except ValueError:
+        attempt_id = None
+
+    if attempt_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    attempt = await _do_reject(admin_repo, attempt_id)
+    if attempt is None:
+        await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
+        return
+
+    await callback.answer(_WL_REJECTED[lang])
+
+    # Replace buttons with status indicator
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_reply_markup(
+            reply_markup=rejected_notification_keyboard(lang),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: approve/reject from admin panel pending list
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_apr:"))
+async def handle_wl_approve(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """Approve access from admin panel pending list."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2]) if len(parts) > 2 else None
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except ValueError:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    if attempt_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    attempt = await _do_approve(admin_repo, chat_settings_repo, attempt_id)
+    if attempt is None:
+        await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
+        return
+
+    await callback.answer(_WL_APPROVED[lang])
+
+    # Re-render pending list
+    await _render_wl_pending(callback, admin_repo, lang, page)
+
+
+@router.callback_query(F.data.startswith("adm_wl_rej:"))
+async def handle_wl_reject(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Reject access from admin panel pending list."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2]) if len(parts) > 2 else None
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except ValueError:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    if attempt_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    attempt = await _do_reject(admin_repo, attempt_id)
+    if attempt is None:
+        await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
+        return
+
+    await callback.answer(_WL_REJECTED[lang])
+
+    # Re-render pending list
+    await _render_wl_pending(callback, admin_repo, lang, page)
+
+
+# ---------------------------------------------------------------------------
+# Callback: noop (used for status indicator buttons)
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data == "noop")
+async def handle_noop(callback: CallbackQuery, **_kwargs: Any) -> None:
+    """No-op handler for status indicator buttons."""
+    await callback.answer()
+
+
+# ---------------------------------------------------------------------------
 # Placeholders for future stages (prevent "unhandled callback" warnings)
 # ---------------------------------------------------------------------------
 
@@ -351,20 +776,4 @@ async def handle_defaults_placeholder(
     callback: CallbackQuery, **kwargs: Any
 ) -> None:
     """Default settings — placeholder for Stage 3.1.4."""
-    await _placeholder_callback(callback, **kwargs)
-
-
-@router.callback_query(F.data.startswith("adm_wl_chats:"))
-async def handle_wl_chats_placeholder(
-    callback: CallbackQuery, **kwargs: Any
-) -> None:
-    """Whitelist chats list — placeholder for Stage 3.1.2."""
-    await _placeholder_callback(callback, **kwargs)
-
-
-@router.callback_query(F.data.startswith("adm_wl_pending:"))
-async def handle_wl_pending_placeholder(
-    callback: CallbackQuery, **kwargs: Any
-) -> None:
-    """Pending access requests — placeholder for Stage 3.1.2."""
     await _placeholder_callback(callback, **kwargs)

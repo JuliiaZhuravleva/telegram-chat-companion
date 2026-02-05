@@ -169,6 +169,69 @@ class TestStickerSession:
         assert result is False
 
 
+class TestGetEnabledChatsPage:
+    @pytest.mark.asyncio
+    async def test_returns_chats_and_total(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 3
+        pool.fetch.return_value = [
+            {"chat_id": -100, "chat_title": "Alpha", "chat_type": "group"},
+            {"chat_id": -200, "chat_title": "Beta", "chat_type": "supergroup"},
+        ]
+
+        chats, total = await repo_.get_enabled_chats_page(0, per_page=5)
+
+        assert total == 3
+        assert len(chats) == 2
+        assert chats[0]["chat_title"] == "Alpha"
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 0
+        pool.fetch.return_value = []
+
+        chats, total = await repo_.get_enabled_chats_page(0)
+        assert total == 0
+        assert chats == []
+
+
+class TestGetPendingAttemptsPage:
+    @pytest.mark.asyncio
+    async def test_returns_attempts_and_total(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 2
+        pool.fetch.return_value = [
+            {"id": 1, "chat_id": -100, "chat_title": "Test", "status": "pending"},
+        ]
+
+        attempts, total = await repo_.get_pending_attempts_page(0, per_page=5)
+
+        assert total == 2
+        assert len(attempts) == 1
+        assert attempts[0]["id"] == 1
+
+
+class TestGetAttempt:
+    @pytest.mark.asyncio
+    async def test_returns_attempt(self, repo):
+        repo_, pool = repo
+        pool.fetchrow.return_value = {"id": 42, "chat_id": -100, "status": "pending"}
+
+        result = await repo_.get_attempt(42)
+
+        assert result is not None
+        assert result["id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_returns_none_for_missing(self, repo):
+        repo_, pool = repo
+        pool.fetchrow.return_value = None
+
+        result = await repo_.get_attempt(999)
+        assert result is None
+
+
 class TestAdminLanguage:
     @pytest.mark.asyncio
     async def test_get_language_default(self, repo):

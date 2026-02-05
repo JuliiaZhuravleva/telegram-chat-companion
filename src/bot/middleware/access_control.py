@@ -11,6 +11,8 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from dishka import AsyncContainer
 
+from src.bot.keyboards.admin import access_keyboard
+from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.models.chat_config import ChatConfig
 from src.services.abuse.notifications import AbuseNotificationService
@@ -141,6 +143,25 @@ class AccessControlMiddleware(BaseMiddleware):
                 user_last_name = event.from_user.last_name
                 user_username = event.from_user.username
 
+            # Log to DB and build inline keyboard for approve/reject
+            keyboard = None
+            try:
+                admin_repo = await container.get(AdminRepository)
+                bot_config_repo = await container.get(BotConfigRepository)
+                attempt_id = await admin_repo.log_unauthorized(
+                    chat_id=chat_id,
+                    chat_title=chat_title,
+                    chat_type=chat_type_str,
+                    user_id=user_id,
+                    user_first_name=user_first_name,
+                    user_username=user_username,
+                    message_text=message_text,
+                )
+                lang = await admin_repo.get_admin_language(bot_config_repo)
+                keyboard = access_keyboard(lang, attempt_id)
+            except Exception:
+                logger.warning("Failed to log unauthorized attempt to DB", exc_info=True)
+
             await notifier.notify_unauthorized(
                 chat_id=chat_id,
                 chat_title=chat_title,
@@ -152,6 +173,7 @@ class AccessControlMiddleware(BaseMiddleware):
                 user_username=user_username,
                 message_text=message_text,
                 bot=bot,
+                reply_markup=keyboard,
             )
             self._last_notify[chat_id] = now
         except Exception:

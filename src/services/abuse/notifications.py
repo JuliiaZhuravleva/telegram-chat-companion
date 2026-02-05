@@ -6,6 +6,7 @@ from html import escape
 from typing import Any
 
 import structlog
+from aiogram.types import InlineKeyboardMarkup
 
 from src.database.repositories.bot_config import BotConfigRepository
 
@@ -113,6 +114,7 @@ class AbuseNotificationService:
         user_username: str | None = None,
         message_text: str | None = None,
         bot: Any = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
         # Legacy compat
         username: str | None = None,
     ) -> None:
@@ -138,7 +140,11 @@ class AbuseNotificationService:
 
         for admin_id in admin_ids:
             try:
-                await bot.send_message(admin_id, text, parse_mode="HTML")
+                await bot.send_message(
+                    admin_id, text,
+                    parse_mode="HTML",
+                    reply_markup=reply_markup,
+                )
             except Exception:
                 logger.warning("Failed to notify admin", admin_id=admin_id)
 
@@ -191,13 +197,6 @@ class AbuseNotificationService:
         # -- Message preview --
         if message_text:
             lines.append(f"\n<b>Message:</b> {escape(message_text[:100])}")
-
-        # -- Quick action hint --
-        lines.append("")
-        lines.append(
-            f"<i>To enable: INSERT INTO chat_settings (chat_id, enabled) "
-            f"VALUES ({chat_id}, true) ON CONFLICT (chat_id) DO UPDATE SET enabled = true;</i>"
-        )
 
         return "\n".join(lines)
 
