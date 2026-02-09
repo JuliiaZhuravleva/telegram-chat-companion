@@ -107,6 +107,9 @@ modules:
     requires:
       - "embeddings"
 
+  rules_engine:
+    enabled: false
+
   link_comments:
     enabled: false
 

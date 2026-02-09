@@ -25,6 +25,8 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset({
     "sticker_response_chance",
     "image_analysis_enabled",
     "save_messages",
+    "rules_enabled",
+    "rules_mode",
     "last_activity_at",
 })
 

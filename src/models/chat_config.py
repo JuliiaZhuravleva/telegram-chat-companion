@@ -37,3 +37,7 @@ class ChatConfig:
     sticker_response_chance: float = 0.15
     image_analysis_enabled: bool = True
     save_messages: bool = True
+
+    # Rules engine
+    rules_enabled: bool = False
+    rules_mode: str = "all"

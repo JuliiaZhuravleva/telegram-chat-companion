@@ -14,3 +14,6 @@ class AdminStates(StatesGroup):
 
     # Sticker wizard: waiting for sticker to analyze
     awaiting_sticker = State()
+
+    # Rules: waiting for JSON config
+    awaiting_rule_config = State()

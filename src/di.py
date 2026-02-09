@@ -23,6 +23,7 @@ from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.response_log import ResponseLogRepository
+from src.database.repositories.rules import RulesRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.abuse.checker import AntiAbuseChecker
 from src.services.abuse.filter import AbuseFilter
@@ -34,6 +35,7 @@ from src.services.modules.sticker import StickerLearningService
 from src.services.modules.summary import SummaryService
 from src.services.modules.voice import VoiceTranscriptionService
 from src.services.rag.memory import RAGMemoryService
+from src.services.rules import RuleActionExecutor, RuleEngine
 from src.services.text.pipeline import TextProcessingPipeline
 
 
@@ -91,6 +93,10 @@ class RepositoryProvider(Provider):
     @provide
     def sticker_repo(self, pool: asyncpg.Pool) -> StickerRepository:
         return StickerRepository(pool)
+
+    @provide
+    def rules_repo(self, pool: asyncpg.Pool) -> RulesRepository:
+        return RulesRepository(pool)
 
     @provide
     def admin_repo(self, pool: asyncpg.Pool) -> AdminRepository:
@@ -192,3 +198,13 @@ class ServiceProvider(Provider):
         sticker_repo: StickerRepository,
     ) -> StickerLearningService:
         return StickerLearningService(ai_router, sticker_repo)
+
+    @provide
+    def rule_engine(self, rules_repo: RulesRepository) -> RuleEngine:
+        return RuleEngine(rules_repo)
+
+    @provide
+    def rule_action_executor(
+        self, bot_config_repo: BotConfigRepository
+    ) -> RuleActionExecutor:
+        return RuleActionExecutor(bot_config_repo)

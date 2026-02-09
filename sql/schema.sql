@@ -63,7 +63,9 @@ INSERT INTO bot_config (key, value, description) VALUES
     ('default_image_analysis_enabled',       'true',            'Enable image analysis by default'),
     ('default_save_messages',                'true',            'Save message history by default'),
     ('admin_ids',                            '""',              'Comma-separated Telegram user IDs of bot admins'),
-    ('allowed_chats',                        '""',              'Comma-separated chat IDs allowed to use the bot (empty = use per-chat enabled flag)')
+    ('allowed_chats',                        '""',              'Comma-separated chat IDs allowed to use the bot (empty = use per-chat enabled flag)'),
+    ('default_rules_mode',                   '"all"',           'Default rules execution mode (all/highest_weight/weighted_random)'),
+    ('default_rules_enabled',                'false',           'Enable custom rules by default')
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================================================
@@ -94,6 +96,10 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     sticker_response_chance      FLOAT DEFAULT 0.15,
     image_analysis_enabled       BOOLEAN DEFAULT true,
     save_messages                BOOLEAN DEFAULT true,
+
+    -- Rules engine
+    rules_enabled                BOOLEAN DEFAULT false,
+    rules_mode                   VARCHAR(20) DEFAULT 'all',
 
     -- Timestamps
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -260,4 +266,31 @@ CREATE TABLE IF NOT EXISTS sticker_sets (
 DROP TRIGGER IF EXISTS sticker_sets_updated_at ON sticker_sets;
 CREATE TRIGGER sticker_sets_updated_at
     BEFORE UPDATE ON sticker_sets
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- =============================================================================
+-- custom_rules — Per-chat automation rules
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS custom_rules (
+    id                  SERIAL PRIMARY KEY,
+    chat_id             BIGINT NOT NULL,
+    rule_type           VARCHAR(50) NOT NULL,
+    config              JSONB NOT NULL DEFAULT '{}',
+    weight              INT DEFAULT 1,
+    mandatory           BOOLEAN DEFAULT FALSE,
+    enabled             BOOLEAN DEFAULT TRUE,
+    status              VARCHAR(20) DEFAULT 'active',
+    trigger_count       INT DEFAULT 0,
+    last_triggered_at   TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_custom_rules_chat_enabled
+    ON custom_rules(chat_id, enabled) WHERE enabled = true;
+
+DROP TRIGGER IF EXISTS custom_rules_updated_at ON custom_rules;
+CREATE TRIGGER custom_rules_updated_at
+    BEFORE UPDATE ON custom_rules
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();

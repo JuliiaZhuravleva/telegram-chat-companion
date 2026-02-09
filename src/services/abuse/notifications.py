@@ -58,8 +58,8 @@ class AbuseNotificationService:
         text = (
             f"⚠️ Jailbreak attempt\n"
             f"Chat: {chat_id}\n"
-            f"User: {username or user_id}\n"
-            f"Pattern: {pattern_description or 'unknown'}\n"
+            f"User: {escape(username) if username else user_id}\n"
+            f"Pattern: {escape(pattern_description) if pattern_description else 'unknown'}\n"
             f"Severity: {severity or 'N/A'}"
         )
 
@@ -90,8 +90,8 @@ class AbuseNotificationService:
         text = (
             f"🚫 Blacklist triggered\n"
             f"Chat: {chat_id}\n"
-            f"User: {username or user_id}\n"
-            f"Content: {content[:50]}\n"
+            f"User: {escape(username) if username else user_id}\n"
+            f"Content: {escape(content[:50])}\n"
             f"Timeout: {timeout_hours:.1f}h"
         )
 

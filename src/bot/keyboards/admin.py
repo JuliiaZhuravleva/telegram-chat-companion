@@ -14,6 +14,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 _L: dict[str, dict[str, str]] = {
     "whitelist": {"ru": "Whitelist", "en": "Whitelist"},
+    "rules": {"ru": "Правила", "en": "Rules"},
     "stickers": {"ru": "Стикеры", "en": "Stickers"},
     "defaults": {"ru": "Настройки", "en": "Default Settings"},
     "statistics": {"ru": "Статистика", "en": "Statistics"},
@@ -41,6 +42,10 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=_t("whitelist", lang),
                 callback_data=f"adm_wl:{lang}",
+            ),
+            InlineKeyboardButton(
+                text=_t("rules", lang),
+                callback_data=f"adm_rules:{lang}:0",
             ),
         ],
         [

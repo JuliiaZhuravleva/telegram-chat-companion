@@ -22,12 +22,13 @@ from src.bot.middleware import (
     ActivityTrackerMiddleware,
     ChatConfigMiddleware,
     MessageSaverMiddleware,
+    RulesMiddleware,
     TopicMiddleware,
 )
 from src.config import Settings
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
 
-_REQUIRED_TABLES = ("bot_config", "chat_settings")
+_REQUIRED_TABLES = ("bot_config", "chat_settings", "custom_rules")
 
 
 async def _verify_schema(pool: asyncpg.Pool) -> None:
@@ -114,8 +115,9 @@ async def main() -> None:
     access_control_mw = AccessControlMiddleware()
     activity_tracker_mw = ActivityTrackerMiddleware()
     message_saver_mw = MessageSaverMiddleware()
+    rules_mw = RulesMiddleware()
 
-    for mw in (chat_config_mw, topic_mw, access_control_mw, activity_tracker_mw, message_saver_mw):
+    for mw in (chat_config_mw, topic_mw, access_control_mw, activity_tracker_mw, message_saver_mw, rules_mw):
         dp.message.middleware(mw)
 
     # Callback queries need chat_config, topic, and access control too

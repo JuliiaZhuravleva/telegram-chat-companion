@@ -9,13 +9,15 @@ from src.bot.handlers.callbacks import router as callbacks_router
 from src.bot.handlers.commands import router as commands_router
 from src.bot.handlers.media import router as media_router
 from src.bot.handlers.message import router as message_router
+from src.bot.handlers.rules import router as rules_router
 
 # Main router that includes all sub-routers.
-# Order matters: admin first (own commands + adm_ callbacks), then commands,
-# then callbacks, media (voice/photo/sticker),
-# then the generic text handler last (F.text catches everything else).
+# Order matters: admin first (own commands + adm_ callbacks), then rules
+# (ar_ callbacks + FSM state), then commands, then callbacks,
+# media (voice/photo/sticker), then the generic text handler last.
 router = Router(name="main")
 router.include_router(admin_router)
+router.include_router(rules_router)
 router.include_router(commands_router)
 router.include_router(callbacks_router)
 router.include_router(media_router)
