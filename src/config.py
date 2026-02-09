@@ -116,6 +116,7 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     grok_api_key: str | None = Field(default=None, alias="GROK_API_KEY")
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
+    youtube_api_key: str | None = Field(default=None, alias="YOUTUBE_API_KEY")
 
     # Nested settings (from YAML)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)

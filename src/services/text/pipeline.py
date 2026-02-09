@@ -27,6 +27,8 @@ from src.models.enums import ResponseType, TriggerType
 from src.services.abuse.checker import AntiAbuseChecker
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
+from src.services.modules.links.extractor import LinkExtractorService
+from src.services.modules.links.formatters import format_link_context_section
 from src.services.rag.memory import RAGMemoryService
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import (
@@ -73,12 +75,14 @@ class TextProcessingPipeline:
         message_repo: MessageRepository,
         response_log_repo: ResponseLogRepository,
         rag_service: RAGMemoryService | None = None,
+        link_service: LinkExtractorService | None = None,
     ) -> None:
         self._ai = ai_router
         self._abuse = abuse_checker
         self._messages = message_repo
         self._response_log = response_log_repo
         self._rag = rag_service
+        self._links = link_service
 
     async def process(
         self,
@@ -127,6 +131,12 @@ class TextProcessingPipeline:
         if config.rag_enabled and self._rag:
             rag_task = asyncio.ensure_future(self._rag.search(chat_id, message_text))
 
+        link_task: asyncio.Task[str | None] | None = None
+        if config.link_comments_enabled and self._links:
+            link_task = asyncio.ensure_future(
+                self._safe_extract_links(message_text)
+            )
+
         recent_msgs, message_lengths = await asyncio.gather(
             recent_msgs_task, lengths_task
         )
@@ -134,6 +144,10 @@ class TextProcessingPipeline:
         rag_memories: list[dict[str, Any]] = []
         if rag_task:
             rag_memories = await rag_task
+
+        link_context_str: str | None = None
+        if link_task:
+            link_context_str = await link_task
 
         # Convert Record rows to dicts for prompt builder
         history = [dict(r) for r in reversed(recent_msgs)]
@@ -156,6 +170,7 @@ class TextProcessingPipeline:
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
             image_context=image_context,
+            link_context=link_context_str,
             user_name=user_name,
             user_message=message_text,
             is_forum_mode=is_forum_mode,
@@ -290,6 +305,19 @@ class TextProcessingPipeline:
         if trigger_type == TriggerType.REPLY:
             return base + 0.1
         return base
+
+    async def _safe_extract_links(self, text: str) -> str | None:
+        """Extract link context (non-blocking on failure)."""
+        if not self._links:
+            return None
+        try:
+            result = await self._links.extract(text)
+            if result is None:
+                return None
+            return format_link_context_section(result)
+        except Exception:
+            logger.warning("Link extraction failed")
+            return None
 
     async def _safe_update_cooldown(self, chat_id: int, user_id: int) -> None:
         try:

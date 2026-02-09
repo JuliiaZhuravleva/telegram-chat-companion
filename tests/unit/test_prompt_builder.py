@@ -105,6 +105,19 @@ class TestBuildSystemPrompt:
         result = build_system_prompt(ctx)
         assert "Image description" not in result
 
+    def test_link_context_included(self):
+        ctx = PromptContext(
+            link_context="The user shared a YouTube video: \"Cool Video\" by Channel (4:33), 1.5M views"
+        )
+        result = build_system_prompt(ctx)
+        assert "Cool Video" in result
+        assert "1.5M views" in result
+
+    def test_no_link_context_when_none(self):
+        ctx = PromptContext(link_context=None)
+        result = build_system_prompt(ctx)
+        assert "YouTube" not in result
+
     def test_rag_memories(self):
         ctx = PromptContext(
             rag_memories=[

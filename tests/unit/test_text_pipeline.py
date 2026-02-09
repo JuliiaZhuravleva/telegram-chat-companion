@@ -50,6 +50,7 @@ def _make_pipeline(
     lengths=None,
     rag_memories=None,
     ai_error=None,
+    link_service=None,
 ):
     """Build a pipeline with mocked dependencies."""
     abuse_checker = AsyncMock()
@@ -80,6 +81,7 @@ def _make_pipeline(
         message_repo=message_repo,
         response_log_repo=response_log_repo,
         rag_service=rag_service,
+        link_service=link_service,
     )
     return pipeline, {
         "abuse_checker": abuse_checker,
@@ -87,6 +89,7 @@ def _make_pipeline(
         "message_repo": message_repo,
         "response_log_repo": response_log_repo,
         "rag_service": rag_service,
+        "link_service": link_service,
     }
 
 
@@ -367,3 +370,86 @@ class TestPipelinePostSend:
 
         # Should not raise
         await pipeline.post_send(result, bot_message_id=999)
+
+
+class TestPipelineLinkExtraction:
+    async def test_link_disabled_skips_extraction(self, make_chat_config):
+        """link_comments_enabled=False should not call link service."""
+        link_service = AsyncMock()
+        config = make_chat_config(enabled=True, link_comments_enabled=False)
+        pipeline, mocks = _make_pipeline(link_service=link_service)
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="https://youtu.be/dQw4w9WgXcQ",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        link_service.extract.assert_not_called()
+
+    async def test_link_enabled_calls_extract(self, make_chat_config):
+        """link_comments_enabled=True should call link service."""
+        from src.services.modules.links.models import (
+            LinkContext,
+            VideoLink,
+            VideoMetadata,
+        )
+
+        link_service = AsyncMock()
+        link_service.extract.return_value = LinkContext(
+            youtube_links=[
+                VideoLink(
+                    url="https://youtu.be/dQw4w9WgXcQ",
+                    platform="youtube",
+                    video_id="dQw4w9WgXcQ",
+                ),
+            ],
+            metadata={
+                "dQw4w9WgXcQ": VideoMetadata(
+                    title="Test Video",
+                    channel="Test Channel",
+                    views="1.5M",
+                    duration="4:33",
+                ),
+            },
+        )
+
+        config = make_chat_config(enabled=True, link_comments_enabled=True)
+        pipeline, mocks = _make_pipeline(link_service=link_service)
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Watch https://youtu.be/dQw4w9WgXcQ bot",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        link_service.extract.assert_called_once()
+        assert result.should_respond is True
+        # Verify link context was passed to AI prompt
+        call_kwargs = mocks["ai_router"].generate_text.call_args.kwargs
+        assert "Test Video" in call_kwargs["system_prompt"]
+
+    async def test_link_extraction_failure_does_not_block(self, make_chat_config):
+        """Link service failure should not prevent AI response."""
+        link_service = AsyncMock()
+        link_service.extract.side_effect = RuntimeError("API error")
+
+        config = make_chat_config(enabled=True, link_comments_enabled=True)
+        pipeline, _ = _make_pipeline(link_service=link_service)
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="https://youtu.be/dQw4w9WgXcQ bot",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        assert result.should_respond is True

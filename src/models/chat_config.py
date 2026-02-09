@@ -41,3 +41,6 @@ class ChatConfig:
     # Rules engine
     rules_enabled: bool = False
     rules_mode: str = "all"
+
+    # Link comments
+    link_comments_enabled: bool = False

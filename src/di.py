@@ -31,6 +31,7 @@ from src.services.abuse.notifications import AbuseNotificationService
 from src.services.ai.router import AIRouter
 from src.services.chat_config import ChatConfigService
 from src.services.modules.image import ImageAnalysisService
+from src.services.modules.links import LinkExtractorService
 from src.services.modules.sticker import StickerLearningService
 from src.services.modules.summary import SummaryService
 from src.services.modules.voice import VoiceTranscriptionService
@@ -163,6 +164,10 @@ class ServiceProvider(Provider):
         return SummaryService(message_repo, ai_router)
 
     @provide
+    def link_extractor_service(self, settings: Settings) -> LinkExtractorService:
+        return LinkExtractorService(youtube_api_key=settings.youtube_api_key)
+
+    @provide
     def text_pipeline(
         self,
         ai_router: AIRouter,
@@ -170,6 +175,7 @@ class ServiceProvider(Provider):
         message_repo: MessageRepository,
         response_log_repo: ResponseLogRepository,
         rag_service: RAGMemoryService,
+        link_service: LinkExtractorService,
     ) -> TextProcessingPipeline:
         return TextProcessingPipeline(
             ai_router=ai_router,
@@ -177,6 +183,7 @@ class ServiceProvider(Provider):
             message_repo=message_repo,
             response_log_repo=response_log_repo,
             rag_service=rag_service,
+            link_service=link_service,
         )
 
     @provide

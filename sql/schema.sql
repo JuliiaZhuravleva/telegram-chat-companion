@@ -65,7 +65,8 @@ INSERT INTO bot_config (key, value, description) VALUES
     ('admin_ids',                            '""',              'Comma-separated Telegram user IDs of bot admins'),
     ('allowed_chats',                        '""',              'Comma-separated chat IDs allowed to use the bot (empty = use per-chat enabled flag)'),
     ('default_rules_mode',                   '"all"',           'Default rules execution mode (all/highest_weight/weighted_random)'),
-    ('default_rules_enabled',                'false',           'Enable custom rules by default')
+    ('default_rules_enabled',                'false',           'Enable custom rules by default'),
+    ('default_link_comments_enabled',        'false',           'Enable video link comments by default')
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================================================
@@ -100,6 +101,9 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     -- Rules engine
     rules_enabled                BOOLEAN DEFAULT false,
     rules_mode                   VARCHAR(20) DEFAULT 'all',
+
+    -- Link comments
+    link_comments_enabled        BOOLEAN DEFAULT false,
 
     -- Timestamps
     created_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),

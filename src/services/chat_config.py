@@ -140,6 +140,7 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset({
     "save_messages",
     "rules_enabled",
     "rules_mode",
+    "link_comments_enabled",
 })
 
 
