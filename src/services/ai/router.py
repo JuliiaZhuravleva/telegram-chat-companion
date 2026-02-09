@@ -125,14 +125,26 @@ class AIRouter:
                 provider="none",
             )
 
+        # Extract caller overrides once, before the retry loop
+        caller_model: str | None = str(kwargs.pop("model")) if "model" in kwargs else None
+        caller_max_tokens: int | None = int(kwargs.pop("max_tokens")) if "max_tokens" in kwargs else None
+        caller_temperature: float | None = float(kwargs.pop("temperature")) if "temperature" in kwargs else None
+
         last_error: Exception | None = None
 
         for provider_name in chain:
             try:
                 provider = await self._get_provider(provider_name)
-                model = task_config.model if task_config else None
-                max_tokens = task_config.max_tokens if task_config else 500
-                temperature = task_config.temperature if task_config else 0.9
+                # Caller override > config > default (None-aware to preserve 0/0.0)
+                model: str | None = caller_model if caller_model is not None else (
+                    task_config.model if task_config else None
+                )
+                max_tokens: int = caller_max_tokens if caller_max_tokens is not None else (
+                    task_config.max_tokens if task_config else 500
+                )
+                temperature: float = caller_temperature if caller_temperature is not None else (
+                    task_config.temperature if task_config else 0.9
+                )
 
                 logger.debug(
                     "Attempting text generation",

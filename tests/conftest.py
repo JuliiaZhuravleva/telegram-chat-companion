@@ -153,12 +153,18 @@ class MockAIProvider(AIProvider):
         self._transcription_result = transcription_result
         self._error = error
         self.call_log: list[str] = []
+        self.last_text_call: dict[str, Any] = {}
 
     async def generate_text(
         self, prompt: str, system_prompt: str | None = None, model: str | None = None,
         max_tokens: int = 500, temperature: float = 0.9, **kwargs: Any,
     ) -> TextGenerationResult:
         self.call_log.append("generate_text")
+        self.last_text_call = {
+            "prompt": prompt, "system_prompt": system_prompt,
+            "model": model, "max_tokens": max_tokens,
+            "temperature": temperature, **kwargs,
+        }
         if self._error:
             raise self._error
         return self._text_result

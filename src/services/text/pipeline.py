@@ -93,6 +93,7 @@ class TextProcessingPipeline:
         reply_text: str | None = None,
         reply_is_bot: bool = False,
         image_context: str | None = None,
+        message_thread_id: int | None = None,
     ) -> PipelineResult:
         """Run the full pipeline and return the result."""
         # --- Stage 1: Anti-abuse check ---
@@ -113,7 +114,13 @@ class TextProcessingPipeline:
             return PipelineResult(should_respond=False, response_type=response_type)
 
         # --- Stage 2: Gather context in parallel ---
-        recent_msgs_task = self._messages.get_recent(chat_id, limit=30)
+        # Use topic-aware context query for forum support
+        recent_msgs_task = self._messages.get_recent_with_topic_context(
+            chat_id,
+            message_thread_id,
+            current_topic_limit=20,
+            other_topics_limit=10,
+        )
         lengths_task = self._messages.get_recent_lengths(chat_id)
 
         rag_task: asyncio.Task[list[dict[str, Any]]] | None = None
@@ -130,6 +137,9 @@ class TextProcessingPipeline:
 
         # Convert Record rows to dicts for prompt builder
         history = [dict(r) for r in reversed(recent_msgs)]
+
+        # Detect forum mode: any message has topic_scope (not NULL)
+        is_forum_mode = any(msg.get("topic_scope") is not None for msg in history)
 
         # --- Stage 3: Build prompts ---
         ctx = PromptContext(
@@ -148,6 +158,7 @@ class TextProcessingPipeline:
             image_context=image_context,
             user_name=user_name,
             user_message=message_text,
+            is_forum_mode=is_forum_mode,
         )
 
         system_prompt = build_system_prompt(ctx)
@@ -192,6 +203,7 @@ class TextProcessingPipeline:
             "trigger_type": trigger_type.value,
             "config": config,
             "ai_text": ai_result.text,
+            "message_thread_id": message_thread_id,
         }
 
         return result
@@ -238,7 +250,7 @@ class TextProcessingPipeline:
             )
         )
 
-        # 3. Save bot message
+        # 3. Save bot message (with topic for forum support)
         if bot_message_id is not None:
             tasks.append(
                 asyncio.ensure_future(
@@ -246,6 +258,7 @@ class TextProcessingPipeline:
                         chat_id=chat_id,
                         message_id=bot_message_id,
                         content=ctx["ai_text"],
+                        message_thread_id=ctx.get("message_thread_id"),
                     )
                 )
             )
@@ -315,6 +328,7 @@ class TextProcessingPipeline:
         chat_id: int,
         message_id: int,
         content: str,
+        message_thread_id: int | None = None,
     ) -> None:
         try:
             await self._messages.save(
@@ -323,6 +337,7 @@ class TextProcessingPipeline:
                 message_type="text",
                 content=content,
                 is_bot_message=True,
+                message_thread_id=message_thread_id,
             )
         except Exception:
             logger.warning("Failed to save bot message", chat_id=chat_id)

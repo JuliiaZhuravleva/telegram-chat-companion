@@ -30,10 +30,10 @@ class MemoryRepository:
             INSERT INTO chat_memory
                 (chat_id, content, embedding, source_message_id,
                  importance_score, metadata)
-            VALUES ($1, $2, $3::vector, $4, $5, $6::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
             RETURNING id
             """,
-            chat_id, content, str(embedding), source_message_id,
+            chat_id, content, embedding, source_message_id,
             importance_score,
             None if metadata is None else json.dumps(metadata),
         )
@@ -51,17 +51,17 @@ class MemoryRepository:
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
             SELECT id, content, metadata, importance_score,
-                   1 - (embedding <=> $2::vector) AS similarity,
+                   1 - (embedding <=> $2) AS similarity,
                    created_at
             FROM chat_memory
             WHERE chat_id = $1
               AND embedding IS NOT NULL
-              AND 1 - (embedding <=> $2::vector) >= $3
+              AND 1 - (embedding <=> $2) >= $3
               AND (expires_at IS NULL OR expires_at > NOW())
-            ORDER BY embedding <=> $2::vector ASC
+            ORDER BY embedding <=> $2 ASC
             LIMIT $4
             """,
-            chat_id, str(query_embedding), min_similarity, max_results,
+            chat_id, query_embedding, min_similarity, max_results,
         )
         return result
 

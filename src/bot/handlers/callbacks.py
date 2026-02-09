@@ -54,13 +54,23 @@ async def handle_summary_callback(
         await callback.answer(_NOT_YOUR_BUTTON[lang], show_alert=True)
         return
 
+    # Early return if message context is gone (e.g. expired callback)
+    msg = callback.message
+    if not isinstance(msg, Message):
+        await callback.answer("Message expired.", show_alert=True)
+        return
+
     processing = "⏳ Генерирую..." if lang == "ru" else "⏳ Generating..."
     await callback.answer(processing)
 
+    # Forum-aware summary: filter by topic if applicable
+    thread_id: int | None = getattr(msg, "message_thread_id", None)
+
     html = await summary_service.generate(
-        callback.message.chat.id if callback.message else 0,
+        msg.chat.id,
         count=count,
         language=lang,
+        message_thread_id=thread_id,
     )
 
     if not html:
@@ -69,16 +79,14 @@ async def handle_summary_callback(
     user_id = callback.from_user.id if callback.from_user else 0
     keyboard = summary_keyboard(user_id, count, language=lang)
 
-    msg = callback.message
-    if isinstance(msg, Message):
-        try:
-            await msg.edit_text(
-                html,
-                parse_mode="HTML",
-                reply_markup=keyboard,
-            )
-        except Exception:
-            logger.warning("Failed to edit summary message")
+    try:
+        await msg.edit_text(
+            html,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except Exception:
+        logger.warning("Failed to edit summary message")
 
 
 @router.callback_query(F.data.startswith("help_close:"))

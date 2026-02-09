@@ -107,15 +107,15 @@ class AbuseRepository:
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
             SELECT id, text, category, description,
-                   1 - (embedding <=> $1::vector) AS similarity
+                   1 - (embedding <=> $1) AS similarity
             FROM abuse_embeddings
             WHERE enabled = true
               AND embedding IS NOT NULL
-              AND 1 - (embedding <=> $1::vector) >= $2
-            ORDER BY embedding <=> $1::vector ASC
+              AND 1 - (embedding <=> $1) >= $2
+            ORDER BY embedding <=> $1 ASC
             LIMIT $3
             """,
-            str(query_embedding), min_similarity, limit,
+            query_embedding, min_similarity, limit,
         )
         return result
 

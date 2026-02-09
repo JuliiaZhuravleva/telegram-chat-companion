@@ -119,8 +119,12 @@ async def handle_summary(
     message: Message,
     chat_config: ChatConfig,
     summary_service: FromDishka[SummaryService],
+    message_thread_id: int | None = None,
 ) -> None:
-    """Handle /summary command — generate chat summary."""
+    """Handle /summary command — generate chat summary.
+
+    In forum chats, summarizes only messages from the current topic.
+    """
     if not chat_config.save_messages:
         lang = chat_config.language
         if lang == "ru":
@@ -133,9 +137,11 @@ async def handle_summary(
     processing = "⏳ Генерирую саммари..." if lang == "ru" else "⏳ Generating summary..."
     placeholder = await message.answer(processing)
 
+    # Topic-filtered summary in forum chats
     html = await summary_service.generate(
         message.chat.id,
         language=lang,
+        message_thread_id=message_thread_id,
     )
 
     if html:

@@ -90,11 +90,11 @@ class StickerRepository:
         await self._pool.execute(
             """
             UPDATE sticker_knowledge
-            SET description_embedding = $2::vector
+            SET description_embedding = $2
             WHERE file_unique_id = $1
             """,
             file_unique_id,
-            str(embedding),
+            embedding,
         )
 
     async def increment_usage(
@@ -133,17 +133,17 @@ class StickerRepository:
             SELECT
                 file_id, file_unique_id, visual_description, emotion,
                 character_or_meme, suggested_contexts, usage_contexts,
-                1 - (description_embedding <=> $1::vector) AS similarity,
+                1 - (description_embedding <=> $1) AS similarity,
                 total_uses, bot_uses
             FROM sticker_knowledge
             WHERE description_embedding IS NOT NULL
               AND visual_description IS NOT NULL
               AND analysis_failed = false
-              AND 1 - (description_embedding <=> $1::vector) >= $2
-            ORDER BY description_embedding <=> $1::vector
+              AND 1 - (description_embedding <=> $1) >= $2
+            ORDER BY description_embedding <=> $1
             LIMIT $3
             """,
-            str(query_embedding),
+            query_embedding,
             min_similarity,
             limit,
         )

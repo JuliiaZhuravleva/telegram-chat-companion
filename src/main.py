@@ -22,6 +22,7 @@ from src.bot.middleware import (
     ActivityTrackerMiddleware,
     ChatConfigMiddleware,
     MessageSaverMiddleware,
+    TopicMiddleware,
 )
 from src.config import Settings
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
@@ -104,19 +105,22 @@ async def main() -> None:
     # Register inner middleware (runs after Dishka's ContainerMiddleware).
     # Order matters: outer middleware runs first.
     # 1. ChatConfig — injects chat_config into handler data
-    # 2. AccessControl — whitelist + admin check (needs chat_config)
-    # 3. ActivityTracker — tracks user activity
-    # 4. MessageSaver — saves messages to DB
+    # 2. Topic — extracts message_thread_id for forum support
+    # 3. AccessControl — whitelist + admin check (needs chat_config)
+    # 4. ActivityTracker — tracks user activity
+    # 5. MessageSaver — saves messages to DB (uses message_thread_id)
     chat_config_mw = ChatConfigMiddleware()
+    topic_mw = TopicMiddleware()
     access_control_mw = AccessControlMiddleware()
     activity_tracker_mw = ActivityTrackerMiddleware()
     message_saver_mw = MessageSaverMiddleware()
 
-    for mw in (chat_config_mw, access_control_mw, activity_tracker_mw, message_saver_mw):
+    for mw in (chat_config_mw, topic_mw, access_control_mw, activity_tracker_mw, message_saver_mw):
         dp.message.middleware(mw)
 
-    # Callback queries need chat_config + access control too
+    # Callback queries need chat_config, topic, and access control too
     dp.callback_query.middleware(chat_config_mw)
+    dp.callback_query.middleware(topic_mw)
     dp.callback_query.middleware(access_control_mw)
 
     dp.include_router(main_router)

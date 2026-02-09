@@ -50,6 +50,9 @@ class MessageSaverMiddleware(BaseMiddleware):
         container: AsyncContainer = data["dishka_container"]
         msg_repo = await container.get(MessageRepository)
 
+        # Extract message_thread_id from middleware data (TopicMiddleware)
+        message_thread_id: int | None = data.get("message_thread_id")
+
         # Determine message type
         if message.sticker:
             msg_type = "sticker"
@@ -84,4 +87,5 @@ class MessageSaverMiddleware(BaseMiddleware):
                 message.sticker.set_name if message.sticker else None
             ),
             sticker_emoji=message.sticker.emoji if message.sticker else None,
+            message_thread_id=message_thread_id,
         )

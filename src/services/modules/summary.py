@@ -8,6 +8,7 @@ from src.database.repositories.messages import MessageRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.text.formatter import markdown_to_html
+from src.services.text.prompt_sanitizer import sanitize_prompt_content
 
 logger = structlog.get_logger(__name__)
 
@@ -29,12 +30,19 @@ class SummaryService:
         *,
         count: int = 100,
         language: str = "ru",
+        message_thread_id: int | None = None,
     ) -> str | None:
         """Generate a chat summary.
 
+        In forum chats, summarizes only messages from the specified topic.
+
         Returns HTML-formatted summary text, or None on failure.
         """
-        rows = await self._messages.get_for_summary(chat_id, limit=count)
+        rows = await self._messages.get_for_summary(
+            chat_id,
+            limit=count,
+            message_thread_id=message_thread_id,
+        )
         if not rows:
             if language == "ru":
                 return "Нет сообщений для создания саммари."
@@ -43,10 +51,10 @@ class SummaryService:
         # Build conversation text (chronological order)
         lines: list[str] = []
         for row in reversed(rows):
-            name = row["username"] or row["first_name"] or "?"
+            name = sanitize_prompt_content(row["username"] or row["first_name"] or "?")
             ts = row["created_at"].strftime("%H:%M")
             prefix = "Bot" if row["is_bot_message"] else name
-            lines.append(f"[{ts}] {prefix}: {row['content']}")
+            lines.append(f"[{ts}] {prefix}: {sanitize_prompt_content(row['content'])}")
 
         conversation = "\n".join(lines)
 

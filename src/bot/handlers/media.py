@@ -34,6 +34,7 @@ async def handle_voice_message(
     chat_config: ChatConfig,
     voice_service: FromDishka[VoiceTranscriptionService],
     bot: Bot,
+    message_thread_id: int | None = None,
 ) -> None:
     """Handle voice messages and video notes via Whisper transcription."""
     # Determine type
@@ -60,13 +61,17 @@ async def handle_voice_message(
         )
         return
 
-    # Send typing action in parallel with transcription
+    # Send typing action in parallel with transcription (route to correct topic)
     user = message.from_user
     user_name = (user.first_name if user else None) or "Unknown"
     message_type = "voice" if is_voice else "video_note"
 
     typing_task = asyncio.create_task(
-        bot.send_chat_action(message.chat.id, ChatAction.TYPING)
+        bot.send_chat_action(
+            message.chat.id,
+            ChatAction.TYPING,
+            message_thread_id=message_thread_id,
+        )
     )
 
     result = await voice_service.transcribe(
@@ -85,7 +90,7 @@ async def handle_voice_message(
     if result is None:
         return
 
-    # Send formatted reply
+    # Send formatted reply (reply routes to same topic via reply_to_message_id)
     reply_text = VoiceTranscriptionService.format_reply(user_name, result.text)
     await message.reply(reply_text, parse_mode="Markdown")
 
@@ -101,6 +106,7 @@ async def handle_photo_message(
     pipeline: FromDishka[TextProcessingPipeline],
     message_repo: FromDishka[MessageRepository],
     bot: Bot,
+    message_thread_id: int | None = None,
 ) -> None:
     """Handle photo messages — analyze and optionally respond."""
     if not chat_config.image_analysis_enabled:
@@ -176,6 +182,7 @@ async def handle_photo_message(
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
             image_context=description,
+            message_thread_id=message_thread_id,
         )
 
         if not result.should_respond or not result.html_text:
@@ -185,6 +192,8 @@ async def handle_photo_message(
             message.message_id if trigger_type != TriggerType.RANDOM else None
         )
 
+        # Send to correct topic in forum chats
+        # Note: message.answer() inherits message_thread_id from the original message
         sent = await message.answer(
             result.html_text,
             parse_mode="HTML",

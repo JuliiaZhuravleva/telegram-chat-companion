@@ -8,6 +8,7 @@ import re
 import structlog
 from aiogram import F, Router
 from aiogram.types import Message
+from dishka.integrations.aiogram import FromDishka
 
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
@@ -56,7 +57,8 @@ def should_respond(
 async def handle_text_message(
     message: Message,
     chat_config: ChatConfig,
-    pipeline: TextProcessingPipeline,
+    pipeline: FromDishka[TextProcessingPipeline],
+    message_thread_id: int | None = None,
 ) -> None:
     """Handle incoming text messages through the AI pipeline."""
     bot_info = await message.bot.me() if message.bot else None
@@ -87,6 +89,7 @@ async def handle_text_message(
         chat_id=message.chat.id,
         user_id=user_id,
         trigger_type=trigger_type.value,
+        message_thread_id=message_thread_id,
     )
 
     result = await pipeline.process(
@@ -99,6 +102,7 @@ async def handle_text_message(
         reply_author=reply_author,
         reply_text=reply_text,
         reply_is_bot=reply_is_bot,
+        message_thread_id=message_thread_id,
     )
 
     if not result.should_respond or not result.html_text:
@@ -107,6 +111,8 @@ async def handle_text_message(
     # Random responses don't quote the triggering message
     reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
 
+    # Send to correct topic in forum chats
+    # Note: message.answer() inherits message_thread_id from the original message
     sent = await message.answer(
         result.html_text,
         parse_mode="HTML",

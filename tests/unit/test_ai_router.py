@@ -190,6 +190,60 @@ class TestGenerateText:
             await router.generate_text("test")
 
 
+    @pytest.mark.asyncio
+    async def test_fallback_preserves_caller_kwargs(
+        self, mock_provider, make_router, mock_router_settings,
+    ):
+        """Caller-specified kwargs must survive to the fallback provider."""
+        failing_provider = mock_provider(
+            name="gemini",
+            error=RateLimitError("rate limited", provider="gemini", retry_after=60.0),
+        )
+        fallback_result = TextGenerationResult(
+            text="ok", model="gpt-5-nano", provider="openai",
+        )
+        fallback_provider = mock_provider(name="openai", text_result=fallback_result)
+
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = ["openai"]
+        task_config.model = "gemini-3-flash"
+        task_config.max_tokens = 500
+        task_config.temperature = 0.9
+        mock_router_settings.ai.tasks = {"text_generation": task_config}
+
+        router, _ = make_router(mock_router_settings)
+        router._providers["gemini"] = failing_provider
+        router._providers["openai"] = fallback_provider
+
+        await router.generate_text("test", max_tokens=8000, temperature=0.5)
+
+        assert fallback_provider.last_text_call["max_tokens"] == 8000
+        assert fallback_provider.last_text_call["temperature"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_zero_temperature_respected(
+        self, mock_provider, make_router, mock_router_settings,
+    ):
+        """temperature=0.0 must not be replaced by the config default."""
+        provider = mock_provider(name="gemini")
+
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = []
+        task_config.model = "gemini-3-flash"
+        task_config.max_tokens = 500
+        task_config.temperature = 0.9
+        mock_router_settings.ai.tasks = {"text_generation": task_config}
+
+        router, _ = make_router(mock_router_settings)
+        router._providers["gemini"] = provider
+
+        await router.generate_text("test", temperature=0.0)
+
+        assert provider.last_text_call["temperature"] == 0.0
+
+
 class TestClose:
     """Test router cleanup."""
 
