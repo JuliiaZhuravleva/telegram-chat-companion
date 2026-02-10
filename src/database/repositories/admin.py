@@ -233,6 +233,15 @@ class AdminRepository:
                 pass
         return "ru"
 
+    # -- Health status --
+
+    async def get_latest_health_check(self) -> dict[str, Any] | None:
+        """Get the most recent health check result (for admin panel)."""
+        row = await self._pool.fetchrow(
+            "SELECT * FROM health_log ORDER BY checked_at DESC LIMIT 1",
+        )
+        return dict(row) if row else None
+
     async def set_admin_language(
         self, bot_config_repo: Any, lang: str
     ) -> None:

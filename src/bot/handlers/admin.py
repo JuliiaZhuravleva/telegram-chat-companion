@@ -24,6 +24,7 @@ from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin import (
     approved_notification_keyboard,
     chats_list_keyboard,
+    health_keyboard,
     language_keyboard,
     main_menu_keyboard,
     pending_list_keyboard,
@@ -88,6 +89,16 @@ _INTERVAL_MAP: dict[str, timedelta] = {
 _PLACEHOLDER: dict[str, str] = {
     "ru": "Функция будет доступна позже.",
     "en": "Feature coming soon.",
+}
+
+_HEALTH_TITLE: dict[str, str] = {
+    "ru": "<b>Состояние бота</b>",
+    "en": "<b>Bot Health</b>",
+}
+
+_HEALTH_NO_DATA: dict[str, str] = {
+    "ru": "Нет данных о проверках.",
+    "en": "No health check data available.",
 }
 
 _WL_CHATS_TITLE: dict[str, str] = {
@@ -367,6 +378,105 @@ async def handle_stats(
             text,
             parse_mode="HTML",
             reply_markup=stats_keyboard(lang, period),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: health status
+# ---------------------------------------------------------------------------
+
+
+def _format_health_status(row: dict[str, Any], lang: str) -> str:
+    """Format a health_log row for display in admin panel."""
+    import json as _json
+
+    status = str(row.get("status", "unknown")).upper()
+    status_emoji = {
+        "HEALTHY": "\u2705",
+        "WARNING": "\u26a0\ufe0f",
+        "CRITICAL": "\U0001f6a8",
+        "SKIPPED": "\u23ed\ufe0f",
+    }
+    emoji = status_emoji.get(status, "\u2753")
+
+    checked_at = row.get("checked_at")
+    time_str = (
+        checked_at.strftime("%Y-%m-%d %H:%M UTC") if checked_at else "?"
+    )
+
+    db_ok = row.get("db_ok", True)
+    db_icon = "\u2705" if db_ok else "\u274c"
+    messages_30m = row.get("messages_30m", 0)
+    fallbacks_15m = row.get("fallbacks_15m", 0)
+
+    if lang == "ru":
+        lines = [
+            f"{emoji} <b>Состояние бота</b>",
+            f"<b>Статус:</b> {status}",
+            f"<b>Время:</b> {time_str}",
+            "",
+            f"{db_icon} База данных",
+            f"\U0001f4ac Сообщений (30м): {messages_30m}",
+            f"\U0001f504 Фоллбэков (15м): {fallbacks_15m}",
+        ]
+    else:
+        lines = [
+            f"{emoji} <b>Bot Health</b>",
+            f"<b>Status:</b> {status}",
+            f"<b>Time:</b> {time_str}",
+            "",
+            f"{db_icon} Database",
+            f"\U0001f4ac Messages (30m): {messages_30m}",
+            f"\U0001f504 Fallbacks (15m): {fallbacks_15m}",
+        ]
+
+    # Show issues if any
+    raw_issues = row.get("issues", [])
+    if isinstance(raw_issues, str):
+        try:
+            raw_issues = _json.loads(raw_issues)
+        except (ValueError, TypeError):
+            raw_issues = []
+
+    if raw_issues:
+        lines.append("")
+        lines.append("<b>Issues:</b>" if lang == "en" else "<b>Проблемы:</b>")
+        for issue in raw_issues:
+            sev = str(issue.get("severity", "warning"))
+            icon = "\U0001f525" if sev == "critical" else "\u26a0\ufe0f"
+            lines.append(f"  {icon} {issue.get('message', '')}")
+
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith("adm_health:"))
+async def handle_health(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Show latest health check result."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+
+    await callback.answer()
+
+    latest = await admin_repo.get_latest_health_check()
+    if latest is None:
+        text = f"{_HEALTH_TITLE[lang]}\n\n{_HEALTH_NO_DATA[lang]}"
+    else:
+        text = _format_health_status(latest, lang)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=health_keyboard(lang),
         )
 
 

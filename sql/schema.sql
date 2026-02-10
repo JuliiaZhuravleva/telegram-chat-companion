@@ -66,7 +66,8 @@ INSERT INTO bot_config (key, value, description) VALUES
     ('allowed_chats',                        '""',              'Comma-separated chat IDs allowed to use the bot (empty = use per-chat enabled flag)'),
     ('default_rules_mode',                   '"all"',           'Default rules execution mode (all/highest_weight/weighted_random)'),
     ('default_rules_enabled',                'false',           'Enable custom rules by default'),
-    ('default_link_comments_enabled',        'false',           'Enable video link comments by default')
+    ('default_link_comments_enabled',        'false',           'Enable video link comments by default'),
+    ('health_check_enabled',                 'true',            'Enable periodic health monitoring')
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================================================
@@ -298,3 +299,23 @@ DROP TRIGGER IF EXISTS custom_rules_updated_at ON custom_rules;
 CREATE TRIGGER custom_rules_updated_at
     BEFORE UPDATE ON custom_rules
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- =============================================================================
+-- health_log — Periodic health check results
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS health_log (
+    id              BIGSERIAL PRIMARY KEY,
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status          VARCHAR(20) NOT NULL
+                    CHECK (status IN ('healthy', 'warning', 'critical', 'skipped')),
+    db_ok           BOOLEAN NOT NULL DEFAULT true,
+    messages_30m    INTEGER NOT NULL DEFAULT 0,
+    fallbacks_15m   INTEGER NOT NULL DEFAULT 0,
+    ai_provider     VARCHAR(50),
+    issues          JSONB NOT NULL DEFAULT '[]'::jsonb,
+    alert_sent      BOOLEAN NOT NULL DEFAULT false
+);
+
+CREATE INDEX IF NOT EXISTS idx_health_log_checked_at
+    ON health_log (checked_at DESC);

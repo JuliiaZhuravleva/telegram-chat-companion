@@ -11,6 +11,7 @@ from src.bot.handlers.admin import (
     handle_admin_command,
     handle_approve_notification,
     handle_close,
+    handle_health,
     handle_language_menu,
     handle_language_set,
     handle_menu,
@@ -577,3 +578,87 @@ class TestWlReject:
 
         admin_repo.update_attempt_status.assert_awaited_once_with(42, "rejected")
         cb.message.edit_text.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# adm_health callback
+# ---------------------------------------------------------------------------
+
+
+class TestHealthCallback:
+    @pytest.mark.asyncio
+    async def test_shows_latest_health_result(self):
+        from datetime import datetime, timezone
+
+        cb = _make_callback("adm_health:ru")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_latest_health_check = AsyncMock(
+            return_value={
+                "id": 1,
+                "status": "healthy",
+                "checked_at": datetime(2026, 2, 10, 15, 0, tzinfo=timezone.utc),
+                "db_ok": True,
+                "messages_30m": 42,
+                "fallbacks_15m": 0,
+                "ai_provider": "gemini",
+                "issues": [],
+                "alert_sent": False,
+            }
+        )
+
+        await handle_health(cb, admin_repo, is_admin=True)
+
+        cb.answer.assert_awaited_once()
+        cb.message.edit_text.assert_awaited_once()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "HEALTHY" in text
+        assert "42" in text  # messages_30m
+
+    @pytest.mark.asyncio
+    async def test_shows_no_data_when_empty(self):
+        cb = _make_callback("adm_health:en")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_latest_health_check = AsyncMock(return_value=None)
+
+        await handle_health(cb, admin_repo, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "No health check data" in text
+
+    @pytest.mark.asyncio
+    async def test_shows_issues_when_present(self):
+        from datetime import datetime, timezone
+        import json
+
+        cb = _make_callback("adm_health:en")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_latest_health_check = AsyncMock(
+            return_value={
+                "id": 2,
+                "status": "warning",
+                "checked_at": datetime(2026, 2, 10, 15, 0, tzinfo=timezone.utc),
+                "db_ok": True,
+                "messages_30m": 5,
+                "fallbacks_15m": 3,
+                "ai_provider": "gemini",
+                "issues": [
+                    {"severity": "warning", "message": "AI fallback activated 3 time(s)"},
+                ],
+                "alert_sent": True,
+            }
+        )
+
+        await handle_health(cb, admin_repo, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "WARNING" in text
+        assert "fallback" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_health:ru")
+        admin_repo = _make_admin_repo()
+
+        await handle_health(cb, admin_repo, is_admin=False)
+
+        cb.message.edit_text.assert_not_awaited()

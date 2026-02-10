@@ -27,8 +27,9 @@ from src.bot.middleware import (
 )
 from src.config import Settings
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
+from src.services.health.checker import HealthChecker
 
-_REQUIRED_TABLES = ("bot_config", "chat_settings", "custom_rules")
+_REQUIRED_TABLES = ("bot_config", "chat_settings", "custom_rules", "health_log")
 
 
 async def _verify_schema(pool: asyncpg.Pool) -> None:
@@ -127,11 +128,16 @@ async def main() -> None:
 
     dp.include_router(main_router)
 
+    # Start health checker background task
+    health_checker = HealthChecker(pool=pool, bot=bot)
+    await health_checker.start()
+
     try:
         logger.info("Bot started, listening for messages...")
         await dp.start_polling(bot)
     finally:
         logger.info("Shutting down...")
+        await health_checker.stop()
         await container.close()
         await bot.session.close()
 

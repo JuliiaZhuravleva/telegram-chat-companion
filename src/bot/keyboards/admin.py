@@ -19,6 +19,7 @@ _L: dict[str, dict[str, str]] = {
     "defaults": {"ru": "Настройки", "en": "Default Settings"},
     "statistics": {"ru": "Статистика", "en": "Statistics"},
     "language": {"ru": "Язык / Language", "en": "Language / Язык"},
+    "health": {"ru": "Здоровье", "en": "Health"},
     "close": {"ru": "Закрыть", "en": "Close"},
     "back": {"ru": "Назад", "en": "Back"},
     "russian": {"ru": "Русский", "en": "Русский"},
@@ -63,6 +64,12 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
                 text=_t("statistics", lang),
                 callback_data=f"adm_stats:{lang}:24h",
             ),
+            InlineKeyboardButton(
+                text=_t("health", lang),
+                callback_data=f"adm_health:{lang}",
+            ),
+        ],
+        [
             InlineKeyboardButton(
                 text=_t("language", lang),
                 callback_data=f"adm_lang:{lang}",
@@ -120,6 +127,29 @@ def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=pending_label.get(lang, "Pending"),
                 callback_data=f"adm_wl_pending:{lang}:0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_menu:{lang}",
+            ),
+        ],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Statistics period selector
+# ---------------------------------------------------------------------------
+
+def health_keyboard(lang: str) -> InlineKeyboardMarkup:
+    """Health status view with refresh and back."""
+    refresh_label = {"ru": "Обновить", "en": "Refresh"}
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=refresh_label.get(lang, "Refresh"),
+                callback_data=f"adm_health:{lang}",
             ),
         ],
         [
