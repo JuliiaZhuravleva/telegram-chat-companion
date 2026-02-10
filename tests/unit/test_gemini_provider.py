@@ -165,6 +165,23 @@ class TestAnalyzeImage:
         assert result.text == "A cat sitting on a table"
         assert result.provider == "gemini"
 
+    async def test_returns_token_counts(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "candidates": [{"content": {"parts": [{"text": "A cat"}]}}],
+                "usageMetadata": {
+                    "promptTokenCount": 200,
+                    "candidatesTokenCount": 15,
+                },
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            result = await provider.analyze_image(b"fake-image", "Describe")
+
+        assert result.tokens_input == 200
+        assert result.tokens_output == 15
+
     async def test_image_payload_format(self, provider):
         mock_resp = _mock_response(
             json_data={

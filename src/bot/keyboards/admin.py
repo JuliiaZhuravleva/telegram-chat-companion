@@ -19,6 +19,7 @@ _L: dict[str, dict[str, str]] = {
     "defaults": {"ru": "Настройки", "en": "Default Settings"},
     "statistics": {"ru": "Статистика", "en": "Statistics"},
     "language": {"ru": "Язык / Language", "en": "Language / Язык"},
+    "costs": {"ru": "Расходы", "en": "Costs"},
     "health": {"ru": "Здоровье", "en": "Health"},
     "close": {"ru": "Закрыть", "en": "Close"},
     "back": {"ru": "Назад", "en": "Back"},
@@ -64,6 +65,12 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
                 text=_t("statistics", lang),
                 callback_data=f"adm_stats:{lang}:24h",
             ),
+            InlineKeyboardButton(
+                text=_t("costs", lang),
+                callback_data=f"adm_costs:{lang}:24h",
+            ),
+        ],
+        [
             InlineKeyboardButton(
                 text=_t("health", lang),
                 callback_data=f"adm_health:{lang}",
@@ -179,6 +186,40 @@ def stats_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMark
         )
     return InlineKeyboardMarkup(inline_keyboard=[
         row,
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_menu:{lang}",
+            ),
+        ],
+    ])
+
+
+# ---------------------------------------------------------------------------
+# Costs period selector
+# ---------------------------------------------------------------------------
+
+def costs_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMarkup:
+    """Costs period selector with optional verify button."""
+    periods = ["1h", "24h", "7d"]
+    row: list[InlineKeyboardButton] = []
+    for period in periods:
+        label = f"[{period}]" if period == current_period else period
+        row.append(
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"adm_costs:{lang}:{period}",
+            )
+        )
+    verify_label = {"ru": "Сверить (OpenAI)", "en": "Verify (OpenAI)"}
+    return InlineKeyboardMarkup(inline_keyboard=[
+        row,
+        [
+            InlineKeyboardButton(
+                text=verify_label.get(lang, "Verify (OpenAI)"),
+                callback_data=f"adm_costs_verify:{lang}:{current_period}",
+            ),
+        ],
         [
             InlineKeyboardButton(
                 text=_t("back", lang),

@@ -168,7 +168,13 @@ class GeminiProvider(AIProvider):
 
         text = self._extract_text(response)
 
-        return VisionResult(text=text, model=model, provider=self.name)
+        return VisionResult(
+            text=text,
+            model=model,
+            provider=self.name,
+            tokens_input=self._get_token_count(response, "promptTokenCount"),
+            tokens_output=self._get_token_count(response, "candidatesTokenCount"),
+        )
 
     async def close(self) -> None:
         """Close the HTTP client."""

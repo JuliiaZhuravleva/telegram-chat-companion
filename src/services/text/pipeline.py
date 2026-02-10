@@ -26,6 +26,7 @@ from src.models.chat_config import ChatConfig
 from src.models.enums import ResponseType, TriggerType
 from src.services.abuse.checker import AntiAbuseChecker
 from src.services.ai.base import AIProviderError
+from src.services.ai.pricing import calculate_cost
 from src.services.ai.router import AIRouter
 from src.services.modules.links.extractor import LinkExtractorService
 from src.services.modules.links.formatters import format_link_context_section
@@ -335,6 +336,11 @@ class TextProcessingPipeline:
         result: PipelineResult,
     ) -> None:
         try:
+            cost = calculate_cost(
+                result.model,
+                tokens_input=result.tokens_input,
+                tokens_output=result.tokens_output,
+            )
             await self._response_log.log(
                 chat_id,
                 user_id=user_id,
@@ -346,6 +352,8 @@ class TextProcessingPipeline:
                 tokens_output=result.tokens_output,
                 response_time_ms=result.response_time_ms,
                 was_fallback=result.was_fallback,
+                task_type="text",
+                cost_usd=cost,
             )
         except Exception:
             logger.warning("Failed to log response", chat_id=chat_id)

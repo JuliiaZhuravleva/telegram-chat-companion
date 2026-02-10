@@ -10,11 +10,13 @@ Routes AI requests to the appropriate provider based on:
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import structlog
 
 from src.config import Settings
+from src.database.repositories.response_log import ResponseLogRepository
 from src.services.ai.base import (
     AIProvider,
     AIProviderError,
@@ -25,6 +27,7 @@ from src.services.ai.base import (
     VisionResult,
 )
 from src.services.ai.capabilities import get_providers_for_capability, provider_supports
+from src.services.ai.pricing import calculate_cost
 
 logger = structlog.get_logger()
 
@@ -38,9 +41,14 @@ class AIRouter:
         result = await router.generate_text("Hello, world!")
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        response_log_repo: ResponseLogRepository | None = None,
+    ) -> None:
         self._settings = settings
         self._providers: dict[str, AIProvider] = {}
+        self._response_log = response_log_repo
         self._initialize_providers()
 
     def _initialize_providers(self) -> None:
@@ -108,6 +116,39 @@ class AIRouter:
             "deepseek": self._settings.deepseek_api_key,
         }
         return bool(api_keys.get(provider_name))
+
+    async def _log_usage(
+        self,
+        *,
+        task_type: str,
+        provider: str,
+        model: str,
+        tokens_input: int | None = None,
+        tokens_output: int | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Log AI usage with cost calculation. Non-critical."""
+        if self._response_log is None:
+            return
+        try:
+            cost = calculate_cost(
+                model,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                duration_minutes=duration_seconds / 60.0 if duration_seconds else None,
+            )
+            await self._response_log.log(
+                0,  # no chat_id for internal calls
+                provider=provider,
+                model=model,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                task_type=task_type,
+                cost_usd=cost,
+                duration_seconds=duration_seconds,
+            )
+        except Exception:
+            logger.warning("Failed to log AI usage", task_type=task_type, model=model)
 
     async def generate_text(
         self,
@@ -210,11 +251,18 @@ class AIRouter:
                 provider = await self._get_provider(provider_name)
                 model = task_config.model if task_config else None
 
-                return await provider.generate_embedding(
+                result = await provider.generate_embedding(
                     text=text,
                     model=model,
                     **kwargs,
                 )
+                asyncio.ensure_future(self._log_usage(
+                    task_type="embedding",
+                    provider=result.provider,
+                    model=result.model,
+                    tokens_input=result.tokens_input,
+                ))
+                return result
 
             except AIProviderError as e:
                 logger.error(
@@ -253,11 +301,19 @@ class AIRouter:
 
             try:
                 provider = await self._get_provider(provider_name)
-                return await provider.analyze_image(
+                result = await provider.analyze_image(
                     image_data=image_data,
                     prompt=prompt,
                     **kwargs,
                 )
+                asyncio.ensure_future(self._log_usage(
+                    task_type="vision",
+                    provider=result.provider,
+                    model=result.model,
+                    tokens_input=result.tokens_input,
+                    tokens_output=result.tokens_output,
+                ))
+                return result
 
             except AIProviderError as e:
                 logger.error(
@@ -296,11 +352,18 @@ class AIRouter:
 
             try:
                 provider = await self._get_provider(provider_name)
-                return await provider.transcribe_audio(
+                result = await provider.transcribe_audio(
                     audio_data=audio_data,
                     language=language,
                     **kwargs,
                 )
+                asyncio.ensure_future(self._log_usage(
+                    task_type="transcription",
+                    provider=result.provider,
+                    model=result.model,
+                    duration_seconds=result.duration,
+                ))
+                return result
 
             except AIProviderError as e:
                 logger.error(

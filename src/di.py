@@ -54,8 +54,8 @@ class AppProvider(Provider):
         await close_pool(pool)
 
     @provide
-    def get_ai_router(self, settings: Settings) -> AIRouter:
-        return AIRouter(settings)
+    def get_ai_router(self, settings: Settings, pool: asyncpg.Pool) -> AIRouter:
+        return AIRouter(settings, response_log_repo=ResponseLogRepository(pool))
 
 
 class RepositoryProvider(Provider):

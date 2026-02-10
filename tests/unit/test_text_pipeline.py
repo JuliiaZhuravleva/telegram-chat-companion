@@ -290,6 +290,30 @@ class TestPipelinePostSend:
 
         mocks["response_log_repo"].log.assert_called_once()
 
+    async def test_post_send_log_includes_task_type_and_cost(self, make_chat_config):
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline(
+            ai_result=_make_ai_result("Ok", tokens_input=100, tokens_output=50),
+        )
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        await pipeline.post_send(result, bot_message_id=999)
+
+        call_kwargs = mocks["response_log_repo"].log.call_args.kwargs
+        assert call_kwargs["task_type"] == "text"
+        assert call_kwargs["cost_usd"] is not None
+        # Cost should be a Decimal > 0 (test-model might not be in pricing, so 0 is ok)
+        from decimal import Decimal
+        assert isinstance(call_kwargs["cost_usd"], Decimal)
+
     async def test_post_send_saves_bot_message(self, make_chat_config):
         config = make_chat_config(enabled=True)
         pipeline, mocks = _make_pipeline()

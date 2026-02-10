@@ -131,11 +131,14 @@ class OpenAIProvider(AIProvider):
                 provider=self.name,
             )
 
+        usage = response.get("usage", {})
+
         return EmbeddingResult(
             embedding=embedding,
             model=model,
             provider=self.name,
             dimensions=len(embedding),
+            tokens_input=usage.get("total_tokens"),
         )
 
     async def analyze_image(
@@ -185,7 +188,14 @@ class OpenAIProvider(AIProvider):
                 provider=self.name,
             )
 
-        return VisionResult(text=text, model=model, provider=self.name)
+        usage = response.get("usage", {})
+        return VisionResult(
+            text=text,
+            model=model,
+            provider=self.name,
+            tokens_input=usage.get("input_tokens"),
+            tokens_output=usage.get("output_tokens"),
+        )
 
     async def transcribe_audio(
         self,
@@ -202,7 +212,7 @@ class OpenAIProvider(AIProvider):
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
         files = {"file": (filename, audio_data)}
-        data: dict[str, str] = {"model": model}
+        data: dict[str, str] = {"model": model, "response_format": "verbose_json"}
         if language:
             data["language"] = language
 
@@ -236,6 +246,7 @@ class OpenAIProvider(AIProvider):
             model=model,
             provider=self.name,
             language=result.get("language") or language,
+            duration=result.get("duration"),
         )
 
     async def close(self) -> None:

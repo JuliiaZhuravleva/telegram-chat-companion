@@ -196,6 +196,20 @@ CREATE TABLE IF NOT EXISTS response_log (
 CREATE INDEX IF NOT EXISTS idx_response_log_chat_created
     ON response_log (chat_id, created_at DESC);
 
+-- Schema v2: Cost monitoring columns
+ALTER TABLE response_log ADD COLUMN IF NOT EXISTS task_type VARCHAR(20) DEFAULT 'text';
+ALTER TABLE response_log ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(12, 8) DEFAULT 0;
+ALTER TABLE response_log ADD COLUMN IF NOT EXISTS duration_seconds FLOAT;
+
+CREATE INDEX IF NOT EXISTS idx_response_log_task_type
+    ON response_log (task_type);
+CREATE INDEX IF NOT EXISTS idx_response_log_created_at
+    ON response_log (created_at DESC);
+
+INSERT INTO schema_version (version, description)
+VALUES (2, 'Add task_type, cost_usd, duration_seconds to response_log')
+ON CONFLICT (version) DO NOTHING;
+
 -- =============================================================================
 -- sticker_knowledge — Sticker intelligence catalog
 -- =============================================================================

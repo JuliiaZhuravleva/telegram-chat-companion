@@ -29,6 +29,7 @@ class EmbeddingResult:
     model: str
     provider: str
     dimensions: int
+    tokens_input: int | None = None
 
 
 @dataclass
@@ -38,6 +39,8 @@ class VisionResult:
     text: str
     model: str
     provider: str
+    tokens_input: int | None = None
+    tokens_output: int | None = None
 
 
 @dataclass

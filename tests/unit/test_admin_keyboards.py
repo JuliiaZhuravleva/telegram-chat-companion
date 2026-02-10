@@ -4,6 +4,7 @@ from src.bot.keyboards.admin import (
     access_keyboard,
     approved_notification_keyboard,
     chats_list_keyboard,
+    costs_keyboard,
     language_keyboard,
     main_menu_keyboard,
     pending_list_keyboard,
@@ -36,6 +37,7 @@ class TestMainMenuKeyboard:
         assert any("adm_stk:" in c for c in callbacks)
         assert any("adm_defs:" in c for c in callbacks)
         assert any("adm_stats:" in c for c in callbacks)
+        assert any("adm_costs:" in c for c in callbacks)
         assert any("adm_lang:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
@@ -193,3 +195,32 @@ class TestNotificationStatusKeyboards:
         kb = rejected_notification_keyboard("en")
         labels = _get_labels(kb)
         assert any("Rejected" in l for l in labels)
+
+
+class TestCostsKeyboard:
+    def test_has_three_periods(self):
+        kb = costs_keyboard("ru", "24h")
+        callbacks = _get_callbacks(kb)
+        assert any("adm_costs:ru:1h" in c for c in callbacks)
+        assert any("adm_costs:ru:24h" in c for c in callbacks)
+        assert any("adm_costs:ru:7d" in c for c in callbacks)
+
+    def test_current_period_marked(self):
+        kb = costs_keyboard("en", "7d")
+        labels = _get_labels(kb)
+        assert "[7d]" in labels
+
+    def test_has_verify_button(self):
+        kb = costs_keyboard("ru", "24h")
+        callbacks = _get_callbacks(kb)
+        assert any("adm_costs_verify:" in c for c in callbacks)
+
+    def test_verify_button_english(self):
+        kb = costs_keyboard("en", "24h")
+        labels = _get_labels(kb)
+        assert any("Verify" in label for label in labels)
+
+    def test_has_back_button(self):
+        kb = costs_keyboard("en", "1h")
+        callbacks = _get_callbacks(kb)
+        assert any("adm_menu:" in c for c in callbacks)

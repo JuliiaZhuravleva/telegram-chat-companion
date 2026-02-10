@@ -1,13 +1,17 @@
 """Tests for src.services.ai.router — AIRouter fallback chain logic."""
 
-from unittest.mock import MagicMock
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.services.ai.base import (
     AIProviderError,
+    EmbeddingResult,
     RateLimitError,
     TextGenerationResult,
+    TranscriptionResult,
+    VisionResult,
 )
 from src.services.ai.router import AIRouter
 
@@ -242,6 +246,155 @@ class TestGenerateText:
         await router.generate_text("test", temperature=0.0)
 
         assert provider.last_text_call["temperature"] == 0.0
+
+
+class TestCentralizedLogging:
+    """Test that non-text operations are logged in the router."""
+
+    @pytest.mark.asyncio
+    async def test_no_crash_without_repo(self, mock_provider, make_router, mock_router_settings):
+        """Router with response_log_repo=None should not crash on embedding."""
+        embedding_result = EmbeddingResult(
+            embedding=[0.1] * 768, model="mock-embed", provider="gemini",
+            dimensions=768, tokens_input=10,
+        )
+        provider = mock_provider(
+            name="gemini",
+            supported_capabilities={"embeddings": True},
+            embedding_result=embedding_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = []
+        task_config.model = "gemini-embedding-001"
+        mock_router_settings.ai.tasks = {"embeddings": task_config}
+
+        router, _ = make_router(mock_router_settings)
+        router._providers["gemini"] = provider
+        # response_log_repo is None by default
+
+        result = await router.generate_embedding("test")
+        assert result.embedding == [0.1] * 768
+
+    @pytest.mark.asyncio
+    async def test_embedding_logs_usage(self, mock_provider, mock_router_settings):
+        """Embedding call should fire _log_usage via ensure_future."""
+        embedding_result = EmbeddingResult(
+            embedding=[0.1] * 768, model="mock-embed", provider="gemini",
+            dimensions=768, tokens_input=42,
+        )
+        provider = mock_provider(
+            name="gemini",
+            supported_capabilities={"embeddings": True},
+            embedding_result=embedding_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = []
+        task_config.model = "gemini-embedding-001"
+        mock_router_settings.ai.tasks = {"embeddings": task_config}
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["gemini"] = provider
+
+        await router.generate_embedding("test")
+
+        # Let the fire-and-forget task complete
+        await asyncio.sleep(0.05)
+
+        mock_repo.log.assert_awaited_once()
+        call_kwargs = mock_repo.log.call_args
+        assert call_kwargs.kwargs["task_type"] == "embedding"
+
+    @pytest.mark.asyncio
+    async def test_vision_logs_usage(self, mock_provider, mock_router_settings):
+        """Vision call should fire _log_usage."""
+        vision_result = VisionResult(
+            text="a cat", model="mock-vision", provider="openai",
+            tokens_input=100, tokens_output=10,
+        )
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"vision": True},
+            vision_result=vision_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"vision": task_config}
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["openai"] = provider
+
+        await router.analyze_image(b"data", "describe")
+        await asyncio.sleep(0.05)
+
+        mock_repo.log.assert_awaited_once()
+        call_kwargs = mock_repo.log.call_args
+        assert call_kwargs.kwargs["task_type"] == "vision"
+
+    @pytest.mark.asyncio
+    async def test_transcription_logs_usage(self, mock_provider, mock_router_settings):
+        """Transcription call should fire _log_usage."""
+        transcription_result = TranscriptionResult(
+            text="hello", model="whisper-1", provider="openai",
+            language="en", duration=2.5,
+        )
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            transcription_result=transcription_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["openai"] = provider
+
+        await router.transcribe_audio(b"audio")
+        await asyncio.sleep(0.05)
+
+        mock_repo.log.assert_awaited_once()
+        call_kwargs = mock_repo.log.call_args
+        assert call_kwargs.kwargs["task_type"] == "transcription"
+        assert call_kwargs.kwargs["duration_seconds"] == 2.5
+
+    @pytest.mark.asyncio
+    async def test_text_generation_does_not_log(
+        self, mock_provider, make_router, mock_router_settings,
+    ):
+        """generate_text should NOT call _log_usage (pipeline does it)."""
+        provider = mock_provider(name="gemini")
+
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = []
+        task_config.model = "gemini-3-flash"
+        task_config.max_tokens = 500
+        task_config.temperature = 0.9
+        mock_router_settings.ai.tasks = {"text_generation": task_config}
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["gemini"] = provider
+
+        await router.generate_text("test")
+        await asyncio.sleep(0.05)
+
+        mock_repo.log.assert_not_awaited()
 
 
 class TestClose:

@@ -129,6 +129,20 @@ class TestGenerateEmbedding:
         assert result.provider == "openai"
         assert result.dimensions == len(embedding)
 
+    async def test_returns_tokens_input(self, provider):
+        embedding = [0.1] * 768
+        mock_resp = _mock_response(
+            json_data={
+                "data": [{"embedding": embedding, "index": 0}],
+                "usage": {"total_tokens": 42},
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            result = await provider.generate_embedding("Test text")
+
+        assert result.tokens_input == 42
+
     async def test_empty_data(self, provider):
         mock_resp = _mock_response(json_data={"data": []})
 
@@ -170,6 +184,20 @@ class TestAnalyzeImage:
 
         assert result.text == "A sunset over mountains"
 
+    async def test_returns_token_counts(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "output_text": "A dog",
+                "usage": {"input_tokens": 150, "output_tokens": 20},
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            result = await provider.analyze_image(b"fake-image", "Describe")
+
+        assert result.tokens_input == 150
+        assert result.tokens_output == 20
+
     async def test_empty_vision_response(self, provider):
         mock_resp = _mock_response(json_data={})
 
@@ -199,7 +227,7 @@ class TestAnalyzeImage:
 class TestTranscribeAudio:
     async def test_successful_transcription(self, provider):
         mock_resp = _mock_response(
-            json_data={"text": "Hello, how are you?", "language": "en"}
+            json_data={"text": "Hello, how are you?", "language": "en", "duration": 3.5}
         )
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
@@ -209,6 +237,7 @@ class TestTranscribeAudio:
         assert result.model == "whisper-1"
         assert result.provider == "openai"
         assert result.language == "en"
+        assert result.duration == 3.5
 
     async def test_with_language_hint(self, provider):
         mock_resp = _mock_response(

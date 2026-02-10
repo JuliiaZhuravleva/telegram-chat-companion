@@ -24,6 +24,7 @@ from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin import (
     approved_notification_keyboard,
     chats_list_keyboard,
+    costs_keyboard,
     health_keyboard,
     language_keyboard,
     main_menu_keyboard,
@@ -32,9 +33,11 @@ from src.bot.keyboards.admin import (
     stats_keyboard,
     whitelist_menu_keyboard,
 )
+from src.config import Settings
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.response_log import ResponseLogRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -378,6 +381,195 @@ async def handle_stats(
             text,
             parse_mode="HTML",
             reply_markup=stats_keyboard(lang, period),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: AI costs
+# ---------------------------------------------------------------------------
+
+_TASK_TYPE_LABELS: dict[str, dict[str, str]] = {
+    "text": {"ru": "Текст", "en": "Text"},
+    "embedding": {"ru": "Эмбеддинги", "en": "Embeddings"},
+    "vision": {"ru": "Зрение", "en": "Vision"},
+    "transcription": {"ru": "Транскрипция", "en": "Transcription"},
+}
+
+
+@router.callback_query(F.data.startswith("adm_costs:"))
+async def handle_costs(
+    callback: CallbackQuery,
+    response_log_repo: FromDishka[ResponseLogRepository],
+    **kwargs: Any,
+) -> None:
+    """Show AI cost breakdown for a given period."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    # Don't match adm_costs_verify
+    action = parts[0] if parts else ""
+    if action != "adm_costs":
+        return
+
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    period = parts[2] if len(parts) > 2 else "24h"
+    if period not in _INTERVAL_MAP:
+        period = "24h"
+
+    await callback.answer()
+
+    interval = _INTERVAL_MAP[period]
+    period_label = _PERIOD_LABELS[period][lang]
+
+    total_cost = await response_log_repo.get_total_cost(interval)
+    by_task = await response_log_repo.get_cost_by_task_type(interval)
+    by_model = await response_log_repo.get_cost_by_model(interval)
+
+    if lang == "ru":
+        lines = [f"<b>Расходы на AI</b> ({period_label})\n"]
+        lines.append(f"<b>Итого:</b> ${total_cost:.4f}\n")
+
+        if by_task:
+            lines.append("<b>По типу:</b>")
+            for row in by_task:
+                task = row["task_type"] or "text"
+                label = _TASK_TYPE_LABELS.get(task, {}).get(lang, task)
+                cost = row["total_cost"]
+                count = row["call_count"]
+                lines.append(f"  {label}: ${cost:.4f} ({count} выз.)")
+            lines.append("")
+
+        if by_model:
+            lines.append("<b>По модели:</b>")
+            for row in by_model[:8]:
+                model = row["model"] or "unknown"
+                cost = row["total_cost"]
+                count = row["call_count"]
+                lines.append(f"  {escape(model)}: ${cost:.4f} ({count}x)")
+    else:
+        lines = [f"<b>AI Costs</b> ({period_label})\n"]
+        lines.append(f"<b>Total:</b> ${total_cost:.4f}\n")
+
+        if by_task:
+            lines.append("<b>By type:</b>")
+            for row in by_task:
+                task = row["task_type"] or "text"
+                label = _TASK_TYPE_LABELS.get(task, {}).get(lang, task)
+                cost = row["total_cost"]
+                count = row["call_count"]
+                lines.append(f"  {label}: ${cost:.4f} ({count} calls)")
+            lines.append("")
+
+        if by_model:
+            lines.append("<b>By model:</b>")
+            for row in by_model[:8]:
+                model = row["model"] or "unknown"
+                cost = row["total_cost"]
+                count = row["call_count"]
+                lines.append(f"  {escape(model)}: ${cost:.4f} ({count}x)")
+
+    text = "\n".join(lines)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=costs_keyboard(lang, period),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: cost verification (OpenAI billing API)
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_costs_verify:"))
+async def handle_costs_verify(
+    callback: CallbackQuery,
+    response_log_repo: FromDishka[ResponseLogRepository],
+    settings: FromDishka[Settings],
+    **kwargs: Any,
+) -> None:
+    """Cross-check our calculated costs with OpenAI billing API."""
+    from src.services.ai.billing import OpenAIBillingClient
+
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    period = parts[2] if len(parts) > 2 else "24h"
+    if period not in _INTERVAL_MAP:
+        period = "24h"
+
+    await callback.answer()
+
+    interval = _INTERVAL_MAP[period]
+    days = {"1h": 1, "24h": 1, "7d": 7}[period]
+
+    # Our calculated cost (OpenAI only)
+    by_provider = await response_log_repo.get_cost_by_provider(interval)
+    our_openai = next(
+        (r["total_cost"] for r in by_provider if r["provider"] == "openai"),
+        0,
+    )
+
+    api_key = settings.openai_api_key or ""
+    if not api_key:
+        if lang == "ru":
+            err_text = "<b>Сверка расходов</b>\n\nOpenAI API ключ не настроен."
+        else:
+            err_text = "<b>Cost Verification</b>\n\nOpenAI API key not configured."
+        msg = callback.message
+        if isinstance(msg, Message):
+            await msg.edit_text(
+                err_text,
+                parse_mode="HTML",
+                reply_markup=costs_keyboard(lang, period),
+            )
+        return
+
+    client = OpenAIBillingClient(api_key)
+    try:
+        report = await client.get_costs(days=days)
+    finally:
+        await client.close()
+
+    if report.error:
+        if lang == "ru":
+            text = f"<b>Сверка расходов</b>\n\n{escape(report.error)}"
+        else:
+            text = f"<b>Cost Verification</b>\n\n{escape(report.error)}"
+    else:
+        openai_total = report.total_usd
+        delta = openai_total - our_openai if our_openai else openai_total
+
+        if lang == "ru":
+            lines = [
+                "<b>Сверка расходов (OpenAI)</b>\n",
+                f"OpenAI отчёт: ${openai_total:.4f}",
+                f"Наш расчёт: ${our_openai:.4f}",
+                f"Разница: ${delta:.4f}",
+            ]
+        else:
+            lines = [
+                "<b>Cost Verification (OpenAI)</b>\n",
+                f"OpenAI reported: ${openai_total:.4f}",
+                f"Our calculation: ${our_openai:.4f}",
+                f"Delta: ${delta:.4f}",
+            ]
+        text = "\n".join(lines)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=costs_keyboard(lang, period),
         )
 
 
