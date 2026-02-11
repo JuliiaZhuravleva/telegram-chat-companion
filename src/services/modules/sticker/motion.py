@@ -71,14 +71,14 @@ class MotionAnalyzer:
         """
         logger.debug("Analyzing WebM motion", path=str(webm_path), frames=total_frames)
 
-        # Use ffmpeg mestimate filter to extract motion vectors
-        # Output format: frame:pts_time:lavfi.mestimate.sse
+        # Use ffmpeg scdet filter to extract frame differences (motion metric)
+        # Output format: lavfi.scd.mafd (mean absolute frame difference)
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg",
             "-i",
             str(webm_path),
             "-vf",
-            "mestimate=method=esa:mb_size=8,metadata=print:file=-",
+            "scdet=t=100,metadata=mode=print",
             "-f",
             "null",
             "-",
@@ -89,7 +89,7 @@ class MotionAnalyzer:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
 
         # Parse motion scores from stderr (metadata output goes to stderr)
-        motion_scores = self._parse_mestimate_output(stderr.decode())
+        motion_scores = self._parse_scdet_output(stderr.decode())
 
         # Fallback if parsing failed
         if not motion_scores or len(motion_scores) < 2:
@@ -173,13 +173,13 @@ class MotionAnalyzer:
             motion_scores=motion_scores,
         )
 
-    def _parse_mestimate_output(self, stderr: str) -> list[float]:
-        """Parse motion scores from ffmpeg mestimate filter output.
+    def _parse_scdet_output(self, stderr: str) -> list[float]:
+        """Parse motion scores from ffmpeg scdet filter output.
 
-        Looks for lines like: "frame:123 pts:4.133 lavfi.mestimate.sse:12345"
+        Looks for lines like: "lavfi.scd.mafd=0.433" (mean absolute frame difference)
         """
         scores: list[float] = []
-        pattern = r"lavfi\.mestimate\.sse:(\d+(?:\.\d+)?)"
+        pattern = r"lavfi\.scd\.mafd=(\d+(?:\.\d+)?)"
 
         for line in stderr.splitlines():
             match = re.search(pattern, line)
