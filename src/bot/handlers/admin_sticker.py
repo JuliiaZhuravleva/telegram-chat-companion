@@ -8,6 +8,7 @@ Handles:
 from __future__ import annotations
 
 import contextlib
+import html as html_lib
 from typing import Any
 
 import structlog
@@ -135,7 +136,7 @@ async def handle_admin_sticker_reply(
 
     if new_desc:
         await message.reply(
-            f"Описание обновлено:\n<i>{new_desc}</i>",
+            f"Описание обновлено:\n<i>{html_lib.escape(new_desc)}</i>",
             parse_mode="HTML",
         )
     else:
@@ -247,7 +248,7 @@ async def handle_sticker_set_view(
     )
     stickers = [dict(r) for r in sticker_records]
 
-    text = f"<b>{set_name}</b> ({total} stickers)"
+    text = f"<b>{html_lib.escape(set_name)}</b> ({total} stickers)"
 
     keyboard = sticker_set_detail_keyboard(
         stickers,
@@ -295,16 +296,16 @@ async def handle_sticker_detail(
 
     lines = []
     if sticker["visual_description"]:
-        lines.append(f"<b>Описание:</b> {sticker['visual_description']}")
+        lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
     if sticker["emotion"]:
-        lines.append(f"<b>Эмоция:</b> {sticker['emotion']}")
+        lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
     if sticker["character_or_meme"]:
-        lines.append(f"<b>Персонаж:</b> {sticker['character_or_meme']}")
+        lines.append(f"<b>Персонаж:</b> {html_lib.escape(sticker['character_or_meme'])}")
     if sticker["suggested_contexts"]:
-        contexts = ", ".join(sticker["suggested_contexts"])
+        contexts = ", ".join(html_lib.escape(c) for c in sticker["suggested_contexts"])
         lines.append(f"<b>Контексты:</b> {contexts}")
     lines.append(f"<b>Использований:</b> {sticker['total_uses']} (бот: {sticker['bot_uses']})")
-    lines.append(f"<b>Emoji:</b> {sticker['emoji'] or '—'}")
+    lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
     lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
     lines.append(f"<b>Video:</b> {sticker['is_video']}")
     if sticker["analysis_failed"]:

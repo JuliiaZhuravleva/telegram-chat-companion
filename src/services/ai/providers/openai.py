@@ -60,6 +60,14 @@ class OpenAIProvider(AIProvider):
         """Generate text using OpenAI Chat Completions API."""
         model = model or "gpt-5-nano"
 
+        # gpt-5-nano only supports temperature=1.0 (default)
+        if model == "gpt-5-nano" and temperature != 1.0:
+            logger.warning(
+                "gpt-5-nano only supports temperature=1.0, adjusting",
+                requested_temperature=temperature,
+            )
+            temperature = 1.0
+
         messages: list[dict[str, str]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})

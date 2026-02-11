@@ -23,6 +23,7 @@ _INTERVAL = 86400  # 24 hours
 _INITIAL_DELAY = 300  # 5 min after startup
 _BATCH_LIMIT = 10
 _STALENESS_DAYS = 30
+_DEBUG_RETENTION_DAYS = 7  # Default retention for debug artifacts
 
 
 class StickerSetSyncScheduler:
@@ -103,3 +104,11 @@ class StickerSetSyncScheduler:
                 synced=synced,
                 total=len(stale),
             )
+
+        # Clean up old debug artifacts (once per day during sync)
+        try:
+            deleted = await repo.cleanup_old_debug_artifacts(_DEBUG_RETENTION_DAYS)
+            if deleted > 0:
+                logger.info("Cleaned up old debug artifacts", deleted=deleted)
+        except Exception:
+            logger.exception("Failed to cleanup debug artifacts")

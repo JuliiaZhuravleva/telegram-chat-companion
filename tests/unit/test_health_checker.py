@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.services.health.checker import HealthChecker
 from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -99,7 +98,7 @@ class TestFormatAlert:
     def test_critical_alert_format(self):
         result = HealthCheckResult(
             status=HealthStatus.CRITICAL,
-            checked_at=datetime(2026, 2, 10, 15, 30, tzinfo=timezone.utc),
+            checked_at=datetime(2026, 2, 10, 15, 30, tzinfo=UTC),
             db_ok=False,
             messages_30m=12,
             fallbacks_15m=3,
@@ -126,7 +125,7 @@ class TestFormatAlert:
     def test_warning_alert_format(self):
         result = HealthCheckResult(
             status=HealthStatus.WARNING,
-            checked_at=datetime(2026, 2, 10, 15, 30, tzinfo=timezone.utc),
+            checked_at=datetime(2026, 2, 10, 15, 30, tzinfo=UTC),
             fallbacks_15m=1,
             issues=[
                 HealthIssue(

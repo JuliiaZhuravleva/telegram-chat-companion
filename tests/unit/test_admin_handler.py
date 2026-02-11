@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -23,7 +23,6 @@ from src.bot.handlers.admin import (
     handle_wl_reject,
     handle_wl_remove,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -588,7 +587,7 @@ class TestWlReject:
 class TestHealthCallback:
     @pytest.mark.asyncio
     async def test_shows_latest_health_result(self):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         cb = _make_callback("adm_health:ru")
         admin_repo = _make_admin_repo()
@@ -596,7 +595,7 @@ class TestHealthCallback:
             return_value={
                 "id": 1,
                 "status": "healthy",
-                "checked_at": datetime(2026, 2, 10, 15, 0, tzinfo=timezone.utc),
+                "checked_at": datetime(2026, 2, 10, 15, 0, tzinfo=UTC),
                 "db_ok": True,
                 "messages_30m": 42,
                 "fallbacks_15m": 0,
@@ -627,8 +626,7 @@ class TestHealthCallback:
 
     @pytest.mark.asyncio
     async def test_shows_issues_when_present(self):
-        from datetime import datetime, timezone
-        import json
+        from datetime import datetime
 
         cb = _make_callback("adm_health:en")
         admin_repo = _make_admin_repo()
@@ -636,7 +634,7 @@ class TestHealthCallback:
             return_value={
                 "id": 2,
                 "status": "warning",
-                "checked_at": datetime(2026, 2, 10, 15, 0, tzinfo=timezone.utc),
+                "checked_at": datetime(2026, 2, 10, 15, 0, tzinfo=UTC),
                 "db_ok": True,
                 "messages_30m": 5,
                 "fallbacks_15m": 3,

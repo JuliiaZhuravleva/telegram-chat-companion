@@ -7,6 +7,7 @@ import pytest
 from src.services.ai.base import AIProviderError, EmbeddingResult, VisionResult
 from src.services.modules.sticker.learning import StickerLearningService
 from src.services.modules.sticker.models import StickerRenderError
+from src.services.modules.sticker.renderer import RenderedSticker
 
 
 def _make_sticker(
@@ -101,7 +102,11 @@ async def test_learn_existing_sticker(sticker_service):
 @pytest.mark.asyncio
 @patch("src.services.modules.sticker.learning.render_tgs", new_callable=AsyncMock)
 async def test_learn_animated_sticker_renders_and_analyzes(mock_render_tgs, sticker_service):
-    mock_render_tgs.return_value = b"fake-collage-png"
+    mock_render_tgs.return_value = RenderedSticker(
+        collage_png=b"fake-collage-png",
+        duration=3.0,
+        frame_times=[0.0, 0.6, 1.2, 1.8, 2.4, 3.0],
+    )
 
     sticker = _make_sticker(is_animated=True)
     result = await sticker_service.learn(
@@ -137,7 +142,11 @@ async def test_learn_animated_sticker_render_failure(mock_render_tgs, sticker_se
 @pytest.mark.asyncio
 @patch("src.services.modules.sticker.learning.render_webm", new_callable=AsyncMock)
 async def test_learn_video_sticker_renders_and_analyzes(mock_render_webm, sticker_service):
-    mock_render_webm.return_value = b"fake-collage-png"
+    mock_render_webm.return_value = RenderedSticker(
+        collage_png=b"fake-collage-png",
+        duration=2.5,
+        frame_times=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5],
+    )
 
     sticker = _make_sticker(is_video=True)
     result = await sticker_service.learn(

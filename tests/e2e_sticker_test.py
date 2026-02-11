@@ -5,7 +5,6 @@ bot learns them by checking the database.
 """
 
 import asyncio
-import json
 import sys
 from pathlib import Path
 

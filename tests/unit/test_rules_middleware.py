@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.types import Message
 
 from src.bot.middleware.rules import RulesMiddleware
 from src.models.chat_config import ChatConfig
-
 
 # ---------------------------------------------------------------------------
 # Helpers

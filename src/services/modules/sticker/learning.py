@@ -7,6 +7,7 @@ Supports static, animated (.tgs), and video (.webm) stickers.
 from __future__ import annotations
 
 import asyncio
+import html as html_lib
 import json
 import re
 from typing import Any
@@ -346,13 +347,13 @@ class StickerLearningService:
 
         description_parts = []
         if result.visual_description:
-            description_parts.append(f"<b>Описание:</b> {result.visual_description}")
+            description_parts.append(f"<b>Описание:</b> {html_lib.escape(result.visual_description)}")
         if result.emotion:
-            description_parts.append(f"<b>Эмоция:</b> {result.emotion}")
+            description_parts.append(f"<b>Эмоция:</b> {html_lib.escape(result.emotion)}")
         if result.character_or_meme:
-            description_parts.append(f"<b>Персонаж:</b> {result.character_or_meme}")
+            description_parts.append(f"<b>Персонаж:</b> {html_lib.escape(result.character_or_meme)}")
         if sticker.set_name:
-            description_parts.append(f"<b>Пак:</b> {sticker.set_name}")
+            description_parts.append(f"<b>Пак:</b> {html_lib.escape(sticker.set_name)}")
 
         description_parts.append(
             "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"

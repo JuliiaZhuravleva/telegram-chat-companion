@@ -6,9 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.models.rules import RuleAction, RuleType, RulesMode
+from src.models.rules import RuleAction
 from src.services.rules.engine import RuleEngine
-
 
 # ---------------------------------------------------------------------------
 # Helpers

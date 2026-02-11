@@ -69,7 +69,9 @@ class TestDetectMimeType:
         assert detect_mime_type("video/file.webm") == "video/webm"
 
     def test_tgs(self):
-        assert detect_mime_type("stickers/file.tgs") == "application/gzip"
+        # Python's mimetypes may return either depending on system config
+        result = detect_mime_type("stickers/file.tgs")
+        assert result in ("application/x-tgsticker", "application/gzip")
 
     def test_unknown(self):
         assert detect_mime_type("file_no_ext") == "application/octet-stream"
