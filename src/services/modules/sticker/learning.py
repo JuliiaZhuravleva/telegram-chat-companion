@@ -22,7 +22,7 @@ from src.services.modules.sticker.models import (
     StickerRenderError,
     StickerSearchResult,
 )
-from src.services.modules.sticker.renderer import render_tgs, render_webm
+from src.services.modules.sticker.renderer import RenderedSticker, render_tgs, render_webm
 
 logger = structlog.get_logger(__name__)
 
@@ -44,9 +44,12 @@ class StickerLearningService:
         self,
         ai_router: AIRouter,
         sticker_repo: StickerRepository,
+        *,
+        debug_mode: bool = False,
     ) -> None:
         self._ai = ai_router
         self._repo = sticker_repo
+        self._debug_mode = debug_mode
 
     # ── Learning ─────────────────────────────────────────────────────
 
@@ -91,13 +94,16 @@ class StickerLearningService:
         # Determine sticker type and prepare image for Vision API
         sticker_type = _detect_sticker_type(sticker)
         vision_image = image_data
+        timing_metadata: RenderedSticker | None = None
 
         if sticker_type != "static":
             try:
                 if sticker_type == "animated":
-                    vision_image = await render_tgs(image_data)
+                    timing_metadata = await render_tgs(image_data)
+                    vision_image = timing_metadata.collage_png
                 else:
-                    vision_image = await render_webm(image_data)
+                    timing_metadata = await render_webm(image_data)
+                    vision_image = timing_metadata.collage_png
             except StickerRenderError:
                 logger.warning(
                     "Sticker rendering failed, saving without analysis",
@@ -143,14 +149,19 @@ class StickerLearningService:
             pack_context=pack_context,
             character_hint=character_hint,
             web_context=web_context,
+            timing=timing_metadata,
         )
         # Determine mime type for the Vision API
-        if sticker_type == "static":
-            mime_type = "image/webp"
-        else:
-            mime_type = "image/png"  # rendered collages are PNG
+        mime_type = "image/webp" if sticker_type == "static" else "image/png"
 
         parsed: dict[str, Any] = {}
+        vision_result_text: str = ""
+        vision_model: str | None = None
+        analysis_duration_ms: int | None = None
+
+        import time
+        start_time = time.perf_counter()
+
         try:
             vision_result = await self._ai.analyze_image(
                 image_data=vision_image,
@@ -158,8 +169,12 @@ class StickerLearningService:
                 mime_type=mime_type,
                 response_mime_type="application/json",
             )
+            analysis_duration_ms = int((time.perf_counter() - start_time) * 1000)
+            vision_result_text = vision_result.text
+            vision_model = vision_result.model
             parsed = self._parse_vision_response(vision_result.text)
         except AIProviderError:
+            analysis_duration_ms = int((time.perf_counter() - start_time) * 1000)
             logger.exception(
                 "Vision API failed for sticker",
                 file_unique_id=file_unique_id,
@@ -202,6 +217,44 @@ class StickerLearningService:
             usage_contexts=usage_contexts,
             analysis_failed=analysis_failed,
         )
+
+        # Save debug artifacts if debug mode is enabled
+        if self._debug_mode and vision_result_text:
+            try:
+                # Only save rendered collage for animated/video (not raw sticker image for static)
+                debug_collage = vision_image if sticker_type != "static" else None
+
+                # Extract motion metadata if available
+                motion_metadata: dict[str, Any] | None = None
+                if timing_metadata and timing_metadata.motion:
+                    motion = timing_metadata.motion
+                    motion_metadata = {
+                        "duration": motion.duration,
+                        "avg_motion": motion.avg_motion,
+                        "peak_motion_time": motion.peak_motion_time,
+                        "keyframe_indices": motion.keyframe_indices,
+                        "keyframe_times": motion.keyframe_times,
+                        "motion_scores": motion.motion_scores[:20],  # Limit to first 20 for storage
+                    }
+
+                await self._repo.save_debug_artifacts(
+                    file_unique_id=file_unique_id,
+                    rendered_collage=debug_collage,
+                    vision_prompt=prompt,
+                    vision_raw_response=vision_result_text,
+                    model_used=vision_model,
+                    analysis_duration_ms=analysis_duration_ms,
+                    motion_metadata=motion_metadata,
+                )
+                logger.debug(
+                    "Saved debug artifacts",
+                    file_unique_id=file_unique_id,
+                    collage_size=len(debug_collage) if debug_collage else 0,
+                    has_motion=bool(motion_metadata),
+                )
+            except Exception:
+                # Don't fail the main flow if debug saving fails
+                logger.exception("Failed to save debug artifacts", file_unique_id=file_unique_id)
 
         # Generate embedding if analysis succeeded
         if visual and not analysis_failed:
@@ -466,14 +519,107 @@ class StickerLearningService:
         pack_context: list[str] | None = None,
         character_hint: str | None = None,
         web_context: str | None = None,
+        timing: RenderedSticker | None = None,
     ) -> str:
         """Build the Vision API prompt for sticker analysis."""
         # Opening line based on sticker type
-        if sticker_type == "animated":
+        if sticker_type == "animated" and timing:
+            lines = [
+                "Это анимированный стикер Telegram для чата.",
+                f"Длительность анимации: {timing.duration:.1f}с.",
+                "",
+            ]
+
+            # Add motion analysis context if available
+            if timing.motion:
+                motion = timing.motion
+                lines.extend([
+                    "## АНАЛИЗ ДВИЖЕНИЯ",
+                    f"Средняя интенсивность движения: {motion.avg_motion:.2f}",
+                    f"Пик движения в момент времени: {motion.peak_motion_time:.1f}с",
+                    "",
+                    "На изображении 6 КЛЮЧЕВЫХ КАДРОВ в моменты НАИБОЛЬШЕГО ДВИЖЕНИЯ (не равномерно распределённые!):",
+                ])
+
+                # Frame list with motion scores
+                for i in range(min(6, len(motion.keyframe_indices))):
+                    idx = motion.keyframe_indices[i]
+                    time = motion.keyframe_times[i]
+                    motion_score = motion.motion_scores[idx] if idx < len(motion.motion_scores) else 0.0
+
+                    if i == 0:
+                        label = f"  • t={time:.1f}с (движение={motion_score:.2f}) — начало"
+                    elif i == 5:
+                        label = f"  • t={time:.1f}с (движение={motion_score:.2f}) — конец"
+                    else:
+                        label = f"  • t={time:.1f}с (движение={motion_score:.2f})"
+
+                    lines.append(label)
+
+                lines.append("")
+            else:
+                # Fallback for timing without motion
+                lines.extend([
+                    "На изображении 6 ключевых кадров (3x2 сетка), показывающих ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЯ:",
+                    f"  • Кадр 1 ({timing.frame_times[0]:.1f}с) — начало действия",
+                    f"  • Кадр 2 ({timing.frame_times[1]:.1f}с)",
+                    f"  • Кадр 3 ({timing.frame_times[2]:.1f}с)",
+                    f"  • Кадр 4 ({timing.frame_times[3]:.1f}с)",
+                    f"  • Кадр 5 ({timing.frame_times[4]:.1f}с)",
+                    f"  • Кадр 6 ({timing.frame_times[5]:.1f}с) — конец действия",
+                    "",
+                ])
+        elif sticker_type == "animated":
             lines = [
                 "Это анимированный стикер Telegram для чата.",
                 "На изображении 6 кадров анимации (3x2 сетка), слева направо, сверху вниз.",
             ]
+        elif sticker_type == "video" and timing:
+            lines = [
+                "Это видео-стикер Telegram для чата.",
+                f"Длительность видео: {timing.duration:.1f}с.",
+                "",
+            ]
+
+            # Add motion analysis context if available
+            if timing.motion:
+                motion = timing.motion
+                lines.extend([
+                    "## АНАЛИЗ ДВИЖЕНИЯ",
+                    f"Средняя интенсивность движения: {motion.avg_motion:.2f}",
+                    f"Пик движения в момент времени: {motion.peak_motion_time:.1f}с",
+                    "",
+                    "На изображении 6 КЛЮЧЕВЫХ КАДРОВ в моменты НАИБОЛЬШЕГО ДВИЖЕНИЯ (не равномерно распределённые!):",
+                ])
+
+                # Frame list with motion scores
+                for i in range(min(6, len(motion.keyframe_indices))):
+                    idx = motion.keyframe_indices[i]
+                    time = motion.keyframe_times[i]
+                    motion_score = motion.motion_scores[idx] if idx < len(motion.motion_scores) else 0.0
+
+                    if i == 0:
+                        label = f"  • t={time:.1f}с (движение={motion_score:.2f}) — начало"
+                    elif i == 5:
+                        label = f"  • t={time:.1f}с (движение={motion_score:.2f}) — конец"
+                    else:
+                        label = f"  • t={time:.1f}с (движение={motion_score:.2f})"
+
+                    lines.append(label)
+
+                lines.append("")
+            else:
+                # Fallback for timing without motion
+                lines.extend([
+                    "На изображении 6 ключевых кадров (3x2 сетка), показывающих ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЯ:",
+                    f"  • Кадр 1 ({timing.frame_times[0]:.1f}с) — начало действия",
+                    f"  • Кадр 2 ({timing.frame_times[1]:.1f}с)",
+                    f"  • Кадр 3 ({timing.frame_times[2]:.1f}с)",
+                    f"  • Кадр 4 ({timing.frame_times[3]:.1f}с)",
+                    f"  • Кадр 5 ({timing.frame_times[4]:.1f}с)",
+                    f"  • Кадр 6 ({timing.frame_times[5]:.1f}с) — конец действия",
+                    "",
+                ])
         elif sticker_type == "video":
             lines = [
                 "Это видео-стикер Telegram для чата.",
@@ -502,17 +648,23 @@ class StickerLearningService:
         lines.append("Опиши СМЫСЛ и НАЗНАЧЕНИЕ стикера для использования в чате.")
 
         if sticker_type in ("animated", "video"):
-            lines.append(
-                "Опиши общий смысл движения/действия, не описывай каждый кадр отдельно."
-            )
+            lines.extend([
+                "",
+                "ВАЖНО — Опиши ДЕЙСТВИЕ как процесс от начала к концу:",
+                "  ✓ Правильно: 'Персонаж замахивается и бьёт кулаком в камеру'",
+                "  ✓ Правильно: 'Кот качает головой из стороны в сторону'",
+                "  ✗ Неправильно: 'На кадрах показан персонаж'",
+                "  ✗ Неправильно: 'Кадры почти одинаковые'",
+                "Используй глаголы движения: бьёт, прыгает, танцует, качается, машет и т.д.",
+            ])
 
         lines.append("")
-        lines.append("## КРИТИЧЕСКИ ВАЖНО — ТЕКСТ НА СТИКЕРЕ")
-        lines.append(
-            "Если на стикере есть текст (даже маленький, художественный, на любом языке):"
-        )
-        lines.append("1. ОБЯЗАТЕЛЬНО процитируй его дословно в visual")
-        lines.append("2. Текст — ГЛАВНОЕ для понимания стикера!")
+        lines.append("## ТЕКСТ НА СТИКЕРЕ")
+        lines.append("Если на стикере ЕСТЬ текст (слова, буквы, надписи):")
+        lines.append("  1. Процитируй его дословно в описании")
+        lines.append("  2. Текст часто ключ к смыслу стикера")
+        lines.append("")
+        lines.append("Если текста НЕТ — НЕ УПОМИНАЙ его вообще, не пиши 'нет текста'.")
         lines.append("")
         lines.append("## Что должно быть в описании (visual):")
         lines.append("- ТЕКСТ на стикере (если есть) — процитировать")

@@ -92,7 +92,7 @@ class AISettings(BaseSettings):
 class ModuleConfig(BaseSettings):
     """Configuration for a module."""
 
-    model_config = SettingsConfigDict(extra="ignore")
+    model_config = SettingsConfigDict(extra="allow")
 
     enabled: bool = True
     requires: list[str] = Field(default_factory=list)

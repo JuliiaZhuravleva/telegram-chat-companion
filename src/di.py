@@ -205,8 +205,11 @@ class ServiceProvider(Provider):
         self,
         ai_router: AIRouter,
         sticker_repo: StickerRepository,
+        settings: Settings,
     ) -> StickerLearningService:
-        return StickerLearningService(ai_router, sticker_repo)
+        module = settings.modules.get("sticker_intelligence")
+        debug_mode = getattr(module, "debug_mode", False) if module else False
+        return StickerLearningService(ai_router, sticker_repo, debug_mode=debug_mode)
 
     @provide
     def sticker_responder_service(

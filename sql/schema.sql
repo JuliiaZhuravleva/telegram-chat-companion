@@ -276,6 +276,27 @@ CREATE TRIGGER sticker_knowledge_updated_at
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
 -- =============================================================================
+-- sticker_analysis_debug — Debug artifacts for Vision API analysis
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS sticker_analysis_debug (
+    id                      SERIAL PRIMARY KEY,
+    file_unique_id          VARCHAR(255) NOT NULL REFERENCES sticker_knowledge(file_unique_id) ON DELETE CASCADE,
+    rendered_collage        BYTEA,
+    vision_prompt           TEXT NOT NULL,
+    vision_raw_response     TEXT NOT NULL,
+    model_used              VARCHAR(100),
+    analysis_duration_ms    INTEGER,
+    motion_metadata         JSONB,
+    created_at              TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sticker_debug_file_id
+    ON sticker_analysis_debug(file_unique_id);
+CREATE INDEX IF NOT EXISTS idx_sticker_debug_created_at
+    ON sticker_analysis_debug(created_at DESC);
+
+-- =============================================================================
 -- sticker_sets — Sticker set metadata cache
 -- =============================================================================
 

@@ -458,3 +458,78 @@ class StickerRepository:
             staleness_days,
             limit,
         )
+
+    # ── sticker_analysis_debug ────────────────────────────────────────
+
+    async def save_debug_artifacts(
+        self,
+        *,
+        file_unique_id: str,
+        rendered_collage: bytes | None,
+        vision_prompt: str,
+        vision_raw_response: str,
+        model_used: str | None,
+        analysis_duration_ms: int | None,
+        motion_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Save Vision API analysis artifacts for debugging.
+
+        Args:
+            file_unique_id: Unique sticker identifier
+            rendered_collage: Collage PNG bytes
+            vision_prompt: Prompt sent to Vision API
+            vision_raw_response: Raw AI response
+            model_used: Model identifier
+            analysis_duration_ms: Analysis duration in milliseconds
+            motion_metadata: Motion analysis data (avg_motion, peak_motion_time, etc.)
+        """
+        import json
+
+        motion_json = json.dumps(motion_metadata) if motion_metadata else None
+
+        await self._pool.execute(
+            """
+            INSERT INTO sticker_analysis_debug (
+                file_unique_id,
+                rendered_collage,
+                vision_prompt,
+                vision_raw_response,
+                model_used,
+                analysis_duration_ms,
+                motion_metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            file_unique_id,
+            rendered_collage,
+            vision_prompt,
+            vision_raw_response,
+            model_used,
+            analysis_duration_ms,
+            motion_json,
+        )
+
+    async def get_debug_artifacts(
+        self, file_unique_id: str
+    ) -> asyncpg.Record | None:
+        """Get latest debug artifacts for a sticker."""
+        return await self._pool.fetchrow(
+            """
+            SELECT * FROM sticker_analysis_debug
+            WHERE file_unique_id = $1
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            file_unique_id,
+        )
+
+    async def cleanup_old_debug_artifacts(self, retention_days: int) -> int:
+        """Delete debug records older than retention_days. Returns count deleted."""
+        result = await self._pool.execute(
+            """
+            DELETE FROM sticker_analysis_debug
+            WHERE created_at < NOW() - INTERVAL '1 day' * $1
+            """,
+            retention_days,
+        )
+        # Parse "DELETE N" to get count
+        return int(result.split()[-1]) if result else 0

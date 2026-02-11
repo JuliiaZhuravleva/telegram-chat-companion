@@ -16,14 +16,32 @@ import gzip
 import io
 import shutil
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
 from PIL import Image, ImageDraw, ImageFont
 
 from src.services.modules.sticker.models import StickerRenderError
+from src.services.modules.sticker.motion import AnimationMotion, MotionAnalyzer
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class RenderedSticker:
+    """Rendered sticker with timing and motion metadata.
+
+    Attributes:
+        collage_png: PNG bytes of the 3x2 frame collage
+        duration: Total animation duration in seconds
+        frame_times: Timestamp (in seconds) of each extracted frame
+        motion: Motion analysis result (optional)
+    """
+    collage_png: bytes
+    duration: float
+    frame_times: list[float]
+    motion: AnimationMotion | None = None
 
 # Collage layout: 3 columns x 2 rows = 6 frames
 _COLS = 3
@@ -42,11 +60,60 @@ def _pick_frame_indices(total_frames: int, count: int = _FRAME_COUNT) -> list[in
     return [round((total_frames - 1) * i / (count - 1)) for i in range(count)]
 
 
+def _create_motion_trail_frame(
+    all_frames: list[Image.Image],
+    center_idx: int,
+    trail_length: int = 3,
+) -> Image.Image:
+    """Create motion trail effect by overlaying previous frames with fading opacity.
+
+    Args:
+        all_frames: Complete list of animation frames
+        center_idx: Index of the main frame to show
+        trail_length: Number of previous frames to overlay (default: 3)
+
+    Returns:
+        Composited image with motion trail (ghosting effect)
+    """
+    if center_idx >= len(all_frames) or center_idx < 0:
+        return all_frames[0] if all_frames else Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE))
+
+    # Start with blank canvas
+    base_frame = all_frames[center_idx].convert("RGBA")
+    result = Image.new("RGBA", base_frame.size, (0, 0, 0, 0))
+
+    # Overlay previous frames with decreasing opacity
+    # trail_length=3 → opacities: [33%, 66%, 100%]
+    for i in range(trail_length):
+        frame_idx = center_idx - (trail_length - 1 - i)
+        if frame_idx < 0 or frame_idx >= len(all_frames):
+            continue
+
+        frame = all_frames[frame_idx].convert("RGBA")
+        alpha = int(255 * (i + 1) / trail_length)  # Fade in from past to present
+
+        # Create alpha mask for this frame
+        alpha_mask = Image.new("L", frame.size, alpha)
+        result = Image.alpha_composite(result, Image.composite(frame, Image.new("RGBA", frame.size), alpha_mask))
+
+    return result
+
+
 def _composite_collage(
     frames: list[Image.Image],
     label: str,
+    motion: AnimationMotion | None = None,
 ) -> bytes:
-    """Arrange frames in a 3x2 grid with labels, return PNG bytes."""
+    """Arrange frames in a 3x2 grid with labels, return PNG bytes.
+
+    Args:
+        frames: List of frames to arrange
+        label: Title label for collage
+        motion: Optional motion analysis data for enhanced labels
+
+    Returns:
+        PNG bytes of the composited collage
+    """
     # Pad frames list to exactly _FRAME_COUNT
     while len(frames) < _FRAME_COUNT:
         frames.append(frames[-1].copy() if frames else Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE)))
@@ -61,13 +128,35 @@ def _composite_collage(
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
     except OSError:
         font = ImageFont.load_default()
-    draw.text((8, 2), label, fill=(30, 100, 200), font=font)
+
+    # Enhanced title with motion info
+    if motion:
+        title = f"{label} — {motion.duration:.1f}s (motion: {motion.avg_motion:.2f})"
+    else:
+        title = label
+
+    draw.text((8, 2), title, fill=(30, 100, 200), font=font)
 
     # Place frames
-    frame_labels = [
-        "Frame 1 (start)", "Frame 2", "Frame 3",
-        "Frame 4", "Frame 5", "Frame 6 (end)",
-    ]
+    # Generate labels based on motion data if available
+    if motion and len(motion.keyframe_times) >= _FRAME_COUNT:
+        frame_labels = []
+        for i in range(_FRAME_COUNT):
+            time = motion.keyframe_times[i]
+            frame_idx = motion.keyframe_indices[i]
+
+            # Get motion score at this frame
+            if frame_idx < len(motion.motion_scores):
+                motion_score = motion.motion_scores[frame_idx]
+                frame_labels.append(f"t={time:.1f}s (m={motion_score:.2f})")
+            else:
+                frame_labels.append(f"t={time:.1f}s")
+    else:
+        # Fallback labels
+        frame_labels = [
+            "Frame 1 (start)", "Frame 2", "Frame 3",
+            "Frame 4", "Frame 5", "Frame 6 (end)",
+        ]
 
     try:
         small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
@@ -92,8 +181,11 @@ def _composite_collage(
     return buf.getvalue()
 
 
-def _render_tgs_sync(tgs_data: bytes) -> bytes:
-    """Synchronous TGS rendering — runs in a thread."""
+def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
+    """Synchronous TGS rendering with motion-aware keyframe selection.
+
+    Runs in a thread due to rlottie blocking I/O.
+    """
     from rlottie_python import LottieAnimation
 
     # Decompress TGS (gzip-compressed Lottie JSON)
@@ -111,30 +203,83 @@ def _render_tgs_sync(tgs_data: bytes) -> bytes:
     if total_frames <= 0:
         raise StickerRenderError("Animation has 0 frames")
 
-    indices = _pick_frame_indices(total_frames)
+    # Calculate duration (Lottie animations run at 60fps)
+    fps = 60.0
+    duration = total_frames / fps
 
+    # Render ALL frames for motion analysis (sampled every 3rd for performance)
+    # We'll sample every 3rd frame: 60fps → 20fps for motion analysis
+    sampling = 3
+    sampled_frames: list[Image.Image] = []
+    w, h = anim.lottie_animation_get_size()
+    default_size = (w or 512, h or 512)
+
+    for frame_num in range(0, total_frames, sampling):
+        try:
+            im = anim.render_pillow_frame(frame_num=frame_num)
+            sampled_frames.append(im)
+        except Exception as exc:
+            logger.warning("Failed to render TGS frame for motion analysis", frame_num=frame_num, error=str(exc))
+            sampled_frames.append(Image.new("RGBA", default_size))
+
+    # Analyze motion (synchronous, but fast with sampling)
+    analyzer = MotionAnalyzer(target_keyframes=_FRAME_COUNT)
+    # Create dummy motion analysis sync wrapper
+    # (This runs in a thread, so we can't use async)
+    from src.services.modules.sticker.motion import AnimationMotion
+
+    try:
+        # Use frame differencing for motion analysis
+        motion_scores_sampled = analyzer._calculate_frame_differences(sampled_frames)
+        sampled_indices = list(range(0, total_frames, sampling))
+        motion_scores = analyzer._interpolate_motion_scores(motion_scores_sampled, sampled_indices, total_frames)
+        keyframe_indices, keyframe_times = analyzer._select_keyframes(motion_scores, total_frames, duration)
+
+        avg_motion = sum(motion_scores) / len(motion_scores) if motion_scores else 0.0
+        peak_idx = motion_scores.index(max(motion_scores)) if motion_scores else 0
+        peak_time = (peak_idx / total_frames) * duration if total_frames > 0 else 0.0
+
+        motion = AnimationMotion(
+            duration=duration,
+            keyframe_indices=keyframe_indices,
+            keyframe_times=keyframe_times,
+            avg_motion=avg_motion,
+            peak_motion_time=peak_time,
+            motion_scores=motion_scores,
+        )
+    except Exception as exc:
+        logger.warning("Motion analysis failed, using fallback", error=str(exc))
+        motion = analyzer._create_fallback_motion(total_frames, duration)
+        keyframe_indices = motion.keyframe_indices
+        keyframe_times = motion.keyframe_times
+
+    # Render keyframes at selected indices
     frames: list[Image.Image] = []
-    for frame_num in indices:
+    for frame_num in keyframe_indices:
         try:
             im = anim.render_pillow_frame(frame_num=frame_num)
             frames.append(im)
         except Exception as exc:
-            logger.warning("Failed to render TGS frame", frame_num=frame_num, error=str(exc))
-            # Use a blank frame
-            w, h = anim.lottie_animation_get_size()
-            frames.append(Image.new("RGBA", (w or 512, h or 512)))
+            logger.warning("Failed to render TGS keyframe", frame_num=frame_num, error=str(exc))
+            frames.append(Image.new("RGBA", default_size))
 
-    return _composite_collage(frames, "ANIMATED STICKER")
+    collage_png = _composite_collage(frames, "ANIMATED STICKER", motion=motion)
+    return RenderedSticker(
+        collage_png=collage_png,
+        duration=duration,
+        frame_times=keyframe_times,
+        motion=motion,
+    )
 
 
-async def render_tgs(tgs_data: bytes) -> bytes:
-    """Render .tgs (Lottie) sticker into a 6-frame PNG collage.
+async def render_tgs(tgs_data: bytes) -> RenderedSticker:
+    """Render .tgs (Lottie) sticker into a 6-frame PNG collage with timing metadata.
 
     Args:
         tgs_data: Raw .tgs file bytes (gzip-compressed Lottie JSON).
 
     Returns:
-        PNG bytes of the 3x2 frame collage.
+        RenderedSticker with collage PNG and frame timing information.
 
     Raises:
         StickerRenderError: If rendering fails.
@@ -147,14 +292,14 @@ async def render_tgs(tgs_data: bytes) -> bytes:
         raise StickerRenderError(f"TGS rendering failed: {exc}") from exc
 
 
-async def render_webm(webm_data: bytes) -> bytes:
-    """Render .webm (VP9 video) sticker into a 6-frame PNG collage.
+async def render_webm(webm_data: bytes) -> RenderedSticker:
+    """Render .webm (VP9 video) sticker with motion-aware keyframe selection.
 
     Args:
         webm_data: Raw .webm file bytes.
 
     Returns:
-        PNG bytes of the 3x2 frame collage.
+        RenderedSticker with collage PNG, timing, and motion information.
 
     Raises:
         StickerRenderError: If rendering or ffmpeg fails.
@@ -172,22 +317,38 @@ async def render_webm(webm_data: bytes) -> bytes:
         if total_frames <= 0 or duration <= 0:
             raise StickerRenderError(f"Invalid video: frames={total_frames}, duration={duration}")
 
-        # Extract 6 evenly-spaced frames
-        indices = _pick_frame_indices(total_frames)
+        # Analyze motion via ffmpeg mestimate filter
+        analyzer = MotionAnalyzer(target_keyframes=_FRAME_COUNT)
+        try:
+            motion = await analyzer.analyze_webm_via_ffmpeg(input_path, total_frames, duration)
+            keyframe_indices = motion.keyframe_indices
+            frame_times = motion.keyframe_times
+        except Exception as exc:
+            logger.warning("Motion analysis failed for WebM, using fallback", error=str(exc))
+            motion = analyzer._create_fallback_motion(total_frames, duration)
+            keyframe_indices = motion.keyframe_indices
+            frame_times = motion.keyframe_times
+
+        # Extract keyframes at motion peaks
         frames: list[Image.Image] = []
 
-        for idx in indices:
-            timestamp = (idx / total_frames) * duration if total_frames > 0 else 0
+        for idx, timestamp in zip(keyframe_indices, frame_times, strict=True):
             frame_path = Path(tmp_dir) / f"frame_{idx}.png"
 
             proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y",
-                "-ss", f"{timestamp:.3f}",
-                "-i", str(input_path),
-                "-frames:v", "1",
-                "-vf", f"scale={_FRAME_SIZE}:{_FRAME_SIZE}:force_original_aspect_ratio=decrease,"
-                       f"pad={_FRAME_SIZE}:{_FRAME_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
-                "-pix_fmt", "rgba",
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{timestamp:.3f}",
+                "-i",
+                str(input_path),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={_FRAME_SIZE}:{_FRAME_SIZE}:force_original_aspect_ratio=decrease,"
+                f"pad={_FRAME_SIZE}:{_FRAME_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+                "-pix_fmt",
+                "rgba",
                 str(frame_path),
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
@@ -202,7 +363,13 @@ async def render_webm(webm_data: bytes) -> bytes:
         if not frames:
             raise StickerRenderError("No frames extracted from WebM")
 
-        return _composite_collage(frames, "VIDEO STICKER")
+        collage_png = _composite_collage(frames, "VIDEO STICKER", motion=motion)
+        return RenderedSticker(
+            collage_png=collage_png,
+            duration=duration,
+            frame_times=frame_times,
+            motion=motion,
+        )
 
     except StickerRenderError:
         raise
