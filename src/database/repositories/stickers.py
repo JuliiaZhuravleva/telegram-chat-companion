@@ -1,4 +1,4 @@
-"""Repository for sticker_knowledge and sticker_sets tables."""
+"""Repository for sticker_knowledge, sticker_sets, and admin_sticker_notifications tables."""
 
 from __future__ import annotations
 
@@ -20,6 +20,13 @@ class StickerRepository:
         return await self._pool.fetchrow(
             "SELECT * FROM sticker_knowledge WHERE file_unique_id = $1",
             file_unique_id,
+        )
+
+    async def get_by_file_id(self, file_id: str) -> asyncpg.Record | None:
+        """Look up a sticker by its (non-unique) file_id."""
+        return await self._pool.fetchrow(
+            "SELECT * FROM sticker_knowledge WHERE file_id = $1",
+            file_id,
         )
 
     async def save_sticker(
@@ -54,7 +61,7 @@ class StickerRepository:
                 usage_contexts, analysis_failed, analyzed_at, total_uses
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                CASE WHEN $7 IS NOT NULL THEN NOW() END,
+                CASE WHEN $7::TEXT IS NOT NULL THEN NOW() END,
                 1
             )
             ON CONFLICT (file_unique_id) DO UPDATE
@@ -230,6 +237,164 @@ class StickerRepository:
             max_contexts,
         )
 
+    # ── Admin description editing ─────────────────────────────────────
+
+    async def update_description_and_fields(
+        self,
+        *,
+        file_unique_id: str,
+        visual_description: str,
+        emotion: str | None = None,
+        suggested_contexts: list[str] | None = None,
+        character_or_meme: str | None = None,
+        admin_notes: str | None = None,
+    ) -> None:
+        """Update description and related fields after admin merge."""
+        await self._pool.execute(
+            """
+            UPDATE sticker_knowledge
+            SET visual_description = $2,
+                emotion = COALESCE($3, emotion),
+                suggested_contexts = COALESCE($4, suggested_contexts),
+                character_or_meme = COALESCE($5, character_or_meme),
+                admin_notes = CASE
+                    WHEN $6 IS NOT NULL AND admin_notes IS NOT NULL
+                        THEN admin_notes || E'\n' || $6
+                    WHEN $6 IS NOT NULL THEN $6
+                    ELSE admin_notes
+                END,
+                updated_at = NOW()
+            WHERE file_unique_id = $1
+            """,
+            file_unique_id,
+            visual_description,
+            emotion,
+            suggested_contexts,
+            character_or_meme,
+            admin_notes,
+        )
+
+    async def clear_for_reanalysis(self, file_unique_id: str) -> None:
+        """Clear analysis fields to force re-analysis on next encounter."""
+        await self._pool.execute(
+            """
+            UPDATE sticker_knowledge
+            SET visual_description = NULL,
+                description_embedding = NULL,
+                analysis_failed = false,
+                analyzed_at = NULL,
+                updated_at = NOW()
+            WHERE file_unique_id = $1
+            """,
+            file_unique_id,
+        )
+
+    # ── Set browsing (admin wizard) ──────────────────────────────────
+
+    async def get_all_sets_with_stats(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[asyncpg.Record]:
+        """Get all sticker sets with learned sticker counts."""
+        return await self._pool.fetch(
+            """
+            SELECT
+                ss.set_name, ss.set_title, ss.total_count,
+                ss.is_animated, ss.is_video, ss.updated_at,
+                COUNT(sk.id) AS learned_count,
+                COUNT(sk.description_embedding) AS with_embedding
+            FROM sticker_sets ss
+            LEFT JOIN sticker_knowledge sk ON sk.set_name = ss.set_name
+            GROUP BY ss.set_name, ss.set_title, ss.total_count,
+                     ss.is_animated, ss.is_video, ss.updated_at
+            ORDER BY learned_count DESC
+            LIMIT $1 OFFSET $2
+            """,
+            limit,
+            offset,
+        )
+
+    async def count_sets(self) -> int:
+        """Count all known sticker sets."""
+        val = await self._pool.fetchval("SELECT COUNT(*) FROM sticker_sets")
+        return int(val or 0)
+
+    async def get_stickers_in_set(
+        self,
+        set_name: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[asyncpg.Record]:
+        """Get stickers in a specific set (paginated)."""
+        return await self._pool.fetch(
+            """
+            SELECT file_unique_id, file_id, emoji, visual_description,
+                   emotion, character_or_meme, total_uses, bot_uses,
+                   is_animated, is_video, analysis_failed
+            FROM sticker_knowledge
+            WHERE set_name = $1
+            ORDER BY total_uses DESC
+            LIMIT $2 OFFSET $3
+            """,
+            set_name,
+            limit,
+            offset,
+        )
+
+    async def count_stickers_in_set(self, set_name: str) -> int:
+        """Count stickers in a specific set."""
+        val = await self._pool.fetchval(
+            "SELECT COUNT(*) FROM sticker_knowledge WHERE set_name = $1",
+            set_name,
+        )
+        return int(val or 0)
+
+    # ── Admin notifications ──────────────────────────────────────────
+
+    async def save_notification(
+        self,
+        *,
+        file_unique_id: str,
+        admin_id: int,
+        message_id: int,
+        sticker_msg_id: int,
+        chat_id: int,
+    ) -> int:
+        """Save admin sticker notification for reply tracking."""
+        row = await self._pool.fetchrow(
+            """
+            INSERT INTO admin_sticker_notifications
+                (file_unique_id, admin_id, message_id, sticker_msg_id, chat_id)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            """,
+            file_unique_id,
+            admin_id,
+            message_id,
+            sticker_msg_id,
+            chat_id,
+        )
+        assert row is not None
+        return int(row["id"])
+
+    async def get_notification_by_reply(
+        self,
+        chat_id: int,
+        reply_to_message_id: int,
+    ) -> asyncpg.Record | None:
+        """Look up notification by the reply message ID in admin's DM."""
+        return await self._pool.fetchrow(
+            """
+            SELECT * FROM admin_sticker_notifications
+            WHERE chat_id = $1 AND (message_id = $2 OR sticker_msg_id = $2)
+            """,
+            chat_id,
+            reply_to_message_id,
+        )
+
     # ── sticker_sets ──────────────────────────────────────────────────
 
     async def upsert_sticker_set(
@@ -269,4 +434,27 @@ class StickerRepository:
         return await self._pool.fetchrow(
             "SELECT * FROM sticker_sets WHERE set_name = $1",
             set_name,
+        )
+
+    async def get_stale_sets(
+        self,
+        *,
+        staleness_days: int = 30,
+        limit: int = 10,
+    ) -> list[asyncpg.Record]:
+        """Get sets needing refresh (stale or missing from cache)."""
+        return await self._pool.fetch(
+            """
+            SELECT DISTINCT sk.set_name
+            FROM sticker_knowledge sk
+            LEFT JOIN sticker_sets ss ON ss.set_name = sk.set_name
+            WHERE sk.set_name IS NOT NULL
+              AND (
+                  ss.set_name IS NULL
+                  OR ss.updated_at < NOW() - INTERVAL '1 day' * $1
+              )
+            LIMIT $2
+            """,
+            staleness_days,
+            limit,
         )

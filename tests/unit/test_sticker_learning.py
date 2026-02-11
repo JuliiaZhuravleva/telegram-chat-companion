@@ -1,11 +1,12 @@
 """Tests for sticker learning service."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.services.ai.base import AIProviderError, EmbeddingResult, VisionResult
 from src.services.modules.sticker.learning import StickerLearningService
+from src.services.modules.sticker.models import StickerRenderError
 
 
 def _make_sticker(
@@ -98,7 +99,29 @@ async def test_learn_existing_sticker(sticker_service):
 
 
 @pytest.mark.asyncio
-async def test_learn_animated_sticker_skips_analysis(sticker_service):
+@patch("src.services.modules.sticker.learning.render_tgs", new_callable=AsyncMock)
+async def test_learn_animated_sticker_renders_and_analyzes(mock_render_tgs, sticker_service):
+    mock_render_tgs.return_value = b"fake-collage-png"
+
+    sticker = _make_sticker(is_animated=True)
+    result = await sticker_service.learn(
+        sticker=sticker,
+        image_data=b"fake-tgs",
+    )
+
+    assert result.is_new is True
+    assert result.analysis_failed is False
+    assert result.visual_description == "A happy cat"
+    mock_render_tgs.assert_awaited_once_with(b"fake-tgs")
+    sticker_service._ai.analyze_image.assert_awaited_once()
+    sticker_service._repo.save_sticker.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@patch("src.services.modules.sticker.learning.render_tgs", new_callable=AsyncMock)
+async def test_learn_animated_sticker_render_failure(mock_render_tgs, sticker_service):
+    mock_render_tgs.side_effect = StickerRenderError("render failed")
+
     sticker = _make_sticker(is_animated=True)
     result = await sticker_service.learn(
         sticker=sticker,
@@ -112,7 +135,28 @@ async def test_learn_animated_sticker_skips_analysis(sticker_service):
 
 
 @pytest.mark.asyncio
-async def test_learn_video_sticker_skips_analysis(sticker_service):
+@patch("src.services.modules.sticker.learning.render_webm", new_callable=AsyncMock)
+async def test_learn_video_sticker_renders_and_analyzes(mock_render_webm, sticker_service):
+    mock_render_webm.return_value = b"fake-collage-png"
+
+    sticker = _make_sticker(is_video=True)
+    result = await sticker_service.learn(
+        sticker=sticker,
+        image_data=b"fake-webm",
+    )
+
+    assert result.is_new is True
+    assert result.analysis_failed is False
+    assert result.visual_description == "A happy cat"
+    mock_render_webm.assert_awaited_once_with(b"fake-webm")
+    sticker_service._ai.analyze_image.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@patch("src.services.modules.sticker.learning.render_webm", new_callable=AsyncMock)
+async def test_learn_video_sticker_render_failure(mock_render_webm, sticker_service):
+    mock_render_webm.side_effect = StickerRenderError("render failed")
+
     sticker = _make_sticker(is_video=True)
     result = await sticker_service.learn(
         sticker=sticker,

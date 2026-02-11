@@ -67,7 +67,11 @@ INSERT INTO bot_config (key, value, description) VALUES
     ('default_rules_mode',                   '"all"',           'Default rules execution mode (all/highest_weight/weighted_random)'),
     ('default_rules_enabled',                'false',           'Enable custom rules by default'),
     ('default_link_comments_enabled',        'false',           'Enable video link comments by default'),
-    ('health_check_enabled',                 'true',            'Enable periodic health monitoring')
+    ('health_check_enabled',                 'true',            'Enable periodic health monitoring'),
+    ('default_sticker_reply_to_sticker_enabled', 'true',       'Reply to stickers with stickers by default'),
+    ('default_sticker_reply_to_sticker_chance', '0.5',         'Default sticker-to-sticker reply probability'),
+    ('default_image_comment_sticker_enabled', 'true',          'Comment on images with stickers by default'),
+    ('default_image_comment_sticker_chance', '0.3',            'Default image comment sticker probability')
 ON CONFLICT (key) DO NOTHING;
 
 -- =============================================================================
@@ -96,6 +100,10 @@ CREATE TABLE IF NOT EXISTS chat_settings (
     abuse_filter_enabled         BOOLEAN DEFAULT false,
     sticker_learning_enabled     BOOLEAN DEFAULT false,
     sticker_response_chance      FLOAT DEFAULT 0.15,
+    sticker_reply_to_sticker_enabled BOOLEAN DEFAULT true,
+    sticker_reply_to_sticker_chance  FLOAT DEFAULT 0.5,
+    image_comment_sticker_enabled    BOOLEAN DEFAULT true,
+    image_comment_sticker_chance     FLOAT DEFAULT 0.3,
     image_analysis_enabled       BOOLEAN DEFAULT true,
     save_messages                BOOLEAN DEFAULT true,
 
@@ -333,3 +341,32 @@ CREATE TABLE IF NOT EXISTS health_log (
 
 CREATE INDEX IF NOT EXISTS idx_health_log_checked_at
     ON health_log (checked_at DESC);
+
+-- =============================================================================
+-- admin_sticker_notifications — Track sticker notifications sent to admins
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS admin_sticker_notifications (
+    id              SERIAL PRIMARY KEY,
+    file_unique_id  VARCHAR(255) NOT NULL,
+    admin_id        BIGINT NOT NULL,
+    message_id      BIGINT,
+    sticker_msg_id  BIGINT,
+    chat_id         BIGINT,
+    created_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_sticker_notif_chat_msg
+    ON admin_sticker_notifications (chat_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_admin_sticker_notif_chat_stk
+    ON admin_sticker_notifications (chat_id, sticker_msg_id);
+
+-- Schema v3: Sticker intelligence — response settings + admin notifications
+ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS sticker_reply_to_sticker_enabled BOOLEAN DEFAULT true;
+ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS sticker_reply_to_sticker_chance FLOAT DEFAULT 0.5;
+ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS image_comment_sticker_enabled BOOLEAN DEFAULT true;
+ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS image_comment_sticker_chance FLOAT DEFAULT 0.3;
+
+INSERT INTO schema_version (version, description)
+VALUES (3, 'Sticker intelligence — response settings + admin notifications')
+ON CONFLICT (version) DO NOTHING;

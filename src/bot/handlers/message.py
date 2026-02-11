@@ -119,5 +119,15 @@ async def handle_text_message(
         reply_to_message_id=reply_to,
     )
 
+    # Send sticker if AI chose one
+    if result.sticker_file_id:
+        try:
+            await message.answer_sticker(result.sticker_file_id)
+        except Exception:
+            logger.warning(
+                "Failed to send AI-chosen sticker",
+                sticker_file_id=result.sticker_file_id,
+            )
+
     # Post-send tasks (non-blocking)
     await pipeline.post_send(result, bot_message_id=sent.message_id)

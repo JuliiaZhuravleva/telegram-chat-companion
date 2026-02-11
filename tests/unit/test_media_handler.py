@@ -44,6 +44,10 @@ def _make_chat_config(**overrides):
     config.transcribe_video_notes = True
     config.image_analysis_enabled = True
     config.sticker_learning_enabled = True
+    config.sticker_reply_to_sticker_enabled = False
+    config.sticker_reply_to_sticker_chance = 0.0
+    config.image_comment_sticker_enabled = False
+    config.image_comment_sticker_chance = 0.0
     config.language = "ru"
     for key, val in overrides.items():
         setattr(config, key, val)
@@ -164,13 +168,17 @@ async def test_photo_handler_no_caption_saves_description():
     message_repo = MagicMock()
     message_repo.save = AsyncMock()
 
+    sticker_responder = MagicMock()
+    sticker_responder.get_sticker_candidates = AsyncMock(return_value=[])
+
     with patch(
         "src.bot.handlers.media.download_telegram_file",
         new_callable=AsyncMock,
         return_value=b"fake-image",
     ):
         await handle_photo_message(
-            message, chat_config, image_service, pipeline, message_repo, bot
+            message, chat_config, image_service, pipeline, sticker_responder,
+            message_repo, bot
         )
 
     message_repo.save.assert_awaited_once()
@@ -190,10 +198,12 @@ async def test_photo_handler_disabled():
     bot = _make_bot()
     image_service = MagicMock()
     pipeline = MagicMock()
+    sticker_responder = MagicMock()
     message_repo = MagicMock()
 
     await handle_photo_message(
-        message, chat_config, image_service, pipeline, message_repo, bot
+        message, chat_config, image_service, pipeline, sticker_responder,
+        message_repo, bot
     )
 
     image_service.analyze.assert_not_called()
@@ -217,13 +227,16 @@ async def test_photo_handler_analysis_fails():
     pipeline = MagicMock()
     message_repo = MagicMock()
 
+    sticker_responder = MagicMock()
+
     with patch(
         "src.bot.handlers.media.download_telegram_file",
         new_callable=AsyncMock,
         return_value=b"fake-image",
     ):
         await handle_photo_message(
-            message, chat_config, image_service, pipeline, message_repo, bot
+            message, chat_config, image_service, pipeline, sticker_responder,
+            message_repo, bot
         )
 
     message_repo.save.assert_not_called()
@@ -247,8 +260,18 @@ async def test_sticker_handler_learns_static():
     chat_config = _make_chat_config()
     bot = _make_bot()
 
+    from src.services.modules.sticker.models import StickerLearningResult
+
     sticker_service = MagicMock()
-    sticker_service.learn = AsyncMock()
+    sticker_service.learn = AsyncMock(return_value=StickerLearningResult(
+        is_new=True, file_unique_id="unique-1", analysis_failed=True,
+    ))
+
+    sticker_responder = MagicMock()
+    sticker_responder.find_sticker_for_sticker_reply = AsyncMock(return_value=None)
+
+    bot_config_repo = MagicMock()
+    bot_config_repo.get_value = AsyncMock(return_value="")
 
     message_repo = MagicMock()
     message_repo.get_recent = AsyncMock(return_value=[])
@@ -259,7 +282,8 @@ async def test_sticker_handler_learns_static():
         return_value=b"fake-webp",
     ):
         await handle_sticker_message(
-            message, chat_config, sticker_service, message_repo, bot
+            message, chat_config, sticker_service, sticker_responder,
+            message_repo, bot_config_repo, bot
         )
 
     sticker_service.learn.assert_awaited_once()
@@ -269,8 +293,10 @@ async def test_sticker_handler_learns_static():
 
 
 @pytest.mark.asyncio
-async def test_sticker_handler_skips_animated():
+async def test_sticker_handler_learns_animated():
+    """Animated stickers are now learned (not skipped)."""
     from src.bot.handlers.media import handle_sticker_message
+    from src.services.modules.sticker.models import StickerLearningResult
 
     message = _make_message()
     sticker = MagicMock()
@@ -282,14 +308,32 @@ async def test_sticker_handler_skips_animated():
 
     chat_config = _make_chat_config()
     bot = _make_bot()
+
     sticker_service = MagicMock()
+    sticker_service.learn = AsyncMock(return_value=StickerLearningResult(
+        is_new=True, file_unique_id="unique-1", analysis_failed=True,
+    ))
+
+    sticker_responder = MagicMock()
+    sticker_responder.find_sticker_for_sticker_reply = AsyncMock(return_value=None)
+
+    bot_config_repo = MagicMock()
+    bot_config_repo.get_value = AsyncMock(return_value="")
+
     message_repo = MagicMock()
+    message_repo.get_recent = AsyncMock(return_value=[])
 
-    await handle_sticker_message(
-        message, chat_config, sticker_service, message_repo, bot
-    )
+    with patch(
+        "src.bot.handlers.media.download_telegram_file",
+        new_callable=AsyncMock,
+        return_value=b"fake-tgs",
+    ):
+        await handle_sticker_message(
+            message, chat_config, sticker_service, sticker_responder,
+            message_repo, bot_config_repo, bot
+        )
 
-    sticker_service.learn.assert_not_called()
+    sticker_service.learn.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -305,10 +349,13 @@ async def test_sticker_handler_disabled():
     chat_config = _make_chat_config(sticker_learning_enabled=False)
     bot = _make_bot()
     sticker_service = MagicMock()
+    sticker_responder = MagicMock()
+    bot_config_repo = MagicMock()
     message_repo = MagicMock()
 
     await handle_sticker_message(
-        message, chat_config, sticker_service, message_repo, bot
+        message, chat_config, sticker_service, sticker_responder,
+        message_repo, bot_config_repo, bot
     )
 
     sticker_service.learn.assert_not_called()

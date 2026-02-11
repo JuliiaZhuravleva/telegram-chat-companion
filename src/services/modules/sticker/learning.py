@@ -1,27 +1,40 @@
 """Sticker learning and search service.
 
 Learns sticker meanings via Vision API, generates embeddings for semantic search.
-Phase 2 scope: static stickers only (no animated/video rendering).
+Supports static, animated (.tgs), and video (.webm) stickers.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
 
 import structlog
-from aiogram import types
+from aiogram import Bot, types
 
 from src.database.repositories.stickers import StickerRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.modules.sticker.models import (
     StickerLearningResult,
+    StickerRenderError,
     StickerSearchResult,
 )
+from src.services.modules.sticker.renderer import render_tgs, render_webm
 
 logger = structlog.get_logger(__name__)
+
+# Edit mode detection patterns for admin merge
+_CORRECTION_PATTERNS = re.compile(
+    r"(?:это не|неправильно|на самом деле|ошибка|wrong|actually|not)",
+    re.IGNORECASE,
+)
+_ADDITION_PATTERNS = re.compile(
+    r"(?:также|ещё|еще|дополнительно|плюс|also|additionally|plus)",
+    re.IGNORECASE,
+)
 
 
 class StickerLearningService:
@@ -35,6 +48,8 @@ class StickerLearningService:
         self._ai = ai_router
         self._repo = sticker_repo
 
+    # ── Learning ─────────────────────────────────────────────────────
+
     async def learn(
         self,
         *,
@@ -46,7 +61,7 @@ class StickerLearningService:
 
         Args:
             sticker: Telegram Sticker object.
-            image_data: Raw image bytes (PNG/WebP for static stickers).
+            image_data: Raw file bytes (.webp/.tgs/.webm).
             preceding_messages: Last few chat messages for usage context.
 
         Returns:
@@ -73,28 +88,36 @@ class StickerLearningService:
                 character_or_meme=existing["character_or_meme"],
             )
 
-        # Skip analysis for animated/video stickers (Phase 2 = static only)
-        if sticker.is_animated or sticker.is_video:
-            await self._repo.save_sticker(
-                file_unique_id=file_unique_id,
-                file_id=sticker.file_id,
-                set_name=sticker.set_name,
-                emoji=sticker.emoji,
-                is_animated=sticker.is_animated,
-                is_video=sticker.is_video,
-                analysis_failed=True,
-            )
-            logger.info(
-                "Skipped animated/video sticker analysis",
-                file_unique_id=file_unique_id,
-                is_animated=sticker.is_animated,
-                is_video=sticker.is_video,
-            )
-            return StickerLearningResult(
-                is_new=True,
-                file_unique_id=file_unique_id,
-                analysis_failed=True,
-            )
+        # Determine sticker type and prepare image for Vision API
+        sticker_type = _detect_sticker_type(sticker)
+        vision_image = image_data
+
+        if sticker_type != "static":
+            try:
+                if sticker_type == "animated":
+                    vision_image = await render_tgs(image_data)
+                else:
+                    vision_image = await render_webm(image_data)
+            except StickerRenderError:
+                logger.warning(
+                    "Sticker rendering failed, saving without analysis",
+                    file_unique_id=file_unique_id,
+                    sticker_type=sticker_type,
+                )
+                await self._repo.save_sticker(
+                    file_unique_id=file_unique_id,
+                    file_id=sticker.file_id,
+                    set_name=sticker.set_name,
+                    emoji=sticker.emoji,
+                    is_animated=sticker.is_animated,
+                    is_video=sticker.is_video,
+                    analysis_failed=True,
+                )
+                return StickerLearningResult(
+                    is_new=True,
+                    file_unique_id=file_unique_id,
+                    analysis_failed=True,
+                )
 
         # Get pack context (other stickers from same set)
         pack_context: list[str] | None = None
@@ -105,13 +128,35 @@ class StickerLearningService:
             if pack_records:
                 pack_context = [r["visual_description"] for r in pack_records]
 
+        # Web search enrichment: identify character/meme for new packs
+        character_hint: str | None = None
+        web_context: str | None = None
+        if sticker.set_name and not pack_context:
+            character_hint, web_context = await self._search_pack_context_via_ai(
+                sticker.set_name
+            )
+
         # Vision API analysis
-        prompt = self._build_vision_prompt(sticker, pack_context=pack_context)
+        prompt = self._build_vision_prompt(
+            sticker,
+            sticker_type=sticker_type,
+            pack_context=pack_context,
+            character_hint=character_hint,
+            web_context=web_context,
+        )
+        # Determine mime type for the Vision API
+        if sticker_type == "static":
+            mime_type = "image/webp"
+        else:
+            mime_type = "image/png"  # rendered collages are PNG
+
         parsed: dict[str, Any] = {}
         try:
             vision_result = await self._ai.analyze_image(
-                image_data=image_data,
+                image_data=vision_image,
                 prompt=prompt,
+                mime_type=mime_type,
+                response_mime_type="application/json",
             )
             parsed = self._parse_vision_response(vision_result.text)
         except AIProviderError:
@@ -123,9 +168,15 @@ class StickerLearningService:
         visual = parsed.get("visual")
         emotion = parsed.get("emotion")
         contexts = parsed.get("contexts")
-        tags = parsed.get("tags")
+        tags = parsed.get("tags") or []
         character = parsed.get("character")
         analysis_failed = not bool(visual)
+
+        # Auto-add format tag
+        if sticker_type == "animated" and "animated" not in tags:
+            tags.append("animated")
+        elif sticker_type == "video" and "video" not in tags:
+            tags.append("video")
 
         # Build usage context from preceding messages
         usage_contexts: list[str] | None = None
@@ -140,13 +191,13 @@ class StickerLearningService:
             file_id=sticker.file_id,
             set_name=sticker.set_name,
             emoji=sticker.emoji,
-            is_animated=False,
-            is_video=False,
+            is_animated=sticker.is_animated,
+            is_video=sticker.is_video,
             visual_description=visual,
             original_vision_description=visual,
             emotion=emotion,
             suggested_contexts=contexts,
-            style_tags=tags,
+            style_tags=tags or None,
             character_or_meme=character,
             usage_contexts=usage_contexts,
             analysis_failed=analysis_failed,
@@ -167,6 +218,7 @@ class StickerLearningService:
             "Learned new sticker",
             file_unique_id=file_unique_id,
             set_name=sticker.set_name,
+            sticker_type=sticker_type,
             has_description=bool(visual),
             analysis_failed=analysis_failed,
         )
@@ -179,6 +231,8 @@ class StickerLearningService:
             character_or_meme=character,
             analysis_failed=analysis_failed,
         )
+
+    # ── Search ───────────────────────────────────────────────────────
 
     async def search(
         self,
@@ -224,6 +278,159 @@ class StickerLearningService:
             for r in records
         ]
 
+    # ── Admin notifications ──────────────────────────────────────────
+
+    async def notify_admins(
+        self,
+        bot: Bot,
+        sticker: types.Sticker,
+        result: StickerLearningResult,
+        admin_ids: list[int],
+    ) -> None:
+        """Send new sticker notification to all admins."""
+        if not admin_ids or result.analysis_failed:
+            return
+
+        description_parts = []
+        if result.visual_description:
+            description_parts.append(f"<b>Описание:</b> {result.visual_description}")
+        if result.emotion:
+            description_parts.append(f"<b>Эмоция:</b> {result.emotion}")
+        if result.character_or_meme:
+            description_parts.append(f"<b>Персонаж:</b> {result.character_or_meme}")
+        if sticker.set_name:
+            description_parts.append(f"<b>Пак:</b> {sticker.set_name}")
+
+        description_parts.append(
+            "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"
+        )
+        text = "\n".join(description_parts)
+
+        for admin_id in admin_ids:
+            try:
+                sticker_msg = await bot.send_sticker(admin_id, sticker.file_id)
+                desc_msg = await bot.send_message(
+                    admin_id, text, parse_mode="HTML",
+                    reply_to_message_id=sticker_msg.message_id,
+                )
+                await self._repo.save_notification(
+                    file_unique_id=sticker.file_unique_id,
+                    admin_id=admin_id,
+                    message_id=desc_msg.message_id,
+                    sticker_msg_id=sticker_msg.message_id,
+                    chat_id=admin_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to notify admin about sticker",
+                    admin_id=admin_id,
+                    file_unique_id=sticker.file_unique_id,
+                )
+
+    # ── Admin merge description ──────────────────────────────────────
+
+    async def merge_admin_description(
+        self,
+        file_unique_id: str,
+        admin_text: str,
+    ) -> str | None:
+        """Merge admin notes with existing description via AI.
+
+        Returns new merged description or None on failure.
+        """
+        existing = await self._repo.get_by_file_unique_id(file_unique_id)
+        if not existing:
+            return None
+
+        original = existing["original_vision_description"] or ""
+        current = existing["visual_description"] or ""
+        edit_mode = _detect_edit_mode(admin_text)
+
+        prompt = self._build_merge_prompt(original, current, admin_text, edit_mode)
+
+        try:
+            ai_result = await self._ai.generate_text(
+                prompt=prompt,
+                system_prompt="Ты помогаешь редактировать описания стикеров. Отвечай только JSON.",
+                max_tokens=300,
+            )
+            parsed = self._parse_vision_response(ai_result.text)
+        except AIProviderError:
+            logger.warning("AI merge failed", file_unique_id=file_unique_id)
+            return None
+
+        new_visual = parsed.get("visual")
+        if not new_visual:
+            return None
+
+        # Update database
+        await self._repo.update_description_and_fields(
+            file_unique_id=file_unique_id,
+            visual_description=new_visual,
+            emotion=parsed.get("emotion") or existing["emotion"],
+            suggested_contexts=parsed.get("contexts") or existing["suggested_contexts"],
+            character_or_meme=parsed.get("character") or existing["character_or_meme"],
+            admin_notes=admin_text,
+        )
+
+        # Regenerate embedding
+        await self._generate_and_store_embedding(
+            file_unique_id=file_unique_id,
+            visual_description=new_visual,
+            emotion=parsed.get("emotion") or existing["emotion"],
+            character_or_meme=parsed.get("character") or existing["character_or_meme"],
+            suggested_contexts=parsed.get("contexts") or existing["suggested_contexts"],
+            usage_contexts=existing["usage_contexts"],
+        )
+
+        return new_visual
+
+    # ── Web search enrichment ────────────────────────────────────────
+
+    async def _search_pack_context_via_ai(
+        self, set_name: str
+    ) -> tuple[str | None, str | None]:
+        """Use AI knowledge to identify character/meme for a sticker pack.
+
+        Returns (character_hint, cultural_context) or (None, None).
+        """
+        prompt = (
+            f'Стикерпак Telegram: "{set_name}".\n'
+            "Если ты знаешь, какой персонаж, мем или культурная отсылка стоит за этим стикерпаком:\n"
+            "1) Назови персонажа/мем\n"
+            "2) Кратко объясни контекст (особенно если это русский мем)\n"
+            'Ответь JSON: {"character": "...", "context": "..."}\n'
+            'Если не знаешь — {"character": null, "context": null}'
+        )
+
+        try:
+            result = await asyncio.wait_for(
+                self._ai.generate_text(
+                    prompt=prompt,
+                    system_prompt="Identify Telegram sticker pack characters. Reply JSON only.",
+                    max_tokens=100,
+                ),
+                timeout=5.0,
+            )
+            parsed = self._parse_vision_response(result.text)
+            character = parsed.get("character")
+            context = parsed.get("context") if isinstance(parsed.get("context"), str) else None
+            if character or context:
+                logger.info(
+                    "Pack context enrichment",
+                    set_name=set_name,
+                    character=character,
+                    has_context=bool(context),
+                )
+            return character, context
+        except (TimeoutError, AIProviderError):
+            return None, None
+        except Exception:
+            logger.debug("Pack context search failed", set_name=set_name)
+            return None, None
+
+    # ── Private helpers ──────────────────────────────────────────────
+
     async def _generate_and_store_embedding(
         self,
         *,
@@ -254,15 +461,36 @@ class StickerLearningService:
     @staticmethod
     def _build_vision_prompt(
         sticker: types.Sticker,
+        *,
+        sticker_type: str = "static",
         pack_context: list[str] | None = None,
+        character_hint: str | None = None,
+        web_context: str | None = None,
     ) -> str:
         """Build the Vision API prompt for sticker analysis."""
-        lines = [
-            "Это статичный стикер Telegram для чата.",
-        ]
+        # Opening line based on sticker type
+        if sticker_type == "animated":
+            lines = [
+                "Это анимированный стикер Telegram для чата.",
+                "На изображении 6 кадров анимации (3x2 сетка), слева направо, сверху вниз.",
+            ]
+        elif sticker_type == "video":
+            lines = [
+                "Это видео-стикер Telegram для чата.",
+                "На изображении 6 ключевых кадров видео (3x2 сетка), слева направо, сверху вниз.",
+            ]
+        else:
+            lines = [
+                "Это статичный стикер Telegram для чата.",
+            ]
 
         if sticker.set_name:
             lines.append(f"Стикерпак: {sticker.set_name}.")
+
+        if character_hint:
+            lines.append(f"Возможный персонаж/мем: {character_hint}")
+        if web_context:
+            lines.append(f"Культурный контекст: {web_context}")
 
         if pack_context:
             lines.append("Другие стикеры из этого набора:")
@@ -272,6 +500,12 @@ class StickerLearningService:
         lines.append("")
         lines.append("## ЗАДАЧА")
         lines.append("Опиши СМЫСЛ и НАЗНАЧЕНИЕ стикера для использования в чате.")
+
+        if sticker_type in ("animated", "video"):
+            lines.append(
+                "Опиши общий смысл движения/действия, не описывай каждый кадр отдельно."
+            )
+
         lines.append("")
         lines.append("## КРИТИЧЕСКИ ВАЖНО — ТЕКСТ НА СТИКЕРЕ")
         lines.append(
@@ -288,9 +522,13 @@ class StickerLearningService:
         lines.append("## Что НЕ нужно:")
         lines.append("- Подробные описания одежды/позы если они не несут смысла")
         lines.append("- Технические детали")
+
+        if sticker_type in ("animated", "video"):
+            lines.append('- "Кадры почти одинаковые" — БЕСПОЛЕЗНО')
+
         lines.append("")
         lines.append("## ФОРМАТ ОТВЕТА (JSON):")
-        lines.append('{')
+        lines.append("{")
         lines.append('  "visual": "[Текст если есть]. Кто/что изображено + смысл",')
         lines.append('  "emotion": "основная эмоция (1 слово)",')
         lines.append(
@@ -298,9 +536,37 @@ class StickerLearningService:
         )
         lines.append('  "tags": ["meme", "reaction", "cute", ...],')
         lines.append('  "character": "имя персонажа/мема или null"')
-        lines.append('}')
+        lines.append("}")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _build_merge_prompt(
+        original: str,
+        current: str,
+        admin_text: str,
+        edit_mode: str,
+    ) -> str:
+        """Build prompt for merging admin notes into sticker description."""
+        mode_instructions = {
+            "correction": "Замени неправильные части описания на то, что говорит админ.",
+            "addition": "Дополни описание информацией от админа, не удаляя существующее.",
+            "smart_merge": "Умно объедини существующее описание с заметками админа.",
+        }
+
+        return (
+            f"Оригинальное описание от Vision API:\n{original}\n\n"
+            f"Текущее описание:\n{current}\n\n"
+            f"Заметка админа:\n{admin_text}\n\n"
+            f"Режим: {mode_instructions.get(edit_mode, mode_instructions['smart_merge'])}\n\n"
+            "Верни обновлённое описание в JSON формате:\n"
+            "{\n"
+            '  "visual": "обновлённое описание",\n'
+            '  "emotion": "эмоция (1 слово)",\n'
+            '  "contexts": ["когда использовать 1", ...],\n'
+            '  "character": "персонаж или null"\n'
+            "}"
+        )
 
     @staticmethod
     def _build_embedding_text(
@@ -376,4 +642,31 @@ class StickerLearningService:
         ):
             result["character"] = character.strip()
 
+        # context (for web enrichment response)
+        context_val = data.get("context")
+        if isinstance(context_val, str) and context_val.strip().lower() not in (
+            "null",
+            "none",
+            "",
+        ):
+            result["context"] = context_val.strip()
+
         return result
+
+
+def _detect_sticker_type(sticker: types.Sticker) -> str:
+    """Detect sticker format: static, animated, or video."""
+    if sticker.is_video:
+        return "video"
+    if sticker.is_animated:
+        return "animated"
+    return "static"
+
+
+def _detect_edit_mode(admin_text: str) -> str:
+    """Detect admin edit intent: correction, addition, or smart_merge."""
+    if _CORRECTION_PATTERNS.search(admin_text):
+        return "correction"
+    if _ADDITION_PATTERNS.search(admin_text):
+        return "addition"
+    return "smart_merge"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import random
 
 import structlog
 from aiogram import Bot, F, Router
@@ -12,11 +13,12 @@ from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.handlers.message import should_respond
+from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.modules.image import ImageAnalysisService
-from src.services.modules.sticker import StickerLearningService
+from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.voice import VoiceTranscriptionService
 from src.services.text.pipeline import TextProcessingPipeline
 from src.utils.telegram import TelegramFileError, download_telegram_file
@@ -104,6 +106,7 @@ async def handle_photo_message(
     chat_config: ChatConfig,
     image_service: FromDishka[ImageAnalysisService],
     pipeline: FromDishka[TextProcessingPipeline],
+    sticker_responder: FromDishka[StickerResponderService],
     message_repo: FromDishka[MessageRepository],
     bot: Bot,
     message_thread_id: int | None = None,
@@ -207,6 +210,26 @@ async def handle_photo_message(
             message_repo, message.chat.id, message.message_id, description
         )
 
+    # Image comment sticker (works for both photo_with_text and photo_only)
+    if (
+        description
+        and chat_config.image_comment_sticker_enabled
+        and chat_config.sticker_learning_enabled
+        and random.random() < chat_config.image_comment_sticker_chance
+    ):
+        try:
+            sticker_match = await sticker_responder.get_sticker_candidates(
+                description, limit=1
+            )
+            if sticker_match:
+                await message.reply_sticker(sticker_match[0].file_id)
+                await sticker_responder.record_bot_use(sticker_match[0].file_unique_id)
+        except Exception:
+            logger.warning(
+                "Image comment sticker failed",
+                chat_id=message.chat.id,
+            )
+
 
 async def _update_message_content(
     message_repo: MessageRepository,
@@ -242,10 +265,12 @@ async def handle_sticker_message(
     message: Message,
     chat_config: ChatConfig,
     sticker_service: FromDishka[StickerLearningService],
+    sticker_responder: FromDishka[StickerResponderService],
     message_repo: FromDishka[MessageRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
     bot: Bot,
 ) -> None:
-    """Handle sticker messages — learn via Vision API (static only)."""
+    """Handle sticker messages — learn via Vision API + optional sticker reply."""
     if not chat_config.sticker_learning_enabled:
         return
 
@@ -253,15 +278,7 @@ async def handle_sticker_message(
     if sticker is None:
         return
 
-    # Phase 2: skip animated/video stickers (no tgs-renderer)
-    if sticker.is_animated or sticker.is_video:
-        logger.debug(
-            "Skipping animated/video sticker",
-            file_unique_id=sticker.file_unique_id,
-        )
-        return
-
-    # Download sticker image
+    # Download sticker file (all types: static, animated, video)
     try:
         image_data = await download_telegram_file(bot, sticker.file_id)
     except TelegramFileError:
@@ -286,9 +303,42 @@ async def handle_sticker_message(
     except Exception:
         pass
 
-    # Learn sticker (silent — no response to chat)
-    await sticker_service.learn(
+    # Learn sticker (all types)
+    learning_result = await sticker_service.learn(
         sticker=sticker,
         image_data=image_data,
         preceding_messages=preceding or None,
     )
+
+    # Notify admins about new stickers
+    if learning_result.is_new and not learning_result.analysis_failed:
+        try:
+            admin_ids_str = await bot_config_repo.get("admin_ids")
+            if admin_ids_str:
+                admin_ids = [
+                    int(x.strip()) for x in str(admin_ids_str).split(",") if x.strip()
+                ]
+                if admin_ids:
+                    await sticker_service.notify_admins(
+                        bot, sticker, learning_result, admin_ids
+                    )
+        except Exception:
+            logger.exception("Failed to notify admins about new sticker")
+
+    # Sticker-to-sticker reply
+    if (
+        chat_config.sticker_reply_to_sticker_enabled
+        and random.random() < chat_config.sticker_reply_to_sticker_chance
+    ):
+        try:
+            response = await sticker_responder.find_sticker_for_sticker_reply(
+                sticker.file_unique_id
+            )
+            if response:
+                await message.reply_sticker(response.file_id)
+                await sticker_responder.record_bot_use(response.file_unique_id)
+        except Exception:
+            logger.warning(
+                "Sticker-to-sticker reply failed",
+                chat_id=message.chat.id,
+            )

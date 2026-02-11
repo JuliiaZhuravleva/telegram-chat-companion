@@ -144,8 +144,16 @@ class GeminiProvider(AIProvider):
         """Analyze image using Gemini vision."""
         model = model or "gemini-3-flash-preview"
         mime_type = kwargs.get("mime_type", "image/jpeg")
+        response_mime_type = kwargs.get("response_mime_type")
 
         b64_data = base64.b64encode(image_data).decode("utf-8")
+
+        gen_config: dict[str, Any] = {
+            "temperature": 0.4,
+            "maxOutputTokens": 1024,
+        }
+        if response_mime_type:
+            gen_config["responseMimeType"] = response_mime_type
 
         payload: dict[str, Any] = {
             "contents": [
@@ -157,10 +165,7 @@ class GeminiProvider(AIProvider):
                     ],
                 }
             ],
-            "generationConfig": {
-                "temperature": 0.4,
-                "maxOutputTokens": 500,
-            },
+            "generationConfig": gen_config,
         }
 
         url = f"{_BASE_URL}/models/{model}:generateContent"

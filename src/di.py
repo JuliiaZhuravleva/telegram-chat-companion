@@ -32,7 +32,7 @@ from src.services.ai.router import AIRouter
 from src.services.chat_config import ChatConfigService
 from src.services.modules.image import ImageAnalysisService
 from src.services.modules.links import LinkExtractorService
-from src.services.modules.sticker import StickerLearningService
+from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.summary import SummaryService
 from src.services.modules.voice import VoiceTranscriptionService
 from src.services.rag.memory import RAGMemoryService
@@ -176,6 +176,7 @@ class ServiceProvider(Provider):
         response_log_repo: ResponseLogRepository,
         rag_service: RAGMemoryService,
         link_service: LinkExtractorService,
+        sticker_service: StickerResponderService,
     ) -> TextProcessingPipeline:
         return TextProcessingPipeline(
             ai_router=ai_router,
@@ -184,6 +185,7 @@ class ServiceProvider(Provider):
             response_log_repo=response_log_repo,
             rag_service=rag_service,
             link_service=link_service,
+            sticker_service=sticker_service,
         )
 
     @provide
@@ -205,6 +207,14 @@ class ServiceProvider(Provider):
         sticker_repo: StickerRepository,
     ) -> StickerLearningService:
         return StickerLearningService(ai_router, sticker_repo)
+
+    @provide
+    def sticker_responder_service(
+        self,
+        sticker_service: StickerLearningService,
+        sticker_repo: StickerRepository,
+    ) -> StickerResponderService:
+        return StickerResponderService(sticker_service, sticker_repo)
 
     @provide
     def rule_engine(self, rules_repo: RulesRepository) -> RuleEngine:

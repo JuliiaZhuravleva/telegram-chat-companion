@@ -1065,12 +1065,7 @@ async def _placeholder_callback(callback: CallbackQuery, **kwargs: Any) -> None:
     await callback.answer(_PLACEHOLDER[lang], show_alert=True)
 
 
-@router.callback_query(F.data.startswith("adm_stk:"))
-async def handle_stickers_placeholder(
-    callback: CallbackQuery, **kwargs: Any
-) -> None:
-    """Sticker management — placeholder for Stage 3.1.5."""
-    await _placeholder_callback(callback, **kwargs)
+# adm_stk: callbacks are handled by admin_sticker_router
 
 
 @router.callback_query(F.data.startswith("adm_defs:"))

@@ -30,6 +30,7 @@ from src.services.ai.pricing import calculate_cost
 from src.services.ai.router import AIRouter
 from src.services.modules.links.extractor import LinkExtractorService
 from src.services.modules.links.formatters import format_link_context_section
+from src.services.modules.sticker.responder import StickerResponderService
 from src.services.rag.memory import RAGMemoryService
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import (
@@ -62,6 +63,9 @@ class PipelineResult:
     response_time_ms: int = 0
     was_fallback: bool = False
 
+    # Sticker chosen by AI
+    sticker_file_id: str | None = None
+
     # Post-send context
     _post_send_ctx: dict[str, Any] = field(default_factory=dict)
 
@@ -77,6 +81,7 @@ class TextProcessingPipeline:
         response_log_repo: ResponseLogRepository,
         rag_service: RAGMemoryService | None = None,
         link_service: LinkExtractorService | None = None,
+        sticker_service: StickerResponderService | None = None,
     ) -> None:
         self._ai = ai_router
         self._abuse = abuse_checker
@@ -84,6 +89,7 @@ class TextProcessingPipeline:
         self._response_log = response_log_repo
         self._rag = rag_service
         self._links = link_service
+        self._sticker = sticker_service
 
     async def process(
         self,
@@ -138,6 +144,12 @@ class TextProcessingPipeline:
                 self._safe_extract_links(message_text)
             )
 
+        sticker_task: asyncio.Task[str | None] | None = None
+        if config.sticker_learning_enabled and self._sticker:
+            sticker_task = asyncio.ensure_future(
+                self._safe_get_sticker_candidates(message_text)
+            )
+
         recent_msgs, message_lengths = await asyncio.gather(
             recent_msgs_task, lengths_task
         )
@@ -149,6 +161,10 @@ class TextProcessingPipeline:
         link_context_str: str | None = None
         if link_task:
             link_context_str = await link_task
+
+        sticker_candidates_str: str | None = None
+        if sticker_task:
+            sticker_candidates_str = await sticker_task
 
         # Convert Record rows to dicts for prompt builder
         history = [dict(r) for r in reversed(recent_msgs)]
@@ -172,6 +188,7 @@ class TextProcessingPipeline:
             reply_is_bot=reply_is_bot,
             image_context=image_context,
             link_context=link_context_str,
+            sticker_candidates=sticker_candidates_str,
             user_name=user_name,
             user_message=message_text,
             is_forum_mode=is_forum_mode,
@@ -196,11 +213,20 @@ class TextProcessingPipeline:
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
         # --- Stage 5: Format response ---
-        html_text = markdown_to_html(ai_result.text)
+        # Extract sticker marker from AI response
+        sticker_file_id: str | None = None
+        ai_text = ai_result.text
+        if self._sticker and sticker_candidates_str:
+            sticker_file_id, ai_text = StickerResponderService.extract_sticker_from_response(
+                ai_text
+            )
+
+        html_text = markdown_to_html(ai_text)
 
         result = PipelineResult(
             should_respond=True,
             html_text=html_text,
+            sticker_file_id=sticker_file_id,
             trigger_type=trigger_type,
             response_type=response_type,
             provider=ai_result.provider,
@@ -218,7 +244,7 @@ class TextProcessingPipeline:
             "message_text": message_text,
             "trigger_type": trigger_type.value,
             "config": config,
-            "ai_text": ai_result.text,
+            "ai_text": ai_text,
             "message_thread_id": message_thread_id,
         }
 
@@ -306,6 +332,19 @@ class TextProcessingPipeline:
         if trigger_type == TriggerType.REPLY:
             return base + 0.1
         return base
+
+    async def _safe_get_sticker_candidates(self, message_text: str) -> str | None:
+        """Get sticker candidates for prompt injection (non-blocking on failure)."""
+        if not self._sticker:
+            return None
+        try:
+            candidates = await self._sticker.get_sticker_candidates(message_text)
+            if not candidates:
+                return None
+            return StickerResponderService.format_candidates_for_prompt(candidates)
+        except Exception:
+            logger.warning("Sticker candidate search failed")
+            return None
 
     async def _safe_extract_links(self, text: str) -> str | None:
         """Extract link context (non-blocking on failure)."""

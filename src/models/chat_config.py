@@ -42,5 +42,11 @@ class ChatConfig:
     rules_enabled: bool = False
     rules_mode: str = "all"
 
+    # Sticker responses
+    sticker_reply_to_sticker_enabled: bool = True
+    sticker_reply_to_sticker_chance: float = 0.5
+    image_comment_sticker_enabled: bool = True
+    image_comment_sticker_chance: float = 0.3
+
     # Link comments
     link_comments_enabled: bool = False

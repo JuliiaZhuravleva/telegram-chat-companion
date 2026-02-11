@@ -173,13 +173,18 @@ class AIRouter:
 
         last_error: Exception | None = None
 
-        for provider_name in chain:
+        for i, provider_name in enumerate(chain):
             try:
                 provider = await self._get_provider(provider_name)
                 # Caller override > config > default (None-aware to preserve 0/0.0)
-                model: str | None = caller_model if caller_model is not None else (
-                    task_config.model if task_config else None
-                )
+                # Only use config model for the primary provider; fallbacks use their defaults
+                # (a Gemini model name won't work on OpenAI and vice versa)
+                if caller_model is not None:
+                    model: str | None = caller_model
+                elif i == 0 and task_config:
+                    model = task_config.model
+                else:
+                    model = None
                 max_tokens: int = caller_max_tokens if caller_max_tokens is not None else (
                     task_config.max_tokens if task_config else 500
                 )

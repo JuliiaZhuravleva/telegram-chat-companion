@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+class StickerRenderError(Exception):
+    """Failed to render frames from animated/video sticker."""
+
+
 @dataclass
 class StickerLearningResult:
     """Result of learning a sticker."""
