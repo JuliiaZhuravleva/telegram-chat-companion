@@ -4,7 +4,7 @@ Analyzes movement intensity in .webm and .tgs animations to select
 6 keyframes at motion peaks (not evenly spaced across timeline).
 
 Uses:
-- ffmpeg mestimate filter for .webm motion vectors
+- ffmpeg scdet filter for .webm frame differences (mean absolute frame difference)
 - Frame differencing for .tgs (sampled every 3rd frame for performance)
 """
 
@@ -88,8 +88,15 @@ class MotionAnalyzer:
 
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
 
+        logger.debug(
+            "ffmpeg scdet completed",
+            returncode=proc.returncode,
+            stderr_len=len(stderr),
+        )
+
         # Parse motion scores from stderr (metadata output goes to stderr)
         motion_scores = self._parse_scdet_output(stderr.decode())
+        logger.debug("Parsed motion scores", count=len(motion_scores))
 
         # Fallback if parsing failed
         if not motion_scores or len(motion_scores) < 2:
@@ -191,7 +198,12 @@ class MotionAnalyzer:
                     continue
 
         if not scores:
-            logger.warning("No motion scores found in ffmpeg output")
+            # Log stderr snippet for diagnostics (truncated to avoid flooding)
+            snippet = stderr[:300].replace("\n", " ") if stderr else "(empty)"
+            logger.warning(
+                "No motion scores found in ffmpeg output",
+                stderr_snippet=snippet,
+            )
             return []
 
         # Normalize scores to 0-1 range
