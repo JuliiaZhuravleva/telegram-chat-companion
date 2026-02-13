@@ -15,8 +15,11 @@ from src.bot.handlers.admin import (
     handle_language_menu,
     handle_language_set,
     handle_menu,
+    handle_notification_toggle,
+    handle_notifications_menu,
     handle_reject_notification,
     handle_stats,
+    handle_sticker_notification_cycle,
     handle_wl_approve,
     handle_wl_chats,
     handle_wl_pending,
@@ -88,6 +91,14 @@ def _make_admin_repo() -> MagicMock:
     repo.get_unauth_count = AsyncMock(return_value=3)
     repo.get_active_chats_count = AsyncMock(return_value=5)
     repo.get_enabled_chats_count = AsyncMock(return_value=2)
+    repo.get_notification_settings = AsyncMock(return_value={
+        "sticker": "on",
+        "unauthorized": True,
+        "jailbreak": True,
+        "blacklist": True,
+        "ai_fallback": True,
+    })
+    repo.set_notification_setting = AsyncMock()
     return repo
 
 
@@ -577,6 +588,181 @@ class TestWlReject:
 
         admin_repo.update_attempt_status.assert_awaited_once_with(42, "rejected")
         cb.message.edit_text.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# adm_notif callback (notification settings)
+# ---------------------------------------------------------------------------
+
+
+class TestNotificationsMenu:
+    @pytest.mark.asyncio
+    async def test_shows_notification_settings(self):
+        cb = _make_callback("adm_notif:ru")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notifications_menu(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        cb.answer.assert_awaited_once()
+        cb.message.edit_text.assert_awaited_once()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "Уведомления" in text
+
+    @pytest.mark.asyncio
+    async def test_english_title(self):
+        cb = _make_callback("adm_notif:en")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notifications_menu(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "Notifications" in text
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_notif:ru")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notifications_menu(
+            cb, admin_repo, bot_config_repo, is_admin=False
+        )
+
+        cb.message.edit_text.assert_not_awaited()
+
+
+class TestStickerNotificationCycle:
+    @pytest.mark.asyncio
+    async def test_cycles_on_to_detailed(self):
+        cb = _make_callback("adm_nstk:ru")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_notification_settings.return_value = {
+            "sticker": "on", "unauthorized": True,
+            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+        }
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_notification_cycle(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        admin_repo.set_notification_setting.assert_awaited_once_with(
+            bot_config_repo, "sticker", "detailed"
+        )
+        cb.message.edit_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_cycles_detailed_to_off(self):
+        cb = _make_callback("adm_nstk:ru")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_notification_settings.return_value = {
+            "sticker": "detailed", "unauthorized": True,
+            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+        }
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_notification_cycle(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        admin_repo.set_notification_setting.assert_awaited_once_with(
+            bot_config_repo, "sticker", "off"
+        )
+
+    @pytest.mark.asyncio
+    async def test_cycles_off_to_on(self):
+        cb = _make_callback("adm_nstk:ru")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_notification_settings.return_value = {
+            "sticker": "off", "unauthorized": True,
+            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+        }
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_notification_cycle(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        admin_repo.set_notification_setting.assert_awaited_once_with(
+            bot_config_repo, "sticker", "on"
+        )
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_nstk:ru")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_notification_cycle(
+            cb, admin_repo, bot_config_repo, is_admin=False
+        )
+
+        admin_repo.set_notification_setting.assert_not_awaited()
+
+
+class TestNotificationToggle:
+    @pytest.mark.asyncio
+    async def test_toggles_unauthorized_off(self):
+        cb = _make_callback("adm_ntog:ru:unauthorized")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notification_toggle(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        admin_repo.set_notification_setting.assert_awaited_once_with(
+            bot_config_repo, "unauthorized", False
+        )
+        cb.message.edit_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_toggles_disabled_back_on(self):
+        cb = _make_callback("adm_ntog:ru:jailbreak")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_notification_settings.return_value = {
+            "sticker": "on", "unauthorized": True,
+            "jailbreak": False, "blacklist": True, "ai_fallback": True,
+        }
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notification_toggle(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        admin_repo.set_notification_setting.assert_awaited_once_with(
+            bot_config_repo, "jailbreak", True
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_type(self):
+        cb = _make_callback("adm_ntog:ru:invalid_type")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notification_toggle(
+            cb, admin_repo, bot_config_repo, is_admin=True
+        )
+
+        admin_repo.set_notification_setting.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_ntog:ru:unauthorized")
+        admin_repo = _make_admin_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_notification_toggle(
+            cb, admin_repo, bot_config_repo, is_admin=False
+        )
+
+        admin_repo.set_notification_setting.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

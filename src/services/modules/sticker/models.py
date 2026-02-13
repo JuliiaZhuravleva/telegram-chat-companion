@@ -19,6 +19,7 @@ class StickerLearningResult:
     emotion: str | None = None
     character_or_meme: str | None = None
     analysis_failed: bool = False
+    collage_png: bytes | None = None
 
 
 @dataclass

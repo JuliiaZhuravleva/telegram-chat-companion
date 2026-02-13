@@ -21,6 +21,7 @@ _L: dict[str, dict[str, str]] = {
     "language": {"ru": "Язык / Language", "en": "Language / Язык"},
     "costs": {"ru": "Расходы", "en": "Costs"},
     "health": {"ru": "Здоровье", "en": "Health"},
+    "notifications": {"ru": "Уведомления", "en": "Notifications"},
     "close": {"ru": "Закрыть", "en": "Close"},
     "back": {"ru": "Назад", "en": "Back"},
     "russian": {"ru": "Русский", "en": "Русский"},
@@ -74,6 +75,12 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=_t("health", lang),
                 callback_data=f"adm_health:{lang}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=_t("notifications", lang),
+                callback_data=f"adm_notif:{lang}",
             ),
         ],
         [
@@ -388,3 +395,71 @@ def rejected_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=label.get(lang, "❌ Rejected"), callback_data="noop")],
     ])
+
+
+# ---------------------------------------------------------------------------
+# Notification settings menu
+# ---------------------------------------------------------------------------
+
+_STICKER_MODE_LABELS: dict[str, dict[str, str]] = {
+    "off": {"ru": "выкл", "en": "off"},
+    "on": {"ru": "вкл", "en": "on"},
+    "detailed": {"ru": "подробно", "en": "detailed"},
+}
+
+_NOTIF_TYPE_LABELS: dict[str, dict[str, str]] = {
+    "unauthorized": {"ru": "Неавторизованный доступ", "en": "Unauthorized access"},
+    "jailbreak": {"ru": "Jailbreak", "en": "Jailbreak"},
+    "blacklist": {"ru": "Blacklist", "en": "Blacklist"},
+    "ai_fallback": {"ru": "AI Fallback", "en": "AI Fallback"},
+}
+
+_NOTIF_TYPE_ICONS: dict[str, str] = {
+    "unauthorized": "\U0001f512",
+    "jailbreak": "\u26a0\ufe0f",
+    "blacklist": "\U0001f6ab",
+    "ai_fallback": "\U0001f504",
+}
+
+
+def notifications_keyboard(
+    lang: str, settings: dict[str, object]
+) -> InlineKeyboardMarkup:
+    """Notification settings menu with toggles for each type."""
+    rows: list[list[InlineKeyboardButton]] = []
+
+    # Sticker notification mode (cycles: off → on → detailed)
+    sticker_mode = str(settings.get("sticker", "on"))
+    sticker_label = _STICKER_MODE_LABELS.get(sticker_mode, {}).get(lang, sticker_mode)
+    sticker_text = {
+        "ru": f"\U0001f5bc Стикеры: {sticker_label}",
+        "en": f"\U0001f5bc Stickers: {sticker_label}",
+    }
+    rows.append([
+        InlineKeyboardButton(
+            text=sticker_text.get(lang, sticker_text["en"]),
+            callback_data=f"adm_nstk:{lang}",
+        ),
+    ])
+
+    # Boolean notification toggles
+    for ntype in ("unauthorized", "jailbreak", "blacklist", "ai_fallback"):
+        enabled = bool(settings.get(ntype, True))
+        icon = _NOTIF_TYPE_ICONS.get(ntype, "")
+        label = _NOTIF_TYPE_LABELS.get(ntype, {}).get(lang, ntype)
+        status = "\u2705" if enabled else "\u26ab"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{icon} {label}: {status}",
+                callback_data=f"adm_ntog:{lang}:{ntype}",
+            ),
+        ])
+
+    # Back button
+    rows.append([
+        InlineKeyboardButton(
+            text=_t("back", lang),
+            callback_data=f"adm_menu:{lang}",
+        ),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

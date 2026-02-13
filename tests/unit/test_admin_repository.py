@@ -232,6 +232,67 @@ class TestGetAttempt:
         assert result is None
 
 
+class TestNotificationSettings:
+    @pytest.mark.asyncio
+    async def test_get_defaults_when_no_settings(self, repo):
+        repo_, _ = repo
+        bot_config_repo = AsyncMock()
+        bot_config_repo.get.return_value = None
+
+        result = await repo_.get_notification_settings(bot_config_repo)
+        assert result["sticker"] == "on"
+        assert result["unauthorized"] is True
+        assert result["jailbreak"] is True
+        assert result["blacklist"] is True
+        assert result["ai_fallback"] is True
+
+    @pytest.mark.asyncio
+    async def test_get_from_existing_settings(self, repo):
+        repo_, _ = repo
+        bot_config_repo = AsyncMock()
+        bot_config_repo.get.return_value = (
+            '{"lang": "en", "notifications": {"sticker": "detailed", "jailbreak": false}}'
+        )
+
+        result = await repo_.get_notification_settings(bot_config_repo)
+        assert result["sticker"] == "detailed"
+        assert result["jailbreak"] is False
+        # Defaults for missing keys
+        assert result["unauthorized"] is True
+        assert result["blacklist"] is True
+
+    @pytest.mark.asyncio
+    async def test_set_preserves_existing_data(self, repo):
+        import json
+
+        repo_, _ = repo
+        bot_config_repo = AsyncMock()
+        bot_config_repo.get.return_value = '{"lang": "ru", "notifications": {"sticker": "on"}}'
+
+        await repo_.set_notification_setting(bot_config_repo, "jailbreak", False)
+
+        call_args = bot_config_repo.set.call_args[0]
+        saved = json.loads(call_args[1])
+        assert saved["lang"] == "ru"
+        assert saved["notifications"]["sticker"] == "on"
+        assert saved["notifications"]["jailbreak"] is False
+
+    @pytest.mark.asyncio
+    async def test_set_creates_notifications_key_if_missing(self, repo):
+        import json
+
+        repo_, _ = repo
+        bot_config_repo = AsyncMock()
+        bot_config_repo.get.return_value = '{"lang": "en"}'
+
+        await repo_.set_notification_setting(bot_config_repo, "sticker", "off")
+
+        call_args = bot_config_repo.set.call_args[0]
+        saved = json.loads(call_args[1])
+        assert saved["lang"] == "en"
+        assert saved["notifications"]["sticker"] == "off"
+
+
 class TestAdminLanguage:
     @pytest.mark.asyncio
     async def test_get_language_default(self, repo):

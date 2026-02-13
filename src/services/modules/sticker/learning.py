@@ -284,6 +284,7 @@ class StickerLearningService:
             emotion=emotion,
             character_or_meme=character,
             analysis_failed=analysis_failed,
+            collage_png=vision_image if sticker_type != "static" else None,
         )
 
     # ── Search ───────────────────────────────────────────────────────
@@ -340,8 +341,19 @@ class StickerLearningService:
         sticker: types.Sticker,
         result: StickerLearningResult,
         admin_ids: list[int],
+        *,
+        notification_mode: str = "on",
+        collage_png: bytes | None = None,
     ) -> None:
-        """Send new sticker notification to all admins."""
+        """Send new sticker notification to all admins.
+
+        Args:
+            notification_mode: "off" (skip), "on" (sticker + text),
+                               "detailed" (sticker + collage + text).
+            collage_png: PNG bytes of the analysis collage (for detailed mode).
+        """
+        if notification_mode == "off":
+            return
         if not admin_ids or result.analysis_failed:
             return
 
@@ -355,6 +367,28 @@ class StickerLearningService:
         if sticker.set_name:
             description_parts.append(f"<b>Пак:</b> {html_lib.escape(sticker.set_name)}")
 
+        # In detailed mode, enrich with RAG data from DB
+        if notification_mode == "detailed":
+            record = await self._repo.get_by_file_unique_id(
+                sticker.file_unique_id,
+            )
+            if record:
+                contexts = record.get("suggested_contexts")
+                if contexts:
+                    ctx_str = ", ".join(html_lib.escape(c) for c in contexts[:5])
+                    description_parts.append(f"<b>Контексты:</b> {ctx_str}")
+                tags = record.get("style_tags")
+                if tags:
+                    tag_str = ", ".join(html_lib.escape(t) for t in tags)
+                    description_parts.append(f"<b>Теги:</b> {tag_str}")
+                emoji = record.get("emoji")
+                if emoji:
+                    description_parts.append(f"<b>Эмодзи:</b> {emoji}")
+                has_embedding = record.get("description_embedding") is not None
+                description_parts.append(
+                    f"<b>Эмбеддинг:</b> {'✅' if has_embedding else '❌'}"
+                )
+
         description_parts.append(
             "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"
         )
@@ -363,6 +397,17 @@ class StickerLearningService:
         for admin_id in admin_ids:
             try:
                 sticker_msg = await bot.send_sticker(admin_id, sticker.file_id)
+
+                # In detailed mode, send the analysis collage
+                if notification_mode == "detailed" and collage_png:
+                    from aiogram.types import BufferedInputFile
+
+                    await bot.send_photo(
+                        admin_id,
+                        BufferedInputFile(collage_png, filename="collage.png"),
+                        reply_to_message_id=sticker_msg.message_id,
+                    )
+
                 desc_msg = await bot.send_message(
                     admin_id, text, parse_mode="HTML",
                     reply_to_message_id=sticker_msg.message_id,

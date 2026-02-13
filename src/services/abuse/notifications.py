@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import json
 from html import escape
 from typing import Any
 
@@ -11,6 +13,14 @@ from aiogram.types import InlineKeyboardMarkup
 from src.database.repositories.bot_config import BotConfigRepository
 
 logger = structlog.get_logger(__name__)
+
+_NOTIFICATION_DEFAULTS: dict[str, Any] = {
+    "sticker": "on",
+    "unauthorized": True,
+    "jailbreak": True,
+    "blacklist": True,
+    "ai_fallback": True,
+}
 
 
 class AbuseNotificationService:
@@ -37,6 +47,17 @@ class AbuseNotificationService:
             logger.warning("Invalid admin_ids format in bot_config", raw=raw)
             return []
 
+    async def _is_notification_enabled(self, notification_type: str) -> bool:
+        """Check if a notification type is enabled in admin_settings."""
+        raw = await self._bot_config_repo.get("admin_settings")
+        notifications: dict[str, Any] = {}
+        if raw:
+            with contextlib.suppress(json.JSONDecodeError, AttributeError):
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                notifications = data.get("notifications") or {}
+        merged = {**_NOTIFICATION_DEFAULTS, **notifications}
+        return bool(merged.get(notification_type, True))
+
     async def notify_jailbreak(
         self,
         *,
@@ -49,6 +70,9 @@ class AbuseNotificationService:
     ) -> None:
         """Notify admins about a jailbreak attempt."""
         if bot is None:
+            return
+
+        if not await self._is_notification_enabled("jailbreak"):
             return
 
         admin_ids = await self._get_admin_ids()
@@ -81,6 +105,9 @@ class AbuseNotificationService:
     ) -> None:
         """Notify admins about a blacklist trigger."""
         if bot is None:
+            return
+
+        if not await self._is_notification_enabled("blacklist"):
             return
 
         admin_ids = await self._get_admin_ids()
@@ -120,6 +147,9 @@ class AbuseNotificationService:
     ) -> None:
         """Notify admins about unauthorized access attempt."""
         if bot is None:
+            return
+
+        if not await self._is_notification_enabled("unauthorized"):
             return
 
         admin_ids = await self._get_admin_ids()
@@ -211,6 +241,9 @@ class AbuseNotificationService:
     ) -> None:
         """Notify admins when AI primary provider failed and fallback was used."""
         if bot is None:
+            return
+
+        if not await self._is_notification_enabled("ai_fallback"):
             return
 
         admin_ids = await self._get_admin_ids()

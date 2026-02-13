@@ -7,6 +7,7 @@ from src.bot.keyboards.admin import (
     costs_keyboard,
     language_keyboard,
     main_menu_keyboard,
+    notifications_keyboard,
     pending_list_keyboard,
     rejected_notification_keyboard,
     stats_keyboard,
@@ -38,6 +39,7 @@ class TestMainMenuKeyboard:
         assert any("adm_defs:" in c for c in callbacks)
         assert any("adm_stats:" in c for c in callbacks)
         assert any("adm_costs:" in c for c in callbacks)
+        assert any("adm_notif:" in c for c in callbacks)
         assert any("adm_lang:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
@@ -45,6 +47,7 @@ class TestMainMenuKeyboard:
         kb = main_menu_keyboard("en")
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:" in c for c in callbacks)
+        assert any("adm_notif:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
     def test_language_embedded_in_callbacks(self):
@@ -224,3 +227,64 @@ class TestCostsKeyboard:
         kb = costs_keyboard("en", "1h")
         callbacks = _get_callbacks(kb)
         assert any("adm_menu:" in c for c in callbacks)
+
+
+class TestNotificationsKeyboard:
+    _ALL_ON = {
+        "sticker": "on",
+        "unauthorized": True,
+        "jailbreak": True,
+        "blacklist": True,
+        "ai_fallback": True,
+    }
+
+    def test_has_all_notification_types(self):
+        kb = notifications_keyboard("ru", self._ALL_ON)
+        callbacks = _get_callbacks(kb)
+        assert any("adm_nstk:" in c for c in callbacks)
+        assert any("adm_ntog:" in c and "unauthorized" in c for c in callbacks)
+        assert any("adm_ntog:" in c and "jailbreak" in c for c in callbacks)
+        assert any("adm_ntog:" in c and "blacklist" in c for c in callbacks)
+        assert any("adm_ntog:" in c and "ai_fallback" in c for c in callbacks)
+
+    def test_has_back_button(self):
+        kb = notifications_keyboard("en", self._ALL_ON)
+        callbacks = _get_callbacks(kb)
+        assert any("adm_menu:" in c for c in callbacks)
+
+    def test_sticker_off_label_ru(self):
+        settings = {**self._ALL_ON, "sticker": "off"}
+        kb = notifications_keyboard("ru", settings)
+        labels = _get_labels(kb)
+        assert any("\u0432\u044b\u043a\u043b" in lab for lab in labels)
+
+    def test_sticker_detailed_label_ru(self):
+        settings = {**self._ALL_ON, "sticker": "detailed"}
+        kb = notifications_keyboard("ru", settings)
+        labels = _get_labels(kb)
+        assert any("\u043f\u043e\u0434\u0440\u043e\u0431\u043d\u043e" in lab for lab in labels)
+
+    def test_sticker_on_label_en(self):
+        kb = notifications_keyboard("en", self._ALL_ON)
+        labels = _get_labels(kb)
+        assert any("on" in lab.lower() and "Sticker" in lab for lab in labels)
+
+    def test_disabled_abuse_type_shows_black_circle(self):
+        settings = {**self._ALL_ON, "unauthorized": False}
+        kb = notifications_keyboard("en", settings)
+        labels = _get_labels(kb)
+        assert any("\u26ab" in lab and "Unauthorized" in lab for lab in labels)
+
+    def test_enabled_abuse_type_shows_checkmark(self):
+        kb = notifications_keyboard("en", self._ALL_ON)
+        labels = _get_labels(kb)
+        assert any("\u2705" in lab and "Unauthorized" in lab for lab in labels)
+
+    def test_language_embedded_in_callbacks(self):
+        kb = notifications_keyboard("en", self._ALL_ON)
+        callbacks = _get_callbacks(kb)
+        for cb in callbacks:
+            if cb == "noop":
+                continue
+            parts = cb.split(":")
+            assert parts[1] == "en", f"Expected :en: in {cb}"

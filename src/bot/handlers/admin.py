@@ -28,6 +28,7 @@ from src.bot.keyboards.admin import (
     health_keyboard,
     language_keyboard,
     main_menu_keyboard,
+    notifications_keyboard,
     pending_list_keyboard,
     rejected_notification_keyboard,
     stats_keyboard,
@@ -1047,6 +1048,119 @@ async def handle_wl_reject(
 async def handle_noop(callback: CallbackQuery, **_kwargs: Any) -> None:
     """No-op handler for status indicator buttons."""
     await callback.answer()
+
+
+# ---------------------------------------------------------------------------
+# Callbacks: notification settings
+# ---------------------------------------------------------------------------
+
+_NOTIF_TITLE: dict[str, str] = {
+    "ru": "<b>Уведомления</b>\n\nНастройте уведомления от бота:",
+    "en": "<b>Notifications</b>\n\nConfigure bot notifications:",
+}
+
+_STICKER_CYCLE = ["off", "on", "detailed"]
+
+
+@router.callback_query(F.data.startswith("adm_notif:"))
+async def handle_notifications_menu(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    **kwargs: Any,
+) -> None:
+    """Show notification settings menu."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+
+    settings = await admin_repo.get_notification_settings(bot_config_repo)
+    await callback.answer()
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            _NOTIF_TITLE[lang],
+            parse_mode="HTML",
+            reply_markup=notifications_keyboard(lang, settings),
+        )
+
+
+@router.callback_query(F.data.startswith("adm_nstk:"))
+async def handle_sticker_notification_cycle(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    **kwargs: Any,
+) -> None:
+    """Cycle sticker notification mode: off → on → detailed → off."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+
+    settings = await admin_repo.get_notification_settings(bot_config_repo)
+    current = str(settings.get("sticker", "on"))
+    try:
+        idx = _STICKER_CYCLE.index(current)
+    except ValueError:
+        idx = 0
+    new_mode = _STICKER_CYCLE[(idx + 1) % len(_STICKER_CYCLE)]
+
+    await admin_repo.set_notification_setting(bot_config_repo, "sticker", new_mode)
+    settings["sticker"] = new_mode
+
+    await callback.answer()
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            _NOTIF_TITLE[lang],
+            parse_mode="HTML",
+            reply_markup=notifications_keyboard(lang, settings),
+        )
+
+
+_VALID_TOGGLE_TYPES = frozenset({"unauthorized", "jailbreak", "blacklist", "ai_fallback"})
+
+
+@router.callback_query(F.data.startswith("adm_ntog:"))
+async def handle_notification_toggle(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    **kwargs: Any,
+) -> None:
+    """Toggle a boolean notification type on/off."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    ntype = parts[2] if len(parts) > 2 else ""
+
+    if ntype not in _VALID_TOGGLE_TYPES:
+        await callback.answer()
+        return
+
+    settings = await admin_repo.get_notification_settings(bot_config_repo)
+    new_value = not bool(settings.get(ntype, True))
+
+    await admin_repo.set_notification_setting(bot_config_repo, ntype, new_value)
+    settings[ntype] = new_value
+
+    await callback.answer()
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            _NOTIF_TITLE[lang],
+            parse_mode="HTML",
+            reply_markup=notifications_keyboard(lang, settings),
+        )
 
 
 # ---------------------------------------------------------------------------

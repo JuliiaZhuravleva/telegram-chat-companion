@@ -253,3 +253,39 @@ class AdminRepository:
                 data = json.loads(raw) if isinstance(raw, str) else raw
         data["lang"] = lang
         await bot_config_repo.set("admin_settings", json.dumps(data))
+
+    # -- Notification settings --
+
+    _NOTIFICATION_DEFAULTS: dict[str, Any] = {
+        "sticker": "on",
+        "unauthorized": True,
+        "jailbreak": True,
+        "blacklist": True,
+        "ai_fallback": True,
+    }
+
+    async def get_notification_settings(
+        self, bot_config_repo: Any
+    ) -> dict[str, Any]:
+        """Get admin notification settings with defaults for missing keys."""
+        raw = await bot_config_repo.get("admin_settings")
+        notifications: dict[str, Any] = {}
+        if raw:
+            with contextlib.suppress(json.JSONDecodeError, AttributeError):
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                notifications = data.get("notifications") or {}
+        return {**self._NOTIFICATION_DEFAULTS, **notifications}
+
+    async def set_notification_setting(
+        self, bot_config_repo: Any, key: str, value: Any
+    ) -> None:
+        """Update a single notification setting, preserving other data."""
+        raw = await bot_config_repo.get("admin_settings")
+        data: dict[str, Any] = {}
+        if raw:
+            with contextlib.suppress(json.JSONDecodeError, AttributeError):
+                data = json.loads(raw) if isinstance(raw, str) else raw
+        notifications = data.get("notifications") or {}
+        notifications[key] = value
+        data["notifications"] = notifications
+        await bot_config_repo.set("admin_settings", json.dumps(data))

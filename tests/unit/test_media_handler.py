@@ -281,9 +281,14 @@ async def test_sticker_handler_learns_static():
         new_callable=AsyncMock,
         return_value=b"fake-webp",
     ):
+        admin_repo = MagicMock()
+        admin_repo.get_notification_settings = AsyncMock(return_value={
+            "sticker": "on", "unauthorized": True,
+            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+        })
         await handle_sticker_message(
             message, chat_config, sticker_service, sticker_responder,
-            message_repo, bot_config_repo, bot
+            message_repo, bot_config_repo, admin_repo, bot
         )
 
     sticker_service.learn.assert_awaited_once()
@@ -323,6 +328,12 @@ async def test_sticker_handler_learns_animated():
     message_repo = MagicMock()
     message_repo.get_recent = AsyncMock(return_value=[])
 
+    admin_repo = MagicMock()
+    admin_repo.get_notification_settings = AsyncMock(return_value={
+        "sticker": "on", "unauthorized": True,
+        "jailbreak": True, "blacklist": True, "ai_fallback": True,
+    })
+
     with patch(
         "src.bot.handlers.media.download_telegram_file",
         new_callable=AsyncMock,
@@ -330,7 +341,7 @@ async def test_sticker_handler_learns_animated():
     ):
         await handle_sticker_message(
             message, chat_config, sticker_service, sticker_responder,
-            message_repo, bot_config_repo, bot
+            message_repo, bot_config_repo, admin_repo, bot
         )
 
     sticker_service.learn.assert_awaited_once()
@@ -352,10 +363,11 @@ async def test_sticker_handler_disabled():
     sticker_responder = MagicMock()
     bot_config_repo = MagicMock()
     message_repo = MagicMock()
+    admin_repo = MagicMock()
 
     await handle_sticker_message(
         message, chat_config, sticker_service, sticker_responder,
-        message_repo, bot_config_repo, bot
+        message_repo, bot_config_repo, admin_repo, bot
     )
 
     sticker_service.learn.assert_not_called()

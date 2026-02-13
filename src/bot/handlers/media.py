@@ -13,6 +13,7 @@ from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.handlers.message import should_respond
+from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
@@ -268,6 +269,7 @@ async def handle_sticker_message(
     sticker_responder: FromDishka[StickerResponderService],
     message_repo: FromDishka[MessageRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot: Bot,
 ) -> None:
     """Handle sticker messages — learn via Vision API + optional sticker reply."""
@@ -313,15 +315,27 @@ async def handle_sticker_message(
     # Notify admins about new stickers
     if learning_result.is_new and not learning_result.analysis_failed:
         try:
-            admin_ids_str = await bot_config_repo.get("admin_ids")
-            if admin_ids_str:
-                admin_ids = [
-                    int(x.strip()) for x in str(admin_ids_str).split(",") if x.strip()
-                ]
-                if admin_ids:
-                    await sticker_service.notify_admins(
-                        bot, sticker, learning_result, admin_ids
-                    )
+            notif_settings = await admin_repo.get_notification_settings(
+                bot_config_repo
+            )
+            sticker_mode = str(notif_settings.get("sticker", "on"))
+            if sticker_mode != "off":
+                admin_ids_str = await bot_config_repo.get("admin_ids")
+                if admin_ids_str:
+                    admin_ids = [
+                        int(x.strip())
+                        for x in str(admin_ids_str).split(",")
+                        if x.strip()
+                    ]
+                    if admin_ids:
+                        await sticker_service.notify_admins(
+                            bot,
+                            sticker,
+                            learning_result,
+                            admin_ids,
+                            notification_mode=sticker_mode,
+                            collage_png=learning_result.collage_png,
+                        )
         except Exception:
             logger.exception("Failed to notify admins about new sticker")
 
