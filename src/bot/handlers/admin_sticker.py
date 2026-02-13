@@ -14,7 +14,7 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka import AsyncContainer
 from dishka.integrations.aiogram import FromDishka
 
@@ -224,6 +224,32 @@ async def handle_sticker_sets(
 # ── Set detail ───────────────────────────────────────────────────────────
 
 
+async def _build_set_view(
+    sticker_repo: StickerRepository,
+    set_name: str,
+    lang: str,
+    page: int,
+    per_page: int = 10,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build text + keyboard for a sticker set detail view."""
+    total = await sticker_repo.count_stickers_in_set(set_name)
+    sticker_records = await sticker_repo.get_stickers_in_set(
+        set_name, limit=per_page, offset=page * per_page
+    )
+    stickers = [dict(r) for r in sticker_records]
+
+    text = f"<b>{html_lib.escape(set_name)}</b> ({total} stickers)"
+    keyboard = sticker_set_detail_keyboard(
+        stickers,
+        set_name=set_name,
+        lang=lang,
+        page=page,
+        total=total,
+        per_page=per_page,
+    )
+    return text, keyboard
+
+
 @router.callback_query(F.data.startswith("adm_stk_set:"))
 async def handle_sticker_set_view(
     callback: CallbackQuery,
@@ -242,31 +268,64 @@ async def handle_sticker_set_view(
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
     set_name = parts[2] if len(parts) > 2 else ""
     page = int(parts[3]) if len(parts) > 3 else 0
-    per_page = 10
 
     if not set_name:
         await callback.answer("Missing set name", show_alert=True)
         return
 
-    total = await sticker_repo.count_stickers_in_set(set_name)
-    sticker_records = await sticker_repo.get_stickers_in_set(
-        set_name, limit=per_page, offset=page * per_page
-    )
-    stickers = [dict(r) for r in sticker_records]
-
-    text = f"<b>{html_lib.escape(set_name)}</b> ({total} stickers)"
-
-    keyboard = sticker_set_detail_keyboard(
-        stickers,
-        set_name=set_name,
-        lang=lang,
-        page=page,
-        total=total,
-        per_page=per_page,
-    )
+    text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
 
     if callback.message:
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer()
+
+
+# ── Back from sticker detail (cleanup sticker message) ──────────────────
+
+
+@router.callback_query(F.data.startswith("adm_stk_back:"))
+async def handle_sticker_back(
+    callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Navigate back from sticker detail, cleaning up sticker + description messages."""
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await _check_admin_direct(bot_config_repo, callback.from_user.id if callback.from_user else None):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    # adm_stk_back:{lang}:{set_name}:{page}:{sticker_msg_id}
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    set_name = parts[2] if len(parts) > 2 else ""
+    page = int(parts[3]) if len(parts) > 3 else 0
+    sticker_msg_id = int(parts[4]) if len(parts) > 4 else None
+
+    if not set_name:
+        await callback.answer("Missing set name", show_alert=True)
+        return
+
+    # Delete the sticker message
+    if sticker_msg_id and callback.message:
+        with contextlib.suppress(Exception):
+            await callback.message.bot.delete_message(
+                chat_id=callback.message.chat.id,
+                message_id=sticker_msg_id,
+            )
+
+    # Delete the description message (the one with this callback)
+    if callback.message:
+        with contextlib.suppress(Exception):
+            await callback.message.delete()
+
+    # Send fresh set list
+    text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
+
+    if callback.message:
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
 
 
@@ -319,17 +378,24 @@ async def handle_sticker_detail(
 
     text = "\n".join(lines) or "No data"
 
-    keyboard = sticker_detail_keyboard(
-        file_unique_id,
-        lang=lang,
-        set_name=sticker["set_name"],
-    )
-
     if callback.message:
-        # Send sticker first, then details
+        # Delete the old message (set list or previous detail) so sticker
+        # and description appear adjacent as new messages.
         with contextlib.suppress(Exception):
-            await callback.message.answer_sticker(sticker["file_id"])
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+            await callback.message.delete()
+
+        # Send sticker, then description right after
+        sticker_msg = None
+        with contextlib.suppress(Exception):
+            sticker_msg = await callback.message.answer_sticker(sticker["file_id"])
+
+        keyboard = sticker_detail_keyboard(
+            file_unique_id,
+            lang=lang,
+            set_name=sticker["set_name"],
+            sticker_msg_id=sticker_msg.message_id if sticker_msg else None,
+        )
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
 
 
