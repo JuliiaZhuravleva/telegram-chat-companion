@@ -15,13 +15,13 @@ def sticker_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="Просмотр паков" if lang == "ru" else "Browse packs",
+                text="📦 Просмотр паков" if lang == "ru" else "📦 Browse packs",
                 callback_data=f"adm_stk_sets:{lang}:0",
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Назад" if lang == "ru" else "Back",
+                text="◀️ Назад" if lang == "ru" else "◀️ Back",
                 callback_data=f"adm_menu:{lang}",
             ),
         ],
@@ -73,7 +73,7 @@ def sticker_sets_keyboard(
     # Back
     rows.append([
         InlineKeyboardButton(
-            text="Назад" if lang == "ru" else "Back",
+            text="◀️ Назад" if lang == "ru" else "◀️ Back",
             callback_data=f"adm_stk:{lang}:0",
         ),
     ])
@@ -128,7 +128,7 @@ def sticker_set_detail_keyboard(
 
     rows.append([
         InlineKeyboardButton(
-            text="Назад" if lang == "ru" else "Back",
+            text="◀️ Назад" if lang == "ru" else "◀️ Back",
             callback_data=f"adm_stk_sets:{lang}:0",
         ),
     ])
@@ -146,7 +146,7 @@ def sticker_detail_keyboard(
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="Переанализировать" if lang == "ru" else "Re-analyze",
+                text="🔄 Переанализировать" if lang == "ru" else "🔄 Re-analyze",
                 callback_data=f"adm_stk_reanalyze:{lang}:{file_unique_id}",
             ),
         ],
@@ -155,7 +155,7 @@ def sticker_detail_keyboard(
     back_data = f"adm_stk_set:{lang}:{set_name}:0" if set_name else f"adm_stk_sets:{lang}:0"
     rows.append([
         InlineKeyboardButton(
-            text="Назад" if lang == "ru" else "Back",
+            text="◀️ Назад" if lang == "ru" else "◀️ Back",
             callback_data=back_data,
         ),
     ])

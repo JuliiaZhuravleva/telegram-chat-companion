@@ -27,6 +27,7 @@ from src.bot.keyboards.admin_sticker import (
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
+from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -44,20 +45,8 @@ async def _check_admin_direct(bot_config_repo: BotConfigRepository, user_id: int
     """Check if user is admin (for handlers with FromDishka parameters)."""
     if user_id is None:
         return False
-
     admin_ids_raw = await bot_config_repo.get("admin_ids")
-    if not admin_ids_raw:
-        return False
-
-    try:
-        if isinstance(admin_ids_raw, str):
-            ids = [int(x.strip()) for x in admin_ids_raw.split(",") if x.strip()]
-        else:
-            ids = [int(x) for x in admin_ids_raw]
-    except (ValueError, TypeError):
-        return False
-
-    return user_id in ids
+    return user_id in parse_admin_ids(admin_ids_raw)
 
 
 async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bool:
@@ -73,8 +62,6 @@ async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bo
 
     bot_config_repo = await container.get(BotConfigRepository)
     admin_ids_raw = await bot_config_repo.get("admin_ids")
-    if not admin_ids_raw:
-        return False
 
     # Get user ID from parameter or kwargs
     if user_id is None:
@@ -85,15 +72,7 @@ async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bo
     else:
         uid = user_id
 
-    try:
-        if isinstance(admin_ids_raw, str):
-            ids = [int(x.strip()) for x in admin_ids_raw.split(",") if x.strip()]
-        else:
-            ids = [int(x) for x in admin_ids_raw]
-    except (ValueError, TypeError):
-        return False
-
-    return uid in ids
+    return uid in parse_admin_ids(admin_ids_raw)
 
 
 def _is_private(callback: CallbackQuery) -> bool:

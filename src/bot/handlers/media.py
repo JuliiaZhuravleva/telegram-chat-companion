@@ -22,6 +22,7 @@ from src.services.modules.image import ImageAnalysisService
 from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.voice import VoiceTranscriptionService
 from src.services.text.pipeline import TextProcessingPipeline
+from src.utils import parse_admin_ids
 from src.utils.telegram import TelegramFileError, download_telegram_file
 
 router = Router(name="media")
@@ -320,13 +321,9 @@ async def handle_sticker_message(
             )
             sticker_mode = str(notif_settings.get("sticker", "on"))
             if sticker_mode != "off":
-                admin_ids_str = await bot_config_repo.get("admin_ids")
-                if admin_ids_str:
-                    admin_ids = [
-                        int(x.strip())
-                        for x in str(admin_ids_str).split(",")
-                        if x.strip()
-                    ]
+                admin_ids_raw = await bot_config_repo.get("admin_ids")
+                if admin_ids_raw:
+                    admin_ids = parse_admin_ids(admin_ids_raw)
                     if admin_ids:
                         await sticker_service.notify_admins(
                             bot,

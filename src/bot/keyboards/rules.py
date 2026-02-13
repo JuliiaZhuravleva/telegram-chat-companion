@@ -17,15 +17,15 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 # ---------------------------------------------------------------------------
 
 _L: dict[str, dict[str, str]] = {
-    "back": {"ru": "Назад", "en": "Back"},
-    "add_rule": {"ru": "Добавить правило", "en": "Add rule"},
+    "back": {"ru": "◀️ Назад", "en": "◀️ Back"},
+    "add_rule": {"ru": "➕ Добавить правило", "en": "➕ Add rule"},
     "no_rules": {"ru": "Нет правил", "en": "No rules"},
     "select_chat": {"ru": "Выберите чат:", "en": "Select a chat:"},
     "select_type": {"ru": "Тип правила:", "en": "Rule type:"},
-    "keyword_trigger": {"ru": "По ключевым словам", "en": "Keyword trigger"},
-    "user_specific": {"ru": "По пользователю", "en": "User-specific"},
-    "sticker_flood": {"ru": "Стикер-флуд", "en": "Sticker flood"},
-    "spam_detect": {"ru": "Спам-детект", "en": "Spam detect"},
+    "keyword_trigger": {"ru": "🔑 По ключевым словам", "en": "🔑 Keyword trigger"},
+    "user_specific": {"ru": "👤 По пользователю", "en": "👤 User-specific"},
+    "sticker_flood": {"ru": "🎭 Стикер-флуд", "en": "🎭 Sticker flood"},
+    "spam_detect": {"ru": "🛡 Спам-детект", "en": "🛡 Spam detect"},
     "delete_confirm": {"ru": "Удалить?", "en": "Delete?"},
     "yes": {"ru": "Да", "en": "Yes"},
     "no": {"ru": "Нет", "en": "No"},
@@ -210,8 +210,8 @@ def rule_detail_keyboard(
     lang: str, rule_id: int, chat_id: int
 ) -> InlineKeyboardMarkup:
     """View a single rule with toggle/delete/back."""
-    toggle_label = {"ru": "Вкл/Выкл", "en": "Toggle"}
-    delete_label = {"ru": "Удалить", "en": "Delete"}
+    toggle_label = {"ru": "⚡ Вкл/Выкл", "en": "⚡ Toggle"}
+    delete_label = {"ru": "🗑 Удалить", "en": "🗑 Delete"}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(

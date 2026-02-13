@@ -16,6 +16,7 @@ from aiogram import Bot
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.health import HealthRepository
 from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
+from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -220,23 +221,7 @@ class HealthChecker:
         config: dict[str, Any],
     ) -> None:
         """Send alert to first admin via Telegram."""
-        admin_ids_raw = config.get("admin_ids", "")
-        if not admin_ids_raw:
-            return
-
-        try:
-            if isinstance(admin_ids_raw, list):
-                admin_ids = [int(x) for x in admin_ids_raw]
-            else:
-                admin_ids = [
-                    int(x.strip())
-                    for x in str(admin_ids_raw).split(",")
-                    if x.strip()
-                ]
-        except (ValueError, TypeError):
-            logger.warning("Invalid admin_ids format", raw=admin_ids_raw)
-            return
-
+        admin_ids = parse_admin_ids(config.get("admin_ids", ""))
         if not admin_ids:
             return
 

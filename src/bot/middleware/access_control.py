@@ -16,6 +16,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.models.chat_config import ChatConfig
 from src.services.abuse.notifications import AbuseNotificationService
+from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -83,16 +84,8 @@ class AccessControlMiddleware(BaseMiddleware):
         container: AsyncContainer = data["dishka_container"]
         bot_config_repo = await container.get(BotConfigRepository)
 
-        admin_ids_str = await bot_config_repo.get("admin_ids")
-        if not admin_ids_str:
-            return False
-
-        try:
-            admin_ids = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
-        except ValueError:
-            return False
-
-        return user_id in admin_ids
+        admin_ids_raw = await bot_config_repo.get("admin_ids")
+        return user_id in parse_admin_ids(admin_ids_raw)
 
     async def _notify_unauthorized(
         self,

@@ -13,19 +13,19 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 # ---------------------------------------------------------------------------
 
 _L: dict[str, dict[str, str]] = {
-    "whitelist": {"ru": "Whitelist", "en": "Whitelist"},
-    "rules": {"ru": "Правила", "en": "Rules"},
-    "stickers": {"ru": "Стикеры", "en": "Stickers"},
-    "defaults": {"ru": "Настройки", "en": "Default Settings"},
-    "statistics": {"ru": "Статистика", "en": "Statistics"},
-    "language": {"ru": "Язык / Language", "en": "Language / Язык"},
-    "costs": {"ru": "Расходы", "en": "Costs"},
-    "health": {"ru": "Здоровье", "en": "Health"},
-    "notifications": {"ru": "Уведомления", "en": "Notifications"},
-    "close": {"ru": "Закрыть", "en": "Close"},
-    "back": {"ru": "Назад", "en": "Back"},
-    "russian": {"ru": "Русский", "en": "Русский"},
-    "english": {"ru": "English", "en": "English"},
+    "whitelist": {"ru": "📋 Whitelist", "en": "📋 Whitelist"},
+    "rules": {"ru": "📏 Правила", "en": "📏 Rules"},
+    "stickers": {"ru": "🎨 Стикеры", "en": "🎨 Stickers"},
+    "defaults": {"ru": "⚙️ Настройки", "en": "⚙️ Default Settings"},
+    "statistics": {"ru": "📊 Статистика", "en": "📊 Statistics"},
+    "language": {"ru": "🌐 Язык / Language", "en": "🌐 Language / Язык"},
+    "costs": {"ru": "💰 Расходы", "en": "💰 Costs"},
+    "health": {"ru": "💚 Здоровье", "en": "💚 Health"},
+    "notifications": {"ru": "🔔 Уведомления", "en": "🔔 Notifications"},
+    "close": {"ru": "✖️ Закрыть", "en": "✖️ Close"},
+    "back": {"ru": "◀️ Назад", "en": "◀️ Back"},
+    "russian": {"ru": "🇷🇺 Русский", "en": "🇷🇺 Русский"},
+    "english": {"ru": "🇬🇧 English", "en": "🇬🇧 English"},
 }
 
 
@@ -130,8 +130,8 @@ def language_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Whitelist management menu."""
-    chats_label = {"ru": "Чаты", "en": "Chats"}
-    pending_label = {"ru": "Ожидают", "en": "Pending"}
+    chats_label = {"ru": "💬 Чаты", "en": "💬 Chats"}
+    pending_label = {"ru": "⏳ Ожидают", "en": "⏳ Pending"}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
@@ -158,7 +158,7 @@ def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
 
 def health_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Health status view with refresh and back."""
-    refresh_label = {"ru": "Обновить", "en": "Refresh"}
+    refresh_label = {"ru": "🔄 Обновить", "en": "🔄 Refresh"}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
@@ -218,7 +218,7 @@ def costs_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMark
                 callback_data=f"adm_costs:{lang}:{period}",
             )
         )
-    verify_label = {"ru": "Сверить (OpenAI)", "en": "Verify (OpenAI)"}
+    verify_label = {"ru": "🔍 Сверить (OpenAI)", "en": "🔍 Verify (OpenAI)"}
     return InlineKeyboardMarkup(inline_keyboard=[
         row,
         [
@@ -244,8 +244,8 @@ def access_keyboard(
     lang: str, attempt_id: int
 ) -> InlineKeyboardMarkup:
     """Approve/reject buttons for unauthorized access notification."""
-    approve_label = {"ru": "Одобрить", "en": "Approve"}
-    reject_label = {"ru": "Отклонить", "en": "Reject"}
+    approve_label = {"ru": "✅ Одобрить", "en": "✅ Approve"}
+    reject_label = {"ru": "❌ Отклонить", "en": "❌ Reject"}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(

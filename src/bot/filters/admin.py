@@ -9,6 +9,7 @@ from aiogram.types import Message
 from dishka import AsyncContainer
 
 from src.database.repositories.bot_config import BotConfigRepository
+from src.utils import parse_admin_ids
 
 
 class IsAdmin(BaseFilter):
@@ -34,19 +35,4 @@ class IsAdmin(BaseFilter):
 
         bot_config_repo = await container.get(BotConfigRepository)
         admin_ids_raw = await bot_config_repo.get("admin_ids")
-        if not admin_ids_raw:
-            return False
-
-        try:
-            if isinstance(admin_ids_raw, str):
-                admin_ids = [
-                    int(x.strip()) for x in admin_ids_raw.split(",") if x.strip()
-                ]
-            elif isinstance(admin_ids_raw, list):
-                admin_ids = [int(x) for x in admin_ids_raw]
-            else:
-                return False
-        except (ValueError, TypeError):
-            return False
-
-        return user_id in admin_ids
+        return user_id in parse_admin_ids(admin_ids_raw)

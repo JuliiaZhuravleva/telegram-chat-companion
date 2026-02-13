@@ -11,6 +11,7 @@ import structlog
 from aiogram.types import InlineKeyboardMarkup
 
 from src.database.repositories.bot_config import BotConfigRepository
+from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -39,13 +40,7 @@ class AbuseNotificationService:
     async def _get_admin_ids(self) -> list[int]:
         """Resolve admin IDs from bot_config table."""
         raw = await self._bot_config_repo.get("admin_ids")
-        if not raw:
-            return []
-        try:
-            return [int(x.strip()) for x in raw.split(",") if x.strip()]
-        except ValueError:
-            logger.warning("Invalid admin_ids format in bot_config", raw=raw)
-            return []
+        return parse_admin_ids(raw)
 
     async def _is_notification_enabled(self, notification_type: str) -> bool:
         """Check if a notification type is enabled in admin_settings."""

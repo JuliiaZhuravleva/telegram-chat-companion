@@ -121,8 +121,8 @@ class TestAccessKeyboard:
     def test_english_labels(self):
         kb = access_keyboard("en", attempt_id=1)
         labels = _get_labels(kb)
-        assert "Approve" in labels
-        assert "Reject" in labels
+        assert any("Approve" in lab for lab in labels)
+        assert any("Reject" in lab for lab in labels)
 
 
 class TestChatsListKeyboard:

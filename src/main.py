@@ -16,6 +16,7 @@ from aiogram.enums import ParseMode
 from dishka import make_async_container
 from dishka.integrations.aiogram import setup_dishka
 
+from src.bot.commands import setup_bot_commands
 from src.bot.handlers import router as main_router
 from src.bot.middleware import (
     AccessControlMiddleware,
@@ -29,6 +30,7 @@ from src.config import Settings
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
 from src.services.health.checker import HealthChecker
 from src.services.modules.sticker.scheduler import StickerSetSyncScheduler
+from src.utils import parse_admin_ids
 
 _REQUIRED_TABLES = ("bot_config", "chat_settings", "custom_rules", "health_log")
 
@@ -128,6 +130,12 @@ async def main() -> None:
     dp.callback_query.middleware(access_control_mw)
 
     dp.include_router(main_router)
+
+    # Register bot commands with Telegram API for autocomplete hints
+    admin_ids_raw = await pool.fetchval(
+        "SELECT value FROM bot_config WHERE key = 'admin_ids'"
+    )
+    await setup_bot_commands(bot, parse_admin_ids(admin_ids_raw))
 
     # Start background tasks
     health_checker = HealthChecker(pool=pool, bot=bot)
