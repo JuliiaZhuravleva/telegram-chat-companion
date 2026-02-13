@@ -637,7 +637,7 @@ def _format_health_status(row: dict[str, Any], lang: str) -> str:
         for issue in raw_issues:
             sev = str(issue.get("severity", "warning"))
             icon = "\U0001f525" if sev == "critical" else "\u26a0\ufe0f"
-            lines.append(f"  {icon} {issue.get('message', '')}")
+            lines.append(f"  {icon} {escape(str(issue.get('message', '')))}")
 
     return "\n".join(lines)
 

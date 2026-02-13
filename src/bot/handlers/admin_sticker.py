@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import html as html_lib
+import re
 from typing import Any
 
 import structlog
@@ -79,6 +80,20 @@ def _is_private(callback: CallbackQuery) -> bool:
     return callback.message is not None and callback.message.chat.type == "private"
 
 
+# Regex to extract file_unique_id from notification text (🆔 line)
+_STICKER_ID_RE = re.compile(r"🆔\s*([A-Za-z0-9_-]+)")
+
+
+def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
+    """Try to extract file_unique_id from replied-to message text or caption."""
+    for content in (reply_msg.text, reply_msg.caption):
+        if content:
+            match = _STICKER_ID_RE.search(content)
+            if match:
+                return match.group(1)
+    return None
+
+
 # ── Admin reply to sticker notification ──────────────────────────────────
 
 
@@ -94,17 +109,29 @@ async def handle_admin_sticker_reply(
     if not message.reply_to_message or not message.text:
         return
 
-    # Look up notification by reply
+    # Look up notification by reply (primary: DB, fallback: text parsing)
     notif = await sticker_repo.get_notification_by_reply(
         message.chat.id,
         message.reply_to_message.message_id,
     )
-    if not notif:
+
+    file_unique_id: str | None = None
+    if notif:
+        file_unique_id = notif["file_unique_id"]
+    else:
+        file_unique_id = _extract_file_unique_id_from_reply(message.reply_to_message)
+
+    if not file_unique_id:
         return
 
-    file_unique_id = notif["file_unique_id"]
-    admin_text = message.text.strip()
+    logger.debug(
+        "Admin sticker reply",
+        file_unique_id=file_unique_id,
+        lookup_source="db" if notif else "text_parse",
+        admin_id=message.from_user.id if message.from_user else None,
+    )
 
+    admin_text = message.text.strip()
     if not admin_text:
         return
 

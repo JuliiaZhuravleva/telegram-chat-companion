@@ -6,6 +6,7 @@ not just a command responder.
 """
 
 import asyncio
+import json
 import logging
 
 import asyncpg
@@ -135,6 +136,8 @@ async def main() -> None:
     admin_ids_raw = await pool.fetchval(
         "SELECT value FROM bot_config WHERE key = 'admin_ids'"
     )
+    if admin_ids_raw is not None:
+        admin_ids_raw = json.loads(admin_ids_raw)
     await setup_bot_commands(bot, parse_admin_ids(admin_ids_raw))
 
     # Start background tasks

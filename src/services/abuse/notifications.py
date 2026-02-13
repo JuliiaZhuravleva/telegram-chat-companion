@@ -255,6 +255,6 @@ class AbuseNotificationService:
 
         for admin_id in admin_ids:
             try:
-                await bot.send_message(admin_id, text)
+                await bot.send_message(admin_id, text, parse_mode=None)
             except Exception:
                 logger.warning("Failed to notify admin", admin_id=admin_id)

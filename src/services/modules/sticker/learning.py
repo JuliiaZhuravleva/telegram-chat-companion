@@ -357,7 +357,7 @@ class StickerLearningService:
         if not admin_ids or result.analysis_failed:
             return
 
-        description_parts = []
+        description_parts = [f"🆔 <code>{sticker.file_unique_id}</code>"]
         if result.visual_description:
             description_parts.append(f"<b>Описание:</b> {html_lib.escape(result.visual_description)}")
         if result.emotion:
@@ -439,6 +439,10 @@ class StickerLearningService:
         """
         existing = await self._repo.get_by_file_unique_id(file_unique_id)
         if not existing:
+            logger.warning(
+                "merge_admin_description: sticker not found in DB",
+                file_unique_id=file_unique_id,
+            )
             return None
 
         original = existing["original_vision_description"] or ""
@@ -455,11 +459,20 @@ class StickerLearningService:
             )
             parsed = self._parse_vision_response(ai_result.text)
         except AIProviderError:
-            logger.warning("AI merge failed", file_unique_id=file_unique_id)
+            logger.warning(
+                "merge_admin_description: AI call failed",
+                file_unique_id=file_unique_id,
+                exc_info=True,
+            )
             return None
 
         new_visual = parsed.get("visual")
         if not new_visual:
+            logger.warning(
+                "merge_admin_description: AI response missing 'visual' key",
+                file_unique_id=file_unique_id,
+                parsed_keys=list(parsed.keys()),
+            )
             return None
 
         # Update database

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html as html_lib
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -264,7 +265,7 @@ class HealthChecker:
                     if issue.severity == HealthStatus.CRITICAL
                     else "\u26a0\ufe0f"
                 )
-                lines.append(f"  {icon} {issue.message}")
+                lines.append(f"  {icon} {html_lib.escape(issue.message)}")
 
         lines.append("")
         lines.append(
