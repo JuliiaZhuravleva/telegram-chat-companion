@@ -101,7 +101,7 @@ modules:
     image_comment_sticker_enabled: true
     image_comment_sticker_chance: 0.3
     # Debug mode: save Vision API artifacts (prompt, response, collage image)
-    debug_mode: false
+    debug_mode: true
     debug_retention_days: 7
 
   image_analysis:

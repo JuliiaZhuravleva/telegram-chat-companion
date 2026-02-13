@@ -88,7 +88,7 @@ class MotionAnalyzer:
 
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
 
-        logger.debug(
+        logger.info(
             "ffmpeg scdet completed",
             returncode=proc.returncode,
             stderr_len=len(stderr),
@@ -96,7 +96,7 @@ class MotionAnalyzer:
 
         # Parse motion scores from stderr (metadata output goes to stderr)
         motion_scores = self._parse_scdet_output(stderr.decode())
-        logger.debug("Parsed motion scores", count=len(motion_scores))
+        logger.info("Parsed motion scores", count=len(motion_scores))
 
         # Fallback if parsing failed
         if not motion_scores or len(motion_scores) < 2:
