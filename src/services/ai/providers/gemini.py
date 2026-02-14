@@ -26,6 +26,14 @@ logger = structlog.get_logger(__name__)
 
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
+# Disable safety filters — the bot analyzes stickers (anime, memes, etc.)
+_SAFETY_OFF = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
 # Russian verbal error prefixes — Gemini sometimes returns these instead of real content
 _VERBAL_ERROR_PREFIXES = ("Не удалось", "Не получилось", "Невозможно", "Не могу")
 
@@ -80,6 +88,7 @@ class GeminiProvider(AIProvider):
                 "temperature": temperature,
                 "maxOutputTokens": max_tokens,
             },
+            "safetySettings": _SAFETY_OFF,
         }
 
         url = f"{_BASE_URL}/models/{model}:generateContent"
@@ -166,6 +175,7 @@ class GeminiProvider(AIProvider):
                 }
             ],
             "generationConfig": gen_config,
+            "safetySettings": _SAFETY_OFF,
         }
 
         url = f"{_BASE_URL}/models/{model}:generateContent"
@@ -242,8 +252,16 @@ class GeminiProvider(AIProvider):
         try:
             candidates = response.get("candidates", [])
             if not candidates:
+                # Log why — usually safety filter or prompt feedback
+                feedback = response.get("promptFeedback", {})
+                block_reason = feedback.get("blockReason", "unknown")
+                logger.warning(
+                    "Gemini no candidates",
+                    block_reason=block_reason,
+                    prompt_feedback=feedback,
+                )
                 raise AIProviderError(
-                    "Gemini returned no candidates",
+                    f"Gemini returned no candidates (block_reason={block_reason})",
                     provider="gemini",
                 )
             return str(candidates[0]["content"]["parts"][0]["text"])

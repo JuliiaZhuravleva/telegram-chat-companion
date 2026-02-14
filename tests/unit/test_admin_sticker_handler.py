@@ -187,7 +187,22 @@ class TestHandleAdminStickerReply:
         await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
 
         msg.reply.assert_awaited_once()
-        assert "не удалось" in msg.reply.call_args[0][0].lower()
+        assert "re-analyze" in msg.reply.call_args[0][0].lower()
+
+    @pytest.mark.asyncio()
+    async def test_content_filter_shows_rephrase(
+        self, sticker_repo: MagicMock, sticker_service: MagicMock
+    ) -> None:
+        sticker_repo.get_notification_by_reply.return_value = {
+            "file_unique_id": "AgADvh4AAlkbCFI"
+        }
+        sticker_service.merge_admin_description.side_effect = ValueError("content_filter")
+        msg = _make_message(text="better description")
+
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+
+        msg.reply.assert_awaited_once()
+        assert "переформулировать" in msg.reply.call_args[0][0].lower()
 
     @pytest.mark.asyncio()
     async def test_ignores_non_private_chat(

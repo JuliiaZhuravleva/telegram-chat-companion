@@ -254,13 +254,13 @@ class StickerRepository:
             """
             UPDATE sticker_knowledge
             SET visual_description = $2,
-                emotion = COALESCE($3, emotion),
-                suggested_contexts = COALESCE($4, suggested_contexts),
-                character_or_meme = COALESCE($5, character_or_meme),
+                emotion = COALESCE($3::TEXT, emotion),
+                suggested_contexts = COALESCE($4::TEXT[], suggested_contexts),
+                character_or_meme = COALESCE($5::TEXT, character_or_meme),
                 admin_notes = CASE
-                    WHEN $6 IS NOT NULL AND admin_notes IS NOT NULL
-                        THEN admin_notes || E'\n' || $6
-                    WHEN $6 IS NOT NULL THEN $6
+                    WHEN $6::TEXT IS NOT NULL AND admin_notes IS NOT NULL
+                        THEN admin_notes || E'\n' || $6::TEXT
+                    WHEN $6::TEXT IS NOT NULL THEN $6::TEXT
                     ELSE admin_notes
                 END,
                 updated_at = NOW()
@@ -272,6 +272,22 @@ class StickerRepository:
             suggested_contexts,
             character_or_meme,
             admin_notes,
+        )
+
+    async def append_admin_note(self, file_unique_id: str, note: str) -> None:
+        """Append a note to admin_notes. Simple — no nullable array params."""
+        await self._pool.execute(
+            """
+            UPDATE sticker_knowledge
+            SET admin_notes = CASE
+                    WHEN admin_notes IS NOT NULL THEN admin_notes || E'\n' || $2
+                    ELSE $2
+                END,
+                updated_at = NOW()
+            WHERE file_unique_id = $1
+            """,
+            file_unique_id,
+            note,
         )
 
     async def clear_for_reanalysis(self, file_unique_id: str) -> None:

@@ -451,31 +451,41 @@ class StickerLearningService:
 
         prompt = self._build_merge_prompt(original, current, admin_text, edit_mode)
 
+        new_visual: str | None = None
+        parsed: dict[str, Any] = {}
+        content_blocked = False
+
         try:
             ai_result = await self._ai.generate_text(
                 prompt=prompt,
                 system_prompt="Ты помогаешь редактировать описания стикеров. Отвечай только JSON.",
-                max_tokens=300,
+                max_tokens=1024,
             )
             parsed = self._parse_vision_response(ai_result.text)
-        except AIProviderError:
+            new_visual = parsed.get("visual")
+            if not new_visual:
+                logger.warning(
+                    "merge_admin_description: AI response missing 'visual' key",
+                    file_unique_id=file_unique_id,
+                    parsed_keys=list(parsed.keys()),
+                )
+        except AIProviderError as exc:
+            content_blocked = "PROHIBITED_CONTENT" in str(exc)
             logger.warning(
-                "merge_admin_description: AI call failed",
+                "merge_admin_description: AI merge failed, saving admin note directly",
                 file_unique_id=file_unique_id,
+                content_blocked=content_blocked,
                 exc_info=True,
             )
-            return None
 
-        new_visual = parsed.get("visual")
+        # Fallback: if AI couldn't merge, just save the admin note
         if not new_visual:
-            logger.warning(
-                "merge_admin_description: AI response missing 'visual' key",
-                file_unique_id=file_unique_id,
-                parsed_keys=list(parsed.keys()),
-            )
+            await self._repo.append_admin_note(file_unique_id, admin_text)
+            if content_blocked:
+                raise ValueError("content_filter")
             return None
 
-        # Update database
+        # Update database with AI-merged description
         await self._repo.update_description_and_fields(
             file_unique_id=file_unique_id,
             visual_description=new_visual,
@@ -814,7 +824,13 @@ class StickerLearningService:
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning("Failed to parse vision JSON", raw_text=text[:200])
+            logger.warning("Failed to parse vision JSON", raw_text=text[:200],
+                           raw_len=len(text))
+            # Fallback: try to extract "visual" from truncated JSON
+            visual_match = re.search(r'"visual"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned)
+            if visual_match:
+                logger.info("Extracted visual from truncated JSON via regex")
+                return {"visual": visual_match.group(1)}
             return {}
 
         if not isinstance(data, dict):

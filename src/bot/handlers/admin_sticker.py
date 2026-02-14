@@ -135,10 +135,23 @@ async def handle_admin_sticker_reply(
     if not admin_text:
         return
 
-    # Merge description via AI
-    new_desc = await sticker_service.merge_admin_description(
-        file_unique_id, admin_text
-    )
+    # Merge description via AI (fallback: save note directly)
+    try:
+        new_desc = await sticker_service.merge_admin_description(
+            file_unique_id, admin_text
+        )
+    except ValueError as e:
+        if str(e) == "content_filter":
+            await message.reply(
+                "Фильтр контента заблокировал запрос. "
+                "Попробуй переформулировать текст.",
+            )
+        else:
+            await message.reply("Произошла ошибка. Попробуй ещё раз.")
+        return
+    except Exception:
+        logger.exception("Sticker merge failed", file_unique_id=file_unique_id)
+        new_desc = None
 
     if new_desc:
         await message.reply(
@@ -146,7 +159,10 @@ async def handle_admin_sticker_reply(
             parse_mode="HTML",
         )
     else:
-        await message.reply("Не удалось обновить описание.")
+        await message.reply(
+            "AI не смог объединить описание. Заметка сохранена. "
+            "Попробуй ещё раз или используй Re-analyze.",
+        )
 
 
 # ── Sticker menu ────────────────────────────────────────────────────────
@@ -359,7 +375,7 @@ async def handle_sticker_detail(
         await callback.answer("Sticker not found", show_alert=True)
         return
 
-    lines = []
+    lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
     if sticker["visual_description"]:
         lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
     if sticker["emotion"]:
@@ -375,8 +391,13 @@ async def handle_sticker_detail(
     lines.append(f"<b>Video:</b> {sticker['is_video']}")
     if sticker["analysis_failed"]:
         lines.append("<b>⚠️ Анализ провалился</b>")
+    if sticker.get("admin_notes"):
+        lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
+    lines.append(
+        "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"
+    )
 
-    text = "\n".join(lines) or "No data"
+    text = "\n".join(lines)
 
     if callback.message:
         # Delete the old message (set list or previous detail) so sticker
@@ -395,7 +416,19 @@ async def handle_sticker_detail(
             set_name=sticker["set_name"],
             sticker_msg_id=sticker_msg.message_id if sticker_msg else None,
         )
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+        desc_msg = await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+        # Save notification so admin can reply to edit description
+        admin_id = callback.from_user.id if callback.from_user else None
+        if admin_id:
+            with contextlib.suppress(Exception):
+                await sticker_repo.save_notification(
+                    file_unique_id=file_unique_id,
+                    admin_id=admin_id,
+                    message_id=desc_msg.message_id,
+                    sticker_msg_id=sticker_msg.message_id if sticker_msg else 0,
+                    chat_id=callback.message.chat.id,
+                )
     await callback.answer()
 
 
