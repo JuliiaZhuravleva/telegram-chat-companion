@@ -295,6 +295,7 @@ class TestMergeAdminDescription:
                 "character_or_meme": None,
                 "suggested_contexts": ["greeting"],
                 "usage_contexts": [],
+                "admin_notes": None,
             }
         )
         sticker_service._ai.generate_text = AsyncMock(
@@ -315,7 +316,7 @@ class TestMergeAdminDescription:
 
     @pytest.mark.asyncio
     async def test_merge_prompt_includes_original_vision(self, sticker_service):
-        """merge prompt emphasizes original vision description."""
+        """merge prompt emphasizes original vision description and priority rules."""
         from src.services.ai.base import TextGenerationResult
 
         sticker_service._repo.get_by_file_unique_id = AsyncMock(
@@ -326,6 +327,7 @@ class TestMergeAdminDescription:
                 "character_or_meme": None,
                 "suggested_contexts": [],
                 "usage_contexts": [],
+                "admin_notes": None,
             }
         )
         sticker_service._ai.generate_text = AsyncMock(
@@ -342,7 +344,68 @@ class TestMergeAdminDescription:
         prompt = sticker_service._ai.generate_text.call_args.kwargs["prompt"]
         assert "Anime girl with blue hair" in prompt
         assert "Vision API" in prompt
-        assert "основу" in prompt  # "используй его как основу"
+        assert "ПРИОРИТЕТ" in prompt
+
+    @pytest.mark.asyncio
+    async def test_merge_prompt_includes_accumulated_notes(self, sticker_service):
+        """Accumulated admin_notes from previous merges are included in prompt."""
+        from src.services.ai.base import TextGenerationResult
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value={
+                "original_vision_description": "A cat",
+                "visual_description": "A cat",
+                "emotion": "joy",
+                "character_or_meme": None,
+                "suggested_contexts": [],
+                "usage_contexts": [],
+                "admin_notes": "previous correction note",
+            }
+        )
+        sticker_service._ai.generate_text = AsyncMock(
+            return_value=TextGenerationResult(
+                text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
+                model="o4-mini",
+                provider="openai",
+            )
+        )
+        sticker_service._repo.update_description_and_fields = AsyncMock()
+
+        await sticker_service.merge_admin_description("unique-123", "new note")
+
+        prompt = sticker_service._ai.generate_text.call_args.kwargs["prompt"]
+        assert "previous correction note" in prompt
+        assert "Предыдущие заметки" in prompt
+
+    @pytest.mark.asyncio
+    async def test_merge_prompt_omits_empty_accumulated_notes(self, sticker_service):
+        """When admin_notes is None, the accumulated notes section is omitted."""
+        from src.services.ai.base import TextGenerationResult
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value={
+                "original_vision_description": "A cat",
+                "visual_description": "A cat",
+                "emotion": "joy",
+                "character_or_meme": None,
+                "suggested_contexts": [],
+                "usage_contexts": [],
+                "admin_notes": None,
+            }
+        )
+        sticker_service._ai.generate_text = AsyncMock(
+            return_value=TextGenerationResult(
+                text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
+                model="o4-mini",
+                provider="openai",
+            )
+        )
+        sticker_service._repo.update_description_and_fields = AsyncMock()
+
+        await sticker_service.merge_admin_description("unique-123", "new note")
+
+        prompt = sticker_service._ai.generate_text.call_args.kwargs["prompt"]
+        assert "Предыдущие заметки" not in prompt
 
 
 class TestBuildEmbeddingText:

@@ -257,12 +257,7 @@ class StickerRepository:
                 emotion = COALESCE($3::TEXT, emotion),
                 suggested_contexts = COALESCE($4::TEXT[], suggested_contexts),
                 character_or_meme = COALESCE($5::TEXT, character_or_meme),
-                admin_notes = CASE
-                    WHEN $6::TEXT IS NOT NULL AND admin_notes IS NOT NULL
-                        THEN admin_notes || E'\n' || $6::TEXT
-                    WHEN $6::TEXT IS NOT NULL THEN $6::TEXT
-                    ELSE admin_notes
-                END,
+                admin_notes = COALESCE($6::TEXT, admin_notes),
                 updated_at = NOW()
             WHERE file_unique_id = $1
             """,

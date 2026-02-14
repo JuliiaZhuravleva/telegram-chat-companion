@@ -447,9 +447,13 @@ class StickerLearningService:
 
         original = existing["original_vision_description"] or ""
         current = existing["visual_description"] or ""
+        accumulated_notes = existing.get("admin_notes") or None
         edit_mode = _detect_edit_mode(admin_text)
 
-        prompt = self._build_merge_prompt(original, current, admin_text, edit_mode)
+        prompt = self._build_merge_prompt(
+            original, current, admin_text, edit_mode,
+            accumulated_notes=accumulated_notes,
+        )
 
         new_visual: str | None = None
         parsed: dict[str, Any] = {}
@@ -458,9 +462,14 @@ class StickerLearningService:
         try:
             ai_result = await self._ai.generate_text(
                 prompt=prompt,
-                system_prompt="Ты помогаешь редактировать описания стикеров. Отвечай только JSON.",
+                system_prompt=(
+                    "Ты — редактор описаний стикеров. "
+                    "Твоя задача: создать КРАТКОЕ, ТОЧНОЕ описание на основе данных. "
+                    "Правки админа всегда приоритетнее автоматического описания. "
+                    "Результат: 2-3 предложения без повторов. Отвечай только JSON."
+                ),
                 model="o4-mini",
-                max_tokens=1024,
+                max_tokens=4096,
                 temperature=0.4,
                 response_mime_type="application/json",
             )
@@ -770,32 +779,64 @@ class StickerLearningService:
         current: str,
         admin_text: str,
         edit_mode: str,
+        accumulated_notes: str | None = None,
     ) -> str:
         """Build prompt for merging admin notes into sticker description."""
         mode_instructions = {
-            "correction": "Замени неправильные части описания на то, что говорит админ.",
-            "addition": "Дополни описание информацией от админа, не удаляя существующее.",
-            "smart_merge": "Умно объедини существующее описание с заметками админа.",
+            "correction": (
+                "Админ ИСПРАВЛЯЕТ ошибки в описании. "
+                "Найди противоречащие части текущего описания и ЗАМЕНИ их "
+                "на то, что говорит админ. Удали устаревшие формулировки."
+            ),
+            "addition": (
+                "Админ ДОПОЛНЯЕТ описание. "
+                "Интегрируй новую информацию в существующее описание, "
+                "не дублируя то, что уже сказано."
+            ),
+            "smart_merge": (
+                "Объедини существующее описание с заметкой админа. "
+                "Если заметка противоречит описанию — заметка админа побеждает. "
+                "Если заметка дополняет — интегрируй, не дублируя."
+            ),
         }
 
-        return (
-            "## ИСХОДНЫЕ ДАННЫЕ\n\n"
-            f"### Оригинальное описание от Vision API (автоматический анализ изображения):\n{original}\n\n"
-            f"### Текущее описание (может содержать предыдущие правки):\n{current}\n\n"
-            f"### Заметка админа:\n{admin_text}\n\n"
-            "## ЗАДАЧА\n\n"
-            f"{mode_instructions.get(edit_mode, mode_instructions['smart_merge'])}\n\n"
-            "ВАЖНО: Оригинальное описание от Vision API — это то, что РЕАЛЬНО изображено на стикере. "
-            "Всегда используй его как основу. Админ уточняет смысл, контекст или исправляет ошибки, "
-            "но визуальное содержание стикера остаётся тем, что увидела Vision модель.\n\n"
-            "Верни обновлённое описание в JSON формате:\n"
-            "{\n"
-            '  "visual": "обновлённое описание (на основе Vision + правки админа)",\n'
-            '  "emotion": "эмоция (1 слово)",\n'
-            '  "contexts": ["когда использовать 1", ...],\n'
-            '  "character": "персонаж или null"\n'
-            "}"
+        sections = [
+            "## ИСХОДНЫЕ ДАННЫЕ\n",
+            f"### Оригинальное описание от Vision API:\n{original}\n",
+            f"### Текущее описание:\n{current}\n",
+            f"### Заметка админа:\n{admin_text}\n",
+        ]
+
+        if accumulated_notes:
+            sections.append(
+                f"### Предыдущие заметки админа (для контекста):\n"
+                f"{accumulated_notes}\n"
+            )
+
+        instruction = mode_instructions.get(
+            edit_mode, mode_instructions["smart_merge"]
         )
+        sections.extend([
+            "## ЗАДАЧА\n",
+            f"{instruction}\n",
+            "## ПРАВИЛА\n",
+            "1. ПРИОРИТЕТ: заметка админа > текущее описание > оригинал Vision API",
+            "2. КРАТКОСТЬ: результат — максимум 2-3 предложения",
+            "3. НЕ ДУБЛИРУЙ: не повторяй одну мысль разными словами",
+            "4. НЕ КОПИРУЙ заметку дословно — перефразируй и интегрируй",
+            "5. ПРОТИВОРЕЧИЯ: если админ говорит иначе — используй версию админа",
+            "6. Визуальное содержание (что изображено) бери из оригинала Vision API",
+            "7. Смысл, контекст и назначение стикера — из заметки админа\n",
+            "## ФОРМАТ ОТВЕТА (JSON)\n",
+            "{\n"
+            '  "visual": "итоговое описание (2-3 предложения, без повторов)",\n'
+            '  "emotion": "основная эмоция (1 слово)",\n'
+            '  "contexts": ["когда использовать 1", "когда использовать 2"],\n'
+            '  "character": "персонаж или null"\n'
+            "}",
+        ])
+
+        return "\n".join(sections)
 
     @staticmethod
     def _build_embedding_text(
