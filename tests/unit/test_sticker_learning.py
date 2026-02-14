@@ -281,6 +281,70 @@ class TestParseVisionResponse:
         assert "character" not in result
 
 
+class TestMergeAdminDescription:
+    @pytest.mark.asyncio
+    async def test_merge_passes_model_and_json_params(self, sticker_service):
+        """merge_admin_description passes model=o4-mini, temperature=0.4 and response_mime_type."""
+        from src.services.ai.base import TextGenerationResult
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value={
+                "original_vision_description": "A cat",
+                "visual_description": "A cat",
+                "emotion": "joy",
+                "character_or_meme": None,
+                "suggested_contexts": ["greeting"],
+                "usage_contexts": [],
+            }
+        )
+        sticker_service._ai.generate_text = AsyncMock(
+            return_value=TextGenerationResult(
+                text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
+                model="o4-mini",
+                provider="openai",
+            )
+        )
+        sticker_service._repo.update_description_and_fields = AsyncMock()
+
+        await sticker_service.merge_admin_description("unique-123", "also happy")
+
+        call_kwargs = sticker_service._ai.generate_text.call_args.kwargs
+        assert call_kwargs["model"] == "o4-mini"
+        assert call_kwargs["temperature"] == 0.4
+        assert call_kwargs["response_mime_type"] == "application/json"
+
+    @pytest.mark.asyncio
+    async def test_merge_prompt_includes_original_vision(self, sticker_service):
+        """merge prompt emphasizes original vision description."""
+        from src.services.ai.base import TextGenerationResult
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value={
+                "original_vision_description": "Anime girl with blue hair",
+                "visual_description": "Anime girl waving",
+                "emotion": "happy",
+                "character_or_meme": None,
+                "suggested_contexts": [],
+                "usage_contexts": [],
+            }
+        )
+        sticker_service._ai.generate_text = AsyncMock(
+            return_value=TextGenerationResult(
+                text='{"visual": "Anime girl waving hello", "emotion": "happy", "contexts": ["greeting"]}',
+                model="o4-mini",
+                provider="openai",
+            )
+        )
+        sticker_service._repo.update_description_and_fields = AsyncMock()
+
+        await sticker_service.merge_admin_description("unique-123", "she is waving")
+
+        prompt = sticker_service._ai.generate_text.call_args.kwargs["prompt"]
+        assert "Anime girl with blue hair" in prompt
+        assert "Vision API" in prompt
+        assert "основу" in prompt  # "используй его как основу"
+
+
 class TestBuildEmbeddingText:
     def test_full_context(self):
         text = StickerLearningService._build_embedding_text(

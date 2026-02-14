@@ -459,7 +459,10 @@ class StickerLearningService:
             ai_result = await self._ai.generate_text(
                 prompt=prompt,
                 system_prompt="Ты помогаешь редактировать описания стикеров. Отвечай только JSON.",
+                model="o4-mini",
                 max_tokens=1024,
+                temperature=0.4,
+                response_mime_type="application/json",
             )
             parsed = self._parse_vision_response(ai_result.text)
             new_visual = parsed.get("visual")
@@ -776,13 +779,18 @@ class StickerLearningService:
         }
 
         return (
-            f"Оригинальное описание от Vision API:\n{original}\n\n"
-            f"Текущее описание:\n{current}\n\n"
-            f"Заметка админа:\n{admin_text}\n\n"
-            f"Режим: {mode_instructions.get(edit_mode, mode_instructions['smart_merge'])}\n\n"
+            "## ИСХОДНЫЕ ДАННЫЕ\n\n"
+            f"### Оригинальное описание от Vision API (автоматический анализ изображения):\n{original}\n\n"
+            f"### Текущее описание (может содержать предыдущие правки):\n{current}\n\n"
+            f"### Заметка админа:\n{admin_text}\n\n"
+            "## ЗАДАЧА\n\n"
+            f"{mode_instructions.get(edit_mode, mode_instructions['smart_merge'])}\n\n"
+            "ВАЖНО: Оригинальное описание от Vision API — это то, что РЕАЛЬНО изображено на стикере. "
+            "Всегда используй его как основу. Админ уточняет смысл, контекст или исправляет ошибки, "
+            "но визуальное содержание стикера остаётся тем, что увидела Vision модель.\n\n"
             "Верни обновлённое описание в JSON формате:\n"
             "{\n"
-            '  "visual": "обновлённое описание",\n'
+            '  "visual": "обновлённое описание (на основе Vision + правки админа)",\n'
             '  "emotion": "эмоция (1 слово)",\n'
             '  "contexts": ["когда использовать 1", ...],\n'
             '  "character": "персонаж или null"\n'

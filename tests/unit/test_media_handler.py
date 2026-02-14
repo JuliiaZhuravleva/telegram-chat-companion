@@ -60,7 +60,26 @@ def _make_bot():
     bot_info = MagicMock()
     bot_info.id = 999
     bot.me = AsyncMock(return_value=bot_info)
+
+    # Mock get_sticker_set for sticker set registration
+    tg_set = MagicMock()
+    tg_set.name = "test_set"
+    tg_set.title = "Test Set"
+    tg_sticker = MagicMock()
+    tg_sticker.is_animated = False
+    tg_sticker.is_video = False
+    tg_set.stickers = [tg_sticker]
+    tg_set.thumbnail = None
+    bot.get_sticker_set = AsyncMock(return_value=tg_set)
+
     return bot
+
+
+def _make_sticker_repo():
+    repo = MagicMock()
+    repo.get_sticker_set = AsyncMock(return_value=None)
+    repo.upsert_sticker_set = AsyncMock()
+    return repo
 
 
 # ── Voice handler tests ──────────────────────────────────────────────
@@ -276,6 +295,8 @@ async def test_sticker_handler_learns_static():
     message_repo = MagicMock()
     message_repo.get_recent = AsyncMock(return_value=[])
 
+    sticker_repo = _make_sticker_repo()
+
     with patch(
         "src.bot.handlers.media.download_telegram_file",
         new_callable=AsyncMock,
@@ -288,7 +309,7 @@ async def test_sticker_handler_learns_static():
         })
         await handle_sticker_message(
             message, chat_config, sticker_service, sticker_responder,
-            message_repo, bot_config_repo, admin_repo, bot
+            sticker_repo, message_repo, bot_config_repo, admin_repo, bot
         )
 
     sticker_service.learn.assert_awaited_once()
@@ -334,6 +355,8 @@ async def test_sticker_handler_learns_animated():
         "jailbreak": True, "blacklist": True, "ai_fallback": True,
     })
 
+    sticker_repo = _make_sticker_repo()
+
     with patch(
         "src.bot.handlers.media.download_telegram_file",
         new_callable=AsyncMock,
@@ -341,7 +364,7 @@ async def test_sticker_handler_learns_animated():
     ):
         await handle_sticker_message(
             message, chat_config, sticker_service, sticker_responder,
-            message_repo, bot_config_repo, admin_repo, bot
+            sticker_repo, message_repo, bot_config_repo, admin_repo, bot
         )
 
     sticker_service.learn.assert_awaited_once()
@@ -361,13 +384,14 @@ async def test_sticker_handler_disabled():
     bot = _make_bot()
     sticker_service = MagicMock()
     sticker_responder = MagicMock()
+    sticker_repo = _make_sticker_repo()
     bot_config_repo = MagicMock()
     message_repo = MagicMock()
     admin_repo = MagicMock()
 
     await handle_sticker_message(
         message, chat_config, sticker_service, sticker_responder,
-        message_repo, bot_config_repo, admin_repo, bot
+        sticker_repo, message_repo, bot_config_repo, admin_repo, bot
     )
 
     sticker_service.learn.assert_not_called()

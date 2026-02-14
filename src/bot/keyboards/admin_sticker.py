@@ -96,10 +96,17 @@ def sticker_set_detail_keyboard(
     for s in stickers:
         fuid = str(s.get("file_unique_id", ""))
         emoji = str(s.get("emoji") or "")
-        desc = str(s.get("visual_description") or "no desc")[:25]
         uses = s.get("total_uses", 0)
         failed = s.get("analysis_failed", False)
-        label = f"{emoji} {desc} ({uses}x)" if not failed else f"{emoji} [FAILED] ({uses}x)"
+        visual = s.get("visual_description")
+
+        if failed:
+            label = f"{emoji} [FAILED] ({uses}x)"
+        elif visual is None:
+            label = f"{emoji} ⏳ ожидает анализа ({uses}x)"
+        else:
+            desc = str(visual)[:25]
+            label = f"{emoji} {desc} ({uses}x)"
         rows.append([
             InlineKeyboardButton(
                 text=label,

@@ -16,6 +16,7 @@ from src.bot.handlers.message import should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
+from src.database.repositories.stickers import StickerRepository
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.modules.image import ImageAnalysisService
@@ -268,6 +269,7 @@ async def handle_sticker_message(
     chat_config: ChatConfig,
     sticker_service: FromDishka[StickerLearningService],
     sticker_responder: FromDishka[StickerResponderService],
+    sticker_repo: FromDishka[StickerRepository],
     message_repo: FromDishka[MessageRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     admin_repo: FromDishka[AdminRepository],
@@ -312,6 +314,28 @@ async def handle_sticker_message(
         image_data=image_data,
         preceding_messages=preceding or None,
     )
+
+    # Register sticker set for admin panel visibility
+    if learning_result.is_new and sticker.set_name:
+        try:
+            existing_set = await sticker_repo.get_sticker_set(sticker.set_name)
+            if not existing_set:
+                tg_set = await bot.get_sticker_set(sticker.set_name)
+                await sticker_repo.upsert_sticker_set(
+                    set_name=tg_set.name,
+                    set_title=tg_set.title,
+                    total_count=len(tg_set.stickers),
+                    thumbnail_file_id=(
+                        tg_set.thumbnail.file_id if tg_set.thumbnail else None
+                    ),
+                    is_animated=any(s.is_animated for s in tg_set.stickers[:1]),
+                    is_video=any(s.is_video for s in tg_set.stickers[:1]),
+                )
+        except Exception:
+            logger.warning(
+                "Failed to register sticker set",
+                set_name=sticker.set_name,
+            )
 
     # Notify admins about new stickers
     if learning_result.is_new and not learning_result.analysis_failed:

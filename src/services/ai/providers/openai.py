@@ -60,10 +60,14 @@ class OpenAIProvider(AIProvider):
         """Generate text using OpenAI Chat Completions API."""
         model = model or "gpt-5-nano"
 
-        # gpt-5-nano only supports temperature=1.0 (default)
-        if model == "gpt-5-nano" and temperature != 1.0:
+        # Some models only support temperature=1.0:
+        # - gpt-5-nano (cheapest tier)
+        # - reasoning models (o1*, o3*, o4* — e.g. o4-mini)
+        is_reasoning = model.startswith(("o1", "o3", "o4"))
+        if (model == "gpt-5-nano" or is_reasoning) and temperature != 1.0:
             logger.warning(
-                "gpt-5-nano only supports temperature=1.0, adjusting",
+                "Model only supports temperature=1.0, adjusting",
+                model=model,
                 requested_temperature=temperature,
             )
             temperature = 1.0
@@ -80,6 +84,10 @@ class OpenAIProvider(AIProvider):
             "temperature": temperature,
         }
 
+        # Enable JSON mode when requested
+        if kwargs.get("response_mime_type") == "application/json":
+            payload["response_format"] = {"type": "json_object"}
+
         response = await self._request(f"{_BASE_URL}/chat/completions", payload)
 
         choices = response.get("choices", [])
@@ -90,12 +98,13 @@ class OpenAIProvider(AIProvider):
             )
 
         choice = choices[0]
+        finish_reason = choice.get("finish_reason", "")
         text = choice.get("message", {}).get("content", "")
         if not text:
             raise AIProviderError(
-                "OpenAI returned empty content",
+                f"OpenAI returned empty content (finish_reason={finish_reason})",
                 provider=self.name,
-                retriable=True,
+                retriable=finish_reason != "content_filter",
             )
 
         usage = response.get("usage", {})

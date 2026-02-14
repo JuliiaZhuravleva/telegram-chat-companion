@@ -82,12 +82,18 @@ class GeminiProvider(AIProvider):
         # Gemini combines system + user prompt into single user message
         full_prompt = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
 
+        response_mime_type = kwargs.get("response_mime_type")
+
+        gen_config: dict[str, Any] = {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+        }
+        if response_mime_type:
+            gen_config["responseMimeType"] = response_mime_type
+
         payload: dict[str, Any] = {
             "contents": [{"role": "user", "parts": [{"text": full_prompt}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-            },
+            "generationConfig": gen_config,
             "safetySettings": _SAFETY_OFF,
         }
 

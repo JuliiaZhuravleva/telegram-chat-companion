@@ -109,6 +109,34 @@ class TestGenerateText:
             with pytest.raises(AIProviderError, match="no candidates"):
                 await provider.generate_text("Test")
 
+    async def test_response_mime_type_included_in_config(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "candidates": [{"content": {"parts": [{"text": '{"key": "value"}'}]}}],
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+            await provider.generate_text(
+                "Test", response_mime_type="application/json"
+            )
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["generationConfig"]["responseMimeType"] == "application/json"
+
+    async def test_response_mime_type_not_included_by_default(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "candidates": [{"content": {"parts": [{"text": "Hello"}]}}],
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+            await provider.generate_text("Test")
+
+        payload = mock_post.call_args[1]["json"]
+        assert "responseMimeType" not in payload["generationConfig"]
+
 
 # -- Embeddings --
 

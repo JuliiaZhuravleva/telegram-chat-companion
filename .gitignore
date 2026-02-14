@@ -91,4 +91,4 @@ tests/manual/
 .playwright-mcp/
 
 # Test screenshots
-telegram-web-*.png
+tests/manual/screenshots/

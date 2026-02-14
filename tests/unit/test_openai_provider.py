@@ -107,8 +107,50 @@ class TestGenerateText:
         )
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
-            with pytest.raises(AIProviderError, match="empty content"):
+            with pytest.raises(AIProviderError, match="empty content.*finish_reason=stop"):
                 await provider.generate_text("Test")
+
+    async def test_empty_content_content_filter_not_retriable(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "choices": [{"message": {"content": ""}, "finish_reason": "content_filter"}],
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            with pytest.raises(AIProviderError) as exc_info:
+                await provider.generate_text("Test")
+
+        assert exc_info.value.retriable is False
+        assert "content_filter" in str(exc_info.value)
+
+    async def test_response_format_json_mode(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "choices": [{"message": {"content": '{"key": "val"}'}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+            await provider.generate_text("Test", response_mime_type="application/json")
+
+        payload = mock_post.call_args[1]["json"]
+        assert payload["response_format"] == {"type": "json_object"}
+
+    async def test_no_response_format_by_default(self, provider):
+        mock_resp = _mock_response(
+            json_data={
+                "choices": [{"message": {"content": "Hello"}, "finish_reason": "stop"}],
+                "usage": {},
+            }
+        )
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+            await provider.generate_text("Test")
+
+        payload = mock_post.call_args[1]["json"]
+        assert "response_format" not in payload
 
 
 # -- Embeddings --
