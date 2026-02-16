@@ -121,7 +121,9 @@ class TextProcessingPipeline:
         # Blocked dispositions
         if response_type == ResponseType.BLACKLISTED:
             return PipelineResult(should_respond=False, response_type=response_type)
-        if response_type == ResponseType.COOLDOWN:
+        # Direct replies to the bot bypass cooldown — the user is explicitly
+        # continuing a conversation, not spamming.
+        if response_type == ResponseType.COOLDOWN and trigger_type != TriggerType.REPLY:
             return PipelineResult(should_respond=False, response_type=response_type)
 
         # --- Stage 2: Gather context in parallel ---

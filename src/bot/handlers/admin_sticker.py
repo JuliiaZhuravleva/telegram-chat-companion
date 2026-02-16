@@ -97,15 +97,13 @@ def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
 # ── Admin reply to sticker notification ──────────────────────────────────
 
 
-@router.message(F.reply_to_message, F.text, IsAdmin())
+@router.message(F.reply_to_message, F.text, F.chat.type == "private", IsAdmin())
 async def handle_admin_sticker_reply(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],
     sticker_service: FromDishka[StickerLearningService],
 ) -> None:
     """Admin replies to sticker notification → merge description."""
-    if message.chat.type != "private":
-        return
     if not message.reply_to_message or not message.text:
         return
 
