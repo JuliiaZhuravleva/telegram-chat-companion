@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
+import time
 
 import structlog
 from aiogram import Bot, F, Router
@@ -28,6 +29,10 @@ from src.utils.telegram import TelegramFileError, download_telegram_file
 
 router = Router(name="media")
 logger = structlog.get_logger(__name__)
+
+# TTL cache for sticker sets that failed registration (avoid repeated API calls)
+_FAILED_SET_REGISTRATION: dict[str, float] = {}
+_FAILED_SET_TTL = 300  # 5 minutes
 
 
 # ── Voice / Video Note ────────────────────────────────────────────────
@@ -315,27 +320,36 @@ async def handle_sticker_message(
         preceding_messages=preceding or None,
     )
 
-    # Register sticker set for admin panel visibility
-    if learning_result.is_new and sticker.set_name:
-        try:
-            existing_set = await sticker_repo.get_sticker_set(sticker.set_name)
-            if not existing_set:
-                tg_set = await bot.get_sticker_set(sticker.set_name)
-                await sticker_repo.upsert_sticker_set(
-                    set_name=tg_set.name,
-                    set_title=tg_set.title,
-                    total_count=len(tg_set.stickers),
-                    thumbnail_file_id=(
-                        tg_set.thumbnail.file_id if tg_set.thumbnail else None
-                    ),
-                    is_animated=any(s.is_animated for s in tg_set.stickers[:1]),
-                    is_video=any(s.is_video for s in tg_set.stickers[:1]),
+    # Register sticker set for admin panel visibility.
+    # Not gated on is_new: if set registration failed on first encounter,
+    # subsequent stickers from the same set will retry (self-healing).
+    # TTL cache prevents hammering the API for persistently failing sets.
+    if sticker.set_name:
+        failed_at = _FAILED_SET_REGISTRATION.get(sticker.set_name)
+        if failed_at and time.monotonic() - failed_at < _FAILED_SET_TTL:
+            pass  # skip — recently failed, wait for TTL
+        else:
+            try:
+                existing_set = await sticker_repo.get_sticker_set(sticker.set_name)
+                if not existing_set:
+                    tg_set = await bot.get_sticker_set(sticker.set_name)
+                    await sticker_repo.upsert_sticker_set(
+                        set_name=tg_set.name,
+                        set_title=tg_set.title,
+                        total_count=len(tg_set.stickers),
+                        thumbnail_file_id=(
+                            tg_set.thumbnail.file_id if tg_set.thumbnail else None
+                        ),
+                        is_animated=any(s.is_animated for s in tg_set.stickers[:1]),
+                        is_video=any(s.is_video for s in tg_set.stickers[:1]),
+                    )
+                _FAILED_SET_REGISTRATION.pop(sticker.set_name, None)
+            except Exception:
+                _FAILED_SET_REGISTRATION[sticker.set_name] = time.monotonic()
+                logger.warning(
+                    "Failed to register sticker set (will retry in 5m)",
+                    set_name=sticker.set_name,
                 )
-        except Exception:
-            logger.warning(
-                "Failed to register sticker set",
-                set_name=sticker.set_name,
-            )
 
     # Notify admins about new stickers
     if learning_result.is_new and not learning_result.analysis_failed:

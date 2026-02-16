@@ -102,7 +102,7 @@ def sticker_set_detail_keyboard(
 
         if failed:
             label = f"{emoji} [FAILED] ({uses}x)"
-        elif visual is None:
+        elif not visual:
             label = f"{emoji} ⏳ ожидает анализа ({uses}x)"
         else:
             desc = str(visual)[:25]

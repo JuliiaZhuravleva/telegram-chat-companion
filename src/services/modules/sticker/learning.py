@@ -862,7 +862,8 @@ class StickerLearningService:
     def _parse_vision_response(text: str) -> dict[str, Any]:
         """Parse JSON from Vision API response.
 
-        Handles JSON wrapped in markdown code blocks and malformed responses.
+        Handles JSON wrapped in markdown code blocks, extra text around JSON,
+        and truncated/malformed responses with multi-level fallback.
         """
         # Strip markdown code block wrapping
         cleaned = text.strip()
@@ -870,22 +871,72 @@ class StickerLearningService:
         cleaned = re.sub(r"\s*```$", "", cleaned)
         cleaned = cleaned.strip()
 
+        data: dict[str, Any] | None = None
+
+        # Attempt 1: direct parse
         try:
-            data = json.loads(cleaned)
+            raw = json.loads(cleaned)
+            if isinstance(raw, dict):
+                data = raw
         except json.JSONDecodeError:
-            logger.warning("Failed to parse vision JSON", raw_text=text[:200],
-                           raw_len=len(text))
-            # Fallback: try to extract "visual" from truncated JSON
-            visual_match = re.search(r'"visual"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned)
+            pass
+
+        # Attempt 2: extract JSON object by finding { ... } boundaries
+        if data is None:
+            brace_start = cleaned.find("{")
+            brace_end = cleaned.rfind("}")
+            if brace_start != -1 and brace_end > brace_start:
+                json_substr = cleaned[brace_start : brace_end + 1]
+                try:
+                    raw = json.loads(json_substr)
+                    if isinstance(raw, dict):
+                        data = raw
+                        logger.info("Extracted JSON from response boundaries")
+                except json.JSONDecodeError:
+                    pass
+
+        # Attempt 3: regex fallback for individual fields
+        if data is None:
+            logger.warning(
+                "Failed to parse vision JSON, trying regex fallback",
+                raw_text=text[:200],
+                raw_len=len(text),
+            )
+
+            def _unescape(s: str) -> str:
+                """Unescape JSON string escapes (\\n, \\\", etc.)."""
+                try:
+                    return json.loads(f'"{s}"')
+                except (json.JSONDecodeError, ValueError):
+                    return s
+
+            result: dict[str, Any] = {}
+            visual_match = re.search(
+                r'"visual"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned
+            )
             if visual_match:
-                logger.info("Extracted visual from truncated JSON via regex")
-                return {"visual": visual_match.group(1)}
-            return {}
+                result["visual"] = _unescape(visual_match.group(1))
+            emotion_match = re.search(
+                r'"emotion"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned
+            )
+            if emotion_match:
+                result["emotion"] = _unescape(emotion_match.group(1))
+            character_match = re.search(
+                r'"character"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned
+            )
+            if character_match and character_match.group(1).lower() not in (
+                "null",
+                "none",
+            ):
+                result["character"] = _unescape(character_match.group(1))
+            if result:
+                logger.info(
+                    "Extracted fields from truncated JSON via regex",
+                    fields=list(result.keys()),
+                )
+            return result
 
-        if not isinstance(data, dict):
-            return {}
-
-        result: dict[str, Any] = {}
+        result = {}
 
         # visual description
         visual = data.get("visual")
