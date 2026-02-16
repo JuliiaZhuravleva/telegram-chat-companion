@@ -1,5 +1,6 @@
 # Telegram Chat Companion
 
+[![CI](https://github.com/JuliiaZhuravleva/telegram-chat-companion/actions/workflows/ci.yml/badge.svg)](https://github.com/JuliiaZhuravleva/telegram-chat-companion/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
@@ -12,47 +13,45 @@ Unlike traditional command-based bots, Telegram Chat Companion:
 
 - **Participates in conversations** — responds to triggers and mentions, not just `/commands`
 - **Remembers context** — RAG-based memory for each chat using pgvector
-- **Multi-provider AI** — Gemini, OpenAI, Grok, DeepSeek, or bring your own
+- **Multi-provider AI** — Gemini, OpenAI, Grok, DeepSeek with automatic fallback
+- **Adaptive responses** — matches conversation tone and message length
 - **Modular design** — enable only the features you need
-- **Easy to extend** — add custom commands in minutes
+- **Easy to extend** — add new AI providers or modules in minutes
 
 ## Supported AI Providers
 
 | Provider | Text | Embeddings | Vision | Transcription |
 |----------|:----:|:----------:|:------:|:-------------:|
+| Gemini   | ✅   | ✅ (free)  | ✅     | ❌            |
 | OpenAI   | ✅   | ✅         | ✅     | ✅            |
-| Gemini   | ✅   | ✅         | ✅     | ❌            |
 | Grok     | ✅   | ❌         | ✅     | ❌            |
 | DeepSeek | ✅   | ✅         | ❌     | ❌            |
-
-More providers coming soon (Anthropic, HuggingFace custom models).
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
+- PostgreSQL 16+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - Telegram Bot Token from [@BotFather](https://t.me/botfather)
 - At least one AI provider API key
 
 ### Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/JuliiaZhuravleva/telegram-chat-companion.git
 cd telegram-chat-companion
 
-# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+source .venv/bin/activate
 
-# Install dependencies
 pip install -e ".[dev]"
 
-# Configure
 cp config/.env.example .env
 # Edit .env with your tokens and database URL
+
+# Initialize database
+psql $DATABASE_URL -f sql/schema.sql
 
 # Run
 python -m src.main
@@ -67,91 +66,80 @@ cp config/.env.example .env
 docker compose up -d
 ```
 
-## Configuration
+## Architecture
 
-### Minimal Bot (text responses only)
-
-```yaml
-# config/local.yml
-modules:
-  rag_memory: true
-  voice_transcription: false
-  sticker_intelligence: false
-  image_analysis: false
-  abuse_filter: false
+```
+Telegram Update
+    → ChatConfigMiddleware (inject per-chat config)
+    → AccessControlMiddleware (whitelist check)
+    → Handler (message/command/media)
+        → TextProcessingPipeline → AI Response
 ```
 
-### Full-Featured Bot
+- **Dependency injection** via [Dishka](https://github.com/reagento/dishka)
+- **Database migrations** via [Alembic](https://alembic.sqlalchemy.org/)
+- **Three-layer config** — YAML defaults → global DB → per-chat DB
+- **Automatic AI fallback** — Gemini → OpenAI → DeepSeek
 
-```yaml
-modules:
-  rag_memory: true
-  voice_transcription: true
-  sticker_intelligence: true
-  image_analysis: true
-  abuse_filter: true
-```
-
-### AI Provider Configuration
-
-```yaml
-ai:
-  default_provider: "gemini"
-
-  tasks:
-    text_generation:
-      provider: "gemini"
-      model: "gemini-2.5-flash"
-      fallback: ["openai", "deepseek"]
-
-    embeddings:
-      provider: "gemini"
-      model: "text-embedding-004"
-      fallback: ["openai"]
-
-    vision:
-      provider: "openai"
-      model: "gpt-4o-mini"
-      fallback: ["gemini"]
-```
+See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 
 ## Features
 
 ### Core
-- **Text responses** with RAG context
-- **Trigger-based activation** — responds to mentions and replies
+- **Text responses** with RAG context and adaptive length
+- **Trigger-based activation** — responds to mentions, replies, and trigger words
 - **Random responses** — occasionally joins conversations naturally
+- **Anti-abuse system** — regex patterns + embedding similarity + SQL-based rate limiting
+
+### Commands
+- `/help` — dynamic feature list based on enabled modules
+- `/summary` — AI-generated chat summary
 
 ### Optional Modules
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually
-- **Abuse filter** — 3-layer detection (regex → embeddings → AI)
-- **Link comments** — extract and comment on YouTube/TikTok/Instagram links
+- **Link comments** — extract and comment on YouTube/TikTok links
+- **Custom rules** — keyword triggers, spam detection, regex matching
 
-## Documentation
+## Configuration
 
-- [Configuration Guide](docs/configuration.md)
-- [AI Providers Setup](docs/ai-providers.md)
-- [Adding Custom Commands](docs/adding-commands.md)
-- [Deployment Guide](docs/deployment.md)
-- [Architecture Overview](docs/architecture.md)
+```yaml
+# config/local.yml — minimal setup
+bot:
+  trigger_words: ["bot", "бот"]
+  random_response_chance: 0.05
+
+ai:
+  default_provider: "gemini"
+  tasks:
+    text_generation:
+      provider: "gemini"
+      model: "gemini-3-flash-preview"
+      fallback: ["openai", "deepseek"]
+    embeddings:
+      provider: "gemini"
+      model: "gemini-embedding-001"
+```
+
+See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Development
 
 ```bash
-# Install dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
-pytest
-
-# Run linter
-ruff check src tests
-
-# Run type checker
-mypy src
+pytest tests/ -v             # Run tests
+ruff check src/ tests/       # Lint
+mypy src/                    # Type check
+pre-commit install           # Set up git hooks
 ```
+
+## Documentation
+
+- [Architecture Overview](docs/architecture.md)
+- [Setup Guide](docs/setup.md)
+- [Configuration Reference](docs/configuration.md)
 
 ## Contributing
 
@@ -159,9 +147,10 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gu
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
-- Built with [aiogram](https://github.com/aiogram/aiogram)
+- Built with [aiogram 3](https://github.com/aiogram/aiogram)
+- Dependency injection by [Dishka](https://github.com/reagento/dishka)
 - Vector search powered by [pgvector](https://github.com/pgvector/pgvector)

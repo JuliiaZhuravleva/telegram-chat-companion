@@ -79,6 +79,11 @@ class ChatConfigService:
         )
         return config
 
+    def is_cached(self, chat_id: int) -> bool:
+        """Check if config for a chat is currently cached and valid."""
+        entry = self._cache.get(chat_id)
+        return entry is not None and entry.expires_at > monotonic()
+
     def invalidate(self, chat_id: int) -> None:
         """Invalidate cache for a specific chat."""
         self._cache.pop(chat_id, None)
@@ -136,8 +141,15 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset({
     "abuse_filter_enabled",
     "sticker_learning_enabled",
     "sticker_response_chance",
+    "sticker_reply_to_sticker_enabled",
+    "sticker_reply_to_sticker_chance",
+    "image_comment_sticker_enabled",
+    "image_comment_sticker_chance",
     "image_analysis_enabled",
     "save_messages",
+    "rules_enabled",
+    "rules_mode",
+    "link_comments_enabled",
 })
 
 

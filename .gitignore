@@ -32,6 +32,10 @@ env/
 *.swp
 *.swo
 *~
+*.code-workspace
+
+# Claude Code
+.claude/
 
 # Environment and secrets
 .env
@@ -79,3 +83,12 @@ schema_backup.sql
 .internal/
 internal/
 migration-notes/
+
+# Manual QA tests (contain chat IDs, bot IDs, test account details)
+tests/manual/
+
+# Playwright MCP artifacts
+.playwright-mcp/
+
+# Test screenshots
+tests/manual/screenshots/

@@ -37,3 +37,16 @@ class ChatConfig:
     sticker_response_chance: float = 0.15
     image_analysis_enabled: bool = True
     save_messages: bool = True
+
+    # Rules engine
+    rules_enabled: bool = False
+    rules_mode: str = "all"
+
+    # Sticker responses
+    sticker_reply_to_sticker_enabled: bool = True
+    sticker_reply_to_sticker_chance: float = 0.5
+    image_comment_sticker_enabled: bool = True
+    image_comment_sticker_chance: float = 0.3
+
+    # Link comments
+    link_comments_enabled: bool = False

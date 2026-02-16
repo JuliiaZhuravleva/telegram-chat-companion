@@ -96,6 +96,13 @@ modules:
       - "vision"
       - "embeddings"
     response_chance: 0.15
+    reply_to_sticker_enabled: true
+    reply_to_sticker_chance: 0.5
+    image_comment_sticker_enabled: true
+    image_comment_sticker_chance: 0.3
+    # Debug mode: save Vision API artifacts (prompt, response, collage image)
+    debug_mode: true
+    debug_retention_days: 7
 
   image_analysis:
     enabled: true
@@ -106,6 +113,9 @@ modules:
     enabled: false  # Disabled by default
     requires:
       - "embeddings"
+
+  rules_engine:
+    enabled: false
 
   link_comments:
     enabled: false

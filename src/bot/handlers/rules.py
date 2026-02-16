@@ -1,0 +1,466 @@
+"""Rules management handlers — admin interface for custom rules.
+
+Callback routes (all DM-only, admin-only):
+- ``adm_rules:{lang}:{page?}``     — chat selection (entry from main menu)
+- ``ar_list:{lang}:{chat_id}:{page}`` — rule list for a chat
+- ``ar_view:{lang}:{rule_id}``     — view rule details
+- ``ar_tog:{lang}:{rule_id}:{chat_id}:{page}`` — toggle on/off
+- ``ar_del:{lang}:{rule_id}:{chat_id}:{page}`` — delete a rule
+- ``ar_add:{lang}:{chat_id}``      — start creation (select type)
+- ``ar_type:{lang}:{chat_id}:{rule_type}`` — selected type, await config
+"""
+
+from __future__ import annotations
+
+import json
+from html import escape
+from typing import Any
+
+import structlog
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+from dishka.integrations.aiogram import FromDishka
+
+from src.bot.keyboards.rules import (
+    rule_detail_keyboard,
+    rule_type_keyboard,
+    rules_chat_list_keyboard,
+    rules_list_keyboard,
+)
+from src.bot.states.admin import AdminStates
+from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.rules import RulesRepository
+from src.models.rules import _VALID_RULE_TYPES
+
+logger = structlog.get_logger(__name__)
+
+router = Router(name="rules")
+
+_PER_PAGE = 5
+
+# ---------------------------------------------------------------------------
+# i18n texts
+# ---------------------------------------------------------------------------
+
+_RULES_TITLE: dict[str, str] = {
+    "ru": "<b>Управление правилами</b>\n\nВыберите чат:",
+    "en": "<b>Rules Management</b>\n\nSelect a chat:",
+}
+
+_RULES_LIST_TITLE: dict[str, str] = {
+    "ru": "<b>Правила чата</b>",
+    "en": "<b>Chat Rules</b>",
+}
+
+_NO_RULES: dict[str, str] = {
+    "ru": "<b>Правила чата</b>\n\nНет правил.",
+    "en": "<b>Chat Rules</b>\n\nNo rules.",
+}
+
+_NO_CHATS: dict[str, str] = {
+    "ru": "<b>Управление правилами</b>\n\nНет чатов в whitelist.",
+    "en": "<b>Rules Management</b>\n\nNo whitelisted chats.",
+}
+
+_NOT_ADMIN: dict[str, str] = {
+    "ru": "У вас нет доступа.",
+    "en": "Access denied.",
+}
+
+_TYPE_SELECTED: dict[str, str] = {
+    "ru": (
+        "<b>Создание правила</b>\n\n"
+        "Тип: <code>{rule_type}</code>\n\n"
+        "Отправьте JSON-конфиг правила.\n\n"
+        "Пример для keyword_trigger:\n"
+        '<code>{{"name": "spam-words", "keywords": ["spam", "buy"], '
+        '"match_type": "contains", "action": "warn_user", '
+        '"warning_message": "No spam!"}}</code>'
+    ),
+    "en": (
+        "<b>Create Rule</b>\n\n"
+        "Type: <code>{rule_type}</code>\n\n"
+        "Send JSON config for the rule.\n\n"
+        "Example for keyword_trigger:\n"
+        '<code>{{"name": "spam-words", "keywords": ["spam", "buy"], '
+        '"match_type": "contains", "action": "warn_user", '
+        '"warning_message": "No spam!"}}</code>'
+    ),
+}
+
+_RULE_CREATED: dict[str, str] = {
+    "ru": "Правило #{rule_id} создано.",
+    "en": "Rule #{rule_id} created.",
+}
+
+_RULE_DELETED: dict[str, str] = {
+    "ru": "Правило удалено.",
+    "en": "Rule deleted.",
+}
+
+_RULE_TOGGLED: dict[str, str] = {
+    "ru": "Правило {status}.",
+    "en": "Rule {status}.",
+}
+
+_INVALID_JSON: dict[str, str] = {
+    "ru": "Невалидный JSON. Попробуйте ещё раз.",
+    "en": "Invalid JSON. Please try again.",
+}
+
+
+def _get_lang(raw: str | None) -> str:
+    return raw if raw in ("ru", "en") else "ru"
+
+
+def _check_admin(data: dict[str, Any]) -> bool:
+    return bool(data.get("is_admin", False))
+
+
+def _is_private(callback: CallbackQuery) -> bool:
+    msg = callback.message
+    if isinstance(msg, Message):
+        return msg.chat.type == "private"
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Entry: chat selection
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("adm_rules:"))
+async def handle_rules_menu(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """Show paginated list of chats to manage rules for."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+
+    await callback.answer()
+
+    # Get enabled chats
+    rows = await chat_settings_repo._pool.fetch(
+        """
+        SELECT chat_id, chat_title, chat_type
+        FROM chat_settings WHERE enabled = true
+        ORDER BY chat_title NULLS LAST, chat_id
+        LIMIT $1 OFFSET $2
+        """,
+        _PER_PAGE,
+        page * _PER_PAGE,
+    )
+    total = await chat_settings_repo._pool.fetchval(
+        "SELECT COUNT(*) FROM chat_settings WHERE enabled = true"
+    ) or 0
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+    chats = [dict(r) for r in rows]
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        text = _NO_CHATS[lang] if not chats else _RULES_TITLE[lang]
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=rules_chat_list_keyboard(lang, chats, page, total_pages),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Rule list for a chat
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("ar_list:"))
+async def handle_rules_list(
+    callback: CallbackQuery,
+    rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
+) -> None:
+    """Show paginated rules for a specific chat."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    chat_id = int(parts[2]) if len(parts) > 2 else 0
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+
+    await callback.answer()
+
+    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# View rule details
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("ar_view:"))
+async def handle_rule_view(
+    callback: CallbackQuery,
+    rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
+) -> None:
+    """Show details for a single rule."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    rule_id = int(parts[2]) if len(parts) > 2 else 0
+
+    await callback.answer()
+
+    rule = await rules_repo.get(rule_id)
+    msg = callback.message
+    if not isinstance(msg, Message):
+        return
+
+    if rule is None:
+        await msg.edit_text(
+            {"ru": "Правило не найдено.", "en": "Rule not found."}.get(lang, ""),
+            parse_mode="HTML",
+        )
+        return
+
+    config = rule.get("config", {})
+    if isinstance(config, str):
+        try:
+            config = json.loads(config)
+        except json.JSONDecodeError:
+            config = {}
+
+    name = escape(config.get("name", f"Rule #{rule_id}"))
+    enabled_icon = "✅" if rule.get("enabled") else "⏸"
+    config_str = escape(json.dumps(config, ensure_ascii=False, indent=2))
+
+    text = (
+        f"<b>{name}</b> {enabled_icon}\n\n"
+        f"<b>ID:</b> {rule_id}\n"
+        f"<b>Type:</b> {escape(str(rule.get('rule_type', '')))}\n"
+        f"<b>Weight:</b> {rule.get('weight', 1)}\n"
+        f"<b>Mandatory:</b> {rule.get('mandatory', False)}\n"
+        f"<b>Triggers:</b> {rule.get('trigger_count', 0)}\n\n"
+        f"<b>Config:</b>\n<pre>{config_str}</pre>"
+    )
+
+    chat_id = rule.get("chat_id", 0)
+    await msg.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=rule_detail_keyboard(lang, rule_id, chat_id),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Toggle rule
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("ar_tog:"))
+async def handle_rule_toggle(
+    callback: CallbackQuery,
+    rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
+) -> None:
+    """Toggle a rule on/off."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    rule_id = int(parts[2]) if len(parts) > 2 else 0
+    chat_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+    rule = await rules_repo.get(rule_id)
+    if rule is None:
+        await callback.answer("Not found", show_alert=True)
+        return
+
+    new_enabled = not rule.get("enabled", True)
+    await rules_repo.toggle(rule_id, enabled=new_enabled)
+
+    status = (
+        {"ru": "включено", "en": "enabled"} if new_enabled
+        else {"ru": "выключено", "en": "disabled"}
+    )
+    await callback.answer(_RULE_TOGGLED[lang].format(status=status.get(lang, "")))
+
+    # Refresh list
+    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Delete rule
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("ar_del:"))
+async def handle_rule_delete(
+    callback: CallbackQuery,
+    rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
+) -> None:
+    """Delete a rule and refresh the list."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    rule_id = int(parts[2]) if len(parts) > 2 else 0
+    chat_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+    await rules_repo.delete(rule_id)
+    await callback.answer(_RULE_DELETED[lang])
+
+    # Refresh list
+    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Add rule: select type
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("ar_add:"))
+async def handle_add_rule(
+    callback: CallbackQuery,
+    **kwargs: Any,
+) -> None:
+    """Show rule type selection."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    chat_id = int(parts[2]) if len(parts) > 2 else 0
+
+    await callback.answer()
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            {"ru": "<b>Тип правила:</b>", "en": "<b>Rule type:</b>"}.get(lang, ""),
+            parse_mode="HTML",
+            reply_markup=rule_type_keyboard(lang, chat_id),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Add rule: type selected → await JSON config
+# ---------------------------------------------------------------------------
+
+@router.callback_query(F.data.startswith("ar_type:"))
+async def handle_type_selected(
+    callback: CallbackQuery,
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """Rule type selected — ask for JSON config via FSM."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    chat_id = int(parts[2]) if len(parts) > 2 else 0
+    rule_type = parts[3] if len(parts) > 3 else ""
+
+    if rule_type not in _VALID_RULE_TYPES:
+        await callback.answer("Invalid type", show_alert=True)
+        return
+
+    await callback.answer()
+
+    # Save context in FSM
+    await state.set_state(AdminStates.awaiting_rule_config)
+    await state.update_data(rule_chat_id=chat_id, rule_type=rule_type, lang=lang)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        text = _TYPE_SELECTED[lang].format(rule_type=escape(rule_type))
+        await msg.edit_text(text, parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# FSM: receive JSON config
+# ---------------------------------------------------------------------------
+
+@router.message(AdminStates.awaiting_rule_config)
+async def handle_rule_config_input(
+    message: Message,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+) -> None:
+    """Receive JSON config and create the rule."""
+    data = await state.get_data()
+    lang = _get_lang(data.get("lang"))
+    chat_id = data.get("rule_chat_id", 0)
+    rule_type = data.get("rule_type", "")
+
+    text = message.text or ""
+    try:
+        config = json.loads(text)
+        if not isinstance(config, dict):
+            raise ValueError  # noqa: TRY301
+    except (json.JSONDecodeError, ValueError):
+        await message.reply(
+            _INVALID_JSON[lang],
+            parse_mode="HTML",
+        )
+        return
+
+    # Create rule
+    rule_id = await rules_repo.create(
+        chat_id=chat_id,
+        rule_type=rule_type,
+        config=config,
+        weight=config.pop("weight", 1),
+        mandatory=config.pop("mandatory", False),
+    )
+
+    await state.clear()
+    await message.reply(
+        _RULE_CREATED[lang].format(rule_id=rule_id),
+        parse_mode="HTML",
+    )
