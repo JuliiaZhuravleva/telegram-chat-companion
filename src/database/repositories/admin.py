@@ -89,6 +89,19 @@ class AdminRepository:
         )
         return dict(row) if row else None
 
+    async def approve_all_for_chat(self, chat_id: int) -> int:
+        """Mark all pending attempts for a chat as approved. Returns count."""
+        result = await self._pool.execute(
+            """
+            UPDATE unauthorized_attempts
+            SET status = 'approved'
+            WHERE chat_id = $1 AND status = 'pending'
+            """,
+            chat_id,
+        )
+        # asyncpg execute returns "UPDATE N" string
+        return int(result.split()[-1]) if result else 0
+
     # -- Statistics --
 
     async def get_message_count(self, interval: timedelta) -> int:
@@ -191,20 +204,30 @@ class AdminRepository:
     async def get_pending_attempts_page(
         self, page: int, per_page: int = 5
     ) -> tuple[list[dict[str, Any]], int]:
-        """Paginated pending attempts (newest first). Returns (attempts, total)."""
+        """Paginated pending attempts (newest first). Returns (attempts, total).
+
+        Excludes attempts for chats that are already whitelisted (enabled).
+        """
+        _where = """
+            ua.status = 'pending'
+            AND NOT EXISTS (
+                SELECT 1 FROM chat_settings cs
+                WHERE cs.chat_id = ua.chat_id AND cs.enabled = true
+            )
+        """
         total = await self._pool.fetchval(
-            "SELECT COUNT(*) FROM unauthorized_attempts WHERE status = 'pending'",
+            f"SELECT COUNT(*) FROM unauthorized_attempts ua WHERE {_where}",  # noqa: S608
         ) or 0
         rows = await self._pool.fetch(
-            """
-            SELECT id, chat_id, chat_title, chat_type,
-                   user_id, user_first_name, user_username,
-                   message_text, created_at
-            FROM unauthorized_attempts
-            WHERE status = 'pending'
-            ORDER BY created_at DESC
+            f"""
+            SELECT ua.id, ua.chat_id, ua.chat_title, ua.chat_type,
+                   ua.user_id, ua.user_first_name, ua.user_username,
+                   ua.message_text, ua.created_at
+            FROM unauthorized_attempts ua
+            WHERE {_where}
+            ORDER BY ua.created_at DESC
             LIMIT $1 OFFSET $2
-            """,
+            """,  # noqa: S608
             per_page,
             page * per_page,
         )

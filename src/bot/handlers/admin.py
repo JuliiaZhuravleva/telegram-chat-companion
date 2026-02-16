@@ -722,11 +722,19 @@ async def _render_wl_chats(
         lines = [f"{_WL_CHATS_TITLE[lang]} ({total})\n"]
         offset = page * _PER_PAGE
         for i, chat in enumerate(chats, start=offset + 1):
-            title = escape(str(chat.get("chat_title") or chat.get("chat_id", "?")))
+            chat_id = chat.get("chat_id", "?")
+            title = chat.get("chat_title")
+            # Fallback: fetch title from Telegram API if not in DB
+            if not title and callback.bot:
+                try:
+                    chat_info = await callback.bot.get_chat(chat_id)
+                    title = chat_info.title or chat_info.full_name
+                except Exception:
+                    pass
+            entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
             ctype = chat.get("chat_type", "")
-            entry = f"{i}. {title}"
             if ctype:
-                entry += f" <i>({escape(str(ctype))})</i>"
+                entry += f" <i>[{escape(str(ctype))}]</i>"
             lines.append(entry)
         text = "\n".join(lines)
 
@@ -825,15 +833,16 @@ async def _render_wl_pending(
         lines = [f"{_WL_PENDING_TITLE[lang]} ({total})\n"]
         offset = page * _PER_PAGE
         for i, attempt in enumerate(attempts, start=offset + 1):
-            title = escape(str(attempt.get("chat_title") or attempt.get("chat_id", "?")))
+            chat_id = attempt.get("chat_id", "?")
+            title = attempt.get("chat_title")
             ctype = attempt.get("chat_type", "")
             user = escape(str(attempt.get("user_first_name") or ""))
             uname = attempt.get("user_username")
             user_display = f"@{escape(str(uname))}" if uname else (user or "?")
 
-            entry = f"{i}. {title}"
+            entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
             if ctype:
-                entry += f" ({escape(str(ctype))})"
+                entry += f" <i>[{escape(str(ctype))}]</i>"
             entry += f"\n    👤 {user_display}"
 
             msg_text = attempt.get("message_text")
@@ -865,9 +874,14 @@ async def _do_approve(
     attempt = await admin_repo.get_attempt(attempt_id)
     if not attempt or attempt.get("status") != "pending":
         return None
-    await admin_repo.update_attempt_status(attempt_id, "approved")
     chat_id = attempt["chat_id"]
-    await chat_settings_repo.upsert(chat_id, enabled=True)
+    await admin_repo.approve_all_for_chat(chat_id)
+    fields: dict[str, Any] = {"enabled": True}
+    if attempt.get("chat_title"):
+        fields["chat_title"] = attempt["chat_title"]
+    if attempt.get("chat_type"):
+        fields["chat_type"] = attempt["chat_type"]
+    await chat_settings_repo.upsert(chat_id, **fields)
     return attempt
 
 

@@ -1,7 +1,7 @@
 """Markdown → Telegram-safe HTML converter.
 
 ADR-012: Convert a subset of Markdown to Telegram-compatible HTML tags.
-Handles: bold, italic, code, pre, strikethrough, blockquote.
+Handles: headings, bold, italic, code, pre, strikethrough, blockquote, lists.
 Escapes all raw HTML entities first, then applies conversions.
 """
 
@@ -14,12 +14,15 @@ def markdown_to_html(text: str) -> str:
     """Convert Markdown-formatted text to Telegram-compatible HTML.
 
     Supported conversions:
+    - ``# text``, ``## text``, ``### text`` → ``▎<b>text</b>``
     - ``**text**`` or ``__text__`` → ``<b>text</b>``
     - ``*text*`` or ``_text_`` → ``<i>text</i>``
     - `` `text` `` → ``<code>text</code>``
     - ````text```` → ``<pre>text</pre>``
     - ``~~text~~`` → ``<s>text</s>``
     - ``> text`` (line start) → ``<blockquote>text</blockquote>``
+    - ``- text`` → ``• text``
+    - ``---`` or ``***`` → (stripped)
     """
     # 1. Escape HTML entities (must be first)
     text = _escape_html(text)
@@ -46,10 +49,16 @@ def markdown_to_html(text: str) -> str:
     # 7. Blockquote: > at line start
     text = _convert_blockquotes(text)
 
-    # 8. Restore inline code
+    # 8. Headings: # / ## / ### at line start → ▎<b>text</b>
+    text = _convert_headings(text)
+
+    # 9. Lists: - item → • item; horizontal rules → blank line
+    text = _convert_lists(text)
+
+    # 10. Restore inline code
     text = _restore_inline_code(text, inline_codes)
 
-    # 9. Restore code blocks
+    # 11. Restore code blocks
     text = _restore_code_blocks(text, code_blocks)
 
     return text
@@ -109,6 +118,23 @@ def _restore_inline_code(text: str, store: list[str]) -> str:
             _INLINE_CODE_PLACEHOLDER.format(idx),
             f"<code>{content}</code>",
         )
+    return text
+
+
+_HEADING_RE = re.compile(r"^(#{1,3})\s+(.+)$", re.MULTILINE)
+_HRULE_RE = re.compile(r"^[-*]{3,}\s*$", re.MULTILINE)
+_LIST_ITEM_RE = re.compile(r"^(\s*)[-*]\s+(.+)$", re.MULTILINE)
+
+
+def _convert_headings(text: str) -> str:
+    """Convert ``# text`` / ``## text`` / ``### text`` → ``▎<b>text</b>``."""
+    return _HEADING_RE.sub(r"▎<b>\2</b>", text)
+
+
+def _convert_lists(text: str) -> str:
+    """Convert ``- item`` → ``• item`` and strip horizontal rules."""
+    text = _HRULE_RE.sub("", text)
+    text = _LIST_ITEM_RE.sub(r"\1• \2", text)
     return text
 
 

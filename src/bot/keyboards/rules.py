@@ -54,8 +54,9 @@ def rules_chat_list_keyboard(
     """Paginated list of enabled chats to manage rules for."""
     rows: list[list[InlineKeyboardButton]] = []
     for chat in chats:
-        title = str(chat.get("chat_title") or chat.get("chat_id", "?"))
-        label = escape(title)
+        chat_id = chat.get("chat_id", "?")
+        title = chat.get("chat_title")
+        label = f"{title} ({chat_id})" if title else str(chat_id)
         if len(label) > 40:
             label = label[:37] + "..."
         rows.append([

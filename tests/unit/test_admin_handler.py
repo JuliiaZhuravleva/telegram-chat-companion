@@ -469,16 +469,14 @@ class TestApproveNotification:
         admin_repo.get_attempt = AsyncMock(
             return_value={"id": 42, "chat_id": -100, "status": "pending"}
         )
-        admin_repo.update_attempt_status = AsyncMock(
-            return_value={"id": 42, "status": "approved"}
-        )
+        admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
         chat_settings_repo = _make_chat_settings_repo()
 
         await handle_approve_notification(
             cb, admin_repo, chat_settings_repo, is_admin=True
         )
 
-        admin_repo.update_attempt_status.assert_awaited_once_with(42, "approved")
+        admin_repo.approve_all_for_chat.assert_awaited_once_with(-100)
         chat_settings_repo.upsert.assert_awaited_once_with(-100, enabled=True)
         cb.message.edit_reply_markup.assert_awaited_once()
 
@@ -555,9 +553,7 @@ class TestWlApprove:
         admin_repo.get_attempt = AsyncMock(
             return_value={"id": 42, "chat_id": -100, "status": "pending"}
         )
-        admin_repo.update_attempt_status = AsyncMock(
-            return_value={"id": 42, "status": "approved"}
-        )
+        admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
         admin_repo.get_pending_attempts_page = AsyncMock(return_value=([], 0))
         chat_settings_repo = _make_chat_settings_repo()
 
@@ -565,7 +561,7 @@ class TestWlApprove:
             cb, admin_repo, chat_settings_repo, is_admin=True
         )
 
-        admin_repo.update_attempt_status.assert_awaited_once_with(42, "approved")
+        admin_repo.approve_all_for_chat.assert_awaited_once_with(-100)
         chat_settings_repo.upsert.assert_awaited_once_with(-100, enabled=True)
         # Should re-render pending list
         cb.message.edit_text.assert_awaited_once()
