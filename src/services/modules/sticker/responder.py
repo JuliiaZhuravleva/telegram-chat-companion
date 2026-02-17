@@ -19,6 +19,28 @@ logger = structlog.get_logger(__name__)
 # Pattern to match STICKER:<file_id> in AI responses
 _STICKER_MARKER_RE = re.compile(r"STICKER:([A-Za-z0-9_-]+)")
 
+# Emoji sentiment sets for reranking sticker candidates
+_NEGATIVE_EMOJI: frozenset[str] = frozenset({
+    "\U0001f621",  # pouting face
+    "\U0001f620",  # angry face
+    "\U0001f92c",  # face with symbols on mouth
+    "\U0001f47f",  # angry face with horns
+    "\U0001f4a2",  # anger symbol
+    "\U0001f44e",  # thumbs down
+    "\U0001f622",  # crying face
+    "\U0001f62d",  # loudly crying face
+    "\U0001f616",  # confounded face
+    "\U0001f624",  # face with steam from nose
+})
+
+_POSITIVE_CONTEXT_RE = re.compile(
+    r"(?:привет|здравств|добр|hello|hi\b|hey\b|good morning|доброе утро|"
+    r"спасибо|благодар|thank|congrat|поздрав|ура\b|класс\b|отлично|круто)",
+    re.IGNORECASE,
+)
+
+_SENTIMENT_PENALTY = 0.05
+
 
 class StickerResponderService:
     """Select stickers for bot responses and format prompt candidates."""
@@ -38,10 +60,30 @@ class StickerResponderService:
         limit: int = 3,
         min_similarity: float = 0.6,
     ) -> list[StickerSearchResult]:
-        """Get top sticker candidates for injection into AI prompt."""
-        return await self._sticker.search(
-            context, limit=limit, min_similarity=min_similarity
+        """Get top sticker candidates for injection into AI prompt.
+
+        Fetches extra candidates and applies emoji sentiment reranking
+        to avoid sending angry stickers with friendly messages.
+        """
+        raw = await self._sticker.search(
+            context, limit=limit + 3, min_similarity=min_similarity
         )
+
+        if not raw:
+            return []
+
+        # Apply emoji sentiment reranking
+        scored: list[tuple[float, StickerSearchResult]] = []
+        for candidate in raw:
+            penalty = (
+                _SENTIMENT_PENALTY
+                if _has_sentiment_mismatch(candidate, context)
+                else 0.0
+            )
+            scored.append((candidate.similarity - penalty, candidate))
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        return [c for _, c in scored[:limit]]
 
     async def find_sticker_for_sticker_reply(
         self,
@@ -117,3 +159,20 @@ class StickerResponderService:
         cleaned = cleaned.strip()
 
         return file_id, cleaned
+
+
+def _has_sentiment_mismatch(
+    candidate: StickerSearchResult,
+    context: str,
+) -> bool:
+    """Check if sticker emoji sentiment contradicts message sentiment.
+
+    Only penalises when context is clearly positive/friendly
+    and the sticker emoji is negative.
+    """
+    if not candidate.emoji:
+        return False
+    return (
+        candidate.emoji in _NEGATIVE_EMOJI
+        and bool(_POSITIVE_CONTEXT_RE.search(context))
+    )

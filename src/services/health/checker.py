@@ -34,10 +34,13 @@ class HealthChecker:
     Receives pool and bot directly from main().
     """
 
+    _FORCE_CHECK_COOLDOWN = 60.0  # seconds between on-demand checks
+
     def __init__(self, pool: asyncpg.Pool, bot: Bot) -> None:
         self._pool = pool
         self._bot = bot
         self._task: asyncio.Task[None] | None = None
+        self._last_forced_at: float = 0.0
 
     async def start(self) -> None:
         """Start the health check background loop."""
@@ -51,6 +54,47 @@ class HealthChecker:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         logger.info("Health checker stopped")
+
+    async def run_check_now(self) -> tuple[HealthCheckResult, bool]:
+        """Run an immediate health check on demand (for admin panel).
+
+        Unlike the background loop, does NOT send alerts or write
+        the Docker healthcheck file.  Enforces a 60-second cooldown
+        to prevent DB flooding from rapid button clicks.
+
+        Returns:
+            (result, from_cache) — from_cache is True when cooldown was active.
+        """
+        now = time.monotonic()
+        if now - self._last_forced_at < self._FORCE_CHECK_COOLDOWN:
+            # Return the latest persisted result instead of running again
+            health_repo = HealthRepository(self._pool)
+            row = await health_repo.get_latest()
+            if row:
+                return HealthCheckResult(
+                    status=HealthStatus(row["status"]),
+                    db_ok=row.get("db_ok", True),
+                    messages_30m=row.get("messages_30m", 0),
+                    fallbacks_15m=row.get("fallbacks_15m", 0),
+                    ai_provider=row.get("ai_provider"),
+                    issues=[],
+                ), True
+        self._last_forced_at = now
+        result = await self._run_check()
+        health_repo = HealthRepository(self._pool)
+        await health_repo.insert_log(
+            status=result.status.value,
+            db_ok=result.db_ok,
+            messages_30m=result.messages_30m,
+            fallbacks_15m=result.fallbacks_15m,
+            ai_provider=result.ai_provider,
+            issues=[
+                {"severity": i.severity.value, "message": i.message}
+                for i in result.issues
+            ],
+            alert_sent=False,
+        )
+        return result, False
 
     # ------------------------------------------------------------------
     # Main loop

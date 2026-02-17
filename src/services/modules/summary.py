@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import structlog
 
 from src.database.repositories.messages import MessageRepository
@@ -90,5 +92,14 @@ class SummaryService:
             if language == "ru":
                 return "Не удалось создать саммари. Попробуйте позже."
             return "Failed to generate summary. Please try again later."
+
+        asyncio.ensure_future(self._ai.log_usage(
+            task_type="text",
+            provider=result.provider,
+            model=result.model,
+            chat_id=chat_id,
+            tokens_input=result.tokens_input,
+            tokens_output=result.tokens_output,
+        ))
 
         return markdown_to_html(header + result.text)

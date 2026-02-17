@@ -157,13 +157,18 @@ def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 
 def health_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Health status view with refresh and back."""
+    """Health status view with refresh, force check, and back."""
     refresh_label = {"ru": "🔄 Обновить", "en": "🔄 Refresh"}
+    force_label = {"ru": "⚡ Проверить", "en": "⚡ Check Now"}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
                 text=refresh_label.get(lang, "Refresh"),
                 callback_data=f"adm_health:{lang}",
+            ),
+            InlineKeyboardButton(
+                text=force_label.get(lang, "Check Now"),
+                callback_data=f"adm_health_force:{lang}",
             ),
         ],
         [

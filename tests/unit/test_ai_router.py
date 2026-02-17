@@ -278,7 +278,7 @@ class TestCentralizedLogging:
 
     @pytest.mark.asyncio
     async def test_embedding_logs_usage(self, mock_provider, mock_router_settings):
-        """Embedding call should fire _log_usage via ensure_future."""
+        """Embedding call should fire log_usage via ensure_future."""
         embedding_result = EmbeddingResult(
             embedding=[0.1] * 768, model="mock-embed", provider="gemini",
             dimensions=768, tokens_input=42,
@@ -311,7 +311,7 @@ class TestCentralizedLogging:
 
     @pytest.mark.asyncio
     async def test_vision_logs_usage(self, mock_provider, mock_router_settings):
-        """Vision call should fire _log_usage."""
+        """Vision call should fire log_usage."""
         vision_result = VisionResult(
             text="a cat", model="mock-vision", provider="openai",
             tokens_input=100, tokens_output=10,
@@ -341,7 +341,7 @@ class TestCentralizedLogging:
 
     @pytest.mark.asyncio
     async def test_transcription_logs_usage(self, mock_provider, mock_router_settings):
-        """Transcription call should fire _log_usage."""
+        """Transcription call should fire log_usage."""
         transcription_result = TranscriptionResult(
             text="hello", model="whisper-1", provider="openai",
             language="en", duration=2.5,
@@ -374,7 +374,7 @@ class TestCentralizedLogging:
     async def test_text_generation_does_not_log(
         self, mock_provider, make_router, mock_router_settings,
     ):
-        """generate_text should NOT call _log_usage (pipeline does it)."""
+        """generate_text should NOT call log_usage (pipeline does it)."""
         provider = mock_provider(name="gemini")
 
         task_config = MagicMock()
@@ -395,6 +395,46 @@ class TestCentralizedLogging:
         await asyncio.sleep(0.05)
 
         mock_repo.log.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_log_usage_public_with_chat_id(self, mock_router_settings):
+        """log_usage is public and passes chat_id to the repo."""
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+
+        await router.log_usage(
+            task_type="text",
+            provider="openai",
+            model="o4-mini",
+            chat_id=12345,
+            tokens_input=100,
+            tokens_output=50,
+        )
+
+        mock_repo.log.assert_awaited_once()
+        call_args = mock_repo.log.call_args
+        assert call_args.args[0] == 12345  # chat_id positional
+        assert call_args.kwargs["task_type"] == "text"
+        assert call_args.kwargs["model"] == "o4-mini"
+
+    @pytest.mark.asyncio
+    async def test_log_usage_defaults_chat_id_to_zero(self, mock_router_settings):
+        """log_usage defaults chat_id to 0 when not specified."""
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+
+        await router.log_usage(
+            task_type="text",
+            provider="gemini",
+            model="gemini-3-flash",
+        )
+
+        call_args = mock_repo.log.call_args
+        assert call_args.args[0] == 0  # default chat_id
 
 
 class TestClose:

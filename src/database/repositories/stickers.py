@@ -140,6 +140,7 @@ class StickerRepository:
             SELECT
                 file_id, file_unique_id, visual_description, emotion,
                 character_or_meme, suggested_contexts, usage_contexts,
+                emoji,
                 1 - (description_embedding <=> $1) AS similarity,
                 total_uses, bot_uses
             FROM sticker_knowledge

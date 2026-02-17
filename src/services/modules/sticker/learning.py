@@ -329,6 +329,7 @@ class StickerLearningService:
                 similarity=float(r["similarity"]),
                 total_uses=r["total_uses"],
                 bot_uses=r["bot_uses"],
+                emoji=r.get("emoji"),
             )
             for r in records
         ]
@@ -473,6 +474,14 @@ class StickerLearningService:
                 temperature=0.4,
                 response_mime_type="application/json",
             )
+            # chat_id omitted (defaults to 0) — admin-initiated, no chat context
+            asyncio.ensure_future(self._ai.log_usage(
+                task_type="text",
+                provider=ai_result.provider,
+                model=ai_result.model,
+                tokens_input=ai_result.tokens_input,
+                tokens_output=ai_result.tokens_output,
+            ))
             parsed = self._parse_vision_response(ai_result.text)
             new_visual = parsed.get("visual")
             if not new_visual:
@@ -546,6 +555,14 @@ class StickerLearningService:
                 ),
                 timeout=5.0,
             )
+            # chat_id omitted (defaults to 0) — background pack context lookup
+            asyncio.ensure_future(self._ai.log_usage(
+                task_type="text",
+                provider=result.provider,
+                model=result.model,
+                tokens_input=result.tokens_input,
+                tokens_output=result.tokens_output,
+            ))
             parsed = self._parse_vision_response(result.text)
             character = parsed.get("character")
             context = parsed.get("context") if isinstance(parsed.get("context"), str) else None

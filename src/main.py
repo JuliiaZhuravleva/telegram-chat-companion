@@ -143,6 +143,7 @@ async def main() -> None:
     # Start background tasks
     health_checker = HealthChecker(pool=pool, bot=bot)
     await health_checker.start()
+    dp["health_checker"] = health_checker
 
     sticker_sync = StickerSetSyncScheduler(pool=pool, bot=bot)
     await sticker_sync.start()

@@ -10,7 +10,7 @@ All callbacks embed language in callback_data for stateless operation:
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from html import escape
 from typing import Any
 
@@ -39,6 +39,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.response_log import ResponseLogRepository
+from src.services.health.models import HealthCheckResult
 
 logger = structlog.get_logger(__name__)
 
@@ -583,7 +584,7 @@ def _format_health_status(row: dict[str, Any], lang: str) -> str:
     """Format a health_log row for display in admin panel."""
     import json as _json
 
-    status = str(row.get("status", "unknown")).upper()
+    status = escape(str(row.get("status", "unknown")).upper())
     status_emoji = {
         "HEALTHY": "\u2705",
         "WARNING": "\u26a0\ufe0f",
@@ -596,6 +597,19 @@ def _format_health_status(row: dict[str, Any], lang: str) -> str:
     time_str = (
         checked_at.strftime("%Y-%m-%d %H:%M UTC") if checked_at else "?"
     )
+
+    # Add relative time indicator
+    if checked_at:
+        ca = checked_at if checked_at.tzinfo else checked_at.replace(tzinfo=UTC)
+        minutes = int((datetime.now(UTC) - ca).total_seconds() / 60)
+        if minutes < 1:
+            time_str += " (just now)" if lang == "en" else " (только что)"
+        elif minutes < 60:
+            time_str += f" ({minutes} min ago)" if lang == "en" else f" ({minutes} мин назад)"
+        elif minutes < 1440:
+            time_str += f" ({minutes // 60}h ago)" if lang == "en" else f" ({minutes // 60}ч назад)"
+        else:
+            time_str += f" ({minutes // 1440}d ago)" if lang == "en" else f" ({minutes // 1440}д назад)"
 
     db_ok = row.get("db_ok", True)
     db_icon = "\u2705" if db_ok else "\u274c"
@@ -642,6 +656,64 @@ def _format_health_status(row: dict[str, Any], lang: str) -> str:
     return "\n".join(lines)
 
 
+def _format_health_result(result: HealthCheckResult, lang: str) -> str:
+    """Format a HealthCheckResult dataclass for display in admin panel."""
+    status = escape(result.status.value.upper())
+    status_emoji = {
+        "HEALTHY": "\u2705",
+        "WARNING": "\u26a0\ufe0f",
+        "CRITICAL": "\U0001f6a8",
+        "SKIPPED": "\u23ed\ufe0f",
+    }
+    emoji = status_emoji.get(status, "\u2753")
+
+    checked_at = result.checked_at
+    time_str = checked_at.strftime("%Y-%m-%d %H:%M UTC")
+    ca = checked_at if checked_at.tzinfo else checked_at.replace(tzinfo=UTC)
+    minutes = int((datetime.now(UTC) - ca).total_seconds() / 60)
+    if minutes < 1:
+        time_str += " (just now)" if lang == "en" else " (только что)"
+    elif minutes < 60:
+        time_str += f" ({minutes} min ago)" if lang == "en" else f" ({minutes} мин назад)"
+    elif minutes < 1440:
+        time_str += f" ({minutes // 60}h ago)" if lang == "en" else f" ({minutes // 60}ч назад)"
+    else:
+        time_str += f" ({minutes // 1440}d ago)" if lang == "en" else f" ({minutes // 1440}д назад)"
+
+    db_icon = "\u2705" if result.db_ok else "\u274c"
+
+    if lang == "ru":
+        lines = [
+            f"{emoji} <b>Состояние бота</b>",
+            f"<b>Статус:</b> {status}",
+            f"<b>Время:</b> {time_str}",
+            "",
+            f"{db_icon} База данных",
+            f"\U0001f4ac Сообщений (30м): {result.messages_30m}",
+            f"\U0001f504 Фоллбэков (15м): {result.fallbacks_15m}",
+        ]
+    else:
+        lines = [
+            f"{emoji} <b>Bot Health</b>",
+            f"<b>Status:</b> {status}",
+            f"<b>Time:</b> {time_str}",
+            "",
+            f"{db_icon} Database",
+            f"\U0001f4ac Messages (30m): {result.messages_30m}",
+            f"\U0001f504 Fallbacks (15m): {result.fallbacks_15m}",
+        ]
+
+    if result.issues:
+        lines.append("")
+        lines.append("<b>Issues:</b>" if lang == "en" else "<b>Проблемы:</b>")
+        for issue in result.issues:
+            sev = issue.severity.value
+            icon = "\U0001f525" if sev == "critical" else "\u26a0\ufe0f"
+            lines.append(f"  {icon} {escape(issue.message)}")
+
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data.startswith("adm_health:"))
 async def handle_health(
     callback: CallbackQuery,
@@ -663,6 +735,46 @@ async def handle_health(
         text = f"{_HEALTH_TITLE[lang]}\n\n{_HEALTH_NO_DATA[lang]}"
     else:
         text = _format_health_status(latest, lang)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=health_keyboard(lang),
+        )
+
+
+@router.callback_query(F.data.startswith("adm_health_force:"))
+async def handle_health_force(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Run an immediate health check and display results."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+
+    checker = kwargs.get("health_checker")
+    if checker is not None:
+        result, from_cache = await checker.run_check_now()
+        if from_cache:
+            toast = "Cached (cooldown 60s)" if lang == "en" else "Кэш (cooldown 60с)"
+            await callback.answer(toast, show_alert=False)
+        else:
+            await callback.answer()
+        text = _format_health_result(result, lang)
+    else:
+        await callback.answer()
+        latest = await admin_repo.get_latest_health_check()
+        if latest is None:
+            text = f"{_HEALTH_TITLE[lang]}\n\n{_HEALTH_NO_DATA[lang]}"
+        else:
+            text = _format_health_status(latest, lang)
 
     msg = callback.message
     if isinstance(msg, Message):

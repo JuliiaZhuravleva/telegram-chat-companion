@@ -35,3 +35,4 @@ class StickerSearchResult:
     similarity: float
     total_uses: int
     bot_uses: int
+    emoji: str | None = None

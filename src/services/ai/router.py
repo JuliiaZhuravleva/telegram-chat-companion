@@ -117,17 +117,22 @@ class AIRouter:
         }
         return bool(api_keys.get(provider_name))
 
-    async def _log_usage(
+    async def log_usage(
         self,
         *,
         task_type: str,
         provider: str,
         model: str,
+        chat_id: int = 0,
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         duration_seconds: float | None = None,
     ) -> None:
-        """Log AI usage with cost calculation. Non-critical."""
+        """Log AI usage with cost calculation. Non-critical.
+
+        Public so that callers of generate_text() outside the text pipeline
+        (e.g. summary, sticker merge) can record their own costs.
+        """
         if self._response_log is None:
             return
         try:
@@ -138,7 +143,7 @@ class AIRouter:
                 duration_minutes=duration_seconds / 60.0 if duration_seconds else None,
             )
             await self._response_log.log(
-                0,  # no chat_id for internal calls
+                chat_id,
                 provider=provider,
                 model=model,
                 tokens_input=tokens_input,
@@ -261,7 +266,7 @@ class AIRouter:
                     model=model,
                     **kwargs,
                 )
-                asyncio.ensure_future(self._log_usage(
+                asyncio.ensure_future(self.log_usage(
                     task_type="embedding",
                     provider=result.provider,
                     model=result.model,
@@ -311,7 +316,7 @@ class AIRouter:
                     prompt=prompt,
                     **kwargs,
                 )
-                asyncio.ensure_future(self._log_usage(
+                asyncio.ensure_future(self.log_usage(
                     task_type="vision",
                     provider=result.provider,
                     model=result.model,
@@ -362,7 +367,7 @@ class AIRouter:
                     language=language,
                     **kwargs,
                 )
-                asyncio.ensure_future(self._log_usage(
+                asyncio.ensure_future(self.log_usage(
                     task_type="transcription",
                     provider=result.provider,
                     model=result.model,

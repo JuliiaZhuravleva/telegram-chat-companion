@@ -48,6 +48,7 @@ def sticker_service():
             dimensions=768,
         )
     )
+    ai_router.log_usage = AsyncMock()
 
     repo = MagicMock()
     repo.get_by_file_unique_id = AsyncMock(return_value=None)
