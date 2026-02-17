@@ -170,6 +170,17 @@ def _is_private(callback: CallbackQuery) -> bool:
     return False
 
 
+def _guard_admin(data: dict[str, Any], callback: CallbackQuery) -> bool:
+    """Check admin + private chat, log denial for audit trail."""
+    if not _check_admin(data):
+        user_obj = data.get("event_from_user")
+        uid = getattr(user_obj, "id", None) if user_obj else None
+        action = (callback.data or "").split(":")[0]
+        logger.warning("admin_access_denied", user_id=uid, action=action)
+        return False
+    return _is_private(callback)
+
+
 # ---------------------------------------------------------------------------
 # Commands: /admin, /settings
 # ---------------------------------------------------------------------------
@@ -199,7 +210,7 @@ async def handle_admin_command(
 @router.callback_query(F.data.startswith("adm_menu:"))
 async def handle_menu(callback: CallbackQuery, **kwargs: Any) -> None:
     """Show or return to main menu."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", "Access denied."), show_alert=True)
         return
 
@@ -224,7 +235,7 @@ async def handle_menu(callback: CallbackQuery, **kwargs: Any) -> None:
 @router.callback_query(F.data.startswith("adm_lang:"))
 async def handle_language_menu(callback: CallbackQuery, **kwargs: Any) -> None:
     """Show language selection menu."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -255,7 +266,7 @@ async def handle_language_set(
     **kwargs: Any,
 ) -> None:
     """Save admin language preference."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -282,7 +293,7 @@ async def handle_language_set(
 @router.callback_query(F.data.startswith("adm_close:"))
 async def handle_close(callback: CallbackQuery, **kwargs: Any) -> None:
     """Close admin panel (delete message)."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -302,7 +313,7 @@ async def handle_close(callback: CallbackQuery, **kwargs: Any) -> None:
 @router.callback_query(F.data.startswith("adm_wl:"))
 async def handle_whitelist_menu(callback: CallbackQuery, **kwargs: Any) -> None:
     """Show whitelist management menu."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -336,7 +347,7 @@ async def handle_stats(
     **kwargs: Any,
 ) -> None:
     """Show bot statistics for a given period."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -404,7 +415,7 @@ async def handle_costs(
     **kwargs: Any,
 ) -> None:
     """Show AI cost breakdown for a given period."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -497,7 +508,7 @@ async def handle_costs_verify(
     """Cross-check our calculated costs with OpenAI billing API."""
     from src.services.ai.billing import OpenAIBillingClient
 
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -649,7 +660,7 @@ async def handle_health(
     **kwargs: Any,
 ) -> None:
     """Show latest health check result."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -685,7 +696,7 @@ async def handle_wl_chats(
     **kwargs: Any,
 ) -> None:
     """Show paginated list of whitelisted chats."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -760,7 +771,7 @@ async def handle_wl_remove(
     **kwargs: Any,
 ) -> None:
     """Remove a chat from the whitelist."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -796,7 +807,7 @@ async def handle_wl_pending(
     **kwargs: Any,
 ) -> None:
     """Show paginated list of pending access requests."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -910,7 +921,7 @@ async def handle_approve_notification(
     **kwargs: Any,
 ) -> None:
     """Approve access from inline notification message."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -947,7 +958,7 @@ async def handle_reject_notification(
     **kwargs: Any,
 ) -> None:
     """Reject access from inline notification message."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -990,7 +1001,7 @@ async def handle_wl_approve(
     **kwargs: Any,
 ) -> None:
     """Approve access from admin panel pending list."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -1025,7 +1036,7 @@ async def handle_wl_reject(
     **kwargs: Any,
 ) -> None:
     """Reject access from admin panel pending list."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -1084,7 +1095,7 @@ async def handle_notifications_menu(
     **kwargs: Any,
 ) -> None:
     """Show notification settings menu."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -1110,7 +1121,7 @@ async def handle_sticker_notification_cycle(
     **kwargs: Any,
 ) -> None:
     """Cycle sticker notification mode: off → on → detailed → off."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -1149,7 +1160,7 @@ async def handle_notification_toggle(
     **kwargs: Any,
 ) -> None:
     """Toggle a boolean notification type on/off."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
@@ -1184,7 +1195,7 @@ async def handle_notification_toggle(
 
 async def _placeholder_callback(callback: CallbackQuery, **kwargs: Any) -> None:
     """Generic placeholder: show alert and keep the current screen."""
-    if not _check_admin(kwargs) or not _is_private(callback):
+    if not _guard_admin(kwargs, callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
 
