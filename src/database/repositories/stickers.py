@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncpg
 
 
@@ -309,7 +311,7 @@ class StickerRepository:
         offset: int = 0,
     ) -> list[asyncpg.Record]:
         """Get all sticker sets with learned sticker counts."""
-        return await self._pool.fetch(
+        return await self._pool.fetch(  # type: ignore[no-any-return]
             """
             SELECT
                 ss.set_name, ss.set_title, ss.total_count,
@@ -340,7 +342,7 @@ class StickerRepository:
         offset: int = 0,
     ) -> list[asyncpg.Record]:
         """Get stickers in a specific set (paginated)."""
-        return await self._pool.fetch(
+        return await self._pool.fetch(  # type: ignore[no-any-return]
             """
             SELECT file_unique_id, file_id, emoji, visual_description,
                    emotion, character_or_meme, total_uses, bot_uses,
@@ -390,6 +392,24 @@ class StickerRepository:
         )
         assert row is not None
         return int(row["id"])
+
+    async def get_latest_sticker_msg(
+        self,
+        admin_id: int,
+        chat_id: int,
+    ) -> int | None:
+        """Get the most recent sticker_msg_id for an admin in a chat."""
+        val = await self._pool.fetchval(
+            """
+            SELECT sticker_msg_id FROM admin_sticker_notifications
+            WHERE admin_id = $1 AND chat_id = $2 AND sticker_msg_id > 0
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            admin_id,
+            chat_id,
+        )
+        return int(val) if val else None
 
     async def get_notification_by_reply(
         self,
@@ -454,7 +474,7 @@ class StickerRepository:
         limit: int = 10,
     ) -> list[asyncpg.Record]:
         """Get sets needing refresh (stale or missing from cache)."""
-        return await self._pool.fetch(
+        return await self._pool.fetch(  # type: ignore[no-any-return]
             """
             SELECT DISTINCT sk.set_name
             FROM sticker_knowledge sk
