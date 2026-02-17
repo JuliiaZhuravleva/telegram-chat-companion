@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.types import Message
 
 from src.bot.handlers.admin_sticker import (
     _extract_file_unique_id_from_reply,
@@ -260,7 +261,7 @@ def _make_callback(
     cb.from_user.id = user_id
     cb.answer = AsyncMock()
 
-    msg = MagicMock()
+    msg = MagicMock(spec=Message)
     msg.chat = MagicMock()
     msg.chat.id = user_id
     msg.chat.type = chat_type
@@ -291,6 +292,7 @@ def _make_sticker_repo(
     sticker: dict | None = None,
     set_count: int = 0,
     sticker_count: int = 0,
+    latest_sticker_msg: int | None = None,
 ) -> MagicMock:
     repo = MagicMock()
     repo.get_by_file_unique_id = AsyncMock(return_value=sticker or _SAMPLE_STICKER)
@@ -298,6 +300,8 @@ def _make_sticker_repo(
     repo.get_stickers_in_set = AsyncMock(return_value=[])
     repo.count_sets = AsyncMock(return_value=set_count)
     repo.get_all_sets_with_stats = AsyncMock(return_value=[])
+    repo.get_latest_sticker_msg = AsyncMock(return_value=latest_sticker_msg)
+    repo.save_notification = AsyncMock(return_value=1)
     return repo
 
 
@@ -327,7 +331,7 @@ class TestHandleStickerDetail:
         cb.message.edit_text.assert_not_awaited()
 
     @pytest.mark.asyncio()
-    async def test_keyboard_contains_sticker_msg_id_in_back_button(self) -> None:
+    async def test_back_button_uses_adm_stk_back_format(self) -> None:
         cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
         sticker_repo = _make_sticker_repo()
         bot_config_repo = _make_bot_config_repo()
@@ -336,10 +340,23 @@ class TestHandleStickerDetail:
 
         call_kwargs = cb.message.answer.call_args
         keyboard = call_kwargs[1]["reply_markup"]
-        # Back button should contain sticker message ID (201)
         back_button = keyboard.inline_keyboard[-1][0]
-        assert "adm_stk_back:" in back_button.callback_data
-        assert ":201" in back_button.callback_data
+        # Back button uses adm_stk_back without sticker_msg_id (DB lookup instead)
+        assert back_button.callback_data == "adm_stk_back:ru:test_set:0"
+
+    @pytest.mark.asyncio()
+    async def test_cleans_up_previous_sticker_via_db(self) -> None:
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo(latest_sticker_msg=150)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        # Previous sticker message deleted via DB lookup
+        cb.message.bot.delete_message.assert_awaited_once_with(
+            chat_id=cb.message.chat.id,
+            message_id=150,
+        )
 
     @pytest.mark.asyncio()
     async def test_not_authorized(self) -> None:
@@ -350,7 +367,7 @@ class TestHandleStickerDetail:
         await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
 
         cb.answer.assert_awaited_once()
-        assert cb.answer.call_args[1].get("show_alert") is True
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
         cb.message.delete.assert_not_awaited()
 
 
@@ -362,13 +379,13 @@ class TestHandleStickerDetail:
 class TestHandleStickerBack:
     @pytest.mark.asyncio()
     async def test_deletes_sticker_and_description_messages(self) -> None:
-        cb = _make_callback("adm_stk_back:ru:test_set:0:150")
-        sticker_repo = _make_sticker_repo(sticker_count=5)
+        cb = _make_callback("adm_stk_back:ru:test_set:0")
+        sticker_repo = _make_sticker_repo(sticker_count=5, latest_sticker_msg=150)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_back(cb, sticker_repo, bot_config_repo)
 
-        # Sticker message deleted by ID
+        # Sticker message deleted via DB lookup
         cb.message.bot.delete_message.assert_awaited_once_with(
             chat_id=cb.message.chat.id,
             message_id=150,
@@ -379,10 +396,10 @@ class TestHandleStickerBack:
         cb.message.answer.assert_awaited_once()
 
     @pytest.mark.asyncio()
-    async def test_works_without_sticker_msg_id(self) -> None:
-        """Graceful fallback if sticker_msg_id is missing."""
+    async def test_works_without_sticker_msg_in_db(self) -> None:
+        """Graceful handling when no sticker message found in DB."""
         cb = _make_callback("adm_stk_back:ru:test_set:0")
-        sticker_repo = _make_sticker_repo(sticker_count=5)
+        sticker_repo = _make_sticker_repo(sticker_count=5, latest_sticker_msg=None)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_back(cb, sticker_repo, bot_config_repo)
@@ -400,36 +417,26 @@ class TestHandleStickerBack:
 
 
 class TestStickerDetailKeyboard:
-    def test_back_button_includes_sticker_msg_id(self) -> None:
+    def test_back_button_with_set_name(self) -> None:
         kb = sticker_detail_keyboard(
             "AgADvh4AAlkbCFI",
             lang="ru",
             set_name="test_set",
-            sticker_msg_id=150,
         )
         back_btn = kb.inline_keyboard[-1][0]
-        assert back_btn.callback_data == "adm_stk_back:ru:test_set:0:150"
+        # Always uses adm_stk_back (cleanup via DB, not callback_data)
+        assert back_btn.callback_data == "adm_stk_back:ru:test_set:0"
 
-    def test_back_button_without_sticker_msg_id(self) -> None:
-        kb = sticker_detail_keyboard(
-            "AgADvh4AAlkbCFI",
-            lang="en",
-            set_name="test_set",
-        )
-        back_btn = kb.inline_keyboard[-1][0]
-        assert back_btn.callback_data == "adm_stk_set:en:test_set:0"
-
-    def test_falls_back_when_callback_data_too_long(self) -> None:
-        long_set_name = "a" * 50  # Makes adm_stk_back:... exceed 64 bytes
+    def test_long_set_name_no_truncation_issue(self) -> None:
+        long_set_name = "a" * 50
         kb = sticker_detail_keyboard(
             "AgADvh4AAlkbCFI",
             lang="ru",
             set_name=long_set_name,
-            sticker_msg_id=1234567890,
         )
         back_btn = kb.inline_keyboard[-1][0]
-        # Should fall back to non-cleanup callback
-        assert back_btn.callback_data.startswith("adm_stk_set:")
+        # No sticker_msg_id in callback_data, so no 64-byte overflow
+        assert back_btn.callback_data == f"adm_stk_back:ru:{long_set_name}:0"
 
     def test_without_set_name(self) -> None:
         kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru")

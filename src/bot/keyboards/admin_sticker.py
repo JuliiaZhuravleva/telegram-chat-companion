@@ -148,7 +148,6 @@ def sticker_detail_keyboard(
     *,
     lang: str,
     set_name: str | None = None,
-    sticker_msg_id: int | None = None,
 ) -> InlineKeyboardMarkup:
     """Detail view for a single sticker."""
     rows: list[list[InlineKeyboardButton]] = [
@@ -160,16 +159,8 @@ def sticker_detail_keyboard(
         ],
     ]
 
-    # Build back button: use cleanup callback if we have sticker_msg_id
-    if sticker_msg_id and set_name:
-        back_data = f"adm_stk_back:{lang}:{set_name}:0:{sticker_msg_id}"
-        # Telegram callback_data limit is 64 bytes; fall back if too long
-        if len(back_data.encode()) > 64:
-            back_data = f"adm_stk_set:{lang}:{set_name}:0"
-    elif set_name:
-        back_data = f"adm_stk_set:{lang}:{set_name}:0"
-    else:
-        back_data = f"adm_stk_sets:{lang}:0"
+    # Back button: sticker message cleanup is handled via DB lookup in handlers
+    back_data = f"adm_stk_back:{lang}:{set_name}:0" if set_name else f"adm_stk_sets:{lang}:0"
 
     rows.append([
         InlineKeyboardButton(

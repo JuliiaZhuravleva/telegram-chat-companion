@@ -77,7 +77,7 @@ async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bo
 
 
 def _is_private(callback: CallbackQuery) -> bool:
-    return callback.message is not None and callback.message.chat.type == "private"
+    return isinstance(callback.message, Message) and callback.message.chat.type == "private"
 
 
 # Regex to extract file_unique_id from notification text (🆔 line)
@@ -185,7 +185,7 @@ async def handle_sticker_menu(
     text = "Управление стикерами" if lang == "ru" else "Sticker Management"
     keyboard = sticker_menu_keyboard(lang)
 
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
@@ -230,7 +230,7 @@ async def handle_sticker_sets(
         sets, lang=lang, page=page, total=total, per_page=per_page
     )
 
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
 
@@ -289,7 +289,7 @@ async def handle_sticker_set_view(
 
     text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
 
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
 
@@ -311,34 +311,38 @@ async def handle_sticker_back(
         await callback.answer("Not authorized", show_alert=True)
         return
 
-    # adm_stk_back:{lang}:{set_name}:{page}:{sticker_msg_id}
+    # adm_stk_back:{lang}:{set_name}:{page}
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
     set_name = parts[2] if len(parts) > 2 else ""
     page = int(parts[3]) if len(parts) > 3 else 0
-    sticker_msg_id = int(parts[4]) if len(parts) > 4 else None
 
     if not set_name:
         await callback.answer("Missing set name", show_alert=True)
         return
 
-    # Delete the sticker message
-    if sticker_msg_id and callback.message:
-        with contextlib.suppress(Exception):
-            await callback.message.bot.delete_message(
-                chat_id=callback.message.chat.id,
-                message_id=sticker_msg_id,
-            )
+    # Delete the sticker message via DB lookup (not callback_data)
+    admin_id = callback.from_user.id if callback.from_user else None
+    if admin_id and isinstance(callback.message, Message) and callback.message.bot:
+        sticker_msg_id = await sticker_repo.get_latest_sticker_msg(
+            admin_id, callback.message.chat.id,
+        )
+        if sticker_msg_id:
+            with contextlib.suppress(Exception):
+                await callback.message.bot.delete_message(
+                    chat_id=callback.message.chat.id,
+                    message_id=sticker_msg_id,
+                )
 
     # Delete the description message (the one with this callback)
-    if callback.message:
+    if isinstance(callback.message, Message):
         with contextlib.suppress(Exception):
             await callback.message.delete()
 
     # Send fresh set list
     text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
 
-    if callback.message:
+    if isinstance(callback.message, Message):
         await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
 
@@ -397,7 +401,20 @@ async def handle_sticker_detail(
 
     text = "\n".join(lines)
 
-    if callback.message:
+    if isinstance(callback.message, Message):
+        # Clean up previous sticker message (if any) to prevent orphans
+        admin_id = callback.from_user.id if callback.from_user else None
+        if admin_id and callback.message.bot:
+            old_sticker_msg_id = await sticker_repo.get_latest_sticker_msg(
+                admin_id, callback.message.chat.id,
+            )
+            if old_sticker_msg_id:
+                with contextlib.suppress(Exception):
+                    await callback.message.bot.delete_message(
+                        chat_id=callback.message.chat.id,
+                        message_id=old_sticker_msg_id,
+                    )
+
         # Delete the old message (set list or previous detail) so sticker
         # and description appear adjacent as new messages.
         with contextlib.suppress(Exception):
@@ -412,7 +429,6 @@ async def handle_sticker_detail(
             file_unique_id,
             lang=lang,
             set_name=sticker["set_name"],
-            sticker_msg_id=sticker_msg.message_id if sticker_msg else None,
         )
         desc_msg = await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
