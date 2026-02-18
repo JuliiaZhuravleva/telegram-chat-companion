@@ -332,6 +332,7 @@ class TestWlChats:
     async def test_shows_chats_list(self):
         cb = _make_callback("adm_wl_chats:ru:0")
         admin_repo = _make_admin_repo()
+        chat_settings_repo = _make_chat_settings_repo()
         admin_repo.get_enabled_chats_page = AsyncMock(
             return_value=(
                 [
@@ -342,7 +343,7 @@ class TestWlChats:
             )
         )
 
-        await handle_wl_chats(cb, admin_repo, is_admin=True)
+        await handle_wl_chats(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         cb.message.edit_text.assert_awaited_once()
         text = cb.message.edit_text.call_args.args[0]
@@ -353,9 +354,10 @@ class TestWlChats:
     async def test_shows_empty_message(self):
         cb = _make_callback("adm_wl_chats:en:0")
         admin_repo = _make_admin_repo()
+        chat_settings_repo = _make_chat_settings_repo()
         admin_repo.get_enabled_chats_page = AsyncMock(return_value=([], 0))
 
-        await handle_wl_chats(cb, admin_repo, is_admin=True)
+        await handle_wl_chats(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "No whitelisted" in text
@@ -364,8 +366,9 @@ class TestWlChats:
     async def test_blocks_non_admin(self):
         cb = _make_callback("adm_wl_chats:ru:0")
         admin_repo = _make_admin_repo()
+        chat_settings_repo = _make_chat_settings_repo()
 
-        await handle_wl_chats(cb, admin_repo, is_admin=False)
+        await handle_wl_chats(cb, admin_repo, chat_settings_repo, is_admin=False)
 
         cb.message.edit_text.assert_not_awaited()
 

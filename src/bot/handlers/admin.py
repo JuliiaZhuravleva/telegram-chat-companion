@@ -693,6 +693,7 @@ async def handle_health(
 async def handle_wl_chats(
     callback: CallbackQuery,
     admin_repo: FromDishka[AdminRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
     """Show paginated list of whitelisted chats."""
@@ -708,12 +709,13 @@ async def handle_wl_chats(
         page = 0
 
     await callback.answer()
-    await _render_wl_chats(callback, admin_repo, lang, page)
+    await _render_wl_chats(callback, admin_repo, chat_settings_repo, lang, page)
 
 
 async def _render_wl_chats(
     callback: CallbackQuery,
     admin_repo: AdminRepository,
+    chat_settings_repo: ChatSettingsRepository,
     lang: str,
     page: int,
 ) -> None:
@@ -740,6 +742,12 @@ async def _render_wl_chats(
                 try:
                     chat_info = await callback.bot.get_chat(chat_id)
                     title = chat_info.title or chat_info.full_name
+                    # Persist for future lookups and update dict for keyboard
+                    if title:
+                        chat["chat_title"] = title
+                        await chat_settings_repo.upsert(
+                            chat_id, chat_title=title,
+                        )
                 except Exception:
                     pass
             entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
@@ -792,7 +800,7 @@ async def handle_wl_remove(
     await callback.answer(_WL_REMOVED[lang])
 
     # Re-render the chat list
-    await _render_wl_chats(callback, admin_repo, lang, page)
+    await _render_wl_chats(callback, admin_repo, chat_settings_repo, lang, page)
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +854,13 @@ async def _render_wl_pending(
         for i, attempt in enumerate(attempts, start=offset + 1):
             chat_id = attempt.get("chat_id", "?")
             title = attempt.get("chat_title")
+            # Fallback: fetch title from Telegram API if missing
+            if not title and callback.bot:
+                try:
+                    chat_info = await callback.bot.get_chat(chat_id)
+                    title = chat_info.title or chat_info.full_name
+                except Exception:
+                    pass
             ctype = attempt.get("chat_type", "")
             user = escape(str(attempt.get("user_first_name") or ""))
             uname = attempt.get("user_username")

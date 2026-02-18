@@ -163,6 +163,20 @@ async def handle_rules_menu(
     total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
     chats = [dict(r) for r in rows]
 
+    # Resolve missing titles via Telegram API and persist
+    for chat in chats:
+        if not chat.get("chat_title") and callback.bot:
+            try:
+                chat_info = await callback.bot.get_chat(chat["chat_id"])
+                title = chat_info.title or chat_info.full_name
+                if title:
+                    chat["chat_title"] = title
+                    await chat_settings_repo.upsert(
+                        chat["chat_id"], chat_title=title,
+                    )
+            except Exception:
+                pass
+
     msg = callback.message
     if isinstance(msg, Message):
         text = _NO_CHATS[lang] if not chats else _RULES_TITLE[lang]
