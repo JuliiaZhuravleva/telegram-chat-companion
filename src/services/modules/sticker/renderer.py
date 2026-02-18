@@ -127,7 +127,7 @@ def _composite_collage(
     try:
         font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 14)
     except OSError:
-        font = ImageFont.load_default()
+        font = ImageFont.load_default()  # type: ignore[assignment]
 
     # Enhanced title with motion info
     if motion:
@@ -161,7 +161,7 @@ def _composite_collage(
     try:
         small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
     except OSError:
-        small_font = ImageFont.load_default()
+        small_font = ImageFont.load_default()  # type: ignore[assignment]
 
     for idx, frame in enumerate(frames[:_FRAME_COUNT]):
         col = idx % _COLS
@@ -169,7 +169,7 @@ def _composite_collage(
         x = col * _FRAME_SIZE
         y = _LABEL_HEIGHT + row * _FRAME_SIZE
 
-        resized = frame.resize((_FRAME_SIZE, _FRAME_SIZE), Image.LANCZOS)
+        resized = frame.resize((_FRAME_SIZE, _FRAME_SIZE), Image.Resampling.LANCZOS)
         collage.paste(resized, (x, y), resized if resized.mode == "RGBA" else None)
 
         # Frame label overlay
@@ -186,7 +186,7 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
 
     Runs in a thread due to rlottie blocking I/O.
     """
-    from rlottie_python import LottieAnimation
+    from rlottie_python import LottieAnimation  # type: ignore[attr-defined]
 
     # Decompress TGS (gzip-compressed Lottie JSON)
     try:

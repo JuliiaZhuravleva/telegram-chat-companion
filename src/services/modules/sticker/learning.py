@@ -906,7 +906,7 @@ class StickerLearningService:
             def _unescape(s: str) -> str:
                 """Unescape JSON string escapes (\\n, \\\", etc.)."""
                 try:
-                    return json.loads(f'"{s}"')
+                    return str(json.loads(f'"{s}"'))
                 except (json.JSONDecodeError, ValueError):
                     return s
 

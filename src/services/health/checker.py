@@ -114,12 +114,31 @@ class HealthChecker:
         try:
             await self._pool.fetchval("SELECT 1")
             result.db_ok = True
-        except Exception as exc:
+        except asyncpg.InterfaceError:
             result.db_ok = False
+            logger.error("Health check DB failed: connection interface error", exc_info=True)
             result.issues.append(
                 HealthIssue(
                     severity=HealthStatus.CRITICAL,
-                    message=f"Database connectivity failed: {exc}",
+                    message="Database connectivity failed: connection unavailable",
+                )
+            )
+        except asyncpg.PostgresError:
+            result.db_ok = False
+            logger.error("Health check DB failed: PostgreSQL error", exc_info=True)
+            result.issues.append(
+                HealthIssue(
+                    severity=HealthStatus.CRITICAL,
+                    message="Database connectivity failed: query error",
+                )
+            )
+        except Exception:
+            result.db_ok = False
+            logger.error("Health check DB failed: unexpected error", exc_info=True)
+            result.issues.append(
+                HealthIssue(
+                    severity=HealthStatus.CRITICAL,
+                    message="Database connectivity failed: unexpected error",
                 )
             )
 
