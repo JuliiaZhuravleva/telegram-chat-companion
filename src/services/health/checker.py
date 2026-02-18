@@ -38,6 +38,7 @@ class HealthChecker:
         self._pool = pool
         self._bot = bot
         self._task: asyncio.Task[None] | None = None
+        self._manual_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Start the health check background loop."""
@@ -51,6 +52,14 @@ class HealthChecker:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         logger.info("Health checker stopped")
+
+    async def run_check_now(self) -> None:
+        """Trigger an immediate health check (admin refresh button)."""
+        async with self._manual_lock:
+            config = await self._load_config()
+            result = await self._run_check()
+            await self._persist_result(result, config)
+            self._write_healthcheck_file()
 
     # ------------------------------------------------------------------
     # Main loop

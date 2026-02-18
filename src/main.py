@@ -140,9 +140,13 @@ async def main() -> None:
         admin_ids_raw = json.loads(admin_ids_raw)
     await setup_bot_commands(bot, parse_admin_ids(admin_ids_raw))
 
+    # Cache bot identity for handlers (avoids per-message getMe calls)
+    dp["bot_id"] = (await bot.me()).id
+
     # Start background tasks
     health_checker = HealthChecker(pool=pool, bot=bot)
     await health_checker.start()
+    dp["health_checker"] = health_checker
 
     sticker_sync = StickerSetSyncScheduler(pool=pool, bot=bot)
     await sticker_sync.start()

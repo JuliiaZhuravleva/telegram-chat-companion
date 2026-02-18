@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import random
 import time
+from typing import Any
 
 import structlog
 from aiogram import Bot, F, Router
@@ -118,6 +119,7 @@ async def handle_photo_message(
     message_repo: FromDishka[MessageRepository],
     bot: Bot,
     message_thread_id: int | None = None,
+    **kwargs: Any,
 ) -> None:
     """Handle photo messages — analyze and optionally respond."""
     if not chat_config.image_analysis_enabled:
@@ -157,8 +159,10 @@ async def handle_photo_message(
 
     if caption:
         # photo_with_text: decide whether to respond via text pipeline
-        bot_info = await bot.me()
-        respond, trigger_type = should_respond(message, chat_config, bot_info.id)
+        bot_id: int | None = kwargs.get("bot_id")
+        if bot_id is None:
+            bot_id = (await bot.me()).id
+        respond, trigger_type = should_respond(message, chat_config, bot_id)
 
         if not respond:
             # Still save the description to message history

@@ -16,6 +16,7 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
@@ -669,6 +670,11 @@ async def handle_health(
 
     await callback.answer()
 
+    # Trigger a live health check before reading from DB
+    health_checker = kwargs.get("health_checker")
+    if health_checker is not None:
+        await health_checker.run_check_now()
+
     latest = await admin_repo.get_latest_health_check()
     if latest is None:
         text = f"{_HEALTH_TITLE[lang]}\n\n{_HEALTH_NO_DATA[lang]}"
@@ -677,11 +683,15 @@ async def handle_health(
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=health_keyboard(lang),
-        )
+        try:
+            await msg.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=health_keyboard(lang),
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                raise
 
 
 # ---------------------------------------------------------------------------
