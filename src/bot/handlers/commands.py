@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import structlog
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
@@ -109,12 +109,13 @@ async def handle_help(message: Message, chat_config: ChatConfig) -> None:
         user_id,
         save_messages=chat_config.save_messages,
         language=lang,
+        chat_type=message.chat.type,
     )
 
     await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
 
 
-@router.message(Command("summary"))
+@router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))
 async def handle_summary(
     message: Message,
     chat_config: ChatConfig,
