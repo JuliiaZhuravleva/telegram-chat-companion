@@ -111,6 +111,7 @@ class ChatConfigService:
             "trigger_words": tuple(self._yaml.trigger_words),
             "random_response_chance": self._yaml.random_response_chance,
             "random_response_min_interval": self._yaml.random_response_min_interval,
+            "relevancy_gate_enabled": self._yaml.relevancy_gate_enabled,
         }
 
         # Layer 2: global DB overrides (only non-None values)
@@ -150,6 +151,7 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset({
     "rules_enabled",
     "rules_mode",
     "link_comments_enabled",
+    "relevancy_gate_enabled",
 })
 
 

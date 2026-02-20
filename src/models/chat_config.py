@@ -50,3 +50,6 @@ class ChatConfig:
 
     # Link comments
     link_comments_enabled: bool = False
+
+    # Relevancy gate (filters random responses for natural participation)
+    relevancy_gate_enabled: bool = True

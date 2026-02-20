@@ -36,6 +36,7 @@ from src.services.modules.sticker import StickerLearningService, StickerResponde
 from src.services.modules.summary import SummaryService
 from src.services.modules.voice import VoiceTranscriptionService
 from src.services.rag.memory import RAGMemoryService
+from src.services.relevancy.gate import RelevancyGate
 from src.services.rules import RuleActionExecutor, RuleEngine
 from src.services.text.pipeline import TextProcessingPipeline
 
@@ -218,6 +219,15 @@ class ServiceProvider(Provider):
         sticker_repo: StickerRepository,
     ) -> StickerResponderService:
         return StickerResponderService(sticker_service, sticker_repo)
+
+    @provide
+    def relevancy_gate(
+        self,
+        ai_router: AIRouter,
+        message_repo: MessageRepository,
+        response_log_repo: ResponseLogRepository,
+    ) -> RelevancyGate:
+        return RelevancyGate(ai_router, message_repo, response_log_repo)
 
     @provide
     def rule_engine(self, rules_repo: RulesRepository) -> RuleEngine:

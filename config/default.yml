@@ -14,6 +14,10 @@ bot:
   # Minimum seconds between random responses in the same chat
   random_response_min_interval: 300
 
+  # Relevancy gate: three-tier pre-check for random responses
+  # Makes bot participation more natural by filtering out low-value responses
+  relevancy_gate_enabled: true
+
 # AI Provider Configuration (January 2026)
 #
 # COST POLICY: Always use the cheapest model that covers the task.
@@ -57,6 +61,16 @@ ai:
         openai: "gpt-5-nano"               # nano has multimodal, no need for gpt-5.2
         grok: "grok-2-vision-1212"
       max_tokens: 200
+
+    relevancy_check:
+      provider: "openai"
+      model: "gpt-5-nano"                    # cheapest: ~$0.00002 per check
+      fallback:
+        - "deepseek"
+      fallback_models:
+        deepseek: "deepseek-v3.2"
+      max_tokens: 1024                        # gpt-5-nano uses reasoning tokens internally
+      temperature: 1.0                       # gpt-5-nano only supports 1.0
 
     transcription:
       provider: "openai"

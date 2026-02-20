@@ -60,6 +60,7 @@ class BotSettings(BaseSettings):
     trigger_words: list[str] = Field(default_factory=lambda: ["bot", "бот"])
     random_response_chance: float = 0.05
     random_response_min_interval: int = 300
+    relevancy_gate_enabled: bool = True
 
 
 class RAGSettings(BaseSettings):

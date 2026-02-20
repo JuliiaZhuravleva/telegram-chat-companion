@@ -391,3 +391,14 @@ ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS image_comment_sticker_chance 
 INSERT INTO schema_version (version, description)
 VALUES (3, 'Sticker intelligence — response settings + admin notifications')
 ON CONFLICT (version) DO NOTHING;
+
+-- Schema v4: Relevancy gate — natural response filtering for random triggers
+ALTER TABLE chat_settings ADD COLUMN IF NOT EXISTS relevancy_gate_enabled BOOLEAN DEFAULT true;
+
+INSERT INTO bot_config (key, value, description) VALUES
+    ('default_relevancy_gate_enabled', 'true', 'Enable relevancy gate for random responses')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO schema_version (version, description)
+VALUES (4, 'Relevancy gate — per-chat toggle')
+ON CONFLICT (version) DO NOTHING;

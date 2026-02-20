@@ -13,6 +13,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
+from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
 
 router = Router(name="messages")
@@ -65,6 +66,7 @@ async def handle_text_message(
     message: Message,
     chat_config: ChatConfig,
     pipeline: FromDishka[TextProcessingPipeline],
+    relevancy_gate: FromDishka[RelevancyGate],
     message_thread_id: int | None = None,
     **kwargs: Any,
 ) -> None:
@@ -78,6 +80,16 @@ async def handle_text_message(
 
     if not should_reply:
         return
+
+    # Relevancy gate: filter random triggers for natural participation
+    if trigger_type == TriggerType.RANDOM:
+        gate_decision = await relevancy_gate.evaluate(
+            chat_id=message.chat.id,
+            message_text=message.text or "",
+            config=chat_config,
+        )
+        if not gate_decision.should_respond:
+            return
 
     user = message.from_user
     user_id = user.id if user else 0
