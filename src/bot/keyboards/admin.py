@@ -6,7 +6,11 @@ Language is embedded in callback_data for stateless operation.
 
 from __future__ import annotations
 
+from typing import cast
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from src.utils.telegram import build_chat_url
 
 # ---------------------------------------------------------------------------
 # i18n labels
@@ -26,6 +30,8 @@ _L: dict[str, dict[str, str]] = {
     "back": {"ru": "◀️ Назад", "en": "◀️ Back"},
     "russian": {"ru": "🇷🇺 Русский", "en": "🇷🇺 Русский"},
     "english": {"ru": "🇬🇧 English", "en": "🇬🇧 English"},
+    "wl_confirm_yes": {"ru": "✅ Да, удалить", "en": "✅ Yes, remove"},
+    "wl_confirm_no": {"ru": "✖ Отмена", "en": "✖ Cancel"},
 }
 
 
@@ -132,6 +138,7 @@ def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Whitelist management menu."""
     chats_label = {"ru": "💬 Чаты", "en": "💬 Chats"}
     pending_label = {"ru": "⏳ Ожидают", "en": "⏳ Pending"}
+    rejected_label = {"ru": "🚫 Отклонённые", "en": "🚫 Rejected"}
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
@@ -141,6 +148,12 @@ def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=pending_label.get(lang, "Pending"),
                 callback_data=f"adm_wl_pending:{lang}:0",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=rejected_label.get(lang, "Rejected"),
+                callback_data=f"adm_wl_rejected:{lang}:0",
             ),
         ],
         [
@@ -283,14 +296,19 @@ def chats_list_keyboard(
         # Truncate label to fit Telegram button limits
         if len(label) > 40:
             label = label[:37] + "..."
+        chat_id_int = cast(int, chat["chat_id"])
+        url = build_chat_url(chat_id_int, str(ctype))
+        if url:
+            title_btn = InlineKeyboardButton(text=label, url=url)
+        else:
+            # Non-linkable chat (old-style group) — use noop to avoid
+            # refreshing the message with identical content.
+            title_btn = InlineKeyboardButton(text=label, callback_data="noop")
         rows.append([
-            InlineKeyboardButton(
-                text=label,
-                callback_data=f"adm_wl_chats:{lang}:{page}",
-            ),
+            title_btn,
             InlineKeyboardButton(
                 text="❌",
-                callback_data=f"adm_wl_rm:{lang}:{chat['chat_id']}:{page}",
+                callback_data=f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}",
             ),
         ])
 
@@ -324,8 +342,100 @@ def chats_list_keyboard(
 
 
 # ---------------------------------------------------------------------------
+# Whitelist remove — confirmation
+# ---------------------------------------------------------------------------
+
+def confirm_remove_chat_keyboard(
+    lang: str, chat_id: int, page: int,
+) -> InlineKeyboardMarkup:
+    """Yes/Cancel row for confirming chat removal from whitelist."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=_t("wl_confirm_yes", lang),
+                callback_data=f"adm_wl_rm:{lang}:{chat_id}:{page}",
+            ),
+            InlineKeyboardButton(
+                text=_t("wl_confirm_no", lang),
+                callback_data=f"adm_wl_chats:{lang}:{page}",
+            ),
+        ],
+    ])
+
+
+# ---------------------------------------------------------------------------
 # Pending access requests list (paginated)
 # ---------------------------------------------------------------------------
+
+def rejected_list_keyboard(
+    lang: str,
+    attempts: list[dict[str, object]],
+    page: int,
+    total_pages: int,
+) -> InlineKeyboardMarkup:
+    """Paginated list of rejected attempts with Restore/Delete per item."""
+    restore_label = {"ru": "🔄 Вернуть", "en": "🔄 Restore"}
+    rows: list[list[InlineKeyboardButton]] = []
+    for attempt in attempts:
+        aid = attempt["id"]
+        rows.append([
+            InlineKeyboardButton(
+                text=restore_label.get(lang, "Restore"),
+                callback_data=f"adm_wl_restore:{lang}:{aid}:{page}",
+            ),
+            InlineKeyboardButton(
+                text="🗑",
+                callback_data=f"adm_wl_del_ask:{lang}:{aid}:{page}",
+            ),
+        ])
+
+    # Pagination row
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="◀",
+                callback_data=f"adm_wl_rejected:{lang}:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop",
+        ))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton(
+                text="▶",
+                callback_data=f"adm_wl_rejected:{lang}:{page + 1}",
+            ))
+        rows.append(nav)
+
+    # Back button
+    rows.append([
+        InlineKeyboardButton(
+            text=_t("back", lang),
+            callback_data=f"adm_wl:{lang}",
+        ),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def confirm_delete_attempt_keyboard(
+    lang: str, attempt_id: int, page: int,
+) -> InlineKeyboardMarkup:
+    """Yes/Cancel row for confirming hard-delete of a rejected attempt."""
+    yes_label = {"ru": "🗑 Да, удалить", "en": "🗑 Yes, delete"}
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=yes_label.get(lang, "Yes, delete"),
+                callback_data=f"adm_wl_del:{lang}:{attempt_id}:{page}",
+            ),
+            InlineKeyboardButton(
+                text=_t("wl_confirm_no", lang),
+                callback_data=f"adm_wl_rejected:{lang}:{page}",
+            ),
+        ],
+    ])
+
 
 def pending_list_keyboard(
     lang: str,

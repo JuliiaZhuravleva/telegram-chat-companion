@@ -7,6 +7,7 @@ import pytest
 
 from src.utils.telegram import (
     TelegramFileError,
+    build_chat_url,
     detect_mime_type,
     download_telegram_file,
 )
@@ -75,3 +76,44 @@ class TestDetectMimeType:
 
     def test_unknown(self):
         assert detect_mime_type("file_no_ext") == "application/octet-stream"
+
+
+class TestBuildChatUrl:
+    def test_public_username_wins_over_everything(self):
+        url = build_chat_url(
+            -1003632335671, chat_type="supergroup", chat_username="mychat",
+        )
+        assert url == "https://t.me/mychat"
+
+    def test_username_for_legacy_group(self):
+        url = build_chat_url(-100, chat_type="group", chat_username="oldgroup")
+        assert url == "https://t.me/oldgroup"
+
+    def test_supergroup_without_username_uses_c_link(self):
+        url = build_chat_url(-1003632335671, chat_type="supergroup")
+        # Strip sign + "100" prefix: -1003632335671 → 3632335671
+        assert url == "https://t.me/c/3632335671"
+
+    def test_channel_uses_c_link(self):
+        url = build_chat_url(-1004200000000, chat_type="channel")
+        assert url == "https://t.me/c/4200000000"
+
+    def test_supergroup_id_threshold_not_crossed(self):
+        # Above the -1_000_000_000_000 threshold → not a real supergroup ID
+        assert build_chat_url(-999, chat_type="supergroup") is None
+
+    def test_private_chat_uses_tg_user_link(self):
+        assert build_chat_url(5870677432, chat_type="private") == (
+            "tg://user?id=5870677432"
+        )
+
+    def test_private_with_negative_id_not_a_link(self):
+        # Defensive: private must have a positive user_id
+        assert build_chat_url(-1, chat_type="private") is None
+
+    def test_legacy_group_no_username_returns_none(self):
+        assert build_chat_url(-100, chat_type="group") is None
+
+    def test_unknown_chat_type_returns_none(self):
+        assert build_chat_url(-100) is None
+        assert build_chat_url(-100, chat_type=None) is None

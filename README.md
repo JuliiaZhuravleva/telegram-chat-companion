@@ -140,6 +140,7 @@ pre-commit install           # Set up git hooks
 - [Architecture Overview](docs/architecture.md)
 - [Setup Guide](docs/setup.md)
 - [Configuration Reference](docs/configuration.md)
+- [Functionality Overview](docs/FUNCTIONALITY.md) — full feature catalogue with live-QA observations and improvement recommendations
 
 ## Contributing
 

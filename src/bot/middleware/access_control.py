@@ -94,7 +94,12 @@ class AccessControlMiddleware(BaseMiddleware):
         chat_id: int,
         user_id: int | None,
     ) -> None:
-        """Send admin notification about unauthorized access (with cooldown)."""
+        """Send admin notification about unauthorized access (with cooldown).
+
+        Skips notification AND DB logging entirely if the chat has a previous
+        rejected attempt (admin-imposed blacklist). Admin must explicitly
+        restore or delete the rejection via the admin panel to lift the block.
+        """
         now = time.monotonic()
         last = self._last_notify.get(chat_id, 0.0)
         if now - last < _NOTIFY_COOLDOWN_SECONDS:
@@ -110,7 +115,18 @@ class AccessControlMiddleware(BaseMiddleware):
         try:
             container: AsyncContainer = data["dishka_container"]
             notifier = await container.get(AbuseNotificationService)
+            admin_repo = await container.get(AdminRepository)
             bot = data.get("bot")
+
+            # Blacklist check: skip if chat has a prior rejected attempt.
+            # Still bump the cooldown so we don't hit the DB on every message.
+            if await admin_repo.has_rejected_attempt(chat_id):
+                self._last_notify[chat_id] = now
+                logger.info(
+                    "Suppressing notification — chat has prior rejection",
+                    chat_id=chat_id,
+                )
+                return
 
             # Extract all available info from the event
             user_first_name: str | None = None
@@ -139,7 +155,6 @@ class AccessControlMiddleware(BaseMiddleware):
             # Log to DB and build inline keyboard for approve/reject
             keyboard = None
             try:
-                admin_repo = await container.get(AdminRepository)
                 bot_config_repo = await container.get(BotConfigRepository)
                 attempt_id = await admin_repo.log_unauthorized(
                     chat_id=chat_id,

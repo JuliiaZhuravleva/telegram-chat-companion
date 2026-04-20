@@ -22,9 +22,14 @@ from src.bot.handlers.admin import (
     handle_sticker_notification_cycle,
     handle_wl_approve,
     handle_wl_chats,
+    handle_wl_delete,
+    handle_wl_delete_ask,
     handle_wl_pending,
     handle_wl_reject,
+    handle_wl_rejected,
     handle_wl_remove,
+    handle_wl_remove_ask,
+    handle_wl_restore,
 )
 
 # ---------------------------------------------------------------------------
@@ -112,6 +117,7 @@ def _make_chat_settings_repo() -> MagicMock:
     repo = AsyncMock()
     repo.set_field = AsyncMock()
     repo.upsert = AsyncMock()
+    repo.get = AsyncMock(return_value=None)
     return repo
 
 
@@ -427,6 +433,69 @@ class TestWlPending:
 
         await handle_wl_pending(cb, admin_repo, is_admin=False)
 
+        cb.message.edit_text.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# adm_wl_rm_ask callback (confirmation step)
+# ---------------------------------------------------------------------------
+
+
+class TestWlRemoveAsk:
+    @pytest.mark.asyncio
+    async def test_shows_confirmation_and_does_not_delete(self):
+        cb = _make_callback("adm_wl_rm_ask:ru:-100:0")
+        chat_settings_repo = _make_chat_settings_repo()
+        chat_settings_repo.get = AsyncMock(return_value={"chat_title": "Alpha"})
+
+        await handle_wl_remove_ask(cb, chat_settings_repo, is_admin=True)
+
+        # Must NOT disable the chat at this stage
+        chat_settings_repo.set_field.assert_not_awaited()
+        # Shows confirmation screen with title + buttons
+        cb.message.edit_text.assert_awaited_once()
+        call = cb.message.edit_text.call_args
+        text = call.args[0]
+        assert "Alpha" in text
+        assert "-100" in text
+        kb = call.kwargs["reply_markup"]
+        callbacks = [
+            b.callback_data
+            for row in kb.inline_keyboard
+            for b in row
+            if b.callback_data
+        ]
+        assert "adm_wl_rm:ru:-100:0" in callbacks
+        assert "adm_wl_chats:ru:0" in callbacks
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_chat_id_when_title_missing(self):
+        cb = _make_callback("adm_wl_rm_ask:en:-200:2")
+        chat_settings_repo = _make_chat_settings_repo()
+        chat_settings_repo.get = AsyncMock(return_value=None)
+
+        await handle_wl_remove_ask(cb, chat_settings_repo, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "-200" in text
+        # Confirm callback preserves page=2
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [
+            b.callback_data
+            for row in kb.inline_keyboard
+            for b in row
+            if b.callback_data
+        ]
+        assert "adm_wl_rm:en:-200:2" in callbacks
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_wl_rm_ask:ru:-100:0")
+        chat_settings_repo = _make_chat_settings_repo()
+
+        await handle_wl_remove_ask(cb, chat_settings_repo, is_admin=False)
+
+        chat_settings_repo.set_field.assert_not_awaited()
         cb.message.edit_text.assert_not_awaited()
 
 
@@ -845,3 +914,195 @@ class TestHealthCallback:
         await handle_health(cb, admin_repo, is_admin=False)
 
         cb.message.edit_text.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# adm_wl_rejected / restore / delete callbacks
+# ---------------------------------------------------------------------------
+
+
+class TestWlRejected:
+    @pytest.mark.asyncio
+    async def test_shows_rejected_list(self):
+        cb = _make_callback("adm_wl_rejected:ru:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_rejected_attempts_page = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "id": 7,
+                        "chat_id": -1003632335671,
+                        "chat_title": "Rejected Chat",
+                        "chat_type": "supergroup",
+                        "user_id": 42,
+                        "user_first_name": "Mallory",
+                        "user_username": "mal",
+                        "message_text": "spam",
+                        "created_at": None,
+                    },
+                ],
+                1,
+            )
+        )
+
+        await handle_wl_rejected(cb, admin_repo, is_admin=True)
+
+        cb.message.edit_text.assert_awaited_once()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "Rejected Chat" in text
+        # Clickable chat link for supergroup
+        assert 'https://t.me/c/3632335671' in text
+        assert "@mal" in text
+
+    @pytest.mark.asyncio
+    async def test_shows_empty_message_in_english(self):
+        cb = _make_callback("adm_wl_rejected:en:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_rejected(cb, admin_repo, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "No rejected" in text
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_wl_rejected:ru:0")
+        admin_repo = _make_admin_repo()
+
+        await handle_wl_rejected(cb, admin_repo, is_admin=False)
+
+        cb.message.edit_text.assert_not_awaited()
+
+
+class TestWlRestore:
+    @pytest.mark.asyncio
+    async def test_restores_to_pending_and_rerenders(self):
+        cb = _make_callback("adm_wl_restore:ru:7:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(
+            return_value={"id": 7, "chat_id": -100, "status": "rejected"}
+        )
+        admin_repo.update_attempt_status = AsyncMock()
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_restore(cb, admin_repo, is_admin=True)
+
+        admin_repo.update_attempt_status.assert_awaited_once_with(7, "pending")
+        cb.message.edit_text.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_update_when_not_rejected(self):
+        cb = _make_callback("adm_wl_restore:ru:7:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(
+            return_value={"id": 7, "chat_id": -100, "status": "approved"}
+        )
+        admin_repo.update_attempt_status = AsyncMock()
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_restore(cb, admin_repo, is_admin=True)
+
+        admin_repo.update_attempt_status.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_shows_alert_when_attempt_missing(self):
+        cb = _make_callback("adm_wl_restore:en:999:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value=None)
+        admin_repo.update_attempt_status = AsyncMock()
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_restore(cb, admin_repo, is_admin=True)
+
+        admin_repo.update_attempt_status.assert_not_awaited()
+        # Alert shown to admin
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_wl_restore:ru:7:0")
+        admin_repo = _make_admin_repo()
+
+        await handle_wl_restore(cb, admin_repo, is_admin=False)
+
+        admin_repo.get_attempt.assert_not_called()
+
+
+class TestWlDeleteAsk:
+    @pytest.mark.asyncio
+    async def test_shows_confirm_and_does_not_delete(self):
+        cb = _make_callback("adm_wl_del_ask:ru:7:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(
+            return_value={
+                "id": 7,
+                "chat_id": -1003632335671,
+                "chat_title": "Mallory's chat",
+                "chat_type": "supergroup",
+                "status": "rejected",
+            }
+        )
+        admin_repo.delete_attempt = AsyncMock()
+
+        await handle_wl_delete_ask(cb, admin_repo, is_admin=True)
+
+        admin_repo.delete_attempt.assert_not_awaited()
+        cb.message.edit_text.assert_awaited_once()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "Mallory" in text
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [
+            b.callback_data
+            for row in kb.inline_keyboard
+            for b in row
+            if b.callback_data
+        ]
+        assert "adm_wl_del:ru:7:0" in callbacks
+        assert "adm_wl_rejected:ru:0" in callbacks
+
+    @pytest.mark.asyncio
+    async def test_shows_not_found_alert(self):
+        cb = _make_callback("adm_wl_del_ask:en:99:2")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value=None)
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_delete_ask(cb, admin_repo, is_admin=True)
+
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+
+class TestWlDelete:
+    @pytest.mark.asyncio
+    async def test_deletes_and_rerenders(self):
+        cb = _make_callback("adm_wl_del:ru:7:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.delete_attempt = AsyncMock(return_value=True)
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_delete(cb, admin_repo, is_admin=True)
+
+        admin_repo.delete_attempt.assert_awaited_once_with(7)
+        cb.message.edit_text.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_falsy_delete_still_rerenders(self):
+        cb = _make_callback("adm_wl_del:ru:7:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.delete_attempt = AsyncMock(return_value=False)
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([], 0))
+
+        await handle_wl_delete(cb, admin_repo, is_admin=True)
+
+        # Shows "not found" toast but still re-renders list
+        cb.message.edit_text.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_blocks_non_admin(self):
+        cb = _make_callback("adm_wl_del:ru:7:0")
+        admin_repo = _make_admin_repo()
+
+        await handle_wl_delete(cb, admin_repo, is_admin=False)
+
+        admin_repo.delete_attempt.assert_not_called()

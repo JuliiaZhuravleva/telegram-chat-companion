@@ -25,12 +25,15 @@ from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin import (
     approved_notification_keyboard,
     chats_list_keyboard,
+    confirm_delete_attempt_keyboard,
+    confirm_remove_chat_keyboard,
     costs_keyboard,
     health_keyboard,
     language_keyboard,
     main_menu_keyboard,
     notifications_keyboard,
     pending_list_keyboard,
+    rejected_list_keyboard,
     rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
@@ -40,6 +43,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.response_log import ResponseLogRepository
+from src.utils.telegram import build_chat_url
 
 logger = structlog.get_logger(__name__)
 
@@ -139,6 +143,65 @@ _WL_REJECTED: dict[str, str] = {
 _WL_REMOVED: dict[str, str] = {
     "ru": "Чат удалён из whitelist.",
     "en": "Chat removed from whitelist.",
+}
+
+_WL_CONFIRM_TITLE: dict[str, str] = {
+    "ru": "<b>Удалить чат из whitelist?</b>",
+    "en": "<b>Remove chat from whitelist?</b>",
+}
+
+_WL_CONFIRM_BODY: dict[str, str] = {
+    "ru": "Бот перестанет отвечать в этом чате.",
+    "en": "The bot will stop responding in this chat.",
+}
+
+_WL_REJECTED_TITLE: dict[str, str] = {
+    "ru": "<b>Отклонённые заявки</b>",
+    "en": "<b>Rejected requests</b>",
+}
+
+_WL_NO_REJECTED: dict[str, str] = {
+    "ru": (
+        "Нет отклонённых заявок.\n\n"
+        "<i>Отклонённые чаты заблокированы: уведомления о новых сообщениях "
+        "оттуда не приходят, пока не «Вернуть» или «Удалить» запись.</i>"
+    ),
+    "en": (
+        "No rejected requests.\n\n"
+        "<i>Rejected chats are blocked: notifications for new messages from "
+        "them are suppressed until the record is Restored or Deleted.</i>"
+    ),
+}
+
+_WL_RESTORED: dict[str, str] = {
+    "ru": "Запрос возвращён в ожидание.",
+    "en": "Request restored to pending.",
+}
+
+_WL_DELETED: dict[str, str] = {
+    "ru": "Запись удалена.",
+    "en": "Record deleted.",
+}
+
+_WL_DELETE_CONFIRM_TITLE: dict[str, str] = {
+    "ru": "<b>Удалить запись?</b>",
+    "en": "<b>Delete record?</b>",
+}
+
+_WL_DELETE_CONFIRM_BODY: dict[str, str] = {
+    "ru": (
+        "Запись будет удалена безвозвратно. Чат снова сможет "
+        "присылать сообщения — и ты получишь новое уведомление."
+    ),
+    "en": (
+        "The record will be permanently deleted. The chat will be able to "
+        "send messages again — a fresh notification will arrive."
+    ),
+}
+
+_WL_NOT_FOUND: dict[str, str] = {
+    "ru": "Запись не найдена.",
+    "en": "Record not found.",
 }
 
 _WL_ALREADY_HANDLED: dict[str, str] = {
@@ -759,7 +822,10 @@ async def _render_wl_chats(
                             chat_id, chat_title=title,
                         )
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Chat title fallback failed",
+                        chat_id=chat_id, exc_info=True,
+                    )
             entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
             ctype = chat.get("chat_type", "")
             if ctype:
@@ -769,10 +835,58 @@ async def _render_wl_chats(
 
     msg = callback.message
     if isinstance(msg, Message):
+        try:
+            await msg.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=chats_list_keyboard(lang, chats, page, total_pages),
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                raise
+
+
+# ---------------------------------------------------------------------------
+# Callback: ask confirmation before removing chat from whitelist
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_rm_ask:"))
+async def handle_wl_remove_ask(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """Show confirmation prompt before actually removing a chat."""
+    if not _guard_admin(kwargs, callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    row = await chat_settings_repo.get(chat_id)
+    title = row.get("chat_title") if row else None
+    label = escape(str(title)) if title else str(chat_id)
+
+    text = (
+        f"{_WL_CONFIRM_TITLE[lang]}\n\n"
+        f"{label} <i>({chat_id})</i>\n\n"
+        f"{_WL_CONFIRM_BODY[lang]}"
+    )
+    await callback.answer()
+    msg = callback.message
+    if isinstance(msg, Message):
         await msg.edit_text(
             text,
             parse_mode="HTML",
-            reply_markup=chats_list_keyboard(lang, chats, page, total_pages),
+            reply_markup=confirm_remove_chat_keyboard(lang, chat_id, page),
         )
 
 
@@ -870,7 +984,10 @@ async def _render_wl_pending(
                     chat_info = await callback.bot.get_chat(chat_id)
                     title = chat_info.title or chat_info.full_name
                 except Exception:
-                    pass
+                    logger.debug(
+                        "Chat title fallback failed",
+                        chat_id=chat_id, exc_info=True,
+                    )
             ctype = attempt.get("chat_type", "")
             user = escape(str(attempt.get("user_first_name") or ""))
             uname = attempt.get("user_username")
@@ -894,6 +1011,226 @@ async def _render_wl_pending(
             parse_mode="HTML",
             reply_markup=pending_list_keyboard(lang, attempts, page, total_pages),
         )
+
+
+# ---------------------------------------------------------------------------
+# Callback: rejected attempts list (paginated)
+# ---------------------------------------------------------------------------
+
+
+def _build_chat_link_html(
+    chat_id: int, chat_title: str | None, chat_type: str | None,
+) -> str:
+    """Render a chat label as an HTML anchor when a URL can be built."""
+    label = escape(str(chat_title)) if chat_title else str(chat_id)
+    url = build_chat_url(chat_id, chat_type)
+    if url:
+        return f'<a href="{url}">{label}</a>'
+    return label
+
+
+@router.callback_query(F.data.startswith("adm_wl_rejected:"))
+async def handle_wl_rejected(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Show paginated list of rejected attempts."""
+    if not _guard_admin(kwargs, callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+
+    await callback.answer()
+    await _render_wl_rejected(callback, admin_repo, lang, page)
+
+
+async def _render_wl_rejected(
+    callback: CallbackQuery,
+    admin_repo: AdminRepository,
+    lang: str,
+    page: int,
+) -> None:
+    """Render rejected attempts list (shared by rejected view and restore/delete)."""
+    attempts, total = await admin_repo.get_rejected_attempts_page(page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    # Clamp page to valid range
+    if page >= total_pages:
+        page = max(0, total_pages - 1)
+        attempts, total = await admin_repo.get_rejected_attempts_page(
+            page, _PER_PAGE,
+        )
+        total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    if total == 0:
+        text = f"{_WL_REJECTED_TITLE[lang]}\n\n{_WL_NO_REJECTED[lang]}"
+    else:
+        lines = [f"{_WL_REJECTED_TITLE[lang]} ({total})\n"]
+        offset = page * _PER_PAGE
+        for i, attempt in enumerate(attempts, start=offset + 1):
+            chat_id = int(attempt.get("chat_id", 0))
+            title = attempt.get("chat_title")
+            ctype = attempt.get("chat_type", "") or ""
+            chat_link = _build_chat_link_html(chat_id, title, ctype)
+            user = escape(str(attempt.get("user_first_name") or ""))
+            uname = attempt.get("user_username")
+            user_display = f"@{escape(str(uname))}" if uname else (user or "?")
+
+            entry = f"{i}. {chat_link} <i>({chat_id})</i>"
+            if ctype:
+                entry += f" <i>[{escape(str(ctype))}]</i>"
+            entry += f"\n    👤 {user_display}"
+
+            msg_text = attempt.get("message_text")
+            if msg_text:
+                entry += f"\n    💬 {escape(str(msg_text)[:50])}"
+            lines.append(entry)
+        text = "\n".join(lines)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        try:
+            await msg.edit_text(
+                text,
+                parse_mode="HTML",
+                reply_markup=rejected_list_keyboard(
+                    lang, attempts, page, total_pages,
+                ),
+                disable_web_page_preview=True,
+            )
+        except TelegramBadRequest as exc:
+            if "message is not modified" not in str(exc):
+                raise
+
+
+# ---------------------------------------------------------------------------
+# Callback: restore rejected attempt to pending
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_restore:"))
+async def handle_wl_restore(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Restore a rejected attempt back to 'pending' status."""
+    if not _guard_admin(kwargs, callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    attempt = await admin_repo.get_attempt(attempt_id)
+    if not attempt:
+        await callback.answer(_WL_NOT_FOUND[lang], show_alert=True)
+        await _render_wl_rejected(callback, admin_repo, lang, page)
+        return
+
+    # Only restore if currently rejected; otherwise just refresh.
+    if attempt.get("status") == "rejected":
+        await admin_repo.update_attempt_status(attempt_id, "pending")
+
+    await callback.answer(_WL_RESTORED[lang])
+    await _render_wl_rejected(callback, admin_repo, lang, page)
+
+
+# ---------------------------------------------------------------------------
+# Callback: ask confirmation before deleting a rejected attempt
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_del_ask:"))
+async def handle_wl_delete_ask(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Show confirmation prompt before hard-deleting a rejected attempt."""
+    if not _guard_admin(kwargs, callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    attempt = await admin_repo.get_attempt(attempt_id)
+    if not attempt:
+        await callback.answer(_WL_NOT_FOUND[lang], show_alert=True)
+        await _render_wl_rejected(callback, admin_repo, lang, page)
+        return
+
+    chat_id = int(attempt.get("chat_id", 0))
+    title = attempt.get("chat_title")
+    ctype = attempt.get("chat_type", "") or ""
+    chat_link = _build_chat_link_html(chat_id, title, ctype)
+
+    text = (
+        f"{_WL_DELETE_CONFIRM_TITLE[lang]}\n\n"
+        f"{chat_link} <i>({chat_id})</i>\n\n"
+        f"{_WL_DELETE_CONFIRM_BODY[lang]}"
+    )
+    await callback.answer()
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=confirm_delete_attempt_keyboard(lang, attempt_id, page),
+            disable_web_page_preview=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Callback: delete rejected attempt (actual)
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("adm_wl_del:"))
+async def handle_wl_delete(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Hard-delete a rejected attempt and re-render the list."""
+    if not _guard_admin(kwargs, callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        attempt_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    deleted = await admin_repo.delete_attempt(attempt_id)
+    await callback.answer(
+        _WL_DELETED[lang] if deleted else _WL_NOT_FOUND[lang],
+    )
+    await _render_wl_rejected(callback, admin_repo, lang, page)
 
 
 # ---------------------------------------------------------------------------
