@@ -17,10 +17,11 @@ _Blocks feature work or security risk._
   - **Priority:** Critical (user-facing)
   - **Source:** Live QA 2026-04-20 ([§7.1 UX-1](docs/FUNCTIONALITY.md))
   - **Created:** 2026-04-20
-- [ ] **TD-004**: Destructive admin callbacks (`🗑` rule delete, `❌` whitelist remove) execute in one click with no confirmation
+- [ ] **TD-004**: Rule `🗑` delete in admin panel still executes in one click with no confirmation
   - **Priority:** Critical (destructive, no undo)
   - **Source:** Live QA 2026-04-20 ([§7.1 UX-2, §7.4 S-13](docs/FUNCTIONALITY.md))
   - **Created:** 2026-04-20
+  - **Note:** Whitelist `❌` remove was fixed in commit 02d63e4 (2026-04-21) with a confirmation step; rule-delete still needs the same treatment
 
 ## High
 _Causes recurring problems._

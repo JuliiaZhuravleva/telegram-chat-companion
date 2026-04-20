@@ -69,6 +69,9 @@ docker-compose.override.yml
 # Project instructions (internal use only)
 CLAUDE.md
 
+# Per-session handoff snapshot (regenerated each session)
+HANDOFF.md
+
 # n8n migration artifacts
 n8n-migration/
 *.n8n.json
