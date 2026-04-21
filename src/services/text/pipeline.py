@@ -142,19 +142,13 @@ class TextProcessingPipeline:
 
         link_task: asyncio.Task[str | None] | None = None
         if config.link_comments_enabled and self._links:
-            link_task = asyncio.ensure_future(
-                self._safe_extract_links(message_text)
-            )
+            link_task = asyncio.ensure_future(self._safe_extract_links(message_text))
 
         sticker_task: asyncio.Task[str | None] | None = None
         if config.sticker_learning_enabled and self._sticker:
-            sticker_task = asyncio.ensure_future(
-                self._safe_get_sticker_candidates(message_text)
-            )
+            sticker_task = asyncio.ensure_future(self._safe_get_sticker_candidates(message_text))
 
-        recent_msgs, message_lengths = await asyncio.gather(
-            recent_msgs_task, lengths_task
-        )
+        recent_msgs, message_lengths = await asyncio.gather(recent_msgs_task, lengths_task)
 
         rag_memories: list[dict[str, Any]] = []
         if rag_task:
@@ -275,11 +269,7 @@ class TextProcessingPipeline:
         tasks: list[asyncio.Task[Any]] = []
 
         # 1. Update cooldown
-        tasks.append(
-            asyncio.ensure_future(
-                self._safe_update_cooldown(chat_id, user_id)
-            )
-        )
+        tasks.append(asyncio.ensure_future(self._safe_update_cooldown(chat_id, user_id)))
 
         # 2. Log response
         tasks.append(

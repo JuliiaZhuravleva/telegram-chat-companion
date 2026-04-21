@@ -14,6 +14,7 @@ from src.models.chat_config import ChatConfig
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_event(
     chat_id: int = -1001,
     user_id: int = 100,
@@ -46,6 +47,7 @@ def _make_data(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestRulesMiddleware:
     @pytest.mark.asyncio
@@ -104,10 +106,12 @@ class TestRulesMiddleware:
         mock_engine.evaluate = AsyncMock(return_value=[mock_action])
 
         container = data["dishka_container"]
-        container.get = AsyncMock(side_effect=lambda cls: {
-            type(mock_engine): mock_engine,
-            type(mock_executor): mock_executor,
-        }.get(cls, MagicMock()))
+        container.get = AsyncMock(
+            side_effect=lambda cls: {
+                type(mock_engine): mock_engine,
+                type(mock_executor): mock_executor,
+            }.get(cls, MagicMock())
+        )
 
         # Patch to return our mocks from dishka
         from src.services.rules.engine import RuleEngine
@@ -127,9 +131,7 @@ class TestRulesMiddleware:
         assert result == "ok"
         handler.assert_called_once()
         mock_engine.evaluate.assert_called_once()
-        mock_executor.execute.assert_called_once_with(
-            mock_action, message=event, bot=data["bot"]
-        )
+        mock_executor.execute.assert_called_once_with(mock_action, message=event, bot=data["bot"])
 
     @pytest.mark.asyncio
     async def test_always_calls_handler_on_error(self) -> None:

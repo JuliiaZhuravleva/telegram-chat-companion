@@ -45,6 +45,7 @@ def _t(key: str, lang: str) -> str:
 # Chat selection for rules (which chat to manage rules for)
 # ---------------------------------------------------------------------------
 
+
 def rules_chat_list_keyboard(
     lang: str,
     chats: list[dict[str, Any]],
@@ -59,44 +60,55 @@ def rules_chat_list_keyboard(
         label = f"{title} ({chat_id})" if title else str(chat_id)
         if len(label) > 40:
             label = label[:37] + "..."
-        rows.append([
-            InlineKeyboardButton(
-                text=label,
-                callback_data=f"ar_list:{lang}:{chat['chat_id']}:0",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"ar_list:{lang}:{chat['chat_id']}:0",
+                ),
+            ]
+        )
 
     # Pagination
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
         if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="◀",
-                callback_data=f"adm_rules:{lang}:{page - 1}",
-            ))
-        nav.append(InlineKeyboardButton(
-            text=f"{page + 1}/{total_pages}",
-            callback_data="noop",
-        ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀",
+                    callback_data=f"adm_rules:{lang}:{page - 1}",
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data="noop",
+            )
+        )
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="▶",
-                callback_data=f"adm_rules:{lang}:{page + 1}",
-            ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶",
+                    callback_data=f"adm_rules:{lang}:{page + 1}",
+                )
+            )
         rows.append(nav)
 
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"adm_menu:{lang}",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_menu:{lang}",
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ---------------------------------------------------------------------------
 # Rules list for a specific chat (paginated)
 # ---------------------------------------------------------------------------
+
 
 def rules_list_keyboard(
     lang: str,
@@ -124,59 +136,72 @@ def rules_list_keyboard(
         if len(label) > 35:
             label = label[:32] + "..."
 
-        rows.append([
-            InlineKeyboardButton(
-                text=label,
-                callback_data=f"ar_view:{lang}:{rid}",
-            ),
-            InlineKeyboardButton(
-                text="🔄",
-                callback_data=f"ar_tog:{lang}:{rid}:{chat_id}:{page}",
-            ),
-            InlineKeyboardButton(
-                text="🗑",
-                callback_data=f"ar_del:{lang}:{rid}:{chat_id}:{page}",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"ar_view:{lang}:{rid}",
+                ),
+                InlineKeyboardButton(
+                    text="🔄",
+                    callback_data=f"ar_tog:{lang}:{rid}:{chat_id}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑",
+                    callback_data=f"ar_del:{lang}:{rid}:{chat_id}:{page}",
+                ),
+            ]
+        )
 
     # Pagination
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
         if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="◀",
-                callback_data=f"ar_list:{lang}:{chat_id}:{page - 1}",
-            ))
-        nav.append(InlineKeyboardButton(
-            text=f"{page + 1}/{total_pages}",
-            callback_data="noop",
-        ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀",
+                    callback_data=f"ar_list:{lang}:{chat_id}:{page - 1}",
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data="noop",
+            )
+        )
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="▶",
-                callback_data=f"ar_list:{lang}:{chat_id}:{page + 1}",
-            ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶",
+                    callback_data=f"ar_list:{lang}:{chat_id}:{page + 1}",
+                )
+            )
         rows.append(nav)
 
     # Add rule + back
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("add_rule", lang),
-            callback_data=f"ar_add:{lang}:{chat_id}",
-        ),
-    ])
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"adm_rules:{lang}:0",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("add_rule", lang),
+                callback_data=f"ar_add:{lang}:{chat_id}",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_rules:{lang}:0",
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 # ---------------------------------------------------------------------------
 # Rule type selection
 # ---------------------------------------------------------------------------
+
 
 def rule_type_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
     """Select rule type when creating a new rule."""
@@ -188,18 +213,22 @@ def rule_type_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
     ]
     rows: list[list[InlineKeyboardButton]] = []
     for rtype, label in types:
-        rows.append([
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"ar_type:{lang}:{chat_id}:{rtype}",
+                ),
+            ]
+        )
+    rows.append(
+        [
             InlineKeyboardButton(
-                text=label,
-                callback_data=f"ar_type:{lang}:{chat_id}:{rtype}",
+                text=_t("back", lang),
+                callback_data=f"ar_list:{lang}:{chat_id}:0",
             ),
-        ])
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"ar_list:{lang}:{chat_id}:0",
-        ),
-    ])
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -207,27 +236,28 @@ def rule_type_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
 # Rule detail view
 # ---------------------------------------------------------------------------
 
-def rule_detail_keyboard(
-    lang: str, rule_id: int, chat_id: int
-) -> InlineKeyboardMarkup:
+
+def rule_detail_keyboard(lang: str, rule_id: int, chat_id: int) -> InlineKeyboardMarkup:
     """View a single rule with toggle/delete/back."""
     toggle_label = {"ru": "⚡ Вкл/Выкл", "en": "⚡ Toggle"}
     delete_label = {"ru": "🗑 Удалить", "en": "🗑 Delete"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=toggle_label.get(lang, "Toggle"),
-                callback_data=f"ar_tog:{lang}:{rule_id}:{chat_id}:0",
-            ),
-            InlineKeyboardButton(
-                text=delete_label.get(lang, "Delete"),
-                callback_data=f"ar_del:{lang}:{rule_id}:{chat_id}:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("back", lang),
-                callback_data=f"ar_list:{lang}:{chat_id}:0",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=toggle_label.get(lang, "Toggle"),
+                    callback_data=f"ar_tog:{lang}:{rule_id}:{chat_id}:0",
+                ),
+                InlineKeyboardButton(
+                    text=delete_label.get(lang, "Delete"),
+                    callback_data=f"ar_del:{lang}:{rule_id}:{chat_id}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"ar_list:{lang}:{chat_id}:0",
+                ),
+            ],
+        ]
+    )

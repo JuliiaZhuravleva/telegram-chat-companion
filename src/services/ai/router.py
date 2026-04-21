@@ -168,8 +168,12 @@ class AIRouter:
 
         # Extract caller overrides once, before the retry loop
         caller_model: str | None = str(kwargs.pop("model")) if "model" in kwargs else None
-        caller_max_tokens: int | None = int(kwargs.pop("max_tokens")) if "max_tokens" in kwargs else None
-        caller_temperature: float | None = float(kwargs.pop("temperature")) if "temperature" in kwargs else None
+        caller_max_tokens: int | None = (
+            int(kwargs.pop("max_tokens")) if "max_tokens" in kwargs else None
+        )
+        caller_temperature: float | None = (
+            float(kwargs.pop("temperature")) if "temperature" in kwargs else None
+        )
 
         last_error: Exception | None = None
 
@@ -185,11 +189,15 @@ class AIRouter:
                     model = task_config.model
                 else:
                     model = None
-                max_tokens: int = caller_max_tokens if caller_max_tokens is not None else (
-                    task_config.max_tokens if task_config else 500
+                max_tokens: int = (
+                    caller_max_tokens
+                    if caller_max_tokens is not None
+                    else (task_config.max_tokens if task_config else 500)
                 )
-                temperature: float = caller_temperature if caller_temperature is not None else (
-                    task_config.temperature if task_config else 0.9
+                temperature: float = (
+                    caller_temperature
+                    if caller_temperature is not None
+                    else (task_config.temperature if task_config else 0.9)
                 )
 
                 logger.debug(
@@ -261,12 +269,14 @@ class AIRouter:
                     model=model,
                     **kwargs,
                 )
-                asyncio.ensure_future(self._log_usage(
-                    task_type="embedding",
-                    provider=result.provider,
-                    model=result.model,
-                    tokens_input=result.tokens_input,
-                ))
+                asyncio.ensure_future(
+                    self._log_usage(
+                        task_type="embedding",
+                        provider=result.provider,
+                        model=result.model,
+                        tokens_input=result.tokens_input,
+                    )
+                )
                 return result
 
             except AIProviderError as e:
@@ -311,13 +321,15 @@ class AIRouter:
                     prompt=prompt,
                     **kwargs,
                 )
-                asyncio.ensure_future(self._log_usage(
-                    task_type="vision",
-                    provider=result.provider,
-                    model=result.model,
-                    tokens_input=result.tokens_input,
-                    tokens_output=result.tokens_output,
-                ))
+                asyncio.ensure_future(
+                    self._log_usage(
+                        task_type="vision",
+                        provider=result.provider,
+                        model=result.model,
+                        tokens_input=result.tokens_input,
+                        tokens_output=result.tokens_output,
+                    )
+                )
                 return result
 
             except AIProviderError as e:
@@ -362,12 +374,14 @@ class AIRouter:
                     language=language,
                     **kwargs,
                 )
-                asyncio.ensure_future(self._log_usage(
-                    task_type="transcription",
-                    provider=result.provider,
-                    model=result.model,
-                    duration_seconds=result.duration,
-                ))
+                asyncio.ensure_future(
+                    self._log_usage(
+                        task_type="transcription",
+                        provider=result.provider,
+                        model=result.model,
+                        duration_seconds=result.duration,
+                    )
+                )
                 return result
 
             except AIProviderError as e:

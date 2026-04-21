@@ -199,6 +199,7 @@ class TestGetConfig:
 
         # Wait for cache to expire
         import asyncio
+
         await asyncio.sleep(0.02)
 
         await service.get_config(123)

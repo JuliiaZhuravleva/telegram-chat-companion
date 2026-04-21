@@ -135,14 +135,11 @@ async def handle_admin_sticker_reply(
 
     # Merge description via AI (fallback: save note directly)
     try:
-        new_desc = await sticker_service.merge_admin_description(
-            file_unique_id, admin_text
-        )
+        new_desc = await sticker_service.merge_admin_description(file_unique_id, admin_text)
     except ValueError as e:
         if str(e) == "content_filter":
             await message.reply(
-                "Фильтр контента заблокировал запрос. "
-                "Попробуй переформулировать текст.",
+                "Фильтр контента заблокировал запрос. Попробуй переформулировать текст.",
             )
         else:
             await message.reply("Произошла ошибка. Попробуй ещё раз.")
@@ -203,7 +200,9 @@ async def handle_sticker_sets(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(bot_config_repo, callback.from_user.id if callback.from_user else None):
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
         await callback.answer("Not authorized", show_alert=True)
         return
 
@@ -221,14 +220,9 @@ async def handle_sticker_sets(
     if not sets:
         text = "Нет изученных стикерпаков" if lang == "ru" else "No learned sticker packs"
     else:
-        text = (
-            f"Стикерпаки ({total}):" if lang == "ru"
-            else f"Sticker packs ({total}):"
-        )
+        text = f"Стикерпаки ({total}):" if lang == "ru" else f"Sticker packs ({total}):"
 
-    keyboard = sticker_sets_keyboard(
-        sets, lang=lang, page=page, total=total, per_page=per_page
-    )
+    keyboard = sticker_sets_keyboard(sets, lang=lang, page=page, total=total, per_page=per_page)
 
     if isinstance(callback.message, Message):
         await callback.message.edit_text(text, reply_markup=keyboard)
@@ -274,7 +268,9 @@ async def handle_sticker_set_view(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(bot_config_repo, callback.from_user.id if callback.from_user else None):
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
         await callback.answer("Not authorized", show_alert=True)
         return
 
@@ -307,7 +303,9 @@ async def handle_sticker_back(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(bot_config_repo, callback.from_user.id if callback.from_user else None):
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
         await callback.answer("Not authorized", show_alert=True)
         return
 
@@ -325,7 +323,8 @@ async def handle_sticker_back(
     admin_id = callback.from_user.id if callback.from_user else None
     if admin_id and isinstance(callback.message, Message) and callback.message.bot:
         sticker_msg_id = await sticker_repo.get_latest_sticker_msg(
-            admin_id, callback.message.chat.id,
+            admin_id,
+            callback.message.chat.id,
         )
         if sticker_msg_id:
             with contextlib.suppress(Exception):
@@ -360,7 +359,9 @@ async def handle_sticker_detail(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(bot_config_repo, callback.from_user.id if callback.from_user else None):
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
         await callback.answer("Not authorized", show_alert=True)
         return
 
@@ -395,9 +396,7 @@ async def handle_sticker_detail(
         lines.append("<b>⚠️ Анализ провалился</b>")
     if sticker.get("admin_notes"):
         lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
-    lines.append(
-        "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"
-    )
+    lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
 
     text = "\n".join(lines)
 
@@ -406,7 +405,8 @@ async def handle_sticker_detail(
         admin_id = callback.from_user.id if callback.from_user else None
         if admin_id and callback.message.bot:
             old_sticker_msg_id = await sticker_repo.get_latest_sticker_msg(
-                admin_id, callback.message.chat.id,
+                admin_id,
+                callback.message.chat.id,
             )
             if old_sticker_msg_id:
                 with contextlib.suppress(Exception):
@@ -459,7 +459,9 @@ async def handle_reanalyze(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(bot_config_repo, callback.from_user.id if callback.from_user else None):
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
         await callback.answer("Not authorized", show_alert=True)
         return
 

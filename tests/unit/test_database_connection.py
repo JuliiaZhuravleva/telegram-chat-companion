@@ -14,7 +14,9 @@ class TestCreatePool:
     async def test_creates_pool_and_returns_it(self):
         mock_pool = MagicMock()
 
-        with patch("src.database.connection.asyncpg.create_pool", new_callable=AsyncMock) as mock_create:
+        with patch(
+            "src.database.connection.asyncpg.create_pool", new_callable=AsyncMock
+        ) as mock_create:
             mock_create.return_value = mock_pool
             pool = await create_pool("postgresql://test:test@localhost/db")
 
@@ -25,7 +27,9 @@ class TestCreatePool:
     async def test_passes_min_max_size(self):
         mock_pool = MagicMock()
 
-        with patch("src.database.connection.asyncpg.create_pool", new_callable=AsyncMock) as mock_create:
+        with patch(
+            "src.database.connection.asyncpg.create_pool", new_callable=AsyncMock
+        ) as mock_create:
             mock_create.return_value = mock_pool
             await create_pool("postgresql://test:test@localhost/db", min_size=2, max_size=10)
 
@@ -35,7 +39,9 @@ class TestCreatePool:
 
     @pytest.mark.asyncio
     async def test_raises_on_none_pool(self):
-        with patch("src.database.connection.asyncpg.create_pool", new_callable=AsyncMock) as mock_create:
+        with patch(
+            "src.database.connection.asyncpg.create_pool", new_callable=AsyncMock
+        ) as mock_create:
             mock_create.return_value = None
             with pytest.raises(RuntimeError, match="Failed to create"):
                 await create_pool("postgresql://test:test@localhost/db")

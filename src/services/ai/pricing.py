@@ -31,16 +31,20 @@ class ModelPricing:
 MODEL_PRICING: dict[str, ModelPricing] = {
     # --- OpenAI ---
     "gpt-5-nano": ModelPricing(
-        input_per_1m=Decimal("0.05"), output_per_1m=Decimal("0.40"),
+        input_per_1m=Decimal("0.05"),
+        output_per_1m=Decimal("0.40"),
     ),
     "gpt-5-mini": ModelPricing(
-        input_per_1m=Decimal("0.25"), output_per_1m=Decimal("2.00"),
+        input_per_1m=Decimal("0.25"),
+        output_per_1m=Decimal("2.00"),
     ),
     "gpt-5.2": ModelPricing(
-        input_per_1m=Decimal("1.75"), output_per_1m=Decimal("14.00"),
+        input_per_1m=Decimal("1.75"),
+        output_per_1m=Decimal("14.00"),
     ),
     "o4-mini": ModelPricing(
-        input_per_1m=Decimal("1.10"), output_per_1m=Decimal("4.40"),
+        input_per_1m=Decimal("1.10"),
+        output_per_1m=Decimal("4.40"),
     ),
     # OpenAI embeddings
     "text-embedding-3-small": ModelPricing(
@@ -53,35 +57,44 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     "whisper-1": ModelPricing(per_minute=Decimal("0.006")),
     # --- Gemini ---
     "gemini-3-flash-preview": ModelPricing(
-        input_per_1m=Decimal("0.50"), output_per_1m=Decimal("3.00"),
+        input_per_1m=Decimal("0.50"),
+        output_per_1m=Decimal("3.00"),
     ),
     "gemini-3-pro-preview": ModelPricing(
-        input_per_1m=Decimal("2.00"), output_per_1m=Decimal("12.00"),
+        input_per_1m=Decimal("2.00"),
+        output_per_1m=Decimal("12.00"),
     ),
     "gemini-embedding-001": ModelPricing(is_free=True),
     # --- Grok (xAI) ---
     "grok-4-1-fast": ModelPricing(
-        input_per_1m=Decimal("0.20"), output_per_1m=Decimal("0.50"),
+        input_per_1m=Decimal("0.20"),
+        output_per_1m=Decimal("0.50"),
     ),
     "grok-4": ModelPricing(
-        input_per_1m=Decimal("3.00"), output_per_1m=Decimal("15.00"),
+        input_per_1m=Decimal("3.00"),
+        output_per_1m=Decimal("15.00"),
     ),
     "grok-2-vision-1212": ModelPricing(
-        input_per_1m=Decimal("2.00"), output_per_1m=Decimal("10.00"),
+        input_per_1m=Decimal("2.00"),
+        output_per_1m=Decimal("10.00"),
     ),
     # --- DeepSeek ---
     "deepseek-v3.2": ModelPricing(
-        input_per_1m=Decimal("0.27"), output_per_1m=Decimal("1.10"),
+        input_per_1m=Decimal("0.27"),
+        output_per_1m=Decimal("1.10"),
     ),
     "deepseek-r1-0528": ModelPricing(
-        input_per_1m=Decimal("0.55"), output_per_1m=Decimal("2.19"),
+        input_per_1m=Decimal("0.55"),
+        output_per_1m=Decimal("2.19"),
     ),
     # --- Anthropic ---
     "claude-sonnet-4": ModelPricing(
-        input_per_1m=Decimal("3.00"), output_per_1m=Decimal("15.00"),
+        input_per_1m=Decimal("3.00"),
+        output_per_1m=Decimal("15.00"),
     ),
     "claude-opus-4-5": ModelPricing(
-        input_per_1m=Decimal("15.00"), output_per_1m=Decimal("75.00"),
+        input_per_1m=Decimal("15.00"),
+        output_per_1m=Decimal("75.00"),
     ),
 }
 

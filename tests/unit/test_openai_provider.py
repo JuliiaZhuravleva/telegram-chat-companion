@@ -68,7 +68,9 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.generate_text("User msg", system_prompt="Be helpful")
 
         payload = mock_post.call_args[1]["json"]
@@ -85,7 +87,9 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.generate_text("User msg")
 
         payload = mock_post.call_args[1]["json"]
@@ -132,7 +136,9 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.generate_text("Test", response_mime_type="application/json")
 
         payload = mock_post.call_args[1]["json"]
@@ -146,7 +152,9 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.generate_text("Test")
 
         payload = mock_post.call_args[1]["json"]
@@ -159,9 +167,7 @@ class TestGenerateText:
 class TestGenerateEmbedding:
     async def test_successful_embedding(self, provider):
         embedding = [0.1, 0.2, 0.3] * 512
-        mock_resp = _mock_response(
-            json_data={"data": [{"embedding": embedding, "index": 0}]}
-        )
+        mock_resp = _mock_response(json_data={"data": [{"embedding": embedding, "index": 0}]})
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
             result = await provider.generate_embedding("Test text")
@@ -198,9 +204,7 @@ class TestGenerateEmbedding:
 
 class TestAnalyzeImage:
     async def test_output_text_format(self, provider):
-        mock_resp = _mock_response(
-            json_data={"output_text": "A dog playing fetch"}
-        )
+        mock_resp = _mock_response(json_data={"output_text": "A dog playing fetch"})
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
             result = await provider.analyze_image(b"fake-image", "Describe this")
@@ -250,7 +254,9 @@ class TestAnalyzeImage:
     async def test_payload_format(self, provider):
         mock_resp = _mock_response(json_data={"output_text": "Result"})
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.analyze_image(b"data", "Prompt", mime_type="image/png")
 
         call_url = mock_post.call_args[0][0]
@@ -282,11 +288,11 @@ class TestTranscribeAudio:
         assert result.duration == 3.5
 
     async def test_with_language_hint(self, provider):
-        mock_resp = _mock_response(
-            json_data={"text": "Привет", "language": "ru"}
-        )
+        mock_resp = _mock_response(json_data={"text": "Привет", "language": "ru"})
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.transcribe_audio(b"audio", language="ru")
 
         # Check that language is in the form data
@@ -296,7 +302,9 @@ class TestTranscribeAudio:
     async def test_multipart_upload(self, provider):
         mock_resp = _mock_response(json_data={"text": "test"})
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.transcribe_audio(b"audio-bytes", filename="voice.ogg")
 
         call_kwargs = mock_post.call_args[1]
@@ -355,7 +363,9 @@ class TestErrorHandling:
 
     async def test_timeout(self, provider):
         with patch.object(
-            provider._client, "post", new_callable=AsyncMock,
+            provider._client,
+            "post",
+            new_callable=AsyncMock,
             side_effect=httpx.TimeoutException("connection timed out"),
         ):
             with pytest.raises(AIProviderError, match="timed out") as exc_info:
@@ -365,7 +375,9 @@ class TestErrorHandling:
 
     async def test_http_error(self, provider):
         with patch.object(
-            provider._client, "post", new_callable=AsyncMock,
+            provider._client,
+            "post",
+            new_callable=AsyncMock,
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             with pytest.raises(AIProviderError, match="HTTP error"):

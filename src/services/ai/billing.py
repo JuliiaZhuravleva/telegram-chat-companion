@@ -94,12 +94,14 @@ class OpenAIBillingClient:
                         amount_raw = result.get("amount", {})
                         amount = Decimal(str(amount_raw.get("value", 0)))
                         total += amount
-                        buckets.append(OpenAICostBucket(
-                            start_time=bucket_data.get("start_time", 0),
-                            end_time=bucket_data.get("end_time", 0),
-                            amount_usd=amount,
-                            line_item=result.get("line_item"),
-                        ))
+                        buckets.append(
+                            OpenAICostBucket(
+                                start_time=bucket_data.get("start_time", 0),
+                                end_time=bucket_data.get("end_time", 0),
+                                amount_usd=amount,
+                                line_item=result.get("line_item"),
+                            )
+                        )
 
                 page_cursor = data.get("next_page")
                 if not page_cursor:

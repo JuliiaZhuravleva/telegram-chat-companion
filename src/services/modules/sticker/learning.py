@@ -81,9 +81,7 @@ class StickerLearningService:
             if preceding_messages:
                 context_text = " | ".join(preceding_messages[:3])
                 if len(context_text) >= 5:
-                    await self._repo.accumulate_context(
-                        file_unique_id, context_text[:200]
-                    )
+                    await self._repo.accumulate_context(file_unique_id, context_text[:200])
             return StickerLearningResult(
                 is_new=False,
                 file_unique_id=file_unique_id,
@@ -139,9 +137,7 @@ class StickerLearningService:
         character_hint: str | None = None
         web_context: str | None = None
         if sticker.set_name and not pack_context:
-            character_hint, web_context = await self._search_pack_context_via_ai(
-                sticker.set_name
-            )
+            character_hint, web_context = await self._search_pack_context_via_ai(sticker.set_name)
 
         # Vision API analysis
         prompt = self._build_vision_prompt(
@@ -161,6 +157,7 @@ class StickerLearningService:
         analysis_duration_ms: int | None = None
 
         import time
+
         start_time = time.perf_counter()
 
         try:
@@ -359,11 +356,15 @@ class StickerLearningService:
 
         description_parts = [f"🆔 <code>{sticker.file_unique_id}</code>"]
         if result.visual_description:
-            description_parts.append(f"<b>Описание:</b> {html_lib.escape(result.visual_description)}")
+            description_parts.append(
+                f"<b>Описание:</b> {html_lib.escape(result.visual_description)}"
+            )
         if result.emotion:
             description_parts.append(f"<b>Эмоция:</b> {html_lib.escape(result.emotion)}")
         if result.character_or_meme:
-            description_parts.append(f"<b>Персонаж:</b> {html_lib.escape(result.character_or_meme)}")
+            description_parts.append(
+                f"<b>Персонаж:</b> {html_lib.escape(result.character_or_meme)}"
+            )
         if sticker.set_name:
             description_parts.append(f"<b>Пак:</b> {html_lib.escape(sticker.set_name)}")
 
@@ -385,9 +386,7 @@ class StickerLearningService:
                 if emoji:
                     description_parts.append(f"<b>Эмодзи:</b> {emoji}")
                 has_embedding = record.get("description_embedding") is not None
-                description_parts.append(
-                    f"<b>Эмбеддинг:</b> {'✅' if has_embedding else '❌'}"
-                )
+                description_parts.append(f"<b>Эмбеддинг:</b> {'✅' if has_embedding else '❌'}")
 
         description_parts.append(
             "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"
@@ -409,7 +408,9 @@ class StickerLearningService:
                     )
 
                 desc_msg = await bot.send_message(
-                    admin_id, text, parse_mode="HTML",
+                    admin_id,
+                    text,
+                    parse_mode="HTML",
                     reply_to_message_id=sticker_msg.message_id,
                 )
                 await self._repo.save_notification(
@@ -451,7 +452,10 @@ class StickerLearningService:
         edit_mode = _detect_edit_mode(admin_text)
 
         prompt = self._build_merge_prompt(
-            original, current, admin_text, edit_mode,
+            original,
+            current,
+            admin_text,
+            edit_mode,
             accumulated_notes=accumulated_notes,
         )
 
@@ -521,9 +525,7 @@ class StickerLearningService:
 
     # ── Web search enrichment ────────────────────────────────────────
 
-    async def _search_pack_context_via_ai(
-        self, set_name: str
-    ) -> tuple[str | None, str | None]:
+    async def _search_pack_context_via_ai(self, set_name: str) -> tuple[str | None, str | None]:
         """Use AI knowledge to identify character/meme for a sticker pack.
 
         Returns (character_hint, cultural_context) or (None, None).
@@ -614,19 +616,23 @@ class StickerLearningService:
             # Add motion analysis context if available
             if timing.motion:
                 motion = timing.motion
-                lines.extend([
-                    "## АНАЛИЗ ДВИЖЕНИЯ",
-                    f"Средняя интенсивность движения: {motion.avg_motion:.2f}",
-                    f"Пик движения в момент времени: {motion.peak_motion_time:.1f}с",
-                    "",
-                    "На изображении 6 КЛЮЧЕВЫХ КАДРОВ в моменты НАИБОЛЬШЕГО ДВИЖЕНИЯ (не равномерно распределённые!):",
-                ])
+                lines.extend(
+                    [
+                        "## АНАЛИЗ ДВИЖЕНИЯ",
+                        f"Средняя интенсивность движения: {motion.avg_motion:.2f}",
+                        f"Пик движения в момент времени: {motion.peak_motion_time:.1f}с",
+                        "",
+                        "На изображении 6 КЛЮЧЕВЫХ КАДРОВ в моменты НАИБОЛЬШЕГО ДВИЖЕНИЯ (не равномерно распределённые!):",
+                    ]
+                )
 
                 # Frame list with motion scores
                 for i in range(min(6, len(motion.keyframe_indices))):
                     idx = motion.keyframe_indices[i]
                     time = motion.keyframe_times[i]
-                    motion_score = motion.motion_scores[idx] if idx < len(motion.motion_scores) else 0.0
+                    motion_score = (
+                        motion.motion_scores[idx] if idx < len(motion.motion_scores) else 0.0
+                    )
 
                     if i == 0:
                         label = f"  • t={time:.1f}с (движение={motion_score:.2f}) — начало"
@@ -640,16 +646,18 @@ class StickerLearningService:
                 lines.append("")
             else:
                 # Fallback for timing without motion
-                lines.extend([
-                    "На изображении 6 ключевых кадров (3x2 сетка), показывающих ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЯ:",
-                    f"  • Кадр 1 ({timing.frame_times[0]:.1f}с) — начало действия",
-                    f"  • Кадр 2 ({timing.frame_times[1]:.1f}с)",
-                    f"  • Кадр 3 ({timing.frame_times[2]:.1f}с)",
-                    f"  • Кадр 4 ({timing.frame_times[3]:.1f}с)",
-                    f"  • Кадр 5 ({timing.frame_times[4]:.1f}с)",
-                    f"  • Кадр 6 ({timing.frame_times[5]:.1f}с) — конец действия",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "На изображении 6 ключевых кадров (3x2 сетка), показывающих ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЯ:",
+                        f"  • Кадр 1 ({timing.frame_times[0]:.1f}с) — начало действия",
+                        f"  • Кадр 2 ({timing.frame_times[1]:.1f}с)",
+                        f"  • Кадр 3 ({timing.frame_times[2]:.1f}с)",
+                        f"  • Кадр 4 ({timing.frame_times[3]:.1f}с)",
+                        f"  • Кадр 5 ({timing.frame_times[4]:.1f}с)",
+                        f"  • Кадр 6 ({timing.frame_times[5]:.1f}с) — конец действия",
+                        "",
+                    ]
+                )
         elif sticker_type == "animated":
             lines = [
                 "Это анимированный стикер Telegram для чата.",
@@ -665,19 +673,23 @@ class StickerLearningService:
             # Add motion analysis context if available
             if timing.motion:
                 motion = timing.motion
-                lines.extend([
-                    "## АНАЛИЗ ДВИЖЕНИЯ",
-                    f"Средняя интенсивность движения: {motion.avg_motion:.2f}",
-                    f"Пик движения в момент времени: {motion.peak_motion_time:.1f}с",
-                    "",
-                    "На изображении 6 КЛЮЧЕВЫХ КАДРОВ в моменты НАИБОЛЬШЕГО ДВИЖЕНИЯ (не равномерно распределённые!):",
-                ])
+                lines.extend(
+                    [
+                        "## АНАЛИЗ ДВИЖЕНИЯ",
+                        f"Средняя интенсивность движения: {motion.avg_motion:.2f}",
+                        f"Пик движения в момент времени: {motion.peak_motion_time:.1f}с",
+                        "",
+                        "На изображении 6 КЛЮЧЕВЫХ КАДРОВ в моменты НАИБОЛЬШЕГО ДВИЖЕНИЯ (не равномерно распределённые!):",
+                    ]
+                )
 
                 # Frame list with motion scores
                 for i in range(min(6, len(motion.keyframe_indices))):
                     idx = motion.keyframe_indices[i]
                     time = motion.keyframe_times[i]
-                    motion_score = motion.motion_scores[idx] if idx < len(motion.motion_scores) else 0.0
+                    motion_score = (
+                        motion.motion_scores[idx] if idx < len(motion.motion_scores) else 0.0
+                    )
 
                     if i == 0:
                         label = f"  • t={time:.1f}с (движение={motion_score:.2f}) — начало"
@@ -691,16 +703,18 @@ class StickerLearningService:
                 lines.append("")
             else:
                 # Fallback for timing without motion
-                lines.extend([
-                    "На изображении 6 ключевых кадров (3x2 сетка), показывающих ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЯ:",
-                    f"  • Кадр 1 ({timing.frame_times[0]:.1f}с) — начало действия",
-                    f"  • Кадр 2 ({timing.frame_times[1]:.1f}с)",
-                    f"  • Кадр 3 ({timing.frame_times[2]:.1f}с)",
-                    f"  • Кадр 4 ({timing.frame_times[3]:.1f}с)",
-                    f"  • Кадр 5 ({timing.frame_times[4]:.1f}с)",
-                    f"  • Кадр 6 ({timing.frame_times[5]:.1f}с) — конец действия",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "На изображении 6 ключевых кадров (3x2 сетка), показывающих ПОСЛЕДОВАТЕЛЬНОСТЬ ДЕЙСТВИЯ:",
+                        f"  • Кадр 1 ({timing.frame_times[0]:.1f}с) — начало действия",
+                        f"  • Кадр 2 ({timing.frame_times[1]:.1f}с)",
+                        f"  • Кадр 3 ({timing.frame_times[2]:.1f}с)",
+                        f"  • Кадр 4 ({timing.frame_times[3]:.1f}с)",
+                        f"  • Кадр 5 ({timing.frame_times[4]:.1f}с)",
+                        f"  • Кадр 6 ({timing.frame_times[5]:.1f}с) — конец действия",
+                        "",
+                    ]
+                )
         elif sticker_type == "video":
             lines = [
                 "Это видео-стикер Telegram для чата.",
@@ -729,15 +743,17 @@ class StickerLearningService:
         lines.append("Опиши СМЫСЛ и НАЗНАЧЕНИЕ стикера для использования в чате.")
 
         if sticker_type in ("animated", "video"):
-            lines.extend([
-                "",
-                "ВАЖНО — Опиши ДЕЙСТВИЕ как процесс от начала к концу:",
-                "  ✓ Правильно: 'Персонаж замахивается и бьёт кулаком в камеру'",
-                "  ✓ Правильно: 'Кот качает головой из стороны в сторону'",
-                "  ✗ Неправильно: 'На кадрах показан персонаж'",
-                "  ✗ Неправильно: 'Кадры почти одинаковые'",
-                "Используй глаголы движения: бьёт, прыгает, танцует, качается, машет и т.д.",
-            ])
+            lines.extend(
+                [
+                    "",
+                    "ВАЖНО — Опиши ДЕЙСТВИЕ как процесс от начала к концу:",
+                    "  ✓ Правильно: 'Персонаж замахивается и бьёт кулаком в камеру'",
+                    "  ✓ Правильно: 'Кот качает головой из стороны в сторону'",
+                    "  ✗ Неправильно: 'На кадрах показан персонаж'",
+                    "  ✗ Неправильно: 'Кадры почти одинаковые'",
+                    "Используй глаголы движения: бьёт, прыгает, танцует, качается, машет и т.д.",
+                ]
+            )
 
         lines.append("")
         lines.append("## ТЕКСТ НА СТИКЕРЕ")
@@ -764,9 +780,7 @@ class StickerLearningService:
         lines.append("{")
         lines.append('  "visual": "[Текст если есть]. Кто/что изображено + смысл",')
         lines.append('  "emotion": "основная эмоция (1 слово)",')
-        lines.append(
-            '  "contexts": ["когда использовать 1", "когда использовать 2", ... 3-5],'
-        )
+        lines.append('  "contexts": ["когда использовать 1", "когда использовать 2", ... 3-5],')
         lines.append('  "tags": ["meme", "reaction", "cute", ...],')
         lines.append('  "character": "имя персонажа/мема или null"')
         lines.append("}")
@@ -809,32 +823,31 @@ class StickerLearningService:
 
         if accumulated_notes:
             sections.append(
-                f"### Предыдущие заметки админа (для контекста):\n"
-                f"{accumulated_notes}\n"
+                f"### Предыдущие заметки админа (для контекста):\n{accumulated_notes}\n"
             )
 
-        instruction = mode_instructions.get(
-            edit_mode, mode_instructions["smart_merge"]
+        instruction = mode_instructions.get(edit_mode, mode_instructions["smart_merge"])
+        sections.extend(
+            [
+                "## ЗАДАЧА\n",
+                f"{instruction}\n",
+                "## ПРАВИЛА\n",
+                "1. ПРИОРИТЕТ: заметка админа > текущее описание > оригинал Vision API",
+                "2. КРАТКОСТЬ: результат — максимум 2-3 предложения",
+                "3. НЕ ДУБЛИРУЙ: не повторяй одну мысль разными словами",
+                "4. НЕ КОПИРУЙ заметку дословно — перефразируй и интегрируй",
+                "5. ПРОТИВОРЕЧИЯ: если админ говорит иначе — используй версию админа",
+                "6. Визуальное содержание (что изображено) бери из оригинала Vision API",
+                "7. Смысл, контекст и назначение стикера — из заметки админа\n",
+                "## ФОРМАТ ОТВЕТА (JSON)\n",
+                "{\n"
+                '  "visual": "итоговое описание (2-3 предложения, без повторов)",\n'
+                '  "emotion": "основная эмоция (1 слово)",\n'
+                '  "contexts": ["когда использовать 1", "когда использовать 2"],\n'
+                '  "character": "персонаж или null"\n'
+                "}",
+            ]
         )
-        sections.extend([
-            "## ЗАДАЧА\n",
-            f"{instruction}\n",
-            "## ПРАВИЛА\n",
-            "1. ПРИОРИТЕТ: заметка админа > текущее описание > оригинал Vision API",
-            "2. КРАТКОСТЬ: результат — максимум 2-3 предложения",
-            "3. НЕ ДУБЛИРУЙ: не повторяй одну мысль разными словами",
-            "4. НЕ КОПИРУЙ заметку дословно — перефразируй и интегрируй",
-            "5. ПРОТИВОРЕЧИЯ: если админ говорит иначе — используй версию админа",
-            "6. Визуальное содержание (что изображено) бери из оригинала Vision API",
-            "7. Смысл, контекст и назначение стикера — из заметки админа\n",
-            "## ФОРМАТ ОТВЕТА (JSON)\n",
-            "{\n"
-            '  "visual": "итоговое описание (2-3 предложения, без повторов)",\n'
-            '  "emotion": "основная эмоция (1 слово)",\n'
-            '  "contexts": ["когда использовать 1", "когда использовать 2"],\n'
-            '  "character": "персонаж или null"\n'
-            "}",
-        ])
 
         return "\n".join(sections)
 
@@ -911,19 +924,13 @@ class StickerLearningService:
                     return s
 
             result: dict[str, Any] = {}
-            visual_match = re.search(
-                r'"visual"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned
-            )
+            visual_match = re.search(r'"visual"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned)
             if visual_match:
                 result["visual"] = _unescape(visual_match.group(1))
-            emotion_match = re.search(
-                r'"emotion"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned
-            )
+            emotion_match = re.search(r'"emotion"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned)
             if emotion_match:
                 result["emotion"] = _unescape(emotion_match.group(1))
-            character_match = re.search(
-                r'"character"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned
-            )
+            character_match = re.search(r'"character"\s*:\s*"((?:[^"\\]|\\.)+)"', cleaned)
             if character_match and character_match.group(1).lower() not in (
                 "null",
                 "none",
@@ -951,9 +958,7 @@ class StickerLearningService:
         # contexts
         contexts = data.get("contexts")
         if isinstance(contexts, list):
-            result["contexts"] = [
-                str(c).strip() for c in contexts if c and str(c).strip()
-            ]
+            result["contexts"] = [str(c).strip() for c in contexts if c and str(c).strip()]
 
         # tags
         tags = data.get("tags")

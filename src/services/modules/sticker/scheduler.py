@@ -84,9 +84,7 @@ class StickerSetSyncScheduler:
                     set_name=tg_set.name,
                     set_title=tg_set.title,
                     total_count=len(tg_set.stickers),
-                    thumbnail_file_id=(
-                        tg_set.thumbnail.file_id if tg_set.thumbnail else None
-                    ),
+                    thumbnail_file_id=(tg_set.thumbnail.file_id if tg_set.thumbnail else None),
                     is_animated=tg_set.sticker_type == "custom_emoji"
                     or any(s.is_animated for s in tg_set.stickers[:1]),
                     is_video=any(s.is_video for s in tg_set.stickers[:1]),

@@ -4,24 +4,29 @@ from src.bot.keyboards.admin import (
     access_keyboard,
     approved_notification_keyboard,
     chats_list_keyboard,
+    confirm_delete_attempt_keyboard,
+    confirm_remove_chat_keyboard,
     costs_keyboard,
     language_keyboard,
     main_menu_keyboard,
     notifications_keyboard,
     pending_list_keyboard,
+    rejected_list_keyboard,
     rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
 )
 
 
+def _get_urls(keyboard):
+    """Extract all button URLs from keyboard."""
+    return [btn.url for row in keyboard.inline_keyboard for btn in row if btn.url]
+
+
 def _get_callbacks(keyboard):
     """Extract all callback_data strings from keyboard."""
     return [
-        btn.callback_data
-        for row in keyboard.inline_keyboard
-        for btn in row
-        if btn.callback_data
+        btn.callback_data for row in keyboard.inline_keyboard for btn in row if btn.callback_data
     ]
 
 
@@ -105,6 +110,17 @@ class TestWhitelistMenuKeyboard:
         assert any("adm_wl_chats:" in c for c in callbacks)
         assert any("adm_wl_pending:" in c for c in callbacks)
 
+    def test_has_rejected_button(self):
+        kb = whitelist_menu_keyboard("ru")
+        callbacks = _get_callbacks(kb)
+        assert any(c.startswith("adm_wl_rejected:") for c in callbacks)
+
+    def test_rejected_label_localized(self):
+        labels_ru = _get_labels(whitelist_menu_keyboard("ru"))
+        labels_en = _get_labels(whitelist_menu_keyboard("en"))
+        assert any("Отклонённые" in lab for lab in labels_ru)
+        assert any("Rejected" in lab for lab in labels_en)
+
     def test_has_back_button(self):
         kb = whitelist_menu_keyboard("en")
         callbacks = _get_callbacks(kb)
@@ -133,8 +149,11 @@ class TestChatsListKeyboard:
         ]
         kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
         callbacks = _get_callbacks(kb)
-        assert any("adm_wl_rm:ru:-100" in c for c in callbacks)
-        assert any("adm_wl_rm:ru:-200" in c for c in callbacks)
+        # ❌ now routes through the confirmation step
+        assert any("adm_wl_rm_ask:ru:-100:0" in c for c in callbacks)
+        assert any("adm_wl_rm_ask:ru:-200:0" in c for c in callbacks)
+        # Must NOT directly delete from the list row anymore
+        assert not any(c.startswith("adm_wl_rm:") for c in callbacks)
 
     def test_has_back_button(self):
         kb = chats_list_keyboard("en", [], page=0, total_pages=1)
@@ -156,7 +175,118 @@ class TestChatsListKeyboard:
         kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
         labels = _get_labels(kb)
         # No page indicator
-        assert not any("/" in l and l[0].isdigit() for l in labels)
+        assert not any("/" in label and label[0].isdigit() for label in labels)
+
+    def test_supergroup_title_is_url_button(self):
+        chats = [
+            {
+                "chat_id": -1001234567890,
+                "chat_title": "Test Supergroup",
+                "chat_type": "supergroup",
+            },
+        ]
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
+        urls = _get_urls(kb)
+        # Internal id: strip sign + "100" prefix
+        assert "https://t.me/c/1234567890" in urls
+
+    def test_private_chat_title_is_tg_user_link(self):
+        chats = [
+            {
+                "chat_id": 1234567890,
+                "chat_title": "Alice",
+                "chat_type": "private",
+            },
+        ]
+        kb = chats_list_keyboard("en", chats, page=0, total_pages=1)
+        urls = _get_urls(kb)
+        assert "tg://user?id=1234567890" in urls
+
+    def test_old_group_title_stays_noop_callback(self):
+        # Legacy groups (chat_type="group") have no shareable link —
+        # title button becomes a pure noop to avoid triggering a
+        # "message is not modified" re-render on tap.
+        chats = [
+            {"chat_id": -100, "chat_title": "Legacy Group", "chat_type": "group"},
+        ]
+        kb = chats_list_keyboard("ru", chats, page=2, total_pages=5)
+        urls = _get_urls(kb)
+        assert not any("-100" in (u or "") for u in urls)
+        # Find the row for this chat (first data row) and check its title button
+        title_btn = kb.inline_keyboard[0][0]
+        assert title_btn.url is None
+        assert title_btn.callback_data == "noop"
+
+
+class TestConfirmRemoveChatKeyboard:
+    def test_has_yes_no_buttons(self):
+        kb = confirm_remove_chat_keyboard("ru", chat_id=-100, page=0)
+        callbacks = _get_callbacks(kb)
+        # Yes → actual delete callback
+        assert "adm_wl_rm:ru:-100:0" in callbacks
+        # No → back to list at same page
+        assert "adm_wl_chats:ru:0" in callbacks
+
+    def test_preserves_page_on_cancel(self):
+        kb = confirm_remove_chat_keyboard("en", chat_id=-200, page=3)
+        callbacks = _get_callbacks(kb)
+        assert "adm_wl_chats:en:3" in callbacks
+        assert "adm_wl_rm:en:-200:3" in callbacks
+
+    def test_labels_per_language(self):
+        ru_labels = _get_labels(confirm_remove_chat_keyboard("ru", -1, 0))
+        en_labels = _get_labels(confirm_remove_chat_keyboard("en", -1, 0))
+        assert any("Да" in lab for lab in ru_labels)
+        assert any("Yes" in lab for lab in en_labels)
+
+
+class TestRejectedListKeyboard:
+    def test_has_restore_and_delete_per_item(self):
+        attempts = [
+            {"id": 1, "chat_id": -100},
+            {"id": 2, "chat_id": -200},
+        ]
+        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=1)
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl_restore:ru:1:0" in c for c in callbacks)
+        assert any("adm_wl_del_ask:ru:1:0" in c for c in callbacks)
+        assert any("adm_wl_restore:ru:2:0" in c for c in callbacks)
+        assert any("adm_wl_del_ask:ru:2:0" in c for c in callbacks)
+        # Must NOT use the direct-delete callback here
+        assert not any(c.startswith("adm_wl_del:") for c in callbacks)
+
+    def test_pagination_uses_rejected_callback(self):
+        attempts = [{"id": 1, "chat_id": -100}]
+        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=3)
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl_rejected:ru:1" in c for c in callbacks)
+
+    def test_back_returns_to_whitelist_menu(self):
+        kb = rejected_list_keyboard("en", [], page=0, total_pages=1)
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl:en" in c for c in callbacks)
+
+    def test_restore_label_per_language(self):
+        attempts = [{"id": 1, "chat_id": -100}]
+        ru = _get_labels(rejected_list_keyboard("ru", attempts, 0, 1))
+        en = _get_labels(rejected_list_keyboard("en", attempts, 0, 1))
+        assert any("Вернуть" in lab for lab in ru)
+        assert any("Restore" in lab for lab in en)
+
+
+class TestConfirmDeleteAttemptKeyboard:
+    def test_has_yes_and_cancel(self):
+        kb = confirm_delete_attempt_keyboard("ru", attempt_id=42, page=1)
+        callbacks = _get_callbacks(kb)
+        assert "adm_wl_del:ru:42:1" in callbacks
+        # Cancel returns to rejected list at same page
+        assert "adm_wl_rejected:ru:1" in callbacks
+
+    def test_yes_label_per_language(self):
+        ru = _get_labels(confirm_delete_attempt_keyboard("ru", 1, 0))
+        en = _get_labels(confirm_delete_attempt_keyboard("en", 1, 0))
+        assert any("Да" in lab and "удалить" in lab for lab in ru)
+        assert any("Yes" in lab and "delete" in lab for lab in en)
 
 
 class TestPendingListKeyboard:
@@ -182,22 +312,22 @@ class TestNotificationStatusKeyboards:
     def test_approved_keyboard_ru(self):
         kb = approved_notification_keyboard("ru")
         labels = _get_labels(kb)
-        assert any("Одобрено" in l for l in labels)
+        assert any("Одобрено" in label for label in labels)
 
     def test_approved_keyboard_en(self):
         kb = approved_notification_keyboard("en")
         labels = _get_labels(kb)
-        assert any("Approved" in l for l in labels)
+        assert any("Approved" in label for label in labels)
 
     def test_rejected_keyboard_ru(self):
         kb = rejected_notification_keyboard("ru")
         labels = _get_labels(kb)
-        assert any("Отклонено" in l for l in labels)
+        assert any("Отклонено" in label for label in labels)
 
     def test_rejected_keyboard_en(self):
         kb = rejected_notification_keyboard("en")
         labels = _get_labels(kb)
-        assert any("Rejected" in l for l in labels)
+        assert any("Rejected" in label for label in labels)
 
 
 class TestCostsKeyboard:

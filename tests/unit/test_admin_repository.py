@@ -337,3 +337,108 @@ class TestAdminLanguage:
         saved_json = call_args[1]
         assert '"lang": "ru"' in saved_json
         assert '"other_key": "value"' in saved_json
+
+
+class TestGetRejectedAttemptsPage:
+    @pytest.mark.asyncio
+    async def test_returns_rejected_only(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 1
+        pool.fetch.return_value = [
+            {
+                "id": 5,
+                "chat_id": -100,
+                "chat_title": "Rejected Chat",
+                "chat_type": "supergroup",
+                "user_id": 42,
+                "user_first_name": "Mallory",
+                "user_username": "mal",
+                "message_text": "spam",
+                "created_at": None,
+            },
+        ]
+
+        attempts, total = await repo_.get_rejected_attempts_page(page=0)
+
+        assert total == 1
+        assert len(attempts) == 1
+        assert attempts[0]["chat_title"] == "Rejected Chat"
+        # Query must filter on status='rejected'
+        query = pool.fetch.call_args[0][0]
+        assert "'rejected'" in query
+        # Excludes chats that are now enabled
+        assert "enabled = true" in query
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_rejected(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 0
+        pool.fetch.return_value = []
+
+        attempts, total = await repo_.get_rejected_attempts_page(page=0)
+
+        assert attempts == []
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_pagination_offset(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 20
+        pool.fetch.return_value = []
+
+        await repo_.get_rejected_attempts_page(page=2, per_page=5)
+
+        # Positional args: (per_page=5, offset=page*per_page=10)
+        args = pool.fetch.call_args[0]
+        assert args[1] == 5  # per_page
+        assert args[2] == 10  # offset
+
+
+class TestHasRejectedAttempt:
+    @pytest.mark.asyncio
+    async def test_true_when_exists(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = True
+
+        assert await repo_.has_rejected_attempt(-100) is True
+        query = pool.fetchval.call_args[0][0]
+        assert "'rejected'" in query
+
+    @pytest.mark.asyncio
+    async def test_false_when_missing(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = False
+
+        assert await repo_.has_rejected_attempt(-100) is False
+
+    @pytest.mark.asyncio
+    async def test_coerces_none_to_false(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = None
+
+        assert await repo_.has_rejected_attempt(-100) is False
+
+
+class TestDeleteAttempt:
+    @pytest.mark.asyncio
+    async def test_returns_true_when_deleted(self, repo):
+        repo_, pool = repo
+        pool.execute.return_value = "DELETE 1"
+
+        assert await repo_.delete_attempt(42) is True
+        query = pool.execute.call_args[0][0]
+        assert "DELETE FROM unauthorized_attempts" in query
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_nothing_deleted(self, repo):
+        repo_, pool = repo
+        pool.execute.return_value = "DELETE 0"
+
+        assert await repo_.delete_attempt(999) is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_empty_result(self, repo):
+        repo_, pool = repo
+        pool.execute.return_value = ""
+
+        assert await repo_.delete_attempt(1) is False

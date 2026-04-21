@@ -38,8 +38,10 @@ async def test_transcribe_success(voice_service):
     assert result.text == "Привет, мир!"
     voice_service._messages.save.assert_awaited_once()
     call_kwargs = voice_service._messages.save.call_args
-    assert call_kwargs.kwargs.get("message_type") == "transcription" or \
-           call_kwargs[1].get("message_type") == "transcription"
+    assert (
+        call_kwargs.kwargs.get("message_type") == "transcription"
+        or call_kwargs[1].get("message_type") == "transcription"
+    )
 
 
 @pytest.mark.asyncio

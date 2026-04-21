@@ -47,6 +47,7 @@ config/local.yml
 
 # Testing
 .coverage
+coverage.xml
 htmlcov/
 .pytest_cache/
 .mypy_cache/
@@ -62,12 +63,24 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Manual QA screenshots and Playwright snapshots — contain live chat names,
+# user photos, and bot handles from QA sessions. Never commit.
+tests/manual/screenshots/
+
 # ===========================================
 # INTERNAL / MIGRATION FILES (not for public)
 # ===========================================
 
 # Project instructions (internal use only)
 CLAUDE.md
+
+# Per-session handoff snapshots (timestamped or plain; regenerated each session)
+HANDOFF.md
+HANDOFF-*.md
+
+# PM registries (internal coordination, not for public repo)
+_registry.md
+_tech-debt.md
 
 # n8n migration artifacts
 n8n-migration/

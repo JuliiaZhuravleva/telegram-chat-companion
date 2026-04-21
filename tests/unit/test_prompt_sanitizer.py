@@ -17,8 +17,13 @@ class TestSanitizePromptContent:
         assert "\uff1c" in result
 
     def test_neutralizes_all_known_tags(self) -> None:
-        for tag in ("user_message", "current_topic", "other_topics",
-                     "chat_history", "conversation"):
+        for tag in (
+            "user_message",
+            "current_topic",
+            "other_topics",
+            "chat_history",
+            "conversation",
+        ):
             assert f"<{tag}>" not in sanitize_prompt_content(f"<{tag}>")
             assert f"</{tag}>" not in sanitize_prompt_content(f"</{tag}>")
 

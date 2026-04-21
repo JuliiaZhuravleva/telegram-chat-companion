@@ -38,6 +38,7 @@ class HealthChecker:
         self._pool = pool
         self._bot = bot
         self._task: asyncio.Task[None] | None = None
+        self._manual_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Start the health check background loop."""
@@ -51,6 +52,14 @@ class HealthChecker:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
         logger.info("Health checker stopped")
+
+    async def run_check_now(self) -> None:
+        """Trigger an immediate health check (admin refresh button)."""
+        async with self._manual_lock:
+            config = await self._load_config()
+            result = await self._run_check()
+            await self._persist_result(result, config)
+            self._write_healthcheck_file()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -158,8 +167,7 @@ class HealthChecker:
                     HealthIssue(
                         severity=HealthStatus.WARNING,
                         message=(
-                            f"AI fallback activated {result.fallbacks_15m} "
-                            f"time(s) in last 15 min"
+                            f"AI fallback activated {result.fallbacks_15m} time(s) in last 15 min"
                         ),
                     )
                 )
@@ -207,10 +215,7 @@ class HealthChecker:
             messages_30m=result.messages_30m,
             fallbacks_15m=result.fallbacks_15m,
             ai_provider=result.ai_provider,
-            issues=[
-                {"severity": i.severity.value, "message": i.message}
-                for i in result.issues
-            ],
+            issues=[{"severity": i.severity.value, "message": i.message} for i in result.issues],
             alert_sent=should_alert,
         )
 
@@ -250,7 +255,9 @@ class HealthChecker:
 
         try:
             await self._bot.send_message(
-                first_admin, text, parse_mode="HTML",
+                first_admin,
+                text,
+                parse_mode="HTML",
             )
         except Exception:
             logger.warning("Failed to send health alert", admin_id=first_admin)
@@ -279,11 +286,7 @@ class HealthChecker:
             lines.append("")
             lines.append("<b>Issues:</b>")
             for issue in result.issues:
-                icon = (
-                    "\U0001f525"
-                    if issue.severity == HealthStatus.CRITICAL
-                    else "\u26a0\ufe0f"
-                )
+                icon = "\U0001f525" if issue.severity == HealthStatus.CRITICAL else "\u26a0\ufe0f"
                 lines.append(f"  {icon} {html_lib.escape(issue.message)}")
 
         lines.append("")

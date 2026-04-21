@@ -33,7 +33,10 @@ class MemoryRepository:
             VALUES ($1, $2, $3, $4, $5, $6::jsonb)
             RETURNING id
             """,
-            chat_id, content, embedding, source_message_id,
+            chat_id,
+            content,
+            embedding,
+            source_message_id,
             importance_score,
             None if metadata is None else json.dumps(metadata),
         )
@@ -61,7 +64,10 @@ class MemoryRepository:
             ORDER BY embedding <=> $2 ASC
             LIMIT $4
             """,
-            chat_id, query_embedding, min_similarity, max_results,
+            chat_id,
+            query_embedding,
+            min_similarity,
+            max_results,
         )
         return result
 
@@ -69,7 +75,8 @@ class MemoryRepository:
         """Delete a specific memory entry (scoped to chat for access control)."""
         await self._pool.execute(
             "DELETE FROM chat_memory WHERE id = $1 AND chat_id = $2",
-            memory_id, chat_id,
+            memory_id,
+            chat_id,
         )
 
     async def delete_expired(self) -> int:

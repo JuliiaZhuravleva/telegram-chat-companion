@@ -12,6 +12,7 @@ from aiogram.types import InlineKeyboardMarkup
 
 from src.database.repositories.bot_config import BotConfigRepository
 from src.utils import parse_admin_ids
+from src.utils.telegram import build_chat_url
 
 logger = structlog.get_logger(__name__)
 
@@ -166,7 +167,8 @@ class AbuseNotificationService:
         for admin_id in admin_ids:
             try:
                 await bot.send_message(
-                    admin_id, text,
+                    admin_id,
+                    text,
                     parse_mode="HTML",
                     reply_markup=reply_markup,
                 )
@@ -190,15 +192,20 @@ class AbuseNotificationService:
         lines: list[str] = ["🔒 <b>Unauthorized access</b>", ""]
 
         # -- Chat info --
-        chat_display = escape(chat_title) if chat_title else str(chat_id)
+        chat_label = escape(chat_title) if chat_title else str(chat_id)
+        # For private-chat unauthorized notifications, the "User" block below
+        # already carries a tg://user?id= link — suppress the duplicate here
+        # by not passing chat_type when it's "private".
+        url = build_chat_url(
+            chat_id,
+            chat_type if chat_type != "private" else None,
+            chat_username,
+        )
+        chat_display = f'<a href="{url}">{chat_label}</a>' if url else chat_label
         if chat_type:
             chat_display += f" ({escape(chat_type)})"
         lines.append(f"<b>Chat:</b> {chat_display}")
         lines.append(f"<b>Chat ID:</b> <code>{chat_id}</code>")
-        if chat_username:
-            lines.append(
-                f"<b>Chat link:</b> https://t.me/{escape(chat_username)}"
-            )
 
         lines.append("")
 
@@ -209,9 +216,7 @@ class AbuseNotificationService:
         full_name = full_name.strip() or "unknown"
 
         if user_id:
-            lines.append(
-                f"<b>User:</b> <a href=\"tg://user?id={user_id}\">{full_name}</a>"
-            )
+            lines.append(f'<b>User:</b> <a href="tg://user?id={user_id}">{full_name}</a>')
             lines.append(f"<b>User ID:</b> <code>{user_id}</code>")
         else:
             lines.append(f"<b>User:</b> {full_name}")

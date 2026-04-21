@@ -227,13 +227,26 @@ class TestPipelineProcess:
     async def test_context_passed_to_prompt(self, make_chat_config):
         config = make_chat_config(enabled=True)
         history_row = MagicMock()
-        history_row.__iter__ = MagicMock(return_value=iter([
-            ("user_id", 1), ("username", "Bob"), ("content", "hi"),
-            ("is_bot_message", False), ("first_name", "Bob"),
-        ]))
-        history_row.keys = MagicMock(return_value=[
-            "user_id", "username", "content", "is_bot_message", "first_name",
-        ])
+        history_row.__iter__ = MagicMock(
+            return_value=iter(
+                [
+                    ("user_id", 1),
+                    ("username", "Bob"),
+                    ("content", "hi"),
+                    ("is_bot_message", False),
+                    ("first_name", "Bob"),
+                ]
+            )
+        )
+        history_row.keys = MagicMock(
+            return_value=[
+                "user_id",
+                "username",
+                "content",
+                "is_bot_message",
+                "first_name",
+            ]
+        )
 
         pipeline, mocks = _make_pipeline(
             recent_msgs=[history_row],
@@ -312,6 +325,7 @@ class TestPipelinePostSend:
         assert call_kwargs["cost_usd"] is not None
         # Cost should be a Decimal > 0 (test-model might not be in pricing, so 0 is ok)
         from decimal import Decimal
+
         assert isinstance(call_kwargs["cost_usd"], Decimal)
 
     async def test_post_send_saves_bot_message(self, make_chat_config):

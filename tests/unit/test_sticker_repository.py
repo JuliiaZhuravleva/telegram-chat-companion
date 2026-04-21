@@ -102,13 +102,9 @@ async def test_search_by_embedding(repo):
 
 @pytest.mark.asyncio
 async def test_get_pack_context_with_exclude(repo):
-    repo._pool.fetch = AsyncMock(
-        return_value=[{"visual_description": "Sad cat"}]
-    )
+    repo._pool.fetch = AsyncMock(return_value=[{"visual_description": "Sad cat"}])
 
-    results = await repo.get_pack_context(
-        "funny_cats", exclude_file_unique_id="unique-1"
-    )
+    results = await repo.get_pack_context("funny_cats", exclude_file_unique_id="unique-1")
 
     assert len(results) == 1
     sql = repo._pool.fetch.call_args.args[0]

@@ -15,4 +15,4 @@ RUN pip install --no-cache-dir .
 # Copy remaining files (config, sql, etc.)
 COPY . .
 
-CMD ["python", "-m", "src.main"]
+CMD ["sh", "-c", "alembic upgrade head && python -m src.main"]

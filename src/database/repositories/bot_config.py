@@ -24,9 +24,7 @@ class BotConfigRepository:
             return None
         return json.loads(row["value"])
 
-    async def set(
-        self, key: str, value: Any, description: str | None = None
-    ) -> None:
+    async def set(self, key: str, value: Any, description: str | None = None) -> None:
         """Set a config value (upsert)."""
         json_value = json.dumps(value)
         await self._pool.execute(
@@ -56,6 +54,4 @@ class BotConfigRepository:
             "SELECT key, value FROM bot_config WHERE key LIKE 'default_%'"
         )
         prefix_len = len("default_")
-        return {
-            row["key"][prefix_len:]: json.loads(row["value"]) for row in rows
-        }
+        return {row["key"][prefix_len:]: json.loads(row["value"]) for row in rows}

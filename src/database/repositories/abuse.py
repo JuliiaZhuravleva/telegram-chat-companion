@@ -46,7 +46,10 @@ class AbuseRepository:
         """Run the check_anti_abuse() SQL function and return parsed result."""
         row = await self._pool.fetchrow(
             "SELECT * FROM check_anti_abuse($1, $2, $3, $4)",
-            chat_id, user_id, content, is_addressed_to_bot,
+            chat_id,
+            user_id,
+            content,
+            is_addressed_to_bot,
         )
         if row is None:
             return AntiAbuseResult(
@@ -93,7 +96,8 @@ class AbuseRepository:
         """Update response cooldown after a bot response."""
         await self._pool.execute(
             "SELECT update_response_cooldown($1, $2)",
-            chat_id, user_id,
+            chat_id,
+            user_id,
         )
 
     async def search_abuse_embeddings(
@@ -115,7 +119,9 @@ class AbuseRepository:
             ORDER BY embedding <=> $1 ASC
             LIMIT $3
             """,
-            query_embedding, min_similarity, limit,
+            query_embedding,
+            min_similarity,
+            limit,
         )
         return result
 
@@ -146,8 +152,17 @@ class AbuseRepository:
                 response_text, response_sticker_id
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
-            chat_id, user_id, username, first_name, original_text,
-            message_id, detection_method, matched_pattern_id,
-            matched_pattern, pattern_severity, embedding_similarity,
-            response_text, response_sticker_id,
+            chat_id,
+            user_id,
+            username,
+            first_name,
+            original_text,
+            message_id,
+            detection_method,
+            matched_pattern_id,
+            matched_pattern,
+            pattern_severity,
+            embedding_similarity,
+            response_text,
+            response_sticker_id,
         )

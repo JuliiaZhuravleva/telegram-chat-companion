@@ -50,12 +50,20 @@ class MessageRepository:
                     chat_messages.original_content, chat_messages.content
                 )
             """,
-            chat_id, message_id, user_id, username, first_name,
-            message_type, content,
+            chat_id,
+            message_id,
+            user_id,
+            username,
+            first_name,
+            message_type,
+            content,
             None if raw_data is None else json.dumps(raw_data),
-            reply_to_message_id, is_bot_message,
-            sticker_file_id, sticker_file_unique_id,
-            sticker_set_name, sticker_emoji,
+            reply_to_message_id,
+            is_bot_message,
+            sticker_file_id,
+            sticker_file_unique_id,
+            sticker_set_name,
+            sticker_emoji,
             message_thread_id,
         )
 
@@ -156,9 +164,83 @@ class MessageRepository:
             ORDER BY created_at DESC
             LIMIT $2
             """,
-            chat_id, limit, min_length,
+            chat_id,
+            limit,
+            min_length,
         )
         return [row["msg_length"] for row in rows]
+
+    async def get_bot_message_stats(
+        self,
+        chat_id: int,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Get bot message statistics for the relevancy gate.
+
+        Returns aggregated signals from the last `limit` messages in one query:
+        total_count, bot_count, bot_ratio, seconds_since_last_bot,
+        velocity_per_minute, consecutive_bot_at_end.
+        """
+        # Single query computes all engagement signals in one round-trip.
+        # CTE 'recent' fetches last N messages; 'stats' aggregates counts;
+        # 'consecutive' counts trailing bot messages at the end of history.
+        row = await self._pool.fetchrow(
+            """
+            WITH recent AS (
+                SELECT is_bot_message, created_at,
+                       ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
+                FROM chat_messages
+                WHERE chat_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+            ),
+            stats AS (
+                SELECT
+                    COUNT(*)::int AS total_count,
+                    COUNT(*) FILTER (WHERE is_bot_message)::int AS bot_count,
+                    MAX(created_at) FILTER (WHERE is_bot_message) AS last_bot_at,
+                    COUNT(*) FILTER (
+                        WHERE created_at > NOW() - INTERVAL '5 minutes'
+                    )::int AS recent_5min_count
+                FROM recent
+            ),
+            first_non_bot AS (
+                SELECT MIN(rn) AS rn
+                FROM recent
+                WHERE NOT is_bot_message
+            ),
+            consecutive AS (
+                SELECT COUNT(*)::int AS consecutive_bot
+                FROM recent
+                WHERE is_bot_message = true
+                  AND rn < COALESCE((SELECT rn FROM first_non_bot), $2 + 1)
+            )
+            SELECT
+                s.total_count,
+                s.bot_count,
+                CASE WHEN s.total_count > 0
+                     THEN s.bot_count::float / s.total_count
+                     ELSE 0.0 END AS bot_ratio,
+                EXTRACT(EPOCH FROM (NOW() - s.last_bot_at)) AS seconds_since_last_bot,
+                CASE WHEN s.recent_5min_count > 0
+                     THEN s.recent_5min_count / 5.0
+                     ELSE 0.0 END AS velocity_per_minute,
+                c.consecutive_bot AS consecutive_bot_at_end
+            FROM stats s, consecutive c
+            """,
+            chat_id,
+            limit,
+        )
+        if row is None:
+            return {
+                "total_count": 0,
+                "bot_count": 0,
+                "bot_ratio": 0.0,
+                "seconds_since_last_bot": None,
+                "velocity_per_minute": 0.0,
+                "consecutive_bot_at_end": 0,
+            }
+        return dict(row)
 
     async def get_for_summary(
         self,

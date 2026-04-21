@@ -74,18 +74,12 @@ class MessageSaverMiddleware(BaseMiddleware):
             first_name=message.from_user.first_name if message.from_user else None,
             content=message.text or message.caption,
             reply_to_message_id=(
-                message.reply_to_message.message_id
-                if message.reply_to_message
-                else None
+                message.reply_to_message.message_id if message.reply_to_message else None
             ),
             is_bot_message=bool(message.from_user and message.from_user.is_bot),
             sticker_file_id=message.sticker.file_id if message.sticker else None,
-            sticker_file_unique_id=(
-                message.sticker.file_unique_id if message.sticker else None
-            ),
-            sticker_set_name=(
-                message.sticker.set_name if message.sticker else None
-            ),
+            sticker_file_unique_id=(message.sticker.file_unique_id if message.sticker else None),
+            sticker_set_name=(message.sticker.set_name if message.sticker else None),
             sticker_emoji=message.sticker.emoji if message.sticker else None,
             message_thread_id=message_thread_id,
         )

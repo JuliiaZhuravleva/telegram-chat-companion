@@ -129,6 +129,7 @@ def _is_private(callback: CallbackQuery) -> bool:
 # Entry: chat selection
 # ---------------------------------------------------------------------------
 
+
 @router.callback_query(F.data.startswith("adm_rules:"))
 async def handle_rules_menu(
     callback: CallbackQuery,
@@ -157,11 +158,33 @@ async def handle_rules_menu(
         _PER_PAGE,
         page * _PER_PAGE,
     )
-    total = await chat_settings_repo._pool.fetchval(
-        "SELECT COUNT(*) FROM chat_settings WHERE enabled = true"
-    ) or 0
+    total = (
+        await chat_settings_repo._pool.fetchval(
+            "SELECT COUNT(*) FROM chat_settings WHERE enabled = true"
+        )
+        or 0
+    )
     total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
     chats = [dict(r) for r in rows]
+
+    # Resolve missing titles via Telegram API and persist
+    for chat in chats:
+        if not chat.get("chat_title") and callback.bot:
+            try:
+                chat_info = await callback.bot.get_chat(chat["chat_id"])
+                title = chat_info.title or chat_info.full_name
+                if title:
+                    chat["chat_title"] = title
+                    await chat_settings_repo.upsert(
+                        chat["chat_id"],
+                        chat_title=title,
+                    )
+            except Exception:
+                logger.debug(
+                    "Could not resolve chat title via Telegram API",
+                    chat_id=chat["chat_id"],
+                    exc_info=True,
+                )
 
     msg = callback.message
     if isinstance(msg, Message):
@@ -176,6 +199,7 @@ async def handle_rules_menu(
 # ---------------------------------------------------------------------------
 # Rule list for a chat
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("ar_list:"))
 async def handle_rules_list(
@@ -211,6 +235,7 @@ async def handle_rules_list(
 # ---------------------------------------------------------------------------
 # View rule details
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("ar_view:"))
 async def handle_rule_view(
@@ -274,6 +299,7 @@ async def handle_rule_view(
 # Toggle rule
 # ---------------------------------------------------------------------------
 
+
 @router.callback_query(F.data.startswith("ar_tog:"))
 async def handle_rule_toggle(
     callback: CallbackQuery,
@@ -300,7 +326,8 @@ async def handle_rule_toggle(
     await rules_repo.toggle(rule_id, enabled=new_enabled)
 
     status = (
-        {"ru": "включено", "en": "enabled"} if new_enabled
+        {"ru": "включено", "en": "enabled"}
+        if new_enabled
         else {"ru": "выключено", "en": "disabled"}
     )
     await callback.answer(_RULE_TOGGLED[lang].format(status=status.get(lang, "")))
@@ -322,6 +349,7 @@ async def handle_rule_toggle(
 # ---------------------------------------------------------------------------
 # Delete rule
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("ar_del:"))
 async def handle_rule_delete(
@@ -361,6 +389,7 @@ async def handle_rule_delete(
 # Add rule: select type
 # ---------------------------------------------------------------------------
 
+
 @router.callback_query(F.data.startswith("ar_add:"))
 async def handle_add_rule(
     callback: CallbackQuery,
@@ -389,6 +418,7 @@ async def handle_add_rule(
 # ---------------------------------------------------------------------------
 # Add rule: type selected → await JSON config
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("ar_type:"))
 async def handle_type_selected(
@@ -425,6 +455,7 @@ async def handle_type_selected(
 # ---------------------------------------------------------------------------
 # FSM: receive JSON config
 # ---------------------------------------------------------------------------
+
 
 @router.message(AdminStates.awaiting_rule_config)
 async def handle_rule_config_input(

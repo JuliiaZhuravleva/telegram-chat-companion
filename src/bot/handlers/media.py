@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import random
 import time
+from typing import Any
 
 import structlog
 from aiogram import Bot, F, Router
@@ -118,6 +119,7 @@ async def handle_photo_message(
     message_repo: FromDishka[MessageRepository],
     bot: Bot,
     message_thread_id: int | None = None,
+    **kwargs: Any,
 ) -> None:
     """Handle photo messages — analyze and optionally respond."""
     if not chat_config.image_analysis_enabled:
@@ -157,8 +159,10 @@ async def handle_photo_message(
 
     if caption:
         # photo_with_text: decide whether to respond via text pipeline
-        bot_info = await bot.me()
-        respond, trigger_type = should_respond(message, chat_config, bot_info.id)
+        bot_id: int | None = kwargs.get("bot_id")
+        if bot_id is None:
+            bot_id = (await bot.me()).id
+        respond, trigger_type = should_respond(message, chat_config, bot_id)
 
         if not respond:
             # Still save the description to message history
@@ -199,9 +203,7 @@ async def handle_photo_message(
         if not result.should_respond or not result.html_text:
             return
 
-        reply_to = (
-            message.message_id if trigger_type != TriggerType.RANDOM else None
-        )
+        reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
 
         # Send to correct topic in forum chats
         # Note: message.answer() inherits message_thread_id from the original message
@@ -226,9 +228,7 @@ async def handle_photo_message(
         and random.random() < chat_config.image_comment_sticker_chance
     ):
         try:
-            sticker_match = await sticker_responder.get_sticker_candidates(
-                description, limit=1
-            )
+            sticker_match = await sticker_responder.get_sticker_candidates(description, limit=1)
             if sticker_match:
                 await message.reply_sticker(sticker_match[0].file_id)
                 await sticker_responder.record_bot_use(sticker_match[0].file_unique_id)
@@ -302,9 +302,7 @@ async def handle_sticker_message(
     # Get preceding messages for usage context
     preceding: list[str] = []
     try:
-        recent = await message_repo.get_recent(
-            message.chat.id, limit=3, exclude_bot=True
-        )
+        recent = await message_repo.get_recent(message.chat.id, limit=3, exclude_bot=True)
         preceding = [
             r["content"]
             for r in reversed(recent)
@@ -337,9 +335,7 @@ async def handle_sticker_message(
                         set_name=tg_set.name,
                         set_title=tg_set.title,
                         total_count=len(tg_set.stickers),
-                        thumbnail_file_id=(
-                            tg_set.thumbnail.file_id if tg_set.thumbnail else None
-                        ),
+                        thumbnail_file_id=(tg_set.thumbnail.file_id if tg_set.thumbnail else None),
                         is_animated=any(s.is_animated for s in tg_set.stickers[:1]),
                         is_video=any(s.is_video for s in tg_set.stickers[:1]),
                     )
@@ -354,9 +350,7 @@ async def handle_sticker_message(
     # Notify admins about new stickers
     if learning_result.is_new and not learning_result.analysis_failed:
         try:
-            notif_settings = await admin_repo.get_notification_settings(
-                bot_config_repo
-            )
+            notif_settings = await admin_repo.get_notification_settings(bot_config_repo)
             sticker_mode = str(notif_settings.get("sticker", "on"))
             if sticker_mode != "off":
                 admin_ids_raw = await bot_config_repo.get("admin_ids")

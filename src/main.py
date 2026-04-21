@@ -40,17 +40,11 @@ async def _verify_schema(pool: asyncpg.Pool) -> None:
     """Check that required tables exist. Raises RuntimeError if not."""
     for table in _REQUIRED_TABLES:
         exists = await pool.fetchval(
-            "SELECT EXISTS("
-            "  SELECT 1 FROM information_schema.tables"
-            "  WHERE table_name = $1"
-            ")",
+            "SELECT EXISTS(  SELECT 1 FROM information_schema.tables  WHERE table_name = $1)",
             table,
         )
         if not exists:
-            raise RuntimeError(
-                f"Required table '{table}' not found. "
-                "Run: psql $DATABASE_URL -f sql/schema.sql"
-            )
+            raise RuntimeError(f"Required table '{table}' not found. Run: alembic upgrade head")
 
 
 async def main() -> None:
@@ -122,7 +116,14 @@ async def main() -> None:
     message_saver_mw = MessageSaverMiddleware()
     rules_mw = RulesMiddleware()
 
-    for mw in (chat_config_mw, topic_mw, access_control_mw, activity_tracker_mw, message_saver_mw, rules_mw):
+    for mw in (
+        chat_config_mw,
+        topic_mw,
+        access_control_mw,
+        activity_tracker_mw,
+        message_saver_mw,
+        rules_mw,
+    ):
         dp.message.middleware(mw)
 
     # Callback queries need chat_config, topic, and access control too
@@ -133,16 +134,18 @@ async def main() -> None:
     dp.include_router(main_router)
 
     # Register bot commands with Telegram API for autocomplete hints
-    admin_ids_raw = await pool.fetchval(
-        "SELECT value FROM bot_config WHERE key = 'admin_ids'"
-    )
+    admin_ids_raw = await pool.fetchval("SELECT value FROM bot_config WHERE key = 'admin_ids'")
     if admin_ids_raw is not None:
         admin_ids_raw = json.loads(admin_ids_raw)
     await setup_bot_commands(bot, parse_admin_ids(admin_ids_raw))
 
+    # Cache bot identity for handlers (avoids per-message getMe calls)
+    dp["bot_id"] = (await bot.me()).id
+
     # Start background tasks
     health_checker = HealthChecker(pool=pool, bot=bot)
     await health_checker.start()
+    dp["health_checker"] = health_checker
 
     sticker_sync = StickerSetSyncScheduler(pool=pool, bot=bot)
     await sticker_sync.start()

@@ -42,10 +42,19 @@ class ResponseLogRepository:
                 task_type, cost_usd, duration_seconds
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
-            chat_id, user_id, message_id, trigger_type,
-            provider, model, tokens_input, tokens_output,
-            response_time_ms, was_fallback,
-            task_type, cost_usd, duration_seconds,
+            chat_id,
+            user_id,
+            message_id,
+            trigger_type,
+            provider,
+            model,
+            tokens_input,
+            tokens_output,
+            response_time_ms,
+            was_fallback,
+            task_type,
+            cost_usd,
+            duration_seconds,
         )
 
     # -- Cost aggregation queries --
@@ -61,9 +70,7 @@ class ResponseLogRepository:
         )
         return Decimal(str(result))
 
-    async def get_cost_by_model(
-        self, interval: timedelta
-    ) -> list[dict[str, Any]]:
+    async def get_cost_by_model(self, interval: timedelta) -> list[dict[str, Any]]:
         """Get cost breakdown by model within an interval."""
         rows = await self._pool.fetch(
             """
@@ -81,9 +88,7 @@ class ResponseLogRepository:
         )
         return [dict(r) for r in rows]
 
-    async def get_cost_by_task_type(
-        self, interval: timedelta
-    ) -> list[dict[str, Any]]:
+    async def get_cost_by_task_type(self, interval: timedelta) -> list[dict[str, Any]]:
         """Get cost breakdown by task type within an interval."""
         rows = await self._pool.fetch(
             """
@@ -99,9 +104,7 @@ class ResponseLogRepository:
         )
         return [dict(r) for r in rows]
 
-    async def get_cost_by_provider(
-        self, interval: timedelta
-    ) -> list[dict[str, Any]]:
+    async def get_cost_by_provider(self, interval: timedelta) -> list[dict[str, Any]]:
         """Get cost breakdown by provider within an interval."""
         rows = await self._pool.fetch(
             """

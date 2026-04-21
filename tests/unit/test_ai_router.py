@@ -97,11 +97,17 @@ class TestGenerateText:
 
     @pytest.mark.asyncio
     async def test_success_on_first_provider(
-        self, mock_provider, make_router, mock_router_settings,
+        self,
+        mock_provider,
+        make_router,
+        mock_router_settings,
     ):
         expected = TextGenerationResult(
-            text="hello world", model="mock", provider="gemini",
-            tokens_input=5, tokens_output=3,
+            text="hello world",
+            model="mock",
+            provider="gemini",
+            tokens_input=5,
+            tokens_output=3,
         )
         provider = mock_provider(name="gemini", text_result=expected)
 
@@ -123,14 +129,19 @@ class TestGenerateText:
 
     @pytest.mark.asyncio
     async def test_fallback_on_rate_limit(
-        self, mock_provider, make_router, mock_router_settings,
+        self,
+        mock_provider,
+        make_router,
+        mock_router_settings,
     ):
         failing_provider = mock_provider(
             name="gemini",
             error=RateLimitError("rate limited", provider="gemini", retry_after=60.0),
         )
         fallback_result = TextGenerationResult(
-            text="fallback response", model="gpt-5-nano", provider="openai",
+            text="fallback response",
+            model="gpt-5-nano",
+            provider="openai",
         )
         fallback_provider = mock_provider(name="openai", text_result=fallback_result)
 
@@ -153,7 +164,10 @@ class TestGenerateText:
 
     @pytest.mark.asyncio
     async def test_raises_when_all_providers_fail(
-        self, mock_provider, make_router, mock_router_settings,
+        self,
+        mock_provider,
+        make_router,
+        mock_router_settings,
     ):
         failing1 = mock_provider(
             name="gemini",
@@ -193,10 +207,12 @@ class TestGenerateText:
         with pytest.raises(AIProviderError, match="No providers available"):
             await router.generate_text("test")
 
-
     @pytest.mark.asyncio
     async def test_fallback_preserves_caller_kwargs(
-        self, mock_provider, make_router, mock_router_settings,
+        self,
+        mock_provider,
+        make_router,
+        mock_router_settings,
     ):
         """Caller-specified kwargs must survive to the fallback provider."""
         failing_provider = mock_provider(
@@ -204,7 +220,9 @@ class TestGenerateText:
             error=RateLimitError("rate limited", provider="gemini", retry_after=60.0),
         )
         fallback_result = TextGenerationResult(
-            text="ok", model="gpt-5-nano", provider="openai",
+            text="ok",
+            model="gpt-5-nano",
+            provider="openai",
         )
         fallback_provider = mock_provider(name="openai", text_result=fallback_result)
 
@@ -227,7 +245,10 @@ class TestGenerateText:
 
     @pytest.mark.asyncio
     async def test_zero_temperature_respected(
-        self, mock_provider, make_router, mock_router_settings,
+        self,
+        mock_provider,
+        make_router,
+        mock_router_settings,
     ):
         """temperature=0.0 must not be replaced by the config default."""
         provider = mock_provider(name="gemini")
@@ -255,8 +276,11 @@ class TestCentralizedLogging:
     async def test_no_crash_without_repo(self, mock_provider, make_router, mock_router_settings):
         """Router with response_log_repo=None should not crash on embedding."""
         embedding_result = EmbeddingResult(
-            embedding=[0.1] * 768, model="mock-embed", provider="gemini",
-            dimensions=768, tokens_input=10,
+            embedding=[0.1] * 768,
+            model="mock-embed",
+            provider="gemini",
+            dimensions=768,
+            tokens_input=10,
         )
         provider = mock_provider(
             name="gemini",
@@ -280,8 +304,11 @@ class TestCentralizedLogging:
     async def test_embedding_logs_usage(self, mock_provider, mock_router_settings):
         """Embedding call should fire _log_usage via ensure_future."""
         embedding_result = EmbeddingResult(
-            embedding=[0.1] * 768, model="mock-embed", provider="gemini",
-            dimensions=768, tokens_input=42,
+            embedding=[0.1] * 768,
+            model="mock-embed",
+            provider="gemini",
+            dimensions=768,
+            tokens_input=42,
         )
         provider = mock_provider(
             name="gemini",
@@ -313,8 +340,11 @@ class TestCentralizedLogging:
     async def test_vision_logs_usage(self, mock_provider, mock_router_settings):
         """Vision call should fire _log_usage."""
         vision_result = VisionResult(
-            text="a cat", model="mock-vision", provider="openai",
-            tokens_input=100, tokens_output=10,
+            text="a cat",
+            model="mock-vision",
+            provider="openai",
+            tokens_input=100,
+            tokens_output=10,
         )
         provider = mock_provider(
             name="openai",
@@ -343,8 +373,11 @@ class TestCentralizedLogging:
     async def test_transcription_logs_usage(self, mock_provider, mock_router_settings):
         """Transcription call should fire _log_usage."""
         transcription_result = TranscriptionResult(
-            text="hello", model="whisper-1", provider="openai",
-            language="en", duration=2.5,
+            text="hello",
+            model="whisper-1",
+            provider="openai",
+            language="en",
+            duration=2.5,
         )
         provider = mock_provider(
             name="openai",
@@ -372,7 +405,10 @@ class TestCentralizedLogging:
 
     @pytest.mark.asyncio
     async def test_text_generation_does_not_log(
-        self, mock_provider, make_router, mock_router_settings,
+        self,
+        mock_provider,
+        make_router,
+        mock_router_settings,
     ):
         """generate_text should NOT call _log_usage (pipeline does it)."""
         provider = mock_provider(name="gemini")

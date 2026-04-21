@@ -15,9 +15,7 @@ class StickerRepository:
 
     # ── sticker_knowledge ─────────────────────────────────────────────
 
-    async def get_by_file_unique_id(
-        self, file_unique_id: str
-    ) -> asyncpg.Record | None:
+    async def get_by_file_unique_id(self, file_unique_id: str) -> asyncpg.Record | None:
         """Look up a sticker by its unique ID."""
         return await self._pool.fetchrow(
             "SELECT * FROM sticker_knowledge WHERE file_unique_id = $1",
@@ -539,9 +537,7 @@ class StickerRepository:
             motion_json,
         )
 
-    async def get_debug_artifacts(
-        self, file_unique_id: str
-    ) -> asyncpg.Record | None:
+    async def get_debug_artifacts(self, file_unique_id: str) -> asyncpg.Record | None:
         """Get latest debug artifacts for a sticker."""
         return await self._pool.fetchrow(
             """

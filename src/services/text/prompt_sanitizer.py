@@ -9,13 +9,15 @@ from __future__ import annotations
 import re
 
 # Tags used as prompt section delimiters — single source of truth
-_PROMPT_TAGS = frozenset({
-    "user_message",
-    "current_topic",
-    "other_topics",
-    "chat_history",
-    "conversation",
-})
+_PROMPT_TAGS = frozenset(
+    {
+        "user_message",
+        "current_topic",
+        "other_topics",
+        "chat_history",
+        "conversation",
+    }
+)
 
 # Matches opening/closing/self-closing variants of known delimiter tags
 _TAG_PATTERN = re.compile(

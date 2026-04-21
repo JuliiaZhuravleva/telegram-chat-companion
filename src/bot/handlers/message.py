@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import re
+from typing import Any
 
 import structlog
 from aiogram import F, Router
@@ -12,6 +13,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
+from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
 
 router = Router(name="messages")
@@ -38,13 +40,19 @@ def should_respond(
             return True, TriggerType.TRIGGER
 
     # Check if this is a reply to the bot's message
-    if (
-        message.reply_to_message
-        and message.reply_to_message.from_user
-        and bot_id
-        and message.reply_to_message.from_user.id == bot_id
-    ):
-        return True, TriggerType.REPLY
+    if message.reply_to_message:
+        reply_from = message.reply_to_message.from_user
+        reply_from_id = reply_from.id if reply_from else None
+        is_match = bot_id is not None and reply_from_id == bot_id
+        logger.debug(
+            "Reply trigger evaluation",
+            chat_id=message.chat.id,
+            reply_from_id=reply_from_id,
+            bot_id=bot_id,
+            is_match=is_match,
+        )
+        if is_match:
+            return True, TriggerType.REPLY
 
     # Random response chance
     if random.random() < config.random_response_chance:
@@ -58,16 +66,30 @@ async def handle_text_message(
     message: Message,
     chat_config: ChatConfig,
     pipeline: FromDishka[TextProcessingPipeline],
+    relevancy_gate: FromDishka[RelevancyGate],
     message_thread_id: int | None = None,
+    **kwargs: Any,
 ) -> None:
     """Handle incoming text messages through the AI pipeline."""
-    bot_info = await message.bot.me() if message.bot else None
-    bot_id = bot_info.id if bot_info else None
+    bot_id: int | None = kwargs.get("bot_id")
+    if bot_id is None:
+        bot_info = await message.bot.me() if message.bot else None
+        bot_id = bot_info.id if bot_info else None
 
     should_reply, trigger_type = should_respond(message, chat_config, bot_id)
 
     if not should_reply:
         return
+
+    # Relevancy gate: filter random triggers for natural participation
+    if trigger_type == TriggerType.RANDOM:
+        gate_decision = await relevancy_gate.evaluate(
+            chat_id=message.chat.id,
+            message_text=message.text or "",
+            config=chat_config,
+        )
+        if not gate_decision.should_respond:
+            return
 
     user = message.from_user
     user_id = user.id if user else 0
@@ -106,6 +128,13 @@ async def handle_text_message(
     )
 
     if not result.should_respond or not result.html_text:
+        logger.info(
+            "Pipeline suppressed response",
+            chat_id=message.chat.id,
+            trigger_type=trigger_type.value,
+            response_type=result.response_type.value if result.response_type else None,
+            has_text=bool(result.html_text),
+        )
         return
 
     # Random responses don't quote the triggering message

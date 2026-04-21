@@ -27,7 +27,11 @@ class ActivityRepository:
                 (chat_id, user_id, username, first_name, activity_type)
             VALUES ($1, $2, $3, $4, $5)
             """,
-            chat_id, user_id, username, first_name, activity_type,
+            chat_id,
+            user_id,
+            username,
+            first_name,
+            activity_type,
         )
 
     async def count_recent(
@@ -44,6 +48,8 @@ class ActivityRepository:
             WHERE chat_id = $1 AND user_id = $2
               AND created_at > NOW() - make_interval(secs => $3)
             """,
-            chat_id, user_id, float(window_seconds),
+            chat_id,
+            user_id,
+            float(window_seconds),
         )
         return int(row["cnt"]) if row else 0

@@ -98,7 +98,9 @@ class TestFormatLinkContextSection:
     def test_metadata_without_comments(self):
         ctx = LinkContext(
             youtube_links=[
-                VideoLink(url="https://youtu.be/abc12345678", platform="youtube", video_id="abc12345678"),
+                VideoLink(
+                    url="https://youtu.be/abc12345678", platform="youtube", video_id="abc12345678"
+                ),
             ],
             metadata={
                 "abc12345678": VideoMetadata(
@@ -116,7 +118,9 @@ class TestFormatLinkContextSection:
         """Link present but metadata missing — should produce minimal output."""
         ctx = LinkContext(
             youtube_links=[
-                VideoLink(url="https://youtu.be/abc12345678", platform="youtube", video_id="abc12345678"),
+                VideoLink(
+                    url="https://youtu.be/abc12345678", platform="youtube", video_id="abc12345678"
+                ),
             ],
             metadata={},
         )
@@ -128,7 +132,9 @@ class TestFormatLinkContextSection:
         """Ensure known prompt delimiter tags in metadata are sanitized."""
         ctx = LinkContext(
             youtube_links=[
-                VideoLink(url="https://youtu.be/abc12345678", platform="youtube", video_id="abc12345678"),
+                VideoLink(
+                    url="https://youtu.be/abc12345678", platform="youtube", video_id="abc12345678"
+                ),
             ],
             metadata={
                 "abc12345678": VideoMetadata(

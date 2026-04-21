@@ -11,14 +11,16 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 # Columns that can be updated via update().
-_UPDATABLE_COLUMNS: frozenset[str] = frozenset({
-    "rule_type",
-    "config",
-    "weight",
-    "mandatory",
-    "enabled",
-    "status",
-})
+_UPDATABLE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "rule_type",
+        "config",
+        "weight",
+        "mandatory",
+        "enabled",
+        "status",
+    }
+)
 
 
 class RulesRepository:
@@ -131,9 +133,7 @@ class RulesRepository:
 
     # -- Stateful queries for sticker_flood and spam_detect --
 
-    async def count_stickers_in_interval(
-        self, chat_id: int, interval_seconds: int
-    ) -> int:
+    async def count_stickers_in_interval(self, chat_id: int, interval_seconds: int) -> int:
         """Count sticker messages in a chat within the last N seconds."""
         return (
             await self._pool.fetchval(
