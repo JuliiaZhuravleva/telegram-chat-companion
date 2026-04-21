@@ -199,13 +199,11 @@ class TestHandleAdminStickerReply:
         msg.reply.assert_awaited_once()
         assert "переформулировать" in msg.reply.call_args[0][0].lower()
 
-    @pytest.mark.asyncio()
-    async def test_non_private_chat_filtered_at_router_level(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        """Non-private chats are now filtered by F.chat.type == 'private' in the
-        router decorator, so the handler is never called for group chats.
-        No handler-level test needed — the guard lives in aiogram filters."""
+    # Note: the non-private-chat case is guarded at router-registration time
+    # by `F.chat.type == "private"` in the @router.message decorator
+    # (src/bot/handlers/admin_sticker.py). aiogram drops the update before it
+    # ever reaches this handler, so a handler-level unit test cannot exercise
+    # that path — it is verified by inspection of the decorator.
 
     @pytest.mark.asyncio()
     async def test_ignores_empty_text(

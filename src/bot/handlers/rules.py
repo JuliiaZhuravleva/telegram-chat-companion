@@ -180,7 +180,11 @@ async def handle_rules_menu(
                         chat_title=title,
                     )
             except Exception:
-                pass
+                logger.debug(
+                    "Could not resolve chat title via Telegram API",
+                    chat_id=chat["chat_id"],
+                    exc_info=True,
+                )
 
     msg = callback.message
     if isinstance(msg, Message):
