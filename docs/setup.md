@@ -49,8 +49,8 @@ createdb telegram_bot
 # Enable pgvector extension
 psql telegram_bot -c "CREATE EXTENSION IF NOT EXISTS vector"
 
-# Apply schema
-psql $DATABASE_URL -f sql/schema.sql
+# Apply migrations (creates all tables)
+alembic upgrade head
 ```
 
 ### 4. Run

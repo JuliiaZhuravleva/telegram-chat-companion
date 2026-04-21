@@ -29,7 +29,7 @@ def build_chat_url(
       ``-1_000_000_000_000`` → ``https://t.me/c/{internal_id}``. Telegram
       encodes supergroup/channel IDs as ``-100`` + internal ID, so we strip
       the sign and the ``"100"`` prefix to recover the portion used in
-      ``t.me/c/`` links (e.g. ``-1003632335671`` → ``3632335671``). This link
+      ``t.me/c/`` links (e.g. ``-1001234567890`` → ``1234567890``). This link
       form only opens for existing members.
     - If ``chat_type == "private"`` and ``chat_id`` is a positive user ID →
       ``tg://user?id={chat_id}``.

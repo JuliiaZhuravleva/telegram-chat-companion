@@ -83,7 +83,7 @@ class TestDetectMimeType:
 class TestBuildChatUrl:
     def test_public_username_wins_over_everything(self):
         url = build_chat_url(
-            -1003632335671,
+            -1001234567890,
             chat_type="supergroup",
             chat_username="mychat",
         )
@@ -94,9 +94,9 @@ class TestBuildChatUrl:
         assert url == "https://t.me/oldgroup"
 
     def test_supergroup_without_username_uses_c_link(self):
-        url = build_chat_url(-1003632335671, chat_type="supergroup")
-        # Strip sign + "100" prefix: -1003632335671 → 3632335671
-        assert url == "https://t.me/c/3632335671"
+        url = build_chat_url(-1001234567890, chat_type="supergroup")
+        # Strip sign + "100" prefix: -1001234567890 → 1234567890
+        assert url == "https://t.me/c/1234567890"
 
     def test_channel_uses_c_link(self):
         url = build_chat_url(-1004200000000, chat_type="channel")
@@ -107,7 +107,7 @@ class TestBuildChatUrl:
         assert build_chat_url(-999, chat_type="supergroup") is None
 
     def test_private_chat_uses_tg_user_link(self):
-        assert build_chat_url(5870677432, chat_type="private") == ("tg://user?id=5870677432")
+        assert build_chat_url(1234567890, chat_type="private") == ("tg://user?id=1234567890")
 
     def test_private_with_negative_id_not_a_link(self):
         # Defensive: private must have a positive user_id

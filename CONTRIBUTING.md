@@ -80,4 +80,4 @@ pytest tests/ -v --cov=src --cov-report=term-missing
 
 ## Architecture Decisions
 
-Major decisions are documented in the [migration plan](internal/migration-plan.md) and referenced ADRs. When proposing architectural changes, please open an issue first.
+Major architectural decisions live as ADR notes inside the codebase (see the "Architectural Decisions" section near the top of each relevant module). When proposing architectural changes, please open an issue first.

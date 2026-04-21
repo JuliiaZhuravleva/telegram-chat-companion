@@ -4,7 +4,7 @@ Revision ID: 001
 Revises:
 Create Date: 2026-02-04
 
-Matches existing sql/schema.sql. All statements are idempotent.
+All statements are idempotent.
 """
 
 from collections.abc import Sequence

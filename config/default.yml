@@ -35,10 +35,8 @@ ai:
       model: "gemini-3-flash-preview"      # cheap: flash tier
       fallback:
         - "openai"
-        - "deepseek"
       fallback_models:
         openai: "gpt-5-nano"               # cheapest OpenAI text model
-        deepseek: "deepseek-v3.2"
       max_tokens: 500
       temperature: 0.9
 
@@ -56,19 +54,14 @@ ai:
       model: "gemini-3-flash-preview"       # cheap: flash tier
       fallback:
         - "openai"
-        - "grok"
       fallback_models:
         openai: "gpt-5-nano"               # nano has multimodal, no need for gpt-5.2
-        grok: "grok-2-vision-1212"
       max_tokens: 200
 
     relevancy_check:
       provider: "openai"
       model: "gpt-5-nano"                    # cheapest: ~$0.00002 per check
-      fallback:
-        - "deepseek"
-      fallback_models:
-        deepseek: "deepseek-v3.2"
+      # No fallback configured — grok/deepseek/anthropic are planned, not implemented
       max_tokens: 1024                        # gpt-5-nano uses reasoning tokens internally
       temperature: 1.0                       # gpt-5-nano only supports 1.0
 

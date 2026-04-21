@@ -137,9 +137,9 @@ class TestMarkdownToHtml:
     # -- Combined (realistic AI output) --
 
     def test_summary_like_output(self):
-        text = "### Ключевые участники:\n- **Планшет**\n- *Вишенки*"
+        text = "### Ключевые участники:\n- **Алиса**\n- *Боря*"
         result = markdown_to_html(text)
         assert "▎<b>" in result
         assert "• " in result
-        assert "<b>Планшет</b>" in result
-        assert "<i>Вишенки</i>" in result
+        assert "<b>Алиса</b>" in result
+        assert "<i>Боря</i>" in result

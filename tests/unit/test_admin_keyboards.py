@@ -180,7 +180,7 @@ class TestChatsListKeyboard:
     def test_supergroup_title_is_url_button(self):
         chats = [
             {
-                "chat_id": -1003632335671,
+                "chat_id": -1001234567890,
                 "chat_title": "Test Supergroup",
                 "chat_type": "supergroup",
             },
@@ -188,19 +188,19 @@ class TestChatsListKeyboard:
         kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
         urls = _get_urls(kb)
         # Internal id: strip sign + "100" prefix
-        assert "https://t.me/c/3632335671" in urls
+        assert "https://t.me/c/1234567890" in urls
 
     def test_private_chat_title_is_tg_user_link(self):
         chats = [
             {
-                "chat_id": 5870677432,
+                "chat_id": 1234567890,
                 "chat_title": "Alice",
                 "chat_type": "private",
             },
         ]
         kb = chats_list_keyboard("en", chats, page=0, total_pages=1)
         urls = _get_urls(kb)
-        assert "tg://user?id=5870677432" in urls
+        assert "tg://user?id=1234567890" in urls
 
     def test_old_group_title_stays_noop_callback(self):
         # Legacy groups (chat_type="group") have no shareable link —

@@ -44,9 +44,7 @@ async def _verify_schema(pool: asyncpg.Pool) -> None:
             table,
         )
         if not exists:
-            raise RuntimeError(
-                f"Required table '{table}' not found. Run: psql $DATABASE_URL -f sql/schema.sql"
-            )
+            raise RuntimeError(f"Required table '{table}' not found. Run: alembic upgrade head")
 
 
 async def main() -> None:

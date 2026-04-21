@@ -1,6 +1,6 @@
 # Telegram Chat Companion — Functionality Overview
 
-**Status:** This document describes the bot's functionality as observed in live QA against [`@blet_dev_bot`](https://t.me/blet_dev_bot) (dev instance, local Docker) on 2026-04-20, cross-referenced with source code on branch `fix/qa-bugfixes`. Every section references concrete files and line numbers so readers can jump from description to implementation.
+**Status:** This document describes the bot's functionality as observed in live QA on a dev instance in April 2026, cross-referenced with source code. Every section references concrete files and line numbers so readers can jump from description to implementation.
 
 **Audience:** developers, operators, community admins, and open-source contributors evaluating or deploying the bot.
 
@@ -8,7 +8,7 @@
 
 ## 1. What It Is
 
-Telegram Chat Companion is an open-source Python bot (aiogram 3.x, PostgreSQL + pgvector) that participates in group chats as a *companion* rather than a command-response bot. It reads recent chat history, remembers long-running context via vector memory, and generates replies through a cost-aware multi-provider AI router (Gemini, OpenAI, DeepSeek, Grok, Anthropic). Stickers, voice notes, video notes, and images are first-class inputs.
+Telegram Chat Companion is an open-source Python bot (aiogram 3.x, PostgreSQL + pgvector) that participates in group chats as a *companion* rather than a command-response bot. It reads recent chat history, remembers long-running context via vector memory, and generates replies through a cost-aware multi-provider AI router (Gemini and OpenAI today; DeepSeek, Grok, Anthropic are planned). Stickers, voice notes, video notes, and images are first-class inputs.
 
 **What it's for:**
 - Active, somewhat playful participation in group chats (friends/community chats) with a configurable personality.
@@ -43,7 +43,7 @@ Live QA observations:
 - `/start` in DM responded within ~500 ms, plain-text greeting.
 - `/help` in DM rendered the 5-item feature list (Chat, Voice, Video notes, Summary, Memory), both trigger words (`bot`, `бот`), and the `Close` button (no Summary buttons in DM — correct, since `chat_type=="private"` hides them).
 - `/summary` in DM: no response, **silent ignore** (the `F.chat.type.in_({"group","supergroup"})` filter rejects the update; no handler catches the DM case to give feedback).
-- `/summary @blet_dev_bot` in the `tests` group returned a 7 s-Gemini-call summary with the expected `📋 Саммари чата (100 сообщений)` header. When two bots share the group, sending the unqualified `/summary` can be auto-routed to whichever bot Telegram Web picks first.
+- `/summary @your_bot` in a group returned a 7 s-Gemini-call summary with the expected `📋 Саммари чата (100 сообщений)` header. When two bots share the group, sending the unqualified `/summary` can be auto-routed to whichever bot Telegram Web picks first.
 - `help_*` callbacks (`Close`, `Summary (100)`, `Summary (500)`) are wired in [src/bot/handlers/callbacks.py](src/bot/handlers/callbacks.py); `Close` deletes the help message.
 
 ### 2.2 Conversation Triggers
@@ -56,7 +56,7 @@ Every message in a whitelisted group passes through [src/bot/handlers/message.py
 | **REPLY** | Message is a reply to a bot-authored message (`reply_to_message.from_user.id == bot_id`). `bot_id` is cached via `dp["bot_id"]` singleton per ADR. | **Bypassed** (per ADR — replies are explicit continuation) | Bypassed |
 | **RANDOM** | `random.random() < random_response_chance` (default 0.05) | `random_response_min_interval` (default 300 s, per chat) | **Evaluated** |
 
-Live-log evidence (`docker compose logs bot | grep trigger_type`): `{"chat_id": -1003779475723, "user_id": 5870677432, "trigger_type": "trigger", …, "event": "Processing message", …}` — word-boundary match on "бот, расскажи …" correctly classified as `trigger`.
+Live-log evidence (`docker compose logs bot | grep trigger_type`): `{"chat_id": -100…, "user_id": …, "trigger_type": "trigger", …, "event": "Processing message", …}` — word-boundary match on "бот, расскажи …" correctly classified as `trigger`.
 
 ### 2.3 Relevancy Gate — Three-Tier Cascade
 
@@ -346,7 +346,7 @@ A freshly created rule lives in `chat_rules` with `ID`, `Type`, `Weight` (defaul
 - **Runtime:** Python 3.12 (hatchling/pyproject).
 - **Bot framework:** aiogram 3.x.
 - **DB:** PostgreSQL 16 + pgvector extension (cosine `<=>`).
-- **Migrations:** alembic (numbered versions) + `sql/schema.sql` used by Docker `init.d/`.
+- **Migrations:** alembic (numbered versions). Applied automatically on container start via `alembic upgrade head` before `python -m src.main`.
 - **DI:** dishka.
 - **Logging:** structlog, JSON format, INFO level by default.
 - **Deployment:** `docker-compose.yml` with two services (`postgres` bound to 127.0.0.1:5432, `bot`). Secrets via `.env` only — never checked in.
@@ -403,7 +403,7 @@ All still apply after the live walkthrough:
 
 ## 6. Observed Behaviours & Known Quirks
 
-Findings from live QA on 2026-04-20 against `@blet_dev_bot`:
+Findings from live QA on a dev instance in April 2026:
 
 | # | Category | Observation | Evidence |
 |---|---|---|---|
@@ -413,7 +413,7 @@ Findings from live QA on 2026-04-20 against `@blet_dev_bot`:
 | Q4 | UX | Rule creation requires the admin to type raw JSON — no form or wizard. | [rules.py:132-480](src/bot/handlers/rules.py#L132-L480); FSM state `awaiting_rule_config` accepts plain text JSON. |
 | Q5 | UX | After rule creation the FSM returns the admin to chat with only a confirmation text — no "return to rules" inline keyboard. The admin must re-send `/admin`. | Live-observed. |
 | Q6 | i18n | Rule detail view mixes Russian menu labels with English field names (`ID`, `Type`, `Weight`, `Mandatory`, `Triggers`, `Config`, `JSON`). | Live-observed: detail of `QA-test-rule`. |
-| Q7 | Bot isolation | In groups containing both `@blet_dev_bot` and another bot with `/summary` registered, Telegram Web may auto-address the unqualified `/summary` to the other bot. Users must type `/summary@blet_dev_bot` to disambiguate. | Live-observed in `tests` group. Not a bot bug per se — a consequence of Telegram client routing. |
+| Q7 | Bot isolation | In groups containing two bots that both register `/summary`, Telegram Web may auto-address the unqualified `/summary` to whichever bot it picks first. Users must type `/summary@your_bot` to disambiguate. | Live-observed. Not a bot bug per se — a consequence of Telegram client routing. |
 | Q8 | Logging | `Healthcheck` runs every 5 min and logs `"Health check completed"` even when idle; this noises the log file. | `docker compose logs bot` shows ~12 such entries/hour. |
 | Q9 | Routing | Admin-side sticker reply flow hinges on `admin_sticker_router` being included first. If the order in `handlers/__init__.py` is ever changed, admin sticker replies would fall through to the generic message pipeline. | [handlers/__init__.py:20-27](src/bot/handlers/__init__.py#L20-L27); no test covers this ordering contract. |
 | Q10 | AI resilience | On bot startup with cold Gemini, the first message sometimes takes 5–7 s. After warmup, trigger-word responses return in ~2–4 s. | Live-measured: first `/summary` 7054 ms vs third one ~3 s. |
@@ -471,7 +471,7 @@ Prioritisation: **P0** = fix now (user-facing pain or security). **P1** = clear 
 
 | ID | Priority | Area | File reference | Recommendation |
 |---|---|---|---|---|
-| A-1 | **P0** | Migration drift | [sql/schema.sql:404](sql/schema.sql#L404) vs [alembic/versions/](alembic/versions/) | `sql/schema.sql` declares `schema_version=4`, but alembic has 11 migrations (anti-abuse, admin tables, `message_thread_id`, motion_metadata). A fresh `psql -f sql/schema.sql` install leaves the DB mid-schema. Pick one source of truth (recommend: alembic) and either regenerate `schema.sql` from `alembic upgrade head --sql`, or delete `schema.sql` and document `alembic upgrade head` as the only install path. |
+| A-1 | ✅ resolved | Migration source of truth | [alembic/versions/](alembic/versions/) | Previously `sql/schema.sql` drifted behind alembic (stopped at version 4 while alembic had 11). `schema.sql` has been deleted; `alembic upgrade head` is the sole install path, and the bot container runs it automatically on start. |
 | A-2 | **P0** | Integration test layer | `tests/integration/conftest.py` | The integration folder contains only a placeholder conftest — **zero integration tests**. Per CLAUDE.md the architecture was specifically chosen to make testcontainers+pgvector integration testing viable. Stand up at minimum: admin callback flow (menu→stats→lang), pipeline end-to-end (abuse→RAG→AI→HTML), rules engine matching, pgvector search correctness. |
 | A-3 | P1 | Admin-panel test coverage | [tests/unit/test_admin_handler.py](tests/unit/test_admin_handler.py) | 16 tests cover main-menu callbacks only. Add handler-level tests for rules CRUD, whitelist pagination, approve/reject flow, notifications toggles. No tests for [src/bot/handlers/rules.py](src/bot/handlers/rules.py) or [src/bot/handlers/callbacks.py](src/bot/handlers/callbacks.py) at all. |
 | A-4 | P1 | Unit tests for core services | `tests/unit/` | No test files for [src/services/rag/memory.py](src/services/rag/memory.py), [src/services/modules/summary.py](src/services/modules/summary.py), [src/services/modules/image/analysis.py](src/services/modules/image/analysis.py). Add mocked-provider unit tests. |
@@ -550,7 +550,7 @@ Findings from the dedicated static audit plus the live probe in §2.4. Severity 
 
 ## Appendix: QA Session Summary (2026-04-20)
 
-**Environment:** local Docker, `@blet_dev_bot` (ID 8303442055), postgres 16 + pgvector, admin `Планшет` (ID 5870677432).
+**Environment:** local Docker, dev bot instance, postgres 16 + pgvector, single admin account.
 
 **Duration:** approximately 30 minutes of browser-driven QA via Playwright MCP against Telegram Web.
 
@@ -558,7 +558,7 @@ Findings from the dedicated static audit plus the live probe in §2.4. Severity 
 - `/start` (DM)
 - `/help` (DM)
 - `/summary` in DM (rejected silently — confirmed)
-- `/summary` in `tests` group (two-bot conflict resolved with `@blet_dev_bot`)
+- `/summary` in a group (two-bot conflict resolved by `@`-qualifying the command)
 - Trigger word response in `not tests` ("бот, расскажи шутку")
 - `/admin` menu → Whitelist → Чаты → Ожидают (empty)
 - `/admin` → Правила → chat select → create rule (invalid + valid JSON) → toggle → delete

@@ -895,7 +895,7 @@ class TestWlRejected:
                 [
                     {
                         "id": 7,
-                        "chat_id": -1003632335671,
+                        "chat_id": -1001234567890,
                         "chat_title": "Rejected Chat",
                         "chat_type": "supergroup",
                         "user_id": 42,
@@ -915,7 +915,7 @@ class TestWlRejected:
         text = cb.message.edit_text.call_args.args[0]
         assert "Rejected Chat" in text
         # Clickable chat link for supergroup
-        assert "https://t.me/c/3632335671" in text
+        assert "https://t.me/c/1234567890" in text
         assert "@mal" in text
 
     @pytest.mark.asyncio
@@ -1001,7 +1001,7 @@ class TestWlDeleteAsk:
         admin_repo.get_attempt = AsyncMock(
             return_value={
                 "id": 7,
-                "chat_id": -1003632335671,
+                "chat_id": -1001234567890,
                 "chat_title": "Mallory's chat",
                 "chat_type": "supergroup",
                 "status": "rejected",
