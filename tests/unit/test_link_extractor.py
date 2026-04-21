@@ -75,7 +75,7 @@ class TestDetectLinks:
         )
         links = self.service.detect_links(text)
         assert len(links) == 2
-        assert all(l.platform == "youtube" for l in links)
+        assert all(link.platform == "youtube" for link in links)
 
     def test_deduplicates_same_url(self):
         text = "https://youtu.be/dQw4w9WgXcQ https://youtu.be/dQw4w9WgXcQ"
@@ -89,7 +89,7 @@ class TestDetectLinks:
         )
         links = self.service.detect_links(text)
         assert len(links) == 2
-        platforms = {l.platform for l in links}
+        platforms = {link.platform for link in links}
         assert platforms == {"youtube", "tiktok"}
 
 
@@ -166,7 +166,7 @@ class TestExtract:
         mock_session = MagicMock()
         call_count = 0
 
-        def mock_get(url, params=None):
+        def mock_get(url, params=None):  # noqa: ARG001
             nonlocal call_count
             call_count += 1
             if "commentThreads" in url:
@@ -241,7 +241,7 @@ class TestExtract:
 
         mock_session = MagicMock()
 
-        def mock_get(url, params=None):
+        def mock_get(url, params=None):  # noqa: ARG001
             if "commentThreads" in url:
                 return mock_comments_response
             return mock_video_response

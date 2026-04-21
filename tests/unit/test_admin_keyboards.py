@@ -183,7 +183,7 @@ class TestChatsListKeyboard:
         kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
         labels = _get_labels(kb)
         # No page indicator
-        assert not any("/" in l and l[0].isdigit() for l in labels)
+        assert not any("/" in label and label[0].isdigit() for label in labels)
 
     def test_supergroup_title_is_url_button(self):
         chats = [
@@ -320,22 +320,22 @@ class TestNotificationStatusKeyboards:
     def test_approved_keyboard_ru(self):
         kb = approved_notification_keyboard("ru")
         labels = _get_labels(kb)
-        assert any("Одобрено" in l for l in labels)
+        assert any("Одобрено" in label for label in labels)
 
     def test_approved_keyboard_en(self):
         kb = approved_notification_keyboard("en")
         labels = _get_labels(kb)
-        assert any("Approved" in l for l in labels)
+        assert any("Approved" in label for label in labels)
 
     def test_rejected_keyboard_ru(self):
         kb = rejected_notification_keyboard("ru")
         labels = _get_labels(kb)
-        assert any("Отклонено" in l for l in labels)
+        assert any("Отклонено" in label for label in labels)
 
     def test_rejected_keyboard_en(self):
         kb = rejected_notification_keyboard("en")
         labels = _get_labels(kb)
-        assert any("Rejected" in l for l in labels)
+        assert any("Rejected" in label for label in labels)
 
 
 class TestCostsKeyboard:
