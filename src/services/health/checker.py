@@ -167,8 +167,7 @@ class HealthChecker:
                     HealthIssue(
                         severity=HealthStatus.WARNING,
                         message=(
-                            f"AI fallback activated {result.fallbacks_15m} "
-                            f"time(s) in last 15 min"
+                            f"AI fallback activated {result.fallbacks_15m} time(s) in last 15 min"
                         ),
                     )
                 )
@@ -216,10 +215,7 @@ class HealthChecker:
             messages_30m=result.messages_30m,
             fallbacks_15m=result.fallbacks_15m,
             ai_provider=result.ai_provider,
-            issues=[
-                {"severity": i.severity.value, "message": i.message}
-                for i in result.issues
-            ],
+            issues=[{"severity": i.severity.value, "message": i.message} for i in result.issues],
             alert_sent=should_alert,
         )
 
@@ -259,7 +255,9 @@ class HealthChecker:
 
         try:
             await self._bot.send_message(
-                first_admin, text, parse_mode="HTML",
+                first_admin,
+                text,
+                parse_mode="HTML",
             )
         except Exception:
             logger.warning("Failed to send health alert", admin_id=first_admin)
@@ -288,11 +286,7 @@ class HealthChecker:
             lines.append("")
             lines.append("<b>Issues:</b>")
             for issue in result.issues:
-                icon = (
-                    "\U0001f525"
-                    if issue.severity == HealthStatus.CRITICAL
-                    else "\u26a0\ufe0f"
-                )
+                icon = "\U0001f525" if issue.severity == HealthStatus.CRITICAL else "\u26a0\ufe0f"
                 lines.append(f"  {icon} {html_lib.escape(issue.message)}")
 
         lines.append("")

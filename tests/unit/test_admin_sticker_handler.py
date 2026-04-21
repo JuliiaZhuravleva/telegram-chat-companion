@@ -114,9 +114,7 @@ class TestHandleAdminStickerReply:
     async def test_db_lookup_success(
         self, sticker_repo: MagicMock, sticker_service: MagicMock
     ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {
-            "file_unique_id": "AgADvh4AAlkbCFI"
-        }
+        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
         msg = _make_message(text="better description")
 
         await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
@@ -179,9 +177,7 @@ class TestHandleAdminStickerReply:
     async def test_merge_failure_shows_error(
         self, sticker_repo: MagicMock, sticker_service: MagicMock
     ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {
-            "file_unique_id": "AgADvh4AAlkbCFI"
-        }
+        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
         sticker_service.merge_admin_description.return_value = None
         msg = _make_message(text="better description")
 
@@ -194,9 +190,7 @@ class TestHandleAdminStickerReply:
     async def test_content_filter_shows_rephrase(
         self, sticker_repo: MagicMock, sticker_service: MagicMock
     ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {
-            "file_unique_id": "AgADvh4AAlkbCFI"
-        }
+        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
         sticker_service.merge_admin_description.side_effect = ValueError("content_filter")
         msg = _make_message(text="better description")
 
@@ -217,9 +211,7 @@ class TestHandleAdminStickerReply:
     async def test_ignores_empty_text(
         self, sticker_repo: MagicMock, sticker_service: MagicMock
     ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {
-            "file_unique_id": "AgADvh4AAlkbCFI"
-        }
+        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
         msg = _make_message(text="   ")
 
         await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)

@@ -127,9 +127,7 @@ DEPRECATED_MODELS = [
 def get_providers_for_capability(capability: str) -> list[str]:
     """Get list of providers that support a capability."""
     return [
-        provider
-        for provider, caps in PROVIDER_CAPABILITIES.items()
-        if caps.get(capability, False)
+        provider for provider, caps in PROVIDER_CAPABILITIES.items() if caps.get(capability, False)
     ]
 
 

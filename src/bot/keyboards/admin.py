@@ -44,153 +44,166 @@ def _t(key: str, lang: str) -> str:
 # Main menu
 # ---------------------------------------------------------------------------
 
+
 def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Admin panel main menu."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=_t("whitelist", lang),
-                callback_data=f"adm_wl:{lang}",
-            ),
-            InlineKeyboardButton(
-                text=_t("rules", lang),
-                callback_data=f"adm_rules:{lang}:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("stickers", lang),
-                callback_data=f"adm_stk:{lang}:0",
-            ),
-            InlineKeyboardButton(
-                text=_t("defaults", lang),
-                callback_data=f"adm_defs:{lang}:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("statistics", lang),
-                callback_data=f"adm_stats:{lang}:24h",
-            ),
-            InlineKeyboardButton(
-                text=_t("costs", lang),
-                callback_data=f"adm_costs:{lang}:24h",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("health", lang),
-                callback_data=f"adm_health:{lang}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("notifications", lang),
-                callback_data=f"adm_notif:{lang}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("language", lang),
-                callback_data=f"adm_lang:{lang}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("close", lang),
-                callback_data=f"adm_close:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_t("whitelist", lang),
+                    callback_data=f"adm_wl:{lang}",
+                ),
+                InlineKeyboardButton(
+                    text=_t("rules", lang),
+                    callback_data=f"adm_rules:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("stickers", lang),
+                    callback_data=f"adm_stk:{lang}:0",
+                ),
+                InlineKeyboardButton(
+                    text=_t("defaults", lang),
+                    callback_data=f"adm_defs:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("statistics", lang),
+                    callback_data=f"adm_stats:{lang}:24h",
+                ),
+                InlineKeyboardButton(
+                    text=_t("costs", lang),
+                    callback_data=f"adm_costs:{lang}:24h",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("health", lang),
+                    callback_data=f"adm_health:{lang}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("notifications", lang),
+                    callback_data=f"adm_notif:{lang}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("language", lang),
+                    callback_data=f"adm_lang:{lang}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("close", lang),
+                    callback_data=f"adm_close:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Language selector
 # ---------------------------------------------------------------------------
 
+
 def language_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Language selection menu."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=_t("russian", lang),
-                callback_data=f"adm_lang_set:{lang}:ru",
-            ),
-            InlineKeyboardButton(
-                text=_t("english", lang),
-                callback_data=f"adm_lang_set:{lang}:en",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("back", lang),
-                callback_data=f"adm_menu:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_t("russian", lang),
+                    callback_data=f"adm_lang_set:{lang}:ru",
+                ),
+                InlineKeyboardButton(
+                    text=_t("english", lang),
+                    callback_data=f"adm_lang_set:{lang}:en",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"adm_menu:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Whitelist menu
 # ---------------------------------------------------------------------------
 
+
 def whitelist_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Whitelist management menu."""
     chats_label = {"ru": "💬 Чаты", "en": "💬 Chats"}
     pending_label = {"ru": "⏳ Ожидают", "en": "⏳ Pending"}
     rejected_label = {"ru": "🚫 Отклонённые", "en": "🚫 Rejected"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=chats_label.get(lang, "Chats"),
-                callback_data=f"adm_wl_chats:{lang}:0",
-            ),
-            InlineKeyboardButton(
-                text=pending_label.get(lang, "Pending"),
-                callback_data=f"adm_wl_pending:{lang}:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=rejected_label.get(lang, "Rejected"),
-                callback_data=f"adm_wl_rejected:{lang}:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("back", lang),
-                callback_data=f"adm_menu:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=chats_label.get(lang, "Chats"),
+                    callback_data=f"adm_wl_chats:{lang}:0",
+                ),
+                InlineKeyboardButton(
+                    text=pending_label.get(lang, "Pending"),
+                    callback_data=f"adm_wl_pending:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=rejected_label.get(lang, "Rejected"),
+                    callback_data=f"adm_wl_rejected:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"adm_menu:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Statistics period selector
 # ---------------------------------------------------------------------------
+
 
 def health_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Health status view with refresh and back."""
     refresh_label = {"ru": "🔄 Обновить", "en": "🔄 Refresh"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=refresh_label.get(lang, "Refresh"),
-                callback_data=f"adm_health:{lang}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("back", lang),
-                callback_data=f"adm_menu:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=refresh_label.get(lang, "Refresh"),
+                    callback_data=f"adm_health:{lang}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"adm_menu:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Statistics period selector
 # ---------------------------------------------------------------------------
+
 
 def stats_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMarkup:
     """Statistics period selector."""
@@ -204,20 +217,23 @@ def stats_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMark
                 callback_data=f"adm_stats:{lang}:{period}",
             )
         )
-    return InlineKeyboardMarkup(inline_keyboard=[
-        row,
-        [
-            InlineKeyboardButton(
-                text=_t("back", lang),
-                callback_data=f"adm_menu:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            row,
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"adm_menu:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Costs period selector
 # ---------------------------------------------------------------------------
+
 
 def costs_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMarkup:
     """Costs period selector with optional verify button."""
@@ -232,50 +248,54 @@ def costs_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMark
             )
         )
     verify_label = {"ru": "🔍 Сверить (OpenAI)", "en": "🔍 Verify (OpenAI)"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        row,
-        [
-            InlineKeyboardButton(
-                text=verify_label.get(lang, "Verify (OpenAI)"),
-                callback_data=f"adm_costs_verify:{lang}:{current_period}",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text=_t("back", lang),
-                callback_data=f"adm_menu:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            row,
+            [
+                InlineKeyboardButton(
+                    text=verify_label.get(lang, "Verify (OpenAI)"),
+                    callback_data=f"adm_costs_verify:{lang}:{current_period}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"adm_menu:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Unauthorized access approve/reject (sent in admin notifications)
 # ---------------------------------------------------------------------------
 
-def access_keyboard(
-    lang: str, attempt_id: int
-) -> InlineKeyboardMarkup:
+
+def access_keyboard(lang: str, attempt_id: int) -> InlineKeyboardMarkup:
     """Approve/reject buttons for unauthorized access notification."""
     approve_label = {"ru": "✅ Одобрить", "en": "✅ Approve"}
     reject_label = {"ru": "❌ Отклонить", "en": "❌ Reject"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=approve_label.get(lang, "Approve"),
-                callback_data=f"adm_approve:{lang}:{attempt_id}",
-            ),
-            InlineKeyboardButton(
-                text=reject_label.get(lang, "Reject"),
-                callback_data=f"adm_reject:{lang}:{attempt_id}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=approve_label.get(lang, "Approve"),
+                    callback_data=f"adm_approve:{lang}:{attempt_id}",
+                ),
+                InlineKeyboardButton(
+                    text=reject_label.get(lang, "Reject"),
+                    callback_data=f"adm_reject:{lang}:{attempt_id}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Whitelisted chats list (paginated)
 # ---------------------------------------------------------------------------
+
 
 def chats_list_keyboard(
     lang: str,
@@ -304,40 +324,50 @@ def chats_list_keyboard(
             # Non-linkable chat (old-style group) — use noop to avoid
             # refreshing the message with identical content.
             title_btn = InlineKeyboardButton(text=label, callback_data="noop")
-        rows.append([
-            title_btn,
-            InlineKeyboardButton(
-                text="❌",
-                callback_data=f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}",
-            ),
-        ])
+        rows.append(
+            [
+                title_btn,
+                InlineKeyboardButton(
+                    text="❌",
+                    callback_data=f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}",
+                ),
+            ]
+        )
 
     # Pagination row
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
         if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="◀",
-                callback_data=f"adm_wl_chats:{lang}:{page - 1}",
-            ))
-        nav.append(InlineKeyboardButton(
-            text=f"{page + 1}/{total_pages}",
-            callback_data="noop",
-        ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀",
+                    callback_data=f"adm_wl_chats:{lang}:{page - 1}",
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data="noop",
+            )
+        )
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="▶",
-                callback_data=f"adm_wl_chats:{lang}:{page + 1}",
-            ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶",
+                    callback_data=f"adm_wl_chats:{lang}:{page + 1}",
+                )
+            )
         rows.append(nav)
 
     # Back button
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"adm_wl:{lang}",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_wl:{lang}",
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -345,27 +375,33 @@ def chats_list_keyboard(
 # Whitelist remove — confirmation
 # ---------------------------------------------------------------------------
 
+
 def confirm_remove_chat_keyboard(
-    lang: str, chat_id: int, page: int,
+    lang: str,
+    chat_id: int,
+    page: int,
 ) -> InlineKeyboardMarkup:
     """Yes/Cancel row for confirming chat removal from whitelist."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=_t("wl_confirm_yes", lang),
-                callback_data=f"adm_wl_rm:{lang}:{chat_id}:{page}",
-            ),
-            InlineKeyboardButton(
-                text=_t("wl_confirm_no", lang),
-                callback_data=f"adm_wl_chats:{lang}:{page}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_t("wl_confirm_yes", lang),
+                    callback_data=f"adm_wl_rm:{lang}:{chat_id}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text=_t("wl_confirm_no", lang),
+                    callback_data=f"adm_wl_chats:{lang}:{page}",
+                ),
+            ],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Pending access requests list (paginated)
 # ---------------------------------------------------------------------------
+
 
 def rejected_list_keyboard(
     lang: str,
@@ -378,63 +414,77 @@ def rejected_list_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     for attempt in attempts:
         aid = attempt["id"]
-        rows.append([
-            InlineKeyboardButton(
-                text=restore_label.get(lang, "Restore"),
-                callback_data=f"adm_wl_restore:{lang}:{aid}:{page}",
-            ),
-            InlineKeyboardButton(
-                text="🗑",
-                callback_data=f"adm_wl_del_ask:{lang}:{aid}:{page}",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=restore_label.get(lang, "Restore"),
+                    callback_data=f"adm_wl_restore:{lang}:{aid}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="🗑",
+                    callback_data=f"adm_wl_del_ask:{lang}:{aid}:{page}",
+                ),
+            ]
+        )
 
     # Pagination row
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
         if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="◀",
-                callback_data=f"adm_wl_rejected:{lang}:{page - 1}",
-            ))
-        nav.append(InlineKeyboardButton(
-            text=f"{page + 1}/{total_pages}",
-            callback_data="noop",
-        ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀",
+                    callback_data=f"adm_wl_rejected:{lang}:{page - 1}",
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data="noop",
+            )
+        )
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="▶",
-                callback_data=f"adm_wl_rejected:{lang}:{page + 1}",
-            ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶",
+                    callback_data=f"adm_wl_rejected:{lang}:{page + 1}",
+                )
+            )
         rows.append(nav)
 
     # Back button
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"adm_wl:{lang}",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_wl:{lang}",
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def confirm_delete_attempt_keyboard(
-    lang: str, attempt_id: int, page: int,
+    lang: str,
+    attempt_id: int,
+    page: int,
 ) -> InlineKeyboardMarkup:
     """Yes/Cancel row for confirming hard-delete of a rejected attempt."""
     yes_label = {"ru": "🗑 Да, удалить", "en": "🗑 Yes, delete"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=yes_label.get(lang, "Yes, delete"),
-                callback_data=f"adm_wl_del:{lang}:{attempt_id}:{page}",
-            ),
-            InlineKeyboardButton(
-                text=_t("wl_confirm_no", lang),
-                callback_data=f"adm_wl_rejected:{lang}:{page}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=yes_label.get(lang, "Yes, delete"),
+                    callback_data=f"adm_wl_del:{lang}:{attempt_id}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text=_t("wl_confirm_no", lang),
+                    callback_data=f"adm_wl_rejected:{lang}:{page}",
+                ),
+            ],
+        ]
+    )
 
 
 def pending_list_keyboard(
@@ -447,43 +497,53 @@ def pending_list_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
     for attempt in attempts:
         aid = attempt["id"]
-        rows.append([
-            InlineKeyboardButton(
-                text="✅",
-                callback_data=f"adm_wl_apr:{lang}:{aid}:{page}",
-            ),
-            InlineKeyboardButton(
-                text="❌",
-                callback_data=f"adm_wl_rej:{lang}:{aid}:{page}",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="✅",
+                    callback_data=f"adm_wl_apr:{lang}:{aid}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text="❌",
+                    callback_data=f"adm_wl_rej:{lang}:{aid}:{page}",
+                ),
+            ]
+        )
 
     # Pagination row
     if total_pages > 1:
         nav: list[InlineKeyboardButton] = []
         if page > 0:
-            nav.append(InlineKeyboardButton(
-                text="◀",
-                callback_data=f"adm_wl_pending:{lang}:{page - 1}",
-            ))
-        nav.append(InlineKeyboardButton(
-            text=f"{page + 1}/{total_pages}",
-            callback_data="noop",
-        ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀",
+                    callback_data=f"adm_wl_pending:{lang}:{page - 1}",
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}",
+                callback_data="noop",
+            )
+        )
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton(
-                text="▶",
-                callback_data=f"adm_wl_pending:{lang}:{page + 1}",
-            ))
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶",
+                    callback_data=f"adm_wl_pending:{lang}:{page + 1}",
+                )
+            )
         rows.append(nav)
 
     # Back button
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"adm_wl:{lang}",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_wl:{lang}",
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -491,20 +551,25 @@ def pending_list_keyboard(
 # Notification status indicators (replace buttons after action)
 # ---------------------------------------------------------------------------
 
+
 def approved_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Status indicator after approval (replaces approve/reject buttons)."""
     label = {"ru": "✅ Одобрено", "en": "✅ Approved"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label.get(lang, "✅ Approved"), callback_data="noop")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=label.get(lang, "✅ Approved"), callback_data="noop")],
+        ]
+    )
 
 
 def rejected_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Status indicator after rejection (replaces approve/reject buttons)."""
     label = {"ru": "❌ Отклонено", "en": "❌ Rejected"}
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=label.get(lang, "❌ Rejected"), callback_data="noop")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=label.get(lang, "❌ Rejected"), callback_data="noop")],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -532,9 +597,7 @@ _NOTIF_TYPE_ICONS: dict[str, str] = {
 }
 
 
-def notifications_keyboard(
-    lang: str, settings: dict[str, object]
-) -> InlineKeyboardMarkup:
+def notifications_keyboard(lang: str, settings: dict[str, object]) -> InlineKeyboardMarkup:
     """Notification settings menu with toggles for each type."""
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -545,12 +608,14 @@ def notifications_keyboard(
         "ru": f"\U0001f5bc Стикеры: {sticker_label}",
         "en": f"\U0001f5bc Stickers: {sticker_label}",
     }
-    rows.append([
-        InlineKeyboardButton(
-            text=sticker_text.get(lang, sticker_text["en"]),
-            callback_data=f"adm_nstk:{lang}",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=sticker_text.get(lang, sticker_text["en"]),
+                callback_data=f"adm_nstk:{lang}",
+            ),
+        ]
+    )
 
     # Boolean notification toggles
     for ntype in ("unauthorized", "jailbreak", "blacklist", "ai_fallback"):
@@ -558,18 +623,22 @@ def notifications_keyboard(
         icon = _NOTIF_TYPE_ICONS.get(ntype, "")
         label = _NOTIF_TYPE_LABELS.get(ntype, {}).get(lang, ntype)
         status = "\u2705" if enabled else "\u26ab"
-        rows.append([
-            InlineKeyboardButton(
-                text=f"{icon} {label}: {status}",
-                callback_data=f"adm_ntog:{lang}:{ntype}",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{icon} {label}: {status}",
+                    callback_data=f"adm_ntog:{lang}:{ntype}",
+                ),
+            ]
+        )
 
     # Back button
-    rows.append([
-        InlineKeyboardButton(
-            text=_t("back", lang),
-            callback_data=f"adm_menu:{lang}",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_t("back", lang),
+                callback_data=f"adm_menu:{lang}",
+            ),
+        ]
+    )
     return InlineKeyboardMarkup(inline_keyboard=rows)

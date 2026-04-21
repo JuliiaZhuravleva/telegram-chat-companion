@@ -25,8 +25,12 @@ class TestDataclasses:
 
     def test_text_generation_result_with_all_fields(self):
         r = TextGenerationResult(
-            text="hello", model="gpt-5-nano", provider="openai",
-            tokens_input=10, tokens_output=5, finish_reason="stop",
+            text="hello",
+            model="gpt-5-nano",
+            provider="openai",
+            tokens_input=10,
+            tokens_output=5,
+            finish_reason="stop",
         )
         assert r.tokens_input == 10
         assert r.finish_reason == "stop"
@@ -47,8 +51,11 @@ class TestDataclasses:
 
     def test_transcription_result_with_all_fields(self):
         r = TranscriptionResult(
-            text="hello", model="whisper", provider="openai",
-            language="en", duration=3.5,
+            text="hello",
+            model="whisper",
+            provider="openai",
+            language="en",
+            duration=3.5,
         )
         assert r.language == "en"
         assert r.duration == 3.5

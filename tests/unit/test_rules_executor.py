@@ -14,6 +14,7 @@ from src.services.rules.executor import RuleActionExecutor
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_rule(
     rule_id: int = 1,
     rule_type: str = "keyword_trigger",
@@ -56,6 +57,7 @@ def _make_executor(admin_ids: str = "12345") -> RuleActionExecutor:
 # ---------------------------------------------------------------------------
 # notify_admin tests
 # ---------------------------------------------------------------------------
+
 
 class TestNotifyAdmin:
     @pytest.mark.asyncio
@@ -128,6 +130,7 @@ class TestNotifyAdmin:
 # warn_user tests
 # ---------------------------------------------------------------------------
 
+
 class TestWarnUser:
     @pytest.mark.asyncio
     async def test_replies_with_warning(self) -> None:
@@ -166,6 +169,7 @@ class TestWarnUser:
 # custom_response tests
 # ---------------------------------------------------------------------------
 
+
 class TestCustomResponse:
     @pytest.mark.asyncio
     async def test_template_substitution(self) -> None:
@@ -174,10 +178,12 @@ class TestCustomResponse:
         msg = _make_message(first_name="Bob", username="bob")
 
         action = RuleActionResult(
-            rule=_make_rule(config={
-                "name": "greeting",
-                "response_template": "Hello {first_name}! @{username} triggered {rule_name}",
-            }),
+            rule=_make_rule(
+                config={
+                    "name": "greeting",
+                    "response_template": "Hello {first_name}! @{username} triggered {rule_name}",
+                }
+            ),
             action=RuleAction.CUSTOM_RESPONSE,
             params={
                 "response_template": "Hello {first_name}! @{username} triggered {rule_name}",
@@ -201,10 +207,12 @@ class TestCustomResponse:
         )
 
         action = RuleActionResult(
-            rule=_make_rule(config={
-                "name": "test",
-                "response_template": "Hello {first_name}!",
-            }),
+            rule=_make_rule(
+                config={
+                    "name": "test",
+                    "response_template": "Hello {first_name}!",
+                }
+            ),
             action=RuleAction.CUSTOM_RESPONSE,
             params={"response_template": "Hello {first_name}!"},
         )

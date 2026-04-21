@@ -66,9 +66,7 @@ class TestGetCosts:
         assert report.buckets[1].line_item == "whisper-1"
 
     async def test_empty_data(self, client):
-        mock_resp = _mock_response(
-            json_data={"data": [], "next_page": None}
-        )
+        mock_resp = _mock_response(json_data={"data": [], "next_page": None})
 
         with patch.object(client._client, "get", new_callable=AsyncMock, return_value=mock_resp):
             report = await client.get_costs(days=1)
@@ -98,7 +96,9 @@ class TestGetCosts:
 
     async def test_timeout_returns_error(self, client):
         with patch.object(
-            client._client, "get", new_callable=AsyncMock,
+            client._client,
+            "get",
+            new_callable=AsyncMock,
             side_effect=httpx.TimeoutException("connection timed out"),
         ):
             report = await client.get_costs(days=1)
@@ -109,7 +109,9 @@ class TestGetCosts:
 
     async def test_network_error_returns_error(self, client):
         with patch.object(
-            client._client, "get", new_callable=AsyncMock,
+            client._client,
+            "get",
+            new_callable=AsyncMock,
             side_effect=httpx.ConnectError("Connection refused"),
         ):
             report = await client.get_costs(days=1)
@@ -144,7 +146,9 @@ class TestGetCosts:
         )
 
         with patch.object(
-            client._client, "get", new_callable=AsyncMock,
+            client._client,
+            "get",
+            new_callable=AsyncMock,
             side_effect=[page1, page2],
         ):
             report = await client.get_costs(days=7)

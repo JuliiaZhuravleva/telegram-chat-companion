@@ -51,9 +51,7 @@ class AdminRepository:
         )
         return int(row["id"])
 
-    async def get_pending_attempts(
-        self, *, limit: int = 20
-    ) -> list[dict[str, Any]]:
+    async def get_pending_attempts(self, *, limit: int = 20) -> list[dict[str, Any]]:
         """Get pending unauthorized attempts (newest first)."""
         rows = await self._pool.fetch(
             """
@@ -71,9 +69,7 @@ class AdminRepository:
 
     _VALID_STATUSES = frozenset({"pending", "approved", "rejected"})
 
-    async def update_attempt_status(
-        self, attempt_id: int, status: str
-    ) -> dict[str, Any] | None:
+    async def update_attempt_status(self, attempt_id: int, status: str) -> dict[str, Any] | None:
         """Update attempt status (approved/rejected). Returns the attempt."""
         if status not in self._VALID_STATUSES:
             raise ValueError(f"Invalid attempt status: {status!r}")
@@ -106,49 +102,64 @@ class AdminRepository:
 
     async def get_message_count(self, interval: timedelta) -> int:
         """Count messages within an interval."""
-        return await self._pool.fetchval(
-            """
+        return (
+            await self._pool.fetchval(
+                """
             SELECT COUNT(*) FROM chat_messages
             WHERE created_at > NOW() - $1::interval
             """,
-            interval,
-        ) or 0
+                interval,
+            )
+            or 0
+        )
 
     async def get_response_count(self, interval: timedelta) -> int:
         """Count bot responses within an interval."""
-        return await self._pool.fetchval(
-            """
+        return (
+            await self._pool.fetchval(
+                """
             SELECT COUNT(*) FROM response_log
             WHERE created_at > NOW() - $1::interval
             """,
-            interval,
-        ) or 0
+                interval,
+            )
+            or 0
+        )
 
     async def get_unauth_count(self, interval: timedelta) -> int:
         """Count unauthorized attempts within an interval."""
-        return await self._pool.fetchval(
-            """
+        return (
+            await self._pool.fetchval(
+                """
             SELECT COUNT(*) FROM unauthorized_attempts
             WHERE created_at > NOW() - $1::interval
             """,
-            interval,
-        ) or 0
+                interval,
+            )
+            or 0
+        )
 
     async def get_active_chats_count(self, interval: timedelta) -> int:
         """Count distinct active chats within an interval."""
-        return await self._pool.fetchval(
-            """
+        return (
+            await self._pool.fetchval(
+                """
             SELECT COUNT(DISTINCT chat_id) FROM chat_messages
             WHERE created_at > NOW() - $1::interval
             """,
-            interval,
-        ) or 0
+                interval,
+            )
+            or 0
+        )
 
     async def get_enabled_chats_count(self) -> int:
         """Count chats in whitelist."""
-        return await self._pool.fetchval(
-            "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
-        ) or 0
+        return (
+            await self._pool.fetchval(
+                "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
+            )
+            or 0
+        )
 
     # -- Admin sticker session --
 
@@ -185,9 +196,12 @@ class AdminRepository:
         self, page: int, per_page: int = 5
     ) -> tuple[list[dict[str, Any]], int]:
         """Paginated enabled chats with title/type. Returns (chats, total)."""
-        total = await self._pool.fetchval(
-            "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
-        ) or 0
+        total = (
+            await self._pool.fetchval(
+                "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
+            )
+            or 0
+        )
         rows = await self._pool.fetch(
             """
             SELECT chat_id, chat_title, chat_type
@@ -215,9 +229,12 @@ class AdminRepository:
                 WHERE cs.chat_id = ua.chat_id AND cs.enabled = true
             )
         """
-        total = await self._pool.fetchval(
-            f"SELECT COUNT(*) FROM unauthorized_attempts ua WHERE {_where}",  # noqa: S608
-        ) or 0
+        total = (
+            await self._pool.fetchval(
+                f"SELECT COUNT(*) FROM unauthorized_attempts ua WHERE {_where}",  # noqa: S608
+            )
+            or 0
+        )
         rows = await self._pool.fetch(
             f"""
             SELECT ua.id, ua.chat_id, ua.chat_title, ua.chat_type,
@@ -247,9 +264,12 @@ class AdminRepository:
                 WHERE cs.chat_id = ua.chat_id AND cs.enabled = true
             )
         """
-        total = await self._pool.fetchval(
-            f"SELECT COUNT(*) FROM unauthorized_attempts ua WHERE {_where}",  # noqa: S608
-        ) or 0
+        total = (
+            await self._pool.fetchval(
+                f"SELECT COUNT(*) FROM unauthorized_attempts ua WHERE {_where}",  # noqa: S608
+            )
+            or 0
+        )
         rows = await self._pool.fetch(
             f"""
             SELECT ua.id, ua.chat_id, ua.chat_title, ua.chat_type,
@@ -301,9 +321,7 @@ class AdminRepository:
 
     # -- Admin language --
 
-    async def get_admin_language(
-        self, bot_config_repo: Any
-    ) -> str:
+    async def get_admin_language(self, bot_config_repo: Any) -> str:
         """Get admin panel language from bot_config.admin_settings."""
         raw = await bot_config_repo.get("admin_settings")
         if raw:
@@ -323,9 +341,7 @@ class AdminRepository:
         )
         return dict(row) if row else None
 
-    async def set_admin_language(
-        self, bot_config_repo: Any, lang: str
-    ) -> None:
+    async def set_admin_language(self, bot_config_repo: Any, lang: str) -> None:
         """Save admin panel language to bot_config.admin_settings."""
         raw = await bot_config_repo.get("admin_settings")
         data: dict[str, Any] = {}
@@ -345,9 +361,7 @@ class AdminRepository:
         "ai_fallback": True,
     }
 
-    async def get_notification_settings(
-        self, bot_config_repo: Any
-    ) -> dict[str, Any]:
+    async def get_notification_settings(self, bot_config_repo: Any) -> dict[str, Any]:
         """Get admin notification settings with defaults for missing keys."""
         raw = await bot_config_repo.get("admin_settings")
         notifications: dict[str, Any] = {}
@@ -357,9 +371,7 @@ class AdminRepository:
                 notifications = data.get("notifications") or {}
         return {**self._NOTIFICATION_DEFAULTS, **notifications}
 
-    async def set_notification_setting(
-        self, bot_config_repo: Any, key: str, value: Any
-    ) -> None:
+    async def set_notification_setting(self, bot_config_repo: Any, key: str, value: Any) -> None:
         """Update a single notification setting, preserving other data."""
         raw = await bot_config_repo.get("admin_settings")
         data: dict[str, Any] = {}

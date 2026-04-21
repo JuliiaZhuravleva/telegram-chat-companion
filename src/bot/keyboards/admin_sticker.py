@@ -12,20 +12,22 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def sticker_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
     """Main sticker management menu."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="📦 Просмотр паков" if lang == "ru" else "📦 Browse packs",
-                callback_data=f"adm_stk_sets:{lang}:0",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="◀️ Назад" if lang == "ru" else "◀️ Back",
-                callback_data=f"adm_menu:{lang}",
-            ),
-        ],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📦 Просмотр паков" if lang == "ru" else "📦 Browse packs",
+                    callback_data=f"adm_stk_sets:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="◀️ Назад" if lang == "ru" else "◀️ Back",
+                    callback_data=f"adm_menu:{lang}",
+                ),
+            ],
+        ]
+    )
 
 
 def sticker_sets_keyboard(
@@ -44,39 +46,49 @@ def sticker_sets_keyboard(
         title = str(s.get("set_title") or set_name)[:30]
         learned = s.get("learned_count", 0)
         total_count = s.get("total_count", 0)
-        rows.append([
-            InlineKeyboardButton(
-                text=f"{title} ({learned}/{total_count})",
-                callback_data=f"adm_stk_set:{lang}:{set_name}:0",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{title} ({learned}/{total_count})",
+                    callback_data=f"adm_stk_set:{lang}:{set_name}:0",
+                ),
+            ]
+        )
 
     # Pagination
     total_pages = max(1, math.ceil(total / per_page))
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(
-            text="◀️",
-            callback_data=f"adm_stk_sets:{lang}:{page - 1}",
-        ))
-    nav.append(InlineKeyboardButton(
-        text=f"{page + 1}/{total_pages}",
-        callback_data="noop",
-    ))
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️",
+                callback_data=f"adm_stk_sets:{lang}:{page - 1}",
+            )
+        )
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop",
+        )
+    )
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(
-            text="▶️",
-            callback_data=f"adm_stk_sets:{lang}:{page + 1}",
-        ))
+        nav.append(
+            InlineKeyboardButton(
+                text="▶️",
+                callback_data=f"adm_stk_sets:{lang}:{page + 1}",
+            )
+        )
     rows.append(nav)
 
     # Back
-    rows.append([
-        InlineKeyboardButton(
-            text="◀️ Назад" if lang == "ru" else "◀️ Back",
-            callback_data=f"adm_stk:{lang}:0",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад" if lang == "ru" else "◀️ Back",
+                callback_data=f"adm_stk:{lang}:0",
+            ),
+        ]
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -107,38 +119,48 @@ def sticker_set_detail_keyboard(
         else:
             desc = str(visual)[:25]
             label = f"{emoji} {desc} ({uses}x)"
-        rows.append([
-            InlineKeyboardButton(
-                text=label,
-                callback_data=f"adm_stk_view:{lang}:{fuid}",
-            ),
-        ])
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"adm_stk_view:{lang}:{fuid}",
+                ),
+            ]
+        )
 
     # Pagination
     total_pages = max(1, math.ceil(total / per_page))
     nav: list[InlineKeyboardButton] = []
     if page > 0:
-        nav.append(InlineKeyboardButton(
-            text="◀️",
-            callback_data=f"adm_stk_set:{lang}:{set_name}:{page - 1}",
-        ))
-    nav.append(InlineKeyboardButton(
-        text=f"{page + 1}/{total_pages}",
-        callback_data="noop",
-    ))
+        nav.append(
+            InlineKeyboardButton(
+                text="◀️",
+                callback_data=f"adm_stk_set:{lang}:{set_name}:{page - 1}",
+            )
+        )
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page + 1}/{total_pages}",
+            callback_data="noop",
+        )
+    )
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(
-            text="▶️",
-            callback_data=f"adm_stk_set:{lang}:{set_name}:{page + 1}",
-        ))
+        nav.append(
+            InlineKeyboardButton(
+                text="▶️",
+                callback_data=f"adm_stk_set:{lang}:{set_name}:{page + 1}",
+            )
+        )
     rows.append(nav)
 
-    rows.append([
-        InlineKeyboardButton(
-            text="◀️ Назад" if lang == "ru" else "◀️ Back",
-            callback_data=f"adm_stk_sets:{lang}:0",
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад" if lang == "ru" else "◀️ Back",
+                callback_data=f"adm_stk_sets:{lang}:0",
+            ),
+        ]
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -162,11 +184,13 @@ def sticker_detail_keyboard(
     # Back button: sticker message cleanup is handled via DB lookup in handlers
     back_data = f"adm_stk_back:{lang}:{set_name}:0" if set_name else f"adm_stk_sets:{lang}:0"
 
-    rows.append([
-        InlineKeyboardButton(
-            text="◀️ Назад" if lang == "ru" else "◀️ Back",
-            callback_data=back_data,
-        ),
-    ])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад" if lang == "ru" else "◀️ Back",
+                callback_data=back_data,
+            ),
+        ]
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)

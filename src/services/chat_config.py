@@ -74,9 +74,7 @@ class ChatConfigService:
         config = self._merge(chat_id, self._global_cache, chat_row)
 
         # Cache result
-        self._cache[chat_id] = _CacheEntry(
-            config=config, expires_at=now + self._cache_ttl
-        )
+        self._cache[chat_id] = _CacheEntry(config=config, expires_at=now + self._cache_ttl)
         return config
 
     def is_cached(self, chat_id: int) -> bool:
@@ -129,30 +127,32 @@ class ChatConfigService:
 
 
 # Fields on ChatConfig that can come from DB layers
-_CHAT_CONFIG_FIELDS: frozenset[str] = frozenset({
-    "enabled",
-    "trigger_words",
-    "random_response_chance",
-    "random_response_min_interval",
-    "system_prompt",
-    "language",
-    "rag_enabled",
-    "transcribe_voice",
-    "transcribe_video_notes",
-    "abuse_filter_enabled",
-    "sticker_learning_enabled",
-    "sticker_response_chance",
-    "sticker_reply_to_sticker_enabled",
-    "sticker_reply_to_sticker_chance",
-    "image_comment_sticker_enabled",
-    "image_comment_sticker_chance",
-    "image_analysis_enabled",
-    "save_messages",
-    "rules_enabled",
-    "rules_mode",
-    "link_comments_enabled",
-    "relevancy_gate_enabled",
-})
+_CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
+    {
+        "enabled",
+        "trigger_words",
+        "random_response_chance",
+        "random_response_min_interval",
+        "system_prompt",
+        "language",
+        "rag_enabled",
+        "transcribe_voice",
+        "transcribe_video_notes",
+        "abuse_filter_enabled",
+        "sticker_learning_enabled",
+        "sticker_response_chance",
+        "sticker_reply_to_sticker_enabled",
+        "sticker_reply_to_sticker_chance",
+        "image_comment_sticker_enabled",
+        "image_comment_sticker_chance",
+        "image_analysis_enabled",
+        "save_messages",
+        "rules_enabled",
+        "rules_mode",
+        "link_comments_enabled",
+        "relevancy_gate_enabled",
+    }
+)
 
 
 def _coerce(key: str, value: Any) -> Any:

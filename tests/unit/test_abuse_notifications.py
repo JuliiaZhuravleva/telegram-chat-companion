@@ -55,7 +55,7 @@ class TestFormatUnauthorized:
 
     def test_user_link_still_present(self):
         text = _fmt(user_id=999, user_first_name="Alice")
-        assert 'tg://user?id=999' in text
+        assert "tg://user?id=999" in text
 
     def test_chat_id_still_shown(self):
         text = _fmt(chat_id=-1003632335671, chat_type="supergroup")
@@ -90,4 +90,4 @@ class TestFormatUnauthorized:
         assert "Alice Private" in chat_line
         assert "<a href=" not in chat_line
         # User: line still carries the user link
-        assert 'tg://user?id=5870677432' in text
+        assert "tg://user?id=5870677432" in text

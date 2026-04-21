@@ -77,7 +77,7 @@ def format_link_context_section(ctx: LinkContext) -> str:
         safe_title = sanitize_prompt_content(meta.title)
         safe_channel = sanitize_prompt_content(meta.channel)
 
-        info = f"- \"{safe_title}\" by {safe_channel}"
+        info = f'- "{safe_title}" by {safe_channel}'
         if meta.duration:
             info += f" ({meta.duration})"
         info += f", {meta.views} views"
@@ -96,6 +96,6 @@ def format_link_context_section(ctx: LinkContext) -> str:
             for comment in meta.top_comments[:3]:
                 safe_author = sanitize_prompt_content(comment.author)
                 safe_text = sanitize_prompt_content(comment.text[:200])
-                parts.append(f"    - {safe_author}: \"{safe_text}\" ({comment.likes} likes)")
+                parts.append(f'    - {safe_author}: "{safe_text}" ({comment.likes} likes)')
 
     return "\n".join(parts)

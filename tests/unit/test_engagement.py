@@ -70,14 +70,16 @@ class TestEngagement:
 
     @pytest.mark.asyncio
     async def test_empty_chat(self) -> None:
-        repo = _make_repo({
-            "total_count": 0,
-            "bot_count": 0,
-            "bot_ratio": 0.0,
-            "seconds_since_last_bot": None,
-            "velocity_per_minute": 0.0,
-            "consecutive_bot_at_end": 0,
-        })
+        repo = _make_repo(
+            {
+                "total_count": 0,
+                "bot_count": 0,
+                "bot_ratio": 0.0,
+                "seconds_since_last_bot": None,
+                "velocity_per_minute": 0.0,
+                "consecutive_bot_at_end": 0,
+            }
+        )
         result = await compute_engagement(chat_id=-100, message_repo=repo)
         assert result.should_pass is True
 

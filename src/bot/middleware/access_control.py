@@ -68,7 +68,10 @@ class AccessControlMiddleware(BaseMiddleware):
 
             # Notify admins about unauthorized access (with cooldown)
             await self._notify_unauthorized(
-                data, event, chat_id, user_id,
+                data,
+                event,
+                chat_id,
+                user_id,
             )
 
             return None
@@ -108,8 +111,7 @@ class AccessControlMiddleware(BaseMiddleware):
         # Prune expired entries to prevent unbounded memory growth
         if len(self._last_notify) > 1000:
             self._last_notify = {
-                k: v for k, v in self._last_notify.items()
-                if now - v < _NOTIFY_COOLDOWN_SECONDS
+                k: v for k, v in self._last_notify.items() if now - v < _NOTIFY_COOLDOWN_SECONDS
             }
 
         try:

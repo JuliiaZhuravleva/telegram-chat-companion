@@ -39,9 +39,7 @@ class StickerResponderService:
         min_similarity: float = 0.6,
     ) -> list[StickerSearchResult]:
         """Get top sticker candidates for injection into AI prompt."""
-        return await self._sticker.search(
-            context, limit=limit, min_similarity=min_similarity
-        )
+        return await self._sticker.search(context, limit=limit, min_similarity=min_similarity)
 
     async def find_sticker_for_sticker_reply(
         self,
@@ -60,9 +58,7 @@ class StickerResponderService:
         if existing.get("emotion"):
             context += f" {existing['emotion']}"
 
-        results = await self._sticker.search(
-            context, limit=5, min_similarity=0.6
-        )
+        results = await self._sticker.search(context, limit=5, min_similarity=0.6)
 
         for r in results:
             if r.file_unique_id != incoming_file_unique_id:
@@ -113,7 +109,7 @@ class StickerResponderService:
 
         file_id = match.group(1)
         # Remove the marker from text
-        cleaned = text[:match.start()] + text[match.end():]
+        cleaned = text[: match.start()] + text[match.end() :]
         cleaned = cleaned.strip()
 
         return file_id, cleaned

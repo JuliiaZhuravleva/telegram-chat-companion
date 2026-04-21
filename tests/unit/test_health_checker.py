@@ -45,9 +45,9 @@ class TestRunCheck:
     @pytest.mark.asyncio
     async def test_healthy_when_all_checks_pass(self, checker, pool):
         pool.fetchval.side_effect = [
-            1,   # SELECT 1 (db check)
-            0,   # message count 30m
-            0,   # fallback count 15m
+            1,  # SELECT 1 (db check)
+            0,  # message count 30m
+            0,  # fallback count 15m
         ]
 
         result = await checker._run_check()
@@ -67,16 +67,15 @@ class TestRunCheck:
         assert result.status == HealthStatus.CRITICAL
         assert result.db_ok is False
         assert any(
-            i.severity == HealthStatus.CRITICAL and "Database" in i.message
-            for i in result.issues
+            i.severity == HealthStatus.CRITICAL and "Database" in i.message for i in result.issues
         )
 
     @pytest.mark.asyncio
     async def test_warning_when_fallbacks_detected(self, checker, pool):
         pool.fetchval.side_effect = [
-            1,   # SELECT 1
-            5,   # message count
-            3,   # fallback count > 0
+            1,  # SELECT 1
+            5,  # message count
+            3,  # fallback count > 0
         ]
 
         result = await checker._run_check()
@@ -274,7 +273,8 @@ class TestHealthcheckFile:
         hc_file = tmp_path / "healthcheck"
 
         with patch(
-            "src.services.health.checker._HEALTHCHECK_FILE", hc_file,
+            "src.services.health.checker._HEALTHCHECK_FILE",
+            hc_file,
         ):
             checker._write_healthcheck_file()
 

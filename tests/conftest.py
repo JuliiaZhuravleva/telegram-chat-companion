@@ -156,21 +156,32 @@ class MockAIProvider(AIProvider):
         self.last_text_call: dict[str, Any] = {}
 
     async def generate_text(
-        self, prompt: str, system_prompt: str | None = None, model: str | None = None,
-        max_tokens: int = 500, temperature: float = 0.9, **kwargs: Any,
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        max_tokens: int = 500,
+        temperature: float = 0.9,
+        **kwargs: Any,
     ) -> TextGenerationResult:
         self.call_log.append("generate_text")
         self.last_text_call = {
-            "prompt": prompt, "system_prompt": system_prompt,
-            "model": model, "max_tokens": max_tokens,
-            "temperature": temperature, **kwargs,
+            "prompt": prompt,
+            "system_prompt": system_prompt,
+            "model": model,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            **kwargs,
         }
         if self._error:
             raise self._error
         return self._text_result
 
     async def generate_embedding(
-        self, text: str, model: str | None = None, **kwargs: Any,
+        self,
+        text: str,
+        model: str | None = None,
+        **kwargs: Any,
     ) -> EmbeddingResult:
         self.call_log.append("generate_embedding")
         if self._error:
@@ -178,7 +189,11 @@ class MockAIProvider(AIProvider):
         return self._embedding_result
 
     async def analyze_image(
-        self, image_data: bytes, prompt: str, model: str | None = None, **kwargs: Any,
+        self,
+        image_data: bytes,
+        prompt: str,
+        model: str | None = None,
+        **kwargs: Any,
     ) -> VisionResult:
         self.call_log.append("analyze_image")
         if self._error:
@@ -188,7 +203,10 @@ class MockAIProvider(AIProvider):
         raise NotImplementedError("mock does not support vision")
 
     async def transcribe_audio(
-        self, audio_data: bytes, language: str | None = None, model: str | None = None,
+        self,
+        audio_data: bytes,
+        language: str | None = None,
+        model: str | None = None,
         **kwargs: Any,
     ) -> TranscriptionResult:
         self.call_log.append("transcribe_audio")

@@ -14,9 +14,7 @@ class TestDetectLinks:
         self.service = LinkExtractorService(youtube_api_key=None)
 
     def test_youtube_watch_url(self):
-        links = self.service.detect_links(
-            "Check this https://www.youtube.com/watch?v=dQw4w9WgXcQ"
-        )
+        links = self.service.detect_links("Check this https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         assert len(links) == 1
         assert links[0].platform == "youtube"
         assert links[0].video_id == "dQw4w9WgXcQ"
@@ -28,17 +26,13 @@ class TestDetectLinks:
         assert links[0].video_id == "dQw4w9WgXcQ"
 
     def test_youtube_shorts_url(self):
-        links = self.service.detect_links(
-            "https://youtube.com/shorts/abcdefghijk"
-        )
+        links = self.service.detect_links("https://youtube.com/shorts/abcdefghijk")
         assert len(links) == 1
         assert links[0].platform == "youtube"
         assert links[0].video_id == "abcdefghijk"
 
     def test_tiktok_url(self):
-        links = self.service.detect_links(
-            "https://tiktok.com/@user/video/1234567890"
-        )
+        links = self.service.detect_links("https://tiktok.com/@user/video/1234567890")
         assert len(links) == 1
         assert links[0].platform == "tiktok"
         assert links[0].video_id is None
@@ -49,9 +43,7 @@ class TestDetectLinks:
         assert links[0].platform == "tiktok"
 
     def test_instagram_reel(self):
-        links = self.service.detect_links(
-            "https://instagram.com/reel/abc123"
-        )
+        links = self.service.detect_links("https://instagram.com/reel/abc123")
         assert len(links) == 1
         assert links[0].platform == "instagram"
 
@@ -70,8 +62,7 @@ class TestDetectLinks:
 
     def test_multiple_urls(self):
         text = (
-            "Watch these: https://youtu.be/dQw4w9WgXcQ "
-            "and https://youtube.com/watch?v=abc12345678"
+            "Watch these: https://youtu.be/dQw4w9WgXcQ and https://youtube.com/watch?v=abc12345678"
         )
         links = self.service.detect_links(text)
         assert len(links) == 2
@@ -83,10 +74,7 @@ class TestDetectLinks:
         assert len(links) == 1
 
     def test_mixed_platforms(self):
-        text = (
-            "YouTube: https://youtu.be/dQw4w9WgXcQ "
-            "TikTok: https://tiktok.com/@user/video/123"
-        )
+        text = "YouTube: https://youtu.be/dQw4w9WgXcQ TikTok: https://tiktok.com/@user/video/123"
         links = self.service.detect_links(text)
         assert len(links) == 2
         platforms = {link.platform for link in links}
@@ -130,36 +118,44 @@ class TestExtract:
 
         mock_video_response = MagicMock()
         mock_video_response.status = 200
-        mock_video_response.json = AsyncMock(return_value={
-            "items": [{
-                "snippet": {
-                    "title": "Test Video",
-                    "channelTitle": "Test Channel",
-                    "description": "A great video",
-                    "tags": ["tag1", "tag2"],
-                },
-                "statistics": {"viewCount": "1500000"},
-                "contentDetails": {"duration": "PT4M33S"},
-            }]
-        })
+        mock_video_response.json = AsyncMock(
+            return_value={
+                "items": [
+                    {
+                        "snippet": {
+                            "title": "Test Video",
+                            "channelTitle": "Test Channel",
+                            "description": "A great video",
+                            "tags": ["tag1", "tag2"],
+                        },
+                        "statistics": {"viewCount": "1500000"},
+                        "contentDetails": {"duration": "PT4M33S"},
+                    }
+                ]
+            }
+        )
         mock_video_response.__aenter__ = AsyncMock(return_value=mock_video_response)
         mock_video_response.__aexit__ = AsyncMock(return_value=False)
 
         mock_comments_response = MagicMock()
         mock_comments_response.status = 200
-        mock_comments_response.json = AsyncMock(return_value={
-            "items": [{
-                "snippet": {
-                    "topLevelComment": {
+        mock_comments_response.json = AsyncMock(
+            return_value={
+                "items": [
+                    {
                         "snippet": {
-                            "authorDisplayName": "Commenter",
-                            "textDisplay": "Nice video!",
-                            "likeCount": 42,
+                            "topLevelComment": {
+                                "snippet": {
+                                    "authorDisplayName": "Commenter",
+                                    "textDisplay": "Nice video!",
+                                    "likeCount": 42,
+                                }
+                            }
                         }
                     }
-                }
-            }]
-        })
+                ]
+            }
+        )
         mock_comments_response.__aenter__ = AsyncMock(return_value=mock_comments_response)
         mock_comments_response.__aexit__ = AsyncMock(return_value=False)
 
@@ -178,9 +174,7 @@ class TestExtract:
         mock_session.__aexit__ = AsyncMock(return_value=False)
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = await service.extract(
-                "Check this out: https://youtu.be/dQw4w9WgXcQ"
-            )
+            result = await service.extract("Check this out: https://youtu.be/dQw4w9WgXcQ")
 
         assert result is not None
         assert len(result.youtube_links) == 1
@@ -220,17 +214,21 @@ class TestExtract:
 
         mock_video_response = MagicMock()
         mock_video_response.status = 200
-        mock_video_response.json = AsyncMock(return_value={
-            "items": [{
-                "snippet": {
-                    "title": "Video",
-                    "channelTitle": "Channel",
-                    "description": "",
-                },
-                "statistics": {"viewCount": "100"},
-                "contentDetails": {"duration": "PT1M"},
-            }]
-        })
+        mock_video_response.json = AsyncMock(
+            return_value={
+                "items": [
+                    {
+                        "snippet": {
+                            "title": "Video",
+                            "channelTitle": "Channel",
+                            "description": "",
+                        },
+                        "statistics": {"viewCount": "100"},
+                        "contentDetails": {"duration": "PT1M"},
+                    }
+                ]
+            }
+        )
         mock_video_response.__aenter__ = AsyncMock(return_value=mock_video_response)
         mock_video_response.__aexit__ = AsyncMock(return_value=False)
 

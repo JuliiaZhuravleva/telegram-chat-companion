@@ -8,28 +8,30 @@ import asyncpg
 
 # Columns that can be written via upsert / set_field.
 # Maps Python field names to SQL column names (they happen to match).
-_WRITABLE_COLUMNS: frozenset[str] = frozenset({
-    "chat_title",
-    "chat_type",
-    "enabled",
-    "trigger_words",
-    "random_response_chance",
-    "random_response_min_interval",
-    "system_prompt",
-    "language",
-    "rag_enabled",
-    "transcribe_voice",
-    "transcribe_video_notes",
-    "abuse_filter_enabled",
-    "sticker_learning_enabled",
-    "sticker_response_chance",
-    "image_analysis_enabled",
-    "save_messages",
-    "rules_enabled",
-    "rules_mode",
-    "link_comments_enabled",
-    "last_activity_at",
-})
+_WRITABLE_COLUMNS: frozenset[str] = frozenset(
+    {
+        "chat_title",
+        "chat_type",
+        "enabled",
+        "trigger_words",
+        "random_response_chance",
+        "random_response_min_interval",
+        "system_prompt",
+        "language",
+        "rag_enabled",
+        "transcribe_voice",
+        "transcribe_video_notes",
+        "abuse_filter_enabled",
+        "sticker_learning_enabled",
+        "sticker_response_chance",
+        "image_analysis_enabled",
+        "save_messages",
+        "rules_enabled",
+        "rules_mode",
+        "link_comments_enabled",
+        "last_activity_at",
+    }
+)
 
 
 class ChatSettingsRepository:
@@ -73,9 +75,7 @@ class ChatSettingsRepository:
         values = list(fields.values())
 
         # Build SET clause: "col1 = $2, col2 = $3, ..."
-        set_clause = ", ".join(
-            f"{col} = ${i + 2}" for i, col in enumerate(columns)
-        )
+        set_clause = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(columns))
         # Build INSERT columns and value placeholders
         insert_cols = "chat_id, " + ", ".join(columns)
         insert_vals = "$1, " + ", ".join(f"${i + 2}" for i in range(len(columns)))
@@ -126,7 +126,5 @@ class ChatSettingsRepository:
 
     async def list_enabled(self) -> list[int]:
         """Get all enabled (whitelisted) chat IDs."""
-        rows = await self._pool.fetch(
-            "SELECT chat_id FROM chat_settings WHERE enabled = true"
-        )
+        rows = await self._pool.fetch("SELECT chat_id FROM chat_settings WHERE enabled = true")
         return [row["chat_id"] for row in rows]

@@ -167,7 +167,8 @@ class AbuseNotificationService:
         for admin_id in admin_ids:
             try:
                 await bot.send_message(
-                    admin_id, text,
+                    admin_id,
+                    text,
                     parse_mode="HTML",
                     reply_markup=reply_markup,
                 )
@@ -200,9 +201,7 @@ class AbuseNotificationService:
             chat_type if chat_type != "private" else None,
             chat_username,
         )
-        chat_display = (
-            f"<a href=\"{url}\">{chat_label}</a>" if url else chat_label
-        )
+        chat_display = f'<a href="{url}">{chat_label}</a>' if url else chat_label
         if chat_type:
             chat_display += f" ({escape(chat_type)})"
         lines.append(f"<b>Chat:</b> {chat_display}")
@@ -217,9 +216,7 @@ class AbuseNotificationService:
         full_name = full_name.strip() or "unknown"
 
         if user_id:
-            lines.append(
-                f"<b>User:</b> <a href=\"tg://user?id={user_id}\">{full_name}</a>"
-            )
+            lines.append(f'<b>User:</b> <a href="tg://user?id={user_id}">{full_name}</a>')
             lines.append(f"<b>User ID:</b> <code>{user_id}</code>")
         else:
             lines.append(f"<b>User:</b> {full_name}")

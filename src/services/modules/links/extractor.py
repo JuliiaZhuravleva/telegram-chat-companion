@@ -38,9 +38,7 @@ _VIDEO_URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-_YOUTUBE_ID_PATTERN = re.compile(
-    r"(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})"
-)
+_YOUTUBE_ID_PATTERN = re.compile(r"(?:v=|youtu\.be/|shorts/)([a-zA-Z0-9_-]{11})")
 
 
 def _classify_platform(url: str) -> str:
@@ -91,10 +89,7 @@ class LinkExtractorService:
         TikTok/Instagram links are ignored — the AI sees them in raw message text.
         """
         all_links = self.detect_links(text)
-        youtube_links = [
-            link for link in all_links
-            if link.platform == "youtube" and link.video_id
-        ]
+        youtube_links = [link for link in all_links if link.platform == "youtube" and link.video_id]
 
         if not youtube_links:
             return None
@@ -119,9 +114,7 @@ class LinkExtractorService:
             return None
 
         try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
                 # Parallel: video info + comments
                 video_task = self._fetch_video_info(session, video_id)
                 comments_task = self._fetch_comments(session, video_id)
@@ -239,11 +232,7 @@ class LinkExtractorService:
             comments: list[YouTubeComment] = []
 
             for item in data.get("items", []):
-                snippet = (
-                    item.get("snippet", {})
-                    .get("topLevelComment", {})
-                    .get("snippet", {})
-                )
+                snippet = item.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
                 if not snippet:
                     continue
 

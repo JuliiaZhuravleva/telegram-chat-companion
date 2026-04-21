@@ -34,9 +34,9 @@ TEST_CHAT = -1003632335671  # tests chat
 DB_URL = "postgresql://bot_user:bot_password@127.0.0.1:5432/telegram_bot"
 
 # Pack names by sticker type
-STATIC_PACK = "Stickers_Duck"       # image/webp
-ANIMATED_PACK = "AnimatedStickers"   # application/x-tgsticker
-VIDEO_PACK = "HotCherryPack"        # video/webm
+STATIC_PACK = "Stickers_Duck"  # image/webp
+ANIMATED_PACK = "AnimatedStickers"  # application/x-tgsticker
+VIDEO_PACK = "HotCherryPack"  # video/webm
 
 
 async def main():
@@ -53,7 +53,9 @@ async def main():
     # Clean up any previous test stickers (case-insensitive — Telegram normalizes names)
     await pool.execute(
         "DELETE FROM sticker_knowledge WHERE LOWER(set_name) IN (LOWER($1), LOWER($2), LOWER($3))",
-        STATIC_PACK, ANIMATED_PACK, VIDEO_PACK,
+        STATIC_PACK,
+        ANIMATED_PACK,
+        VIDEO_PACK,
     )
     await pool.execute("DELETE FROM admin_sticker_notifications")
     print("Cleaned up previous test data.\n")
@@ -61,10 +63,12 @@ async def main():
     # ── Test 1: Static Sticker ─────────────────────────────────────
     print("Test 1: Static sticker learning")
     try:
-        result = await client(GetStickerSetRequest(
-            stickerset=InputStickerSetShortName(short_name=STATIC_PACK),
-            hash=0,
-        ))
+        result = await client(
+            GetStickerSetRequest(
+                stickerset=InputStickerSetShortName(short_name=STATIC_PACK),
+                hash=0,
+            )
+        )
         static_sticker = None
         for doc in result.documents:
             if doc.mime_type == "image/webp":
@@ -86,7 +90,9 @@ async def main():
                 print(f"    Description: {row['visual_description']}")
                 print(f"    Emotion: {row['emotion']}")
                 print(f"    Analysis failed: {row['analysis_failed']}")
-                results["static"] = "PASS" if not row["analysis_failed"] else "FAIL (analysis failed)"
+                results["static"] = (
+                    "PASS" if not row["analysis_failed"] else "FAIL (analysis failed)"
+                )
             else:
                 print("  ✗ Static sticker NOT found in DB")
                 results["static"] = "FAIL"
@@ -100,10 +106,12 @@ async def main():
     # ── Test 2: Animated Sticker ───────────────────────────────────
     print("\nTest 2: Animated sticker (.tgs) rendering + learning")
     try:
-        result = await client(GetStickerSetRequest(
-            stickerset=InputStickerSetShortName(short_name=ANIMATED_PACK),
-            hash=0,
-        ))
+        result = await client(
+            GetStickerSetRequest(
+                stickerset=InputStickerSetShortName(short_name=ANIMATED_PACK),
+                hash=0,
+            )
+        )
         animated_sticker = None
         for doc in result.documents:
             if doc.mime_type == "application/x-tgsticker":
@@ -127,7 +135,9 @@ async def main():
                 print(f"    Analysis failed: {row['analysis_failed']}")
                 print(f"    is_animated: {row['is_animated']}")
                 if row["analysis_failed"]:
-                    results["animated"] = "PASS (saved with analysis_failed — render may have failed)"
+                    results["animated"] = (
+                        "PASS (saved with analysis_failed — render may have failed)"
+                    )
                 else:
                     results["animated"] = "PASS"
             else:
@@ -143,10 +153,12 @@ async def main():
     # ── Test 3: Video Sticker ──────────────────────────────────────
     print("\nTest 3: Video sticker (.webm) rendering + learning")
     try:
-        result = await client(GetStickerSetRequest(
-            stickerset=InputStickerSetShortName(short_name=VIDEO_PACK),
-            hash=0,
-        ))
+        result = await client(
+            GetStickerSetRequest(
+                stickerset=InputStickerSetShortName(short_name=VIDEO_PACK),
+                hash=0,
+            )
+        )
         video_sticker = None
         for doc in result.documents:
             if doc.mime_type == "video/webm":
@@ -207,9 +219,11 @@ async def main():
     # Show bot logs for context
     print("\n=== Recent Bot Logs (last 50 lines) ===")
     import subprocess
+
     logs = subprocess.run(
         ["docker", "logs", "companion-bot", "--tail", "50"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     print(logs.stdout or logs.stderr)
 

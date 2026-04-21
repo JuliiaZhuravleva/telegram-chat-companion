@@ -11,17 +11,19 @@ class TestCalculateCost:
     def test_text_model_with_tokens(self) -> None:
         # gpt-5-nano: $0.05/1M input, $0.40/1M output
         cost = calculate_cost(
-            "gpt-5-nano", tokens_input=1000, tokens_output=500,
+            "gpt-5-nano",
+            tokens_input=1000,
+            tokens_output=500,
         )
-        expected = (
-            Decimal("0.05") * Decimal("1000") / Decimal("1000000")
-            + Decimal("0.40") * Decimal("500") / Decimal("1000000")
-        )
+        expected = Decimal("0.05") * Decimal("1000") / Decimal("1000000") + Decimal(
+            "0.40"
+        ) * Decimal("500") / Decimal("1000000")
         assert cost == expected
 
     def test_free_model_returns_zero(self) -> None:
         cost = calculate_cost(
-            "gemini-embedding-001", tokens_input=10000,
+            "gemini-embedding-001",
+            tokens_input=10000,
         )
         assert cost == Decimal("0")
 
@@ -33,7 +35,9 @@ class TestCalculateCost:
 
     def test_unknown_model_returns_zero(self) -> None:
         cost = calculate_cost(
-            "nonexistent-model", tokens_input=1000, tokens_output=500,
+            "nonexistent-model",
+            tokens_input=1000,
+            tokens_output=500,
         )
         assert cost == Decimal("0")
 

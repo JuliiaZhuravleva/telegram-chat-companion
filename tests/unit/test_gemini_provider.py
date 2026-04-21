@@ -16,7 +16,10 @@ def provider():
 
 def _mock_response(status_code: int = 200, json_data: dict | None = None, text: str = ""):
     """Create a mock httpx.Response."""
-    kwargs: dict = {"status_code": status_code, "request": httpx.Request("POST", "https://example.com")}
+    kwargs: dict = {
+        "status_code": status_code,
+        "request": httpx.Request("POST", "https://example.com"),
+    }
     if json_data is not None:
         kwargs["json"] = json_data
     else:
@@ -61,7 +64,9 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.generate_text(
                 "Test",
                 system_prompt="Be helpful",
@@ -116,10 +121,10 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
-            await provider.generate_text(
-                "Test", response_mime_type="application/json"
-            )
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
+            await provider.generate_text("Test", response_mime_type="application/json")
 
         payload = mock_post.call_args[1]["json"]
         assert payload["generationConfig"]["responseMimeType"] == "application/json"
@@ -131,7 +136,9 @@ class TestGenerateText:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.generate_text("Test")
 
         payload = mock_post.call_args[1]["json"]
@@ -144,9 +151,7 @@ class TestGenerateText:
 class TestGenerateEmbedding:
     async def test_successful_embedding(self, provider):
         embedding_values = [0.1] * 768
-        mock_resp = _mock_response(
-            json_data={"embedding": {"values": embedding_values}}
-        )
+        mock_resp = _mock_response(json_data={"embedding": {"values": embedding_values}})
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
             result = await provider.generate_embedding("Test text")
@@ -164,11 +169,11 @@ class TestGenerateEmbedding:
                 await provider.generate_embedding("Test")
 
     async def test_custom_dimensions(self, provider):
-        mock_resp = _mock_response(
-            json_data={"embedding": {"values": [0.1] * 256}}
-        )
+        mock_resp = _mock_response(json_data={"embedding": {"values": [0.1] * 256}})
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             result = await provider.generate_embedding("Test", dimensions=256)
 
         payload = mock_post.call_args[1]["json"]
@@ -217,7 +222,9 @@ class TestAnalyzeImage:
             }
         )
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp) as mock_post:
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
             await provider.analyze_image(b"fake", "Describe", mime_type="image/png")
 
         payload = mock_post.call_args[1]["json"]
@@ -270,9 +277,7 @@ class TestRateLimiting:
 
 class TestErrorHandling:
     async def test_api_error_in_body(self, provider):
-        mock_resp = _mock_response(
-            json_data={"error": {"message": "Invalid API key"}}
-        )
+        mock_resp = _mock_response(json_data={"error": {"message": "Invalid API key"}})
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
             with pytest.raises(AIProviderError, match="Invalid API key"):
@@ -298,7 +303,9 @@ class TestErrorHandling:
 
     async def test_timeout(self, provider):
         with patch.object(
-            provider._client, "post", new_callable=AsyncMock,
+            provider._client,
+            "post",
+            new_callable=AsyncMock,
             side_effect=httpx.TimeoutException("timed out"),
         ):
             with pytest.raises(AIProviderError, match="timed out") as exc_info:

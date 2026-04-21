@@ -172,9 +172,7 @@ class TestHandleCostsVerify:
             buckets=[],
         )
 
-        with patch(
-            "src.services.ai.billing.OpenAIBillingClient"
-        ) as MockClient:
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
             instance = AsyncMock()
             instance.get_costs = AsyncMock(return_value=mock_report)
             instance.close = AsyncMock()
@@ -211,9 +209,7 @@ class TestHandleCostsVerify:
             error="API key lacks billing access (admin key required)",
         )
 
-        with patch(
-            "src.services.ai.billing.OpenAIBillingClient"
-        ) as MockClient:
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
             instance = AsyncMock()
             instance.get_costs = AsyncMock(return_value=mock_report)
             instance.close = AsyncMock()

@@ -50,12 +50,20 @@ class MessageRepository:
                     chat_messages.original_content, chat_messages.content
                 )
             """,
-            chat_id, message_id, user_id, username, first_name,
-            message_type, content,
+            chat_id,
+            message_id,
+            user_id,
+            username,
+            first_name,
+            message_type,
+            content,
             None if raw_data is None else json.dumps(raw_data),
-            reply_to_message_id, is_bot_message,
-            sticker_file_id, sticker_file_unique_id,
-            sticker_set_name, sticker_emoji,
+            reply_to_message_id,
+            is_bot_message,
+            sticker_file_id,
+            sticker_file_unique_id,
+            sticker_set_name,
+            sticker_emoji,
             message_thread_id,
         )
 
@@ -156,7 +164,9 @@ class MessageRepository:
             ORDER BY created_at DESC
             LIMIT $2
             """,
-            chat_id, limit, min_length,
+            chat_id,
+            limit,
+            min_length,
         )
         return [row["msg_length"] for row in rows]
 

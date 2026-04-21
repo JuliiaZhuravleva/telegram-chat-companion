@@ -38,10 +38,12 @@ class RenderedSticker:
         frame_times: Timestamp (in seconds) of each extracted frame
         motion: Motion analysis result (optional)
     """
+
     collage_png: bytes
     duration: float
     frame_times: list[float]
     motion: AnimationMotion | None = None
+
 
 # Collage layout: 3 columns x 2 rows = 6 frames
 _COLS = 3
@@ -94,7 +96,9 @@ def _create_motion_trail_frame(
 
         # Create alpha mask for this frame
         alpha_mask = Image.new("L", frame.size, alpha)
-        result = Image.alpha_composite(result, Image.composite(frame, Image.new("RGBA", frame.size), alpha_mask))
+        result = Image.alpha_composite(
+            result, Image.composite(frame, Image.new("RGBA", frame.size), alpha_mask)
+        )
 
     return result
 
@@ -116,7 +120,9 @@ def _composite_collage(
     """
     # Pad frames list to exactly _FRAME_COUNT
     while len(frames) < _FRAME_COUNT:
-        frames.append(frames[-1].copy() if frames else Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE)))
+        frames.append(
+            frames[-1].copy() if frames else Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE))
+        )
 
     collage_w = _COLS * _FRAME_SIZE
     collage_h = _LABEL_HEIGHT + _ROWS * _FRAME_SIZE
@@ -154,8 +160,12 @@ def _composite_collage(
     else:
         # Fallback labels
         frame_labels = [
-            "Frame 1 (start)", "Frame 2", "Frame 3",
-            "Frame 4", "Frame 5", "Frame 6 (end)",
+            "Frame 1 (start)",
+            "Frame 2",
+            "Frame 3",
+            "Frame 4",
+            "Frame 5",
+            "Frame 6 (end)",
         ]
 
     try:
@@ -219,7 +229,11 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
             im = anim.render_pillow_frame(frame_num=frame_num)
             sampled_frames.append(im)
         except Exception as exc:
-            logger.warning("Failed to render TGS frame for motion analysis", frame_num=frame_num, error=str(exc))
+            logger.warning(
+                "Failed to render TGS frame for motion analysis",
+                frame_num=frame_num,
+                error=str(exc),
+            )
             sampled_frames.append(Image.new("RGBA", default_size))
 
     # Analyze motion (synchronous, but fast with sampling)
@@ -232,8 +246,12 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
         # Use frame differencing for motion analysis
         motion_scores_sampled = analyzer._calculate_frame_differences(sampled_frames)
         sampled_indices = list(range(0, total_frames, sampling))
-        motion_scores = analyzer._interpolate_motion_scores(motion_scores_sampled, sampled_indices, total_frames)
-        keyframe_indices, keyframe_times = analyzer._select_keyframes(motion_scores, total_frames, duration)
+        motion_scores = analyzer._interpolate_motion_scores(
+            motion_scores_sampled, sampled_indices, total_frames
+        )
+        keyframe_indices, keyframe_times = analyzer._select_keyframes(
+            motion_scores, total_frames, duration
+        )
 
         avg_motion = sum(motion_scores) / len(motion_scores) if motion_scores else 0.0
         peak_idx = motion_scores.index(max(motion_scores)) if motion_scores else 0
@@ -385,11 +403,15 @@ async def _probe_video(path: str) -> tuple[int, float]:
     """Get total frame count and duration from a video file via ffprobe."""
     proc = await asyncio.create_subprocess_exec(
         "ffprobe",
-        "-v", "quiet",
+        "-v",
+        "quiet",
         "-count_frames",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=nb_read_frames,duration",
-        "-of", "csv=p=0",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=nb_read_frames,duration",
+        "-of",
+        "csv=p=0",
         path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
@@ -416,10 +438,14 @@ async def _probe_video_fallback(path: str) -> tuple[int, float]:
     """Fallback video probing without frame counting."""
     proc = await asyncio.create_subprocess_exec(
         "ffprobe",
-        "-v", "quiet",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=duration,r_frame_rate",
-        "-of", "csv=p=0",
+        "-v",
+        "quiet",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=duration,r_frame_rate",
+        "-of",
+        "csv=p=0",
         path,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,

@@ -96,7 +96,4 @@ class VoiceTranscriptionService:
 
         Returns Markdown-formatted text.
         """
-        return (
-            f"\U0001f399 *Расшифровка от* {user_first_name}:\n\n"
-            f"{transcription_text}"
-        )
+        return f"\U0001f399 *Расшифровка от* {user_first_name}:\n\n{transcription_text}"

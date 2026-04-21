@@ -193,7 +193,9 @@ def _make_data_with_services(
 
 class TestBlacklistSuppression:
     async def test_skips_notification_when_chat_has_rejected_attempt(
-        self, middleware, make_chat_config,
+        self,
+        middleware,
+        make_chat_config,
     ):
         """Chat with a prior rejection → no new notification, no new DB log."""
         config = make_chat_config(enabled=False)
@@ -216,7 +218,9 @@ class TestBlacklistSuppression:
         notifier.notify_unauthorized.assert_not_awaited()
 
     async def test_notifies_when_chat_has_no_prior_rejection(
-        self, middleware, make_chat_config,
+        self,
+        middleware,
+        make_chat_config,
     ):
         """Fresh chat (no prior reject) → normal log + notify path."""
         config = make_chat_config(enabled=False)

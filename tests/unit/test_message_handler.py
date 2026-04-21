@@ -32,7 +32,8 @@ class TestShouldRespond:
     def test_russian_trigger_word(self, make_message):
         msg = make_message(text="эй бот привет")
         result, trigger_type = self._call(
-            msg, trigger_words=["bot", "бот"],
+            msg,
+            trigger_words=["bot", "бот"],
         )
         assert result is True
         assert trigger_type == "trigger"

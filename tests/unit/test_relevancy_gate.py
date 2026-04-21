@@ -67,7 +67,9 @@ class TestRelevancyGateDisabled:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="anything", config=config,
+            chat_id=-100,
+            message_text="anything",
+            config=config,
         )
         assert decision.should_respond is True
         assert decision.tier == "disabled"
@@ -86,7 +88,9 @@ class TestRelevancyGateTier1:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="ладно", config=config,
+            chat_id=-100,
+            message_text="ладно",
+            config=config,
         )
         assert decision.should_respond is False
         assert decision.tier == "fast_rules"
@@ -102,7 +106,9 @@ class TestRelevancyGateTier1:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="ok", config=config,
+            chat_id=-100,
+            message_text="ok",
+            config=config,
         )
         assert decision.should_respond is False
         assert decision.tier == "fast_rules"
@@ -121,7 +127,9 @@ class TestRelevancyGateTier2:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="А что вы думаете об этом?", config=config,
+            chat_id=-100,
+            message_text="А что вы думаете об этом?",
+            config=config,
         )
         assert decision.should_respond is False
         assert decision.tier == "engagement"
@@ -138,7 +146,9 @@ class TestRelevancyGateTier2:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="Интересный вопрос", config=config,
+            chat_id=-100,
+            message_text="Интересный вопрос",
+            config=config,
         )
         assert decision.should_respond is False
         assert decision.tier == "engagement"
@@ -157,7 +167,9 @@ class TestRelevancyGateTier3:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="Кто знает хороший рецепт пасты?", config=config,
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт пасты?",
+            config=config,
         )
         assert decision.should_respond is True
         assert decision.tier == "llm_judge"
@@ -171,7 +183,9 @@ class TestRelevancyGateTier3:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="Кто знает хороший рецепт пасты?", config=config,
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт пасты?",
+            config=config,
         )
         assert decision.should_respond is False
         assert decision.tier == "llm_judge"
@@ -181,16 +195,16 @@ class TestRelevancyGateTier3:
         """Fail-closed: if LLM fails, bot stays silent."""
         config = _make_config()
         ai = AsyncMock()
-        ai.generate_text = AsyncMock(
-            side_effect=AIProviderError("timeout", provider="openai")
-        )
+        ai.generate_text = AsyncMock(side_effect=AIProviderError("timeout", provider="openai"))
         gate = RelevancyGate(
             ai_router=ai,
             message_repo=_make_message_repo(),
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="Кто знает хороший рецепт пасты?", config=config,
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт пасты?",
+            config=config,
         )
         assert decision.should_respond is False
         assert decision.tier == "llm_judge"
@@ -205,7 +219,9 @@ class TestRelevancyGateTier3:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="Кто знает хороший рецепт?", config=config,
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт?",
+            config=config,
         )
         assert decision.should_respond is False
 
@@ -219,7 +235,9 @@ class TestRelevancyGateTier3:
             response_log_repo=log_repo,
         )
         await gate.evaluate(
-            chat_id=-100, message_text="Расскажите что-нибудь интересное", config=config,
+            chat_id=-100,
+            message_text="Расскажите что-нибудь интересное",
+            config=config,
         )
         log_repo.log.assert_called_once()
         call_kwargs = log_repo.log.call_args
@@ -235,6 +253,8 @@ class TestRelevancyGateTier3:
             response_log_repo=_make_response_log(),
         )
         decision = await gate.evaluate(
-            chat_id=-100, message_text="Интересный вопрос по Python", config=config,
+            chat_id=-100,
+            message_text="Интересный вопрос по Python",
+            config=config,
         )
         assert decision.cost_usd >= Decimal("0")

@@ -424,9 +424,7 @@ class TestBuildEmbeddingText:
         assert "hey guys" in text
 
     def test_minimal_context(self):
-        text = StickerLearningService._build_embedding_text(
-            "A sticker", None, None, None, None
-        )
+        text = StickerLearningService._build_embedding_text("A sticker", None, None, None, None)
         assert text == "A sticker"
         assert "Emotion" not in text
 

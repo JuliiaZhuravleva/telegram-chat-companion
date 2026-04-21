@@ -106,7 +106,11 @@ class RuleEngine:
             id=row["id"],
             chat_id=row["chat_id"],
             rule_type=RuleType(row["rule_type"]),
-            config=row["config"] if isinstance(row["config"], dict) else json.loads(row["config"]) if isinstance(row["config"], str) else {},
+            config=row["config"]
+            if isinstance(row["config"], dict)
+            else json.loads(row["config"])
+            if isinstance(row["config"], str)
+            else {},
             weight=row.get("weight", 1),
             mandatory=row.get("mandatory", False),
             enabled=row.get("enabled", True),
@@ -160,27 +164,19 @@ class RuleEngine:
             if match_type == "exact" and text.strip() == check_kw:
                 return RuleMatch(rule=rule, triggered=True, match_detail=f"exact:{kw}")
             if match_type == "contains" and check_kw in text:
-                return RuleMatch(
-                    rule=rule, triggered=True, match_detail=f"contains:{kw}"
-                )
+                return RuleMatch(rule=rule, triggered=True, match_detail=f"contains:{kw}")
             if match_type == "regex":
                 try:
                     flags = 0 if case_sensitive else re.IGNORECASE
                     if re.search(kw, message.text or message.caption or "", flags):
-                        return RuleMatch(
-                            rule=rule, triggered=True, match_detail=f"regex:{kw}"
-                        )
+                        return RuleMatch(rule=rule, triggered=True, match_detail=f"regex:{kw}")
                 except re.error:
-                    logger.warning(
-                        "Invalid regex in rule", rule_id=rule.id, pattern=kw
-                    )
+                    logger.warning("Invalid regex in rule", rule_id=rule.id, pattern=kw)
 
         return RuleMatch(rule=rule, triggered=False)
 
     @staticmethod
-    def _eval_user_specific(
-        rule: Rule, user_id: int, message: Message
-    ) -> RuleMatch:
+    def _eval_user_specific(rule: Rule, user_id: int, message: Message) -> RuleMatch:
         """Evaluate user_specific rule."""
         cfg = rule.config
         target_user_ids: list[int] = cfg.get("user_ids", [])
@@ -190,9 +186,7 @@ class RuleEngine:
             return RuleMatch(rule=rule, triggered=False)
 
         if conditions.get("any_message", False):
-            return RuleMatch(
-                rule=rule, triggered=True, match_detail=f"user:{user_id}"
-            )
+            return RuleMatch(rule=rule, triggered=True, match_detail=f"user:{user_id}")
 
         kw_list: list[str] = conditions.get("keywords", [])
         text = (message.text or message.caption or "").lower()
@@ -221,9 +215,7 @@ class RuleEngine:
             )
         return RuleMatch(rule=rule, triggered=False)
 
-    async def _eval_spam_detect(
-        self, rule: Rule, chat_id: int, user_id: int
-    ) -> RuleMatch:
+    async def _eval_spam_detect(self, rule: Rule, chat_id: int, user_id: int) -> RuleMatch:
         """Evaluate spam_detect rule."""
         cfg = rule.config
         time_window = cfg.get("time_window_seconds", 60)
@@ -273,9 +265,7 @@ class RuleEngine:
         try:
             action = RuleAction(action_str)
         except ValueError:
-            logger.warning(
-                "Unknown rule action", action=action_str, rule_id=match.rule.id
-            )
+            logger.warning("Unknown rule action", action=action_str, rule_id=match.rule.id)
             return []
 
         return [

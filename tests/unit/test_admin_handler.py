@@ -96,13 +96,15 @@ def _make_admin_repo() -> MagicMock:
     repo.get_unauth_count = AsyncMock(return_value=3)
     repo.get_active_chats_count = AsyncMock(return_value=5)
     repo.get_enabled_chats_count = AsyncMock(return_value=2)
-    repo.get_notification_settings = AsyncMock(return_value={
-        "sticker": "on",
-        "unauthorized": True,
-        "jailbreak": True,
-        "blacklist": True,
-        "ai_fallback": True,
-    })
+    repo.get_notification_settings = AsyncMock(
+        return_value={
+            "sticker": "on",
+            "unauthorized": True,
+            "jailbreak": True,
+            "blacklist": True,
+            "ai_fallback": True,
+        }
+    )
     repo.set_notification_setting = AsyncMock()
     return repo
 
@@ -233,13 +235,9 @@ class TestLanguageSet:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_language_set(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_language_set(cb, admin_repo, bot_config_repo, is_admin=True)
 
-        admin_repo.set_admin_language.assert_awaited_once_with(
-            bot_config_repo, "en"
-        )
+        admin_repo.set_admin_language.assert_awaited_once_with(bot_config_repo, "en")
         # Menu refreshed in new language
         text = cb.message.edit_text.call_args.args[0]
         assert "Admin Panel" in text
@@ -250,9 +248,7 @@ class TestLanguageSet:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_language_set(
-            cb, admin_repo, bot_config_repo, is_admin=False
-        )
+        await handle_language_set(cb, admin_repo, bot_config_repo, is_admin=False)
 
         admin_repo.set_admin_language.assert_not_awaited()
 
@@ -459,12 +455,7 @@ class TestWlRemoveAsk:
         assert "Alpha" in text
         assert "-100" in text
         kb = call.kwargs["reply_markup"]
-        callbacks = [
-            b.callback_data
-            for row in kb.inline_keyboard
-            for b in row
-            if b.callback_data
-        ]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
         assert "adm_wl_rm:ru:-100:0" in callbacks
         assert "adm_wl_chats:ru:0" in callbacks
 
@@ -480,12 +471,7 @@ class TestWlRemoveAsk:
         assert "-200" in text
         # Confirm callback preserves page=2
         kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
-        callbacks = [
-            b.callback_data
-            for row in kb.inline_keyboard
-            for b in row
-            if b.callback_data
-        ]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
         assert "adm_wl_rm:en:-200:2" in callbacks
 
     @pytest.mark.asyncio
@@ -544,9 +530,7 @@ class TestApproveNotification:
         admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
         chat_settings_repo = _make_chat_settings_repo()
 
-        await handle_approve_notification(
-            cb, admin_repo, chat_settings_repo, is_admin=True
-        )
+        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         admin_repo.approve_all_for_chat.assert_awaited_once_with(-100)
         chat_settings_repo.upsert.assert_awaited_once_with(-100, enabled=True)
@@ -561,9 +545,7 @@ class TestApproveNotification:
         )
         chat_settings_repo = _make_chat_settings_repo()
 
-        await handle_approve_notification(
-            cb, admin_repo, chat_settings_repo, is_admin=True
-        )
+        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         admin_repo.update_attempt_status.assert_not_awaited()
         cb.answer.assert_awaited()
@@ -575,9 +557,7 @@ class TestApproveNotification:
         admin_repo = _make_admin_repo()
         chat_settings_repo = _make_chat_settings_repo()
 
-        await handle_approve_notification(
-            cb, admin_repo, chat_settings_repo, is_admin=False
-        )
+        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=False)
 
         admin_repo.get_attempt.assert_not_awaited()
 
@@ -590,9 +570,7 @@ class TestRejectNotification:
         admin_repo.get_attempt = AsyncMock(
             return_value={"id": 42, "chat_id": -100, "status": "pending"}
         )
-        admin_repo.update_attempt_status = AsyncMock(
-            return_value={"id": 42, "status": "rejected"}
-        )
+        admin_repo.update_attempt_status = AsyncMock(return_value={"id": 42, "status": "rejected"})
 
         await handle_reject_notification(cb, admin_repo, is_admin=True)
 
@@ -629,9 +607,7 @@ class TestWlApprove:
         admin_repo.get_pending_attempts_page = AsyncMock(return_value=([], 0))
         chat_settings_repo = _make_chat_settings_repo()
 
-        await handle_wl_approve(
-            cb, admin_repo, chat_settings_repo, is_admin=True
-        )
+        await handle_wl_approve(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         admin_repo.approve_all_for_chat.assert_awaited_once_with(-100)
         chat_settings_repo.upsert.assert_awaited_once_with(-100, enabled=True)
@@ -647,9 +623,7 @@ class TestWlReject:
         admin_repo.get_attempt = AsyncMock(
             return_value={"id": 42, "chat_id": -100, "status": "pending"}
         )
-        admin_repo.update_attempt_status = AsyncMock(
-            return_value={"id": 42, "status": "rejected"}
-        )
+        admin_repo.update_attempt_status = AsyncMock(return_value={"id": 42, "status": "rejected"})
         admin_repo.get_pending_attempts_page = AsyncMock(return_value=([], 0))
 
         await handle_wl_reject(cb, admin_repo, is_admin=True)
@@ -670,9 +644,7 @@ class TestNotificationsMenu:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notifications_menu(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_notifications_menu(cb, admin_repo, bot_config_repo, is_admin=True)
 
         cb.answer.assert_awaited_once()
         cb.message.edit_text.assert_awaited_once()
@@ -685,9 +657,7 @@ class TestNotificationsMenu:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notifications_menu(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_notifications_menu(cb, admin_repo, bot_config_repo, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "Notifications" in text
@@ -698,9 +668,7 @@ class TestNotificationsMenu:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notifications_menu(
-            cb, admin_repo, bot_config_repo, is_admin=False
-        )
+        await handle_notifications_menu(cb, admin_repo, bot_config_repo, is_admin=False)
 
         cb.message.edit_text.assert_not_awaited()
 
@@ -711,14 +679,15 @@ class TestStickerNotificationCycle:
         cb = _make_callback("adm_nstk:ru")
         admin_repo = _make_admin_repo()
         admin_repo.get_notification_settings.return_value = {
-            "sticker": "on", "unauthorized": True,
-            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+            "sticker": "on",
+            "unauthorized": True,
+            "jailbreak": True,
+            "blacklist": True,
+            "ai_fallback": True,
         }
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_notification_cycle(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_sticker_notification_cycle(cb, admin_repo, bot_config_repo, is_admin=True)
 
         admin_repo.set_notification_setting.assert_awaited_once_with(
             bot_config_repo, "sticker", "detailed"
@@ -730,14 +699,15 @@ class TestStickerNotificationCycle:
         cb = _make_callback("adm_nstk:ru")
         admin_repo = _make_admin_repo()
         admin_repo.get_notification_settings.return_value = {
-            "sticker": "detailed", "unauthorized": True,
-            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+            "sticker": "detailed",
+            "unauthorized": True,
+            "jailbreak": True,
+            "blacklist": True,
+            "ai_fallback": True,
         }
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_notification_cycle(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_sticker_notification_cycle(cb, admin_repo, bot_config_repo, is_admin=True)
 
         admin_repo.set_notification_setting.assert_awaited_once_with(
             bot_config_repo, "sticker", "off"
@@ -748,14 +718,15 @@ class TestStickerNotificationCycle:
         cb = _make_callback("adm_nstk:ru")
         admin_repo = _make_admin_repo()
         admin_repo.get_notification_settings.return_value = {
-            "sticker": "off", "unauthorized": True,
-            "jailbreak": True, "blacklist": True, "ai_fallback": True,
+            "sticker": "off",
+            "unauthorized": True,
+            "jailbreak": True,
+            "blacklist": True,
+            "ai_fallback": True,
         }
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_notification_cycle(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_sticker_notification_cycle(cb, admin_repo, bot_config_repo, is_admin=True)
 
         admin_repo.set_notification_setting.assert_awaited_once_with(
             bot_config_repo, "sticker", "on"
@@ -767,9 +738,7 @@ class TestStickerNotificationCycle:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_notification_cycle(
-            cb, admin_repo, bot_config_repo, is_admin=False
-        )
+        await handle_sticker_notification_cycle(cb, admin_repo, bot_config_repo, is_admin=False)
 
         admin_repo.set_notification_setting.assert_not_awaited()
 
@@ -781,9 +750,7 @@ class TestNotificationToggle:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notification_toggle(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_notification_toggle(cb, admin_repo, bot_config_repo, is_admin=True)
 
         admin_repo.set_notification_setting.assert_awaited_once_with(
             bot_config_repo, "unauthorized", False
@@ -795,14 +762,15 @@ class TestNotificationToggle:
         cb = _make_callback("adm_ntog:ru:jailbreak")
         admin_repo = _make_admin_repo()
         admin_repo.get_notification_settings.return_value = {
-            "sticker": "on", "unauthorized": True,
-            "jailbreak": False, "blacklist": True, "ai_fallback": True,
+            "sticker": "on",
+            "unauthorized": True,
+            "jailbreak": False,
+            "blacklist": True,
+            "ai_fallback": True,
         }
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notification_toggle(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_notification_toggle(cb, admin_repo, bot_config_repo, is_admin=True)
 
         admin_repo.set_notification_setting.assert_awaited_once_with(
             bot_config_repo, "jailbreak", True
@@ -814,9 +782,7 @@ class TestNotificationToggle:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notification_toggle(
-            cb, admin_repo, bot_config_repo, is_admin=True
-        )
+        await handle_notification_toggle(cb, admin_repo, bot_config_repo, is_admin=True)
 
         admin_repo.set_notification_setting.assert_not_awaited()
 
@@ -826,9 +792,7 @@ class TestNotificationToggle:
         admin_repo = _make_admin_repo()
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_notification_toggle(
-            cb, admin_repo, bot_config_repo, is_admin=False
-        )
+        await handle_notification_toggle(cb, admin_repo, bot_config_repo, is_admin=False)
 
         admin_repo.set_notification_setting.assert_not_awaited()
 
@@ -951,7 +915,7 @@ class TestWlRejected:
         text = cb.message.edit_text.call_args.args[0]
         assert "Rejected Chat" in text
         # Clickable chat link for supergroup
-        assert 'https://t.me/c/3632335671' in text
+        assert "https://t.me/c/3632335671" in text
         assert "@mal" in text
 
     @pytest.mark.asyncio
@@ -1052,12 +1016,7 @@ class TestWlDeleteAsk:
         text = cb.message.edit_text.call_args.args[0]
         assert "Mallory" in text
         kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
-        callbacks = [
-            b.callback_data
-            for row in kb.inline_keyboard
-            for b in row
-            if b.callback_data
-        ]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
         assert "adm_wl_del:ru:7:0" in callbacks
         assert "adm_wl_rejected:ru:0" in callbacks
 

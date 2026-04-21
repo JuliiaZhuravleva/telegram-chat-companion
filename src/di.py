@@ -234,7 +234,5 @@ class ServiceProvider(Provider):
         return RuleEngine(rules_repo)
 
     @provide
-    def rule_action_executor(
-        self, bot_config_repo: BotConfigRepository
-    ) -> RuleActionExecutor:
+    def rule_action_executor(self, bot_config_repo: BotConfigRepository) -> RuleActionExecutor:
         return RuleActionExecutor(bot_config_repo)

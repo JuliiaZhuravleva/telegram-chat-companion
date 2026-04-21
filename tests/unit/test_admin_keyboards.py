@@ -20,21 +20,13 @@ from src.bot.keyboards.admin import (
 
 def _get_urls(keyboard):
     """Extract all button URLs from keyboard."""
-    return [
-        btn.url
-        for row in keyboard.inline_keyboard
-        for btn in row
-        if btn.url
-    ]
+    return [btn.url for row in keyboard.inline_keyboard for btn in row if btn.url]
 
 
 def _get_callbacks(keyboard):
     """Extract all callback_data strings from keyboard."""
     return [
-        btn.callback_data
-        for row in keyboard.inline_keyboard
-        for btn in row
-        if btn.callback_data
+        btn.callback_data for row in keyboard.inline_keyboard for btn in row if btn.callback_data
     ]
 
 

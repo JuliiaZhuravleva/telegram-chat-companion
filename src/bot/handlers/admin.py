@@ -221,6 +221,7 @@ def _get_lang(lang: str | None) -> str:
 # Helper: admin check for callbacks
 # ---------------------------------------------------------------------------
 
+
 def _check_admin(data: dict[str, Any]) -> bool:
     """Check if current user is admin (from middleware-injected data)."""
     return bool(data.get("is_admin", False))
@@ -249,6 +250,7 @@ def _guard_admin(data: dict[str, Any], callback: CallbackQuery) -> bool:
 # Commands: /admin, /settings
 # ---------------------------------------------------------------------------
 
+
 @router.message(Command("admin", "settings"), IsAdmin())
 async def handle_admin_command(
     message: Message,
@@ -270,6 +272,7 @@ async def handle_admin_command(
 # ---------------------------------------------------------------------------
 # Callback: main menu
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("adm_menu:"))
 async def handle_menu(callback: CallbackQuery, **kwargs: Any) -> None:
@@ -295,6 +298,7 @@ async def handle_menu(callback: CallbackQuery, **kwargs: Any) -> None:
 # ---------------------------------------------------------------------------
 # Callback: language selector
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("adm_lang:"))
 async def handle_language_menu(callback: CallbackQuery, **kwargs: Any) -> None:
@@ -354,6 +358,7 @@ async def handle_language_set(
 # Callback: close
 # ---------------------------------------------------------------------------
 
+
 @router.callback_query(F.data.startswith("adm_close:"))
 async def handle_close(callback: CallbackQuery, **kwargs: Any) -> None:
     """Close admin panel (delete message)."""
@@ -373,6 +378,7 @@ async def handle_close(callback: CallbackQuery, **kwargs: Any) -> None:
 # ---------------------------------------------------------------------------
 # Callback: whitelist menu (placeholder — full impl in Stage 3.1.2)
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("adm_wl:"))
 async def handle_whitelist_menu(callback: CallbackQuery, **kwargs: Any) -> None:
@@ -403,6 +409,7 @@ async def handle_whitelist_menu(callback: CallbackQuery, **kwargs: Any) -> None:
 # ---------------------------------------------------------------------------
 # Callback: statistics
 # ---------------------------------------------------------------------------
+
 
 @router.callback_query(F.data.startswith("adm_stats:"))
 async def handle_stats(
@@ -668,9 +675,7 @@ def _format_health_status(row: dict[str, Any], lang: str) -> str:
     emoji = status_emoji.get(status, "\u2753")
 
     checked_at = row.get("checked_at")
-    time_str = (
-        checked_at.strftime("%Y-%m-%d %H:%M UTC") if checked_at else "?"
-    )
+    time_str = checked_at.strftime("%Y-%m-%d %H:%M UTC") if checked_at else "?"
 
     db_ok = row.get("db_ok", True)
     db_icon = "\u2705" if db_ok else "\u274c"
@@ -819,12 +824,14 @@ async def _render_wl_chats(
                     if title:
                         chat["chat_title"] = title
                         await chat_settings_repo.upsert(
-                            chat_id, chat_title=title,
+                            chat_id,
+                            chat_title=title,
                         )
                 except Exception:
                     logger.debug(
                         "Chat title fallback failed",
-                        chat_id=chat_id, exc_info=True,
+                        chat_id=chat_id,
+                        exc_info=True,
                     )
             entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
             ctype = chat.get("chat_type", "")
@@ -875,11 +882,7 @@ async def handle_wl_remove_ask(
     title = row.get("chat_title") if row else None
     label = escape(str(title)) if title else str(chat_id)
 
-    text = (
-        f"{_WL_CONFIRM_TITLE[lang]}\n\n"
-        f"{label} <i>({chat_id})</i>\n\n"
-        f"{_WL_CONFIRM_BODY[lang]}"
-    )
+    text = f"{_WL_CONFIRM_TITLE[lang]}\n\n{label} <i>({chat_id})</i>\n\n{_WL_CONFIRM_BODY[lang]}"
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
@@ -986,7 +989,8 @@ async def _render_wl_pending(
                 except Exception:
                     logger.debug(
                         "Chat title fallback failed",
-                        chat_id=chat_id, exc_info=True,
+                        chat_id=chat_id,
+                        exc_info=True,
                     )
             ctype = attempt.get("chat_type", "")
             user = escape(str(attempt.get("user_first_name") or ""))
@@ -1019,7 +1023,9 @@ async def _render_wl_pending(
 
 
 def _build_chat_link_html(
-    chat_id: int, chat_title: str | None, chat_type: str | None,
+    chat_id: int,
+    chat_title: str | None,
+    chat_type: str | None,
 ) -> str:
     """Render a chat label as an HTML anchor when a URL can be built."""
     label = escape(str(chat_title)) if chat_title else str(chat_id)
@@ -1065,7 +1071,8 @@ async def _render_wl_rejected(
     if page >= total_pages:
         page = max(0, total_pages - 1)
         attempts, total = await admin_repo.get_rejected_attempts_page(
-            page, _PER_PAGE,
+            page,
+            _PER_PAGE,
         )
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
@@ -1101,7 +1108,10 @@ async def _render_wl_rejected(
                 text,
                 parse_mode="HTML",
                 reply_markup=rejected_list_keyboard(
-                    lang, attempts, page, total_pages,
+                    lang,
+                    attempts,
+                    page,
+                    total_pages,
                 ),
                 disable_web_page_preview=True,
             )
@@ -1570,8 +1580,6 @@ async def _placeholder_callback(callback: CallbackQuery, **kwargs: Any) -> None:
 
 
 @router.callback_query(F.data.startswith("adm_defs:"))
-async def handle_defaults_placeholder(
-    callback: CallbackQuery, **kwargs: Any
-) -> None:
+async def handle_defaults_placeholder(callback: CallbackQuery, **kwargs: Any) -> None:
     """Default settings — placeholder for Stage 3.1.4."""
     await _placeholder_callback(callback, **kwargs)

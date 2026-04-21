@@ -76,9 +76,7 @@ class RuleActionExecutor:
         user = message.from_user
         user_display = escape(user.first_name) if user else "Unknown"
         username = f" (@{escape(user.username)})" if user and user.username else ""
-        rule_name = escape(
-            action.rule.config.get("name", f"Rule #{action.rule.id}")
-        )
+        rule_name = escape(action.rule.config.get("name", f"Rule #{action.rule.id}"))
         excerpt = escape((message.text or message.caption or "")[:100])
         match_detail = escape(action.params.get("match_detail", ""))
 
@@ -106,9 +104,7 @@ class RuleActionExecutor:
         await message.reply(warning, parse_mode=None)
 
     @staticmethod
-    async def _custom_response(
-        action: RuleActionResult, *, message: Message
-    ) -> None:
+    async def _custom_response(action: RuleActionResult, *, message: Message) -> None:
         """Reply with a template-substituted custom response."""
         template = (
             action.params.get("response_template")
@@ -122,9 +118,7 @@ class RuleActionExecutor:
         substitutions = {
             "{first_name}": escape(user.first_name) if user else "Unknown",
             "{username}": escape(user.username or "") if user else "",
-            "{rule_name}": escape(
-                action.rule.config.get("name", f"Rule #{action.rule.id}")
-            ),
+            "{rule_name}": escape(action.rule.config.get("name", f"Rule #{action.rule.id}")),
         }
         text = template
         for placeholder, value in substitutions.items():
