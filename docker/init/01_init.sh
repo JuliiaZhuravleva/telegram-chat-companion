@@ -1,6 +1,6 @@
 #!/bin/bash
-# Enables pgvector before schema.sql runs.
-# 02_schema.sql is executed automatically by the entrypoint after this script.
+# Enables pgvector before the bot applies alembic migrations.
+# The bot container runs `alembic upgrade head` on startup.
 
 set -e
 

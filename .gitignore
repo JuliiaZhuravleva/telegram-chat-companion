@@ -63,6 +63,10 @@ Thumbs.db
 # Docker
 docker-compose.override.yml
 
+# Manual QA screenshots and Playwright snapshots — contain live chat names,
+# user photos, and bot handles from QA sessions. Never commit.
+tests/manual/screenshots/
+
 # ===========================================
 # INTERNAL / MIGRATION FILES (not for public)
 # ===========================================
