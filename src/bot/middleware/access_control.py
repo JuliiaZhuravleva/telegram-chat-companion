@@ -104,8 +104,8 @@ class AccessControlMiddleware(BaseMiddleware):
         restore or delete the rejection via the admin panel to lift the block.
         """
         now = time.monotonic()
-        last = self._last_notify.get(chat_id, 0.0)
-        if now - last < _NOTIFY_COOLDOWN_SECONDS:
+        last = self._last_notify.get(chat_id)
+        if last is not None and now - last < _NOTIFY_COOLDOWN_SECONDS:
             return
 
         # Prune expired entries to prevent unbounded memory growth
