@@ -33,6 +33,8 @@ _L: dict[str, dict[str, str]] = {
         "ru": "Отправьте JSON-конфиг правила:",
         "en": "Send rule JSON config:",
     },
+    "rule_del_yes": {"ru": "🗑 Да, удалить", "en": "🗑 Yes, delete"},
+    "rule_del_cancel": {"ru": "✖ Отмена", "en": "✖ Cancel"},
 }
 
 
@@ -148,7 +150,7 @@ def rules_list_keyboard(
                 ),
                 InlineKeyboardButton(
                     text="🗑",
-                    callback_data=f"ar_del:{lang}:{rid}:{chat_id}:{page}",
+                    callback_data=f"ar_del_ask:{lang}:{rid}:{chat_id}:{page}",
                 ),
             ]
         )
@@ -250,13 +252,41 @@ def rule_detail_keyboard(lang: str, rule_id: int, chat_id: int) -> InlineKeyboar
                 ),
                 InlineKeyboardButton(
                     text=delete_label.get(lang, "Delete"),
-                    callback_data=f"ar_del:{lang}:{rule_id}:{chat_id}:0",
+                    callback_data=f"ar_del_ask:{lang}:{rule_id}:{chat_id}:0",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text=_t("back", lang),
                     callback_data=f"ar_list:{lang}:{chat_id}:0",
+                ),
+            ],
+        ]
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rule delete — confirmation
+# ---------------------------------------------------------------------------
+
+
+def confirm_delete_rule_keyboard(
+    lang: str,
+    rule_id: int,
+    chat_id: int,
+    page: int,
+) -> InlineKeyboardMarkup:
+    """Yes/Cancel row for confirming rule deletion."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_t("rule_del_yes", lang),
+                    callback_data=f"ar_del:{lang}:{rule_id}:{chat_id}:{page}",
+                ),
+                InlineKeyboardButton(
+                    text=_t("rule_del_cancel", lang),
+                    callback_data=f"ar_list:{lang}:{chat_id}:{page}",
                 ),
             ],
         ]
