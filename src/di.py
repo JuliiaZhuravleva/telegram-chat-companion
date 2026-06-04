@@ -30,6 +30,7 @@ from src.services.abuse.filter import AbuseFilter
 from src.services.abuse.notifications import AbuseNotificationService
 from src.services.ai.router import AIRouter
 from src.services.chat_config import ChatConfigService
+from src.services.costs.spend_limit import SpendLimitService
 from src.services.modules.image import ImageAnalysisService
 from src.services.modules.links import LinkExtractorService
 from src.services.modules.sticker import StickerLearningService, StickerResponderService
@@ -228,6 +229,14 @@ class ServiceProvider(Provider):
         response_log_repo: ResponseLogRepository,
     ) -> RelevancyGate:
         return RelevancyGate(ai_router, message_repo, response_log_repo)
+
+    @provide
+    def spend_limit_service(
+        self,
+        response_log_repo: ResponseLogRepository,
+        bot_config_repo: BotConfigRepository,
+    ) -> SpendLimitService:
+        return SpendLimitService(response_log_repo, bot_config_repo)
 
     @provide
     def rule_engine(self, rules_repo: RulesRepository) -> RuleEngine:
