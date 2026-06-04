@@ -123,11 +123,12 @@ class AIRouter:
         task_type: str,
         provider: str,
         model: str,
+        chat_id: int = 0,
         tokens_input: int | None = None,
         tokens_output: int | None = None,
         duration_seconds: float | None = None,
     ) -> None:
-        """Log AI usage with cost calculation. Non-critical."""
+        """Log AI usage with cost calculation. Non-critical — never raises."""
         if self._response_log is None:
             return
         try:
@@ -138,7 +139,7 @@ class AIRouter:
                 duration_minutes=duration_seconds / 60.0 if duration_seconds else None,
             )
             await self._response_log.log(
-                0,  # no chat_id for internal calls
+                chat_id,
                 provider=provider,
                 model=model,
                 tokens_input=tokens_input,
@@ -149,6 +150,32 @@ class AIRouter:
             )
         except Exception:
             logger.warning("Failed to log AI usage", task_type=task_type, model=model)
+
+    async def log_usage(
+        self,
+        result: TextGenerationResult,
+        *,
+        chat_id: int = 0,
+        task_type: str = "text",
+    ) -> None:
+        """Log text-generation cost for callers outside TextProcessingPipeline.
+
+        Per ADR: ``generate_text()`` does not auto-log costs — the pipeline
+        handles that with full context.  Callers that invoke ``generate_text()``
+        directly (summary, sticker merge, relevancy judge, …) must call this
+        method explicitly after a successful generation.
+
+        The call is idempotent and non-critical: any internal error is logged
+        as a warning and silently swallowed.
+        """
+        await self._log_usage(
+            task_type=task_type,
+            provider=result.provider,
+            model=result.model,
+            chat_id=chat_id,
+            tokens_input=result.tokens_input,
+            tokens_output=result.tokens_output,
+        )
 
     async def generate_text(
         self,

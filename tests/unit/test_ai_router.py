@@ -1,6 +1,7 @@
 """Tests for src.services.ai.router — AIRouter fallback chain logic."""
 
 import asyncio
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -431,6 +432,91 @@ class TestCentralizedLogging:
         await asyncio.sleep(0.05)
 
         mock_repo.log.assert_not_awaited()
+
+
+class TestLogUsage:
+    """Test public log_usage() — explicit cost logging for callers outside the pipeline."""
+
+    @pytest.mark.asyncio
+    async def test_log_usage_calls_repo_with_cost(self, mock_router_settings):
+        """log_usage() must insert a row with computed cost_usd and correct fields."""
+        text_result = TextGenerationResult(
+            text="summary text",
+            model="gpt-5-nano",
+            provider="openai",
+            tokens_input=100,
+            tokens_output=50,
+        )
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+
+        await router.log_usage(text_result, chat_id=12345, task_type="summary")
+
+        mock_repo.log.assert_awaited_once()
+        kwargs = mock_repo.log.call_args
+        assert kwargs.args[0] == 12345  # chat_id positional
+        assert kwargs.kwargs["task_type"] == "summary"
+        assert kwargs.kwargs["provider"] == "openai"
+        assert kwargs.kwargs["model"] == "gpt-5-nano"
+        assert kwargs.kwargs["tokens_input"] == 100
+        assert kwargs.kwargs["tokens_output"] == 50
+        # gpt-5-nano: $0.05/1M input, $0.40/1M output
+        # cost = 0.05 * 100/1_000_000 + 0.40 * 50/1_000_000 = 0.000005 + 0.00002 = 0.000025
+        assert kwargs.kwargs["cost_usd"] == Decimal("0.000025")
+
+    @pytest.mark.asyncio
+    async def test_log_usage_defaults_chat_id_zero(self, mock_router_settings):
+        """Default chat_id=0 when caller has no chat context (e.g. sticker merge)."""
+        text_result = TextGenerationResult(
+            text="ok",
+            model="o4-mini",
+            provider="openai",
+            tokens_input=10,
+            tokens_output=5,
+        )
+        mock_repo = AsyncMock()
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+
+        await router.log_usage(text_result)
+
+        args = mock_repo.log.call_args
+        assert args.args[0] == 0  # default chat_id
+
+    @pytest.mark.asyncio
+    async def test_log_usage_noop_without_repo(self, mock_router_settings):
+        """log_usage() must not raise when response_log_repo is None."""
+        text_result = TextGenerationResult(
+            text="ok",
+            model="gpt-5-nano",
+            provider="openai",
+            tokens_input=10,
+            tokens_output=5,
+        )
+        router = AIRouter(mock_router_settings)  # no repo
+
+        # Should not raise
+        await router.log_usage(text_result, task_type="summary")
+
+    @pytest.mark.asyncio
+    async def test_log_usage_swallows_repo_errors(self, mock_router_settings):
+        """log_usage() must not propagate DB errors to the caller."""
+        text_result = TextGenerationResult(
+            text="ok",
+            model="gpt-5-nano",
+            provider="openai",
+            tokens_input=10,
+            tokens_output=5,
+        )
+        mock_repo = AsyncMock()
+        mock_repo.log.side_effect = RuntimeError("DB down")
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+
+        # Must not raise
+        await router.log_usage(text_result, task_type="summary")
 
 
 class TestClose:

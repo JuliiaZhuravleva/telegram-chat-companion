@@ -477,6 +477,8 @@ class StickerLearningService:
                 temperature=0.4,
                 response_mime_type="application/json",
             )
+            # Log usage explicitly — generate_text() does not auto-log (see ADR).
+            asyncio.ensure_future(self._ai.log_usage(ai_result, task_type="sticker_merge"))
             parsed = self._parse_vision_response(ai_result.text)
             new_visual = parsed.get("visual")
             if not new_visual:
@@ -548,6 +550,8 @@ class StickerLearningService:
                 ),
                 timeout=5.0,
             )
+            # Log usage explicitly — generate_text() does not auto-log (see ADR).
+            asyncio.ensure_future(self._ai.log_usage(result, task_type="sticker_context"))
             parsed = self._parse_vision_response(result.text)
             character = parsed.get("character")
             context = parsed.get("context") if isinstance(parsed.get("context"), str) else None
