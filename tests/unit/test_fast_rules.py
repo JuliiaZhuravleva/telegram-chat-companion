@@ -79,3 +79,42 @@ class TestFastRules:
     def test_whitespace_stripped(self) -> None:
         result = check_fast_rules("  ok  ")
         assert result.should_pass is False
+
+
+class TestFastRulesQuestionShortcut:
+    """Short questions ending with '?' bypass the length filter."""
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Да?",       # 3 chars — Russian "Right?"
+            "Ну?",       # 3 chars — Russian "Well?"
+            "Как?",      # 4 chars — Russian "How?"
+            "Why?",      # 4 chars
+            "Правда?",   # longer question
+        ],
+    )
+    def test_passes_short_questions(self, text: str) -> None:
+        result = check_fast_rules(text)
+        assert result.should_pass is True
+        assert result.reason == "question"
+
+    def test_question_shortcut_bypasses_ack_pattern(self) -> None:
+        """'Ладно?' is a confirmation question — should pass despite ack stem."""
+        result = check_fast_rules("Ладно?")
+        assert result.should_pass is True
+
+    def test_bare_question_mark_does_not_pass(self) -> None:
+        """'?' alone (1 char) is not a genuine question — too short for shortcut."""
+        result = check_fast_rules("?")
+        assert result.should_pass is False
+
+    def test_two_char_question_does_not_pass(self) -> None:
+        """'А?' (2 chars) — below the shortcut minimum of 3."""
+        result = check_fast_rules("А?")
+        assert result.should_pass is False
+
+    def test_non_question_short_still_rejected(self) -> None:
+        """Short message without '?' still fails the length check."""
+        result = check_fast_rules("мда")  # 3 chars, no ?
+        assert result.should_pass is False

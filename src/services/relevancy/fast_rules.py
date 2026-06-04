@@ -47,6 +47,11 @@ def check_fast_rules(message_text: str) -> FastRuleResult:
     """
     text = message_text.strip()
 
+    # Short questions (e.g. "Да?", "Правда?") are genuine — pass before
+    # the length check so they reach the engagement/LLM tiers.
+    if text.endswith("?") and len(text) >= 3:
+        return FastRuleResult(True, "question")
+
     if len(text) < _MIN_MESSAGE_LENGTH:
         return FastRuleResult(False, f"too_short:{len(text)}")
 

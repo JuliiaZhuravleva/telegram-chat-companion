@@ -79,8 +79,10 @@ class RelevancyGate:
             return decision
 
         # --- Tier 3: LLM judge (cheapest model) ---
+        # get_recent() returns newest-first; reverse to chronological order
+        # so the LLM sees the conversation as it unfolded (oldest → newest).
         recent = await self._messages.get_recent(chat_id, limit=5)
-        history = [dict(r) for r in recent]
+        history = [dict(r) for r in reversed(recent)]
         judge = await llm_judge(message_text, history, self._ai)
 
         decision = GateDecision(
@@ -95,6 +97,7 @@ class RelevancyGate:
             await self._safe_log_usage(
                 chat_id=chat_id,
                 model=judge.model,
+                provider=judge.provider or "openai",
                 tokens_input=judge.tokens_input,
                 tokens_output=judge.tokens_output,
                 cost_usd=judge.cost_usd,
@@ -117,6 +120,7 @@ class RelevancyGate:
         *,
         chat_id: int,
         model: str,
+        provider: str,
         tokens_input: int | None,
         tokens_output: int | None,
         cost_usd: Decimal,
@@ -125,7 +129,7 @@ class RelevancyGate:
             await self._response_log.log(
                 chat_id,
                 task_type="relevancy_check",
-                provider="openai",
+                provider=provider,
                 model=model,
                 tokens_input=tokens_input,
                 tokens_output=tokens_output,

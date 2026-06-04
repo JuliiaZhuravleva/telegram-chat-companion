@@ -258,3 +258,67 @@ class TestRelevancyGateTier3:
             config=config,
         )
         assert decision.cost_usd >= Decimal("0")
+
+    @pytest.mark.asyncio
+    async def test_provider_from_llm_used_in_log(self) -> None:
+        """Provider from AIRouter result is forwarded to the log, not hardcoded 'openai'."""
+        from unittest.mock import AsyncMock as _AsyncMock
+
+        config = _make_config()
+        log_repo = _make_response_log()
+
+        # Simulate a non-OpenAI provider winning the fallback chain
+        router = _AsyncMock()
+        router.generate_text = _AsyncMock(
+            return_value=TextGenerationResult(
+                text="YES",
+                model="gemini-3-flash-preview",
+                provider="gemini",
+                tokens_input=80,
+                tokens_output=8,
+            )
+        )
+        gate = RelevancyGate(
+            ai_router=router,
+            message_repo=_make_message_repo(),
+            response_log_repo=log_repo,
+        )
+        await gate.evaluate(
+            chat_id=-100,
+            message_text="Расскажи что-нибудь интересное",
+            config=config,
+        )
+        log_repo.log.assert_called_once()
+        call_kwargs = log_repo.log.call_args[1]
+        assert call_kwargs["provider"] == "gemini"
+        assert call_kwargs["model"] == "gemini-3-flash-preview"
+
+    @pytest.mark.asyncio
+    async def test_history_passed_in_chronological_order(self) -> None:
+        """get_recent() returns newest-first; gate must reverse before LLM call."""
+        config = _make_config()
+        # Simulate DB returning [newest=Charlie, ..., oldest=Alice]
+        recent_from_db = [
+            {"first_name": "Charlie", "content": "third msg", "is_bot_message": False},
+            {"first_name": "Bob", "content": "second msg", "is_bot_message": False},
+            {"first_name": "Alice", "content": "first msg", "is_bot_message": False},
+        ]
+        repo = _make_message_repo(recent=recent_from_db)
+        ai = _make_ai_router("YES")
+        gate = RelevancyGate(
+            ai_router=ai,
+            message_repo=repo,
+            response_log_repo=_make_response_log(),
+        )
+        await gate.evaluate(
+            chat_id=-100,
+            message_text="Как всё прошло?",
+            config=config,
+        )
+        prompt: str = ai.generate_text.call_args.kwargs["prompt"]
+        # With chronological ordering Alice (oldest) must appear before Charlie (newest)
+        alice_pos = prompt.index("Alice")
+        charlie_pos = prompt.index("Charlie")
+        assert alice_pos < charlie_pos, (
+            "History should be oldest→newest; Charlie appeared before Alice in the prompt"
+        )
