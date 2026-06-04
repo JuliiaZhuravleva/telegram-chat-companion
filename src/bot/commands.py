@@ -49,12 +49,14 @@ _ADMIN_COMMANDS: dict[str, list[BotCommand]] = {
         BotCommand(command="help", description="Возможности бота"),
         BotCommand(command="admin", description="Панель администратора"),
         BotCommand(command="settings", description="Настройки бота"),
+        BotCommand(command="costs", description="Расходы на AI за 24ч"),
     ],
     "en": [
         BotCommand(command="start", description="Start the bot"),
         BotCommand(command="help", description="Bot features"),
         BotCommand(command="admin", description="Admin panel"),
         BotCommand(command="settings", description="Bot settings"),
+        BotCommand(command="costs", description="AI cost summary (24h)"),
     ],
 }
 
