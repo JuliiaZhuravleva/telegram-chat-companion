@@ -65,6 +65,11 @@ _START_TEXT = {
     "en": "Hello! I'm a chat companion. Type /help to see what I can do.",
 }
 
+_SUMMARY_DM_TEXT = {
+    "ru": "📋 /summary доступен только в групповых чатах.",
+    "en": "📋 /summary is only available in group chats.",
+}
+
 
 def _build_feature_list(config: ChatConfig, language: str) -> str:
     """Build dynamic feature list based on enabled features."""
@@ -155,3 +160,10 @@ async def handle_summary(
     else:
         fail_msg = "Не удалось создать саммари." if lang == "ru" else "Failed to generate summary."
         await placeholder.edit_text(fail_msg)
+
+
+@router.message(Command("summary"), F.chat.type == "private")
+async def handle_summary_dm(message: Message, chat_config: ChatConfig) -> None:
+    """Handle /summary in a private (DM) chat — inform user it's group-only."""
+    lang = chat_config.language if chat_config.language in _SUMMARY_DM_TEXT else "ru"
+    await message.answer(_SUMMARY_DM_TEXT[lang])

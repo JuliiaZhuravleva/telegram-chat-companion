@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from PIL import Image
 
 from src.services.modules.sticker.motion import MotionAnalyzer
 
@@ -115,3 +116,102 @@ def test_fallback_motion_evenly_spaced(analyzer: MotionAnalyzer) -> None:
     assert motion.keyframe_indices[0] == 0
     assert motion.keyframe_indices[-1] == 89
     assert all(s == 0.0 for s in motion.motion_scores)
+
+
+# --- _calculate_frame_differences ---
+
+
+def _solid_frame(color: tuple[int, int, int], size: int = 8) -> Image.Image:
+    """Create a small solid-color RGB image for testing."""
+    img = Image.new("RGB", (size, size), color)
+    return img
+
+
+def test_calculate_frame_differences_identical_frames(analyzer: MotionAnalyzer) -> None:
+    """Identical frames should produce zero motion scores."""
+    frame = _solid_frame((128, 64, 32))
+    scores = analyzer._calculate_frame_differences([frame, frame, frame])
+    # length = n_frames (first element always 0.0)
+    assert len(scores) == 3
+    assert scores[0] == pytest.approx(0.0)  # first-frame sentinel
+    assert scores[1] == pytest.approx(0.0)  # identical pair
+    assert scores[2] == pytest.approx(0.0)  # identical pair
+
+
+def test_calculate_frame_differences_max_contrast(analyzer: MotionAnalyzer) -> None:
+    """Black→white transition should produce a score close to 1.0."""
+    black = _solid_frame((0, 0, 0))
+    white = _solid_frame((255, 255, 255))
+    scores = analyzer._calculate_frame_differences([black, white])
+    assert len(scores) == 2
+    assert scores[0] == pytest.approx(0.0)
+    assert scores[1] == pytest.approx(1.0)
+
+
+def test_calculate_frame_differences_partial_change(analyzer: MotionAnalyzer) -> None:
+    """Partial color change should produce a score between 0 and 1."""
+    frame_a = _solid_frame((0, 0, 0))
+    frame_b = _solid_frame((128, 0, 0))  # only red channel, half-max
+    scores = analyzer._calculate_frame_differences([frame_a, frame_b])
+    assert len(scores) == 2
+    assert 0.0 < scores[1] < 1.0
+
+
+def test_calculate_frame_differences_single_frame(analyzer: MotionAnalyzer) -> None:
+    """Single frame input returns [0.0] (nothing to diff against)."""
+    scores = analyzer._calculate_frame_differences([_solid_frame((100, 100, 100))])
+    assert scores == [0.0]
+
+
+def test_calculate_frame_differences_accepts_rgba(analyzer: MotionAnalyzer) -> None:
+    """RGBA input is converted to RGB without error."""
+    rgba_frame = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+    black = _solid_frame((0, 0, 0))
+    scores = analyzer._calculate_frame_differences([rgba_frame, black])
+    assert len(scores) == 2
+    assert 0.0 <= scores[1] <= 1.0
+
+
+# --- _interpolate_motion_scores ---
+
+
+def test_interpolate_exact_match(analyzer: MotionAnalyzer) -> None:
+    """When frame_idx exactly matches a sample index, use that sample's score."""
+    sampled_scores = [0.0, 0.5, 1.0]
+    sampled_indices = [0, 5, 10]
+    result = analyzer._interpolate_motion_scores(sampled_scores, sampled_indices, total_frames=11)
+    assert result[0] == pytest.approx(0.0)
+    assert result[5] == pytest.approx(0.5)
+    assert result[10] == pytest.approx(1.0)
+
+
+def test_interpolate_midpoint(analyzer: MotionAnalyzer) -> None:
+    """Frame halfway between two samples gets the average of their scores."""
+    sampled_scores = [0.0, 1.0]
+    sampled_indices = [0, 10]
+    result = analyzer._interpolate_motion_scores(sampled_scores, sampled_indices, total_frames=11)
+    assert result[5] == pytest.approx(0.5, abs=1e-9)
+
+
+def test_interpolate_output_length(analyzer: MotionAnalyzer) -> None:
+    """Output list length equals total_frames regardless of sample count."""
+    sampled_scores = [0.0, 0.3, 0.7, 1.0]
+    sampled_indices = [0, 3, 6, 9]
+    result = analyzer._interpolate_motion_scores(sampled_scores, sampled_indices, total_frames=30)
+    assert len(result) == 30
+
+
+def test_interpolate_beyond_last_sample(analyzer: MotionAnalyzer) -> None:
+    """Frames beyond the last sample extrapolate with the last sample score."""
+    sampled_scores = [0.2, 0.8]
+    sampled_indices = [0, 6]
+    result = analyzer._interpolate_motion_scores(sampled_scores, sampled_indices, total_frames=10)
+    # Frames 7, 8, 9 are all beyond the last sample (index 6)
+    for frame_idx in (7, 8, 9):
+        assert result[frame_idx] == pytest.approx(0.8)
+
+
+def test_interpolate_empty_inputs(analyzer: MotionAnalyzer) -> None:
+    """Empty sampled inputs return all-zeros of the requested length."""
+    result = analyzer._interpolate_motion_scores([], [], total_frames=5)
+    assert result == [0.0] * 5

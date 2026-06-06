@@ -1,10 +1,16 @@
 """Tests for sticker learning service."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.ai.base import AIProviderError, EmbeddingResult, VisionResult
+from src.services.ai.base import (
+    AIProviderError,
+    EmbeddingResult,
+    TextGenerationResult,
+    VisionResult,
+)
 from src.services.modules.sticker.learning import StickerLearningService
 from src.services.modules.sticker.models import StickerRenderError
 from src.services.modules.sticker.renderer import RenderedSticker
@@ -48,6 +54,16 @@ def sticker_service():
             dimensions=768,
         )
     )
+    ai_router.generate_text = AsyncMock(
+        return_value=TextGenerationResult(
+            text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
+            model="o4-mini",
+            provider="openai",
+            tokens_input=150,
+            tokens_output=60,
+        )
+    )
+    ai_router.log_usage = AsyncMock()
 
     repo = MagicMock()
     repo.get_by_file_unique_id = AsyncMock(return_value=None)
@@ -444,3 +460,64 @@ class TestBuildVisionPrompt:
         )
         assert "Another happy cat" in prompt
         assert "Sad cat" in prompt
+
+
+class TestLogUsageOnMerge:
+    """merge_admin_description() must call log_usage() after a successful AI call."""
+
+    @pytest.mark.asyncio
+    async def test_merge_calls_log_usage_on_success(self, sticker_service):
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value={
+                "original_vision_description": "A cat",
+                "visual_description": "A cat",
+                "emotion": "joy",
+                "character_or_meme": None,
+                "suggested_contexts": [],
+                "usage_contexts": [],
+                "admin_notes": None,
+            }
+        )
+        sticker_service._repo.update_description_and_fields = AsyncMock()
+
+        await sticker_service.merge_admin_description("unique-123", "admin note")
+        # fire-and-forget tasks
+        await asyncio.sleep(0.05)
+
+        sticker_service._ai.log_usage.assert_awaited_once()
+        call_kwargs = sticker_service._ai.log_usage.call_args.kwargs
+        assert call_kwargs["task_type"] == "sticker_merge"
+
+    @pytest.mark.asyncio
+    async def test_merge_does_not_call_log_usage_on_ai_error(self, sticker_service):
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value={
+                "original_vision_description": "A cat",
+                "visual_description": "A cat",
+                "emotion": "joy",
+                "character_or_meme": None,
+                "suggested_contexts": [],
+                "usage_contexts": [],
+                "admin_notes": None,
+            }
+        )
+        sticker_service._ai.generate_text = AsyncMock(
+            side_effect=AIProviderError("AI down", provider="openai")
+        )
+        sticker_service._repo.append_admin_note = AsyncMock()
+
+        await sticker_service.merge_admin_description("unique-123", "admin note")
+        await asyncio.sleep(0.05)
+
+        sticker_service._ai.log_usage.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_merge_does_not_call_log_usage_when_sticker_not_found(self, sticker_service):
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(return_value=None)
+
+        result = await sticker_service.merge_admin_description("missing-uid", "note")
+        await asyncio.sleep(0.05)
+
+        assert result is None
+        sticker_service._ai.generate_text.assert_not_awaited()
+        sticker_service._ai.log_usage.assert_not_awaited()

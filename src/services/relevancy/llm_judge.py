@@ -45,6 +45,7 @@ class JudgeResult:
     tokens_input: int | None = None
     tokens_output: int | None = None
     model: str = ""
+    provider: str = ""
     cost_usd: Decimal = Decimal("0")
 
 
@@ -96,5 +97,6 @@ async def llm_judge(
         tokens_input=result.tokens_input,
         tokens_output=result.tokens_output,
         model=result.model,
+        provider=result.provider,
         cost_usd=cost,
     )

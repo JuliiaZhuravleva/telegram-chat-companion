@@ -25,6 +25,10 @@ def upgrade() -> None:
         );
     """)
 
+    # unauthorized_attempts was first created in migration 004 without admin
+    # columns (chat_type, user_first_name, user_username, message_text, status).
+    # CREATE TABLE IF NOT EXISTS is idempotent on a fresh install; the ALTER TABLE
+    # statements below bring an existing 004-era table up to the full admin schema.
     op.execute("""
         CREATE TABLE IF NOT EXISTS unauthorized_attempts (
             id BIGSERIAL PRIMARY KEY,
@@ -38,6 +42,17 @@ def upgrade() -> None:
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+    """)
+
+    # Idempotent column additions — no-op if columns already exist (fresh install)
+    # or if upgrading from the migration-004 version of the table.
+    op.execute("""
+        ALTER TABLE unauthorized_attempts
+            ADD COLUMN IF NOT EXISTS chat_type      VARCHAR(20),
+            ADD COLUMN IF NOT EXISTS user_first_name TEXT,
+            ADD COLUMN IF NOT EXISTS user_username  TEXT,
+            ADD COLUMN IF NOT EXISTS message_text   TEXT,
+            ADD COLUMN IF NOT EXISTS status         VARCHAR(20) NOT NULL DEFAULT 'pending';
     """)
 
     op.execute("""

@@ -13,6 +13,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
+from src.services.costs.spend_limit import SpendLimitService
 from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
 
@@ -67,6 +68,7 @@ async def handle_text_message(
     chat_config: ChatConfig,
     pipeline: FromDishka[TextProcessingPipeline],
     relevancy_gate: FromDishka[RelevancyGate],
+    spend_limit_svc: FromDishka[SpendLimitService],
     message_thread_id: int | None = None,
     **kwargs: Any,
 ) -> None:
@@ -160,3 +162,11 @@ async def handle_text_message(
 
     # Post-send tasks (non-blocking)
     await pipeline.post_send(result, bot_message_id=sent.message_id)
+
+    # Check daily spend limit AFTER usage is logged (post_send writes the row)
+    warning = await spend_limit_svc.get_warning_if_exceeded(chat_config.language)
+    if warning:
+        try:
+            await message.answer(warning)
+        except Exception:
+            logger.warning("Failed to send spend limit warning", chat_id=message.chat.id)

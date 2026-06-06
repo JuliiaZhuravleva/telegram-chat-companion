@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 logger = structlog.get_logger(__name__)
 
@@ -216,8 +216,13 @@ class MotionAnalyzer:
     def _calculate_frame_differences(self, frames: list[Image.Image]) -> list[float]:
         """Calculate normalized pixel differences between consecutive frames.
 
+        Uses PIL ImageChops.difference + ImageStat for vectorized computation
+        (avoids a slow Python pixel-by-pixel loop: ~100-1000x faster on typical
+        sticker frames at 256-512 px).
+
         Returns:
-            List of motion scores (0-1), length = len(frames) - 1
+            List of motion scores (0-1), length = len(frames). First element is
+            always 0.0 (no prior frame to compare against).
         """
         scores: list[float] = []
 
@@ -225,24 +230,20 @@ class MotionAnalyzer:
             frame1 = frames[i].convert("RGB")
             frame2 = frames[i + 1].convert("RGB")
 
-            # Calculate pixel-wise absolute difference
-            diff = 0.0
-            pixels1 = frame1.load()
-            pixels2 = frame2.load()
-            width, height = frame1.size
+            # Vectorised absolute per-pixel difference via PIL (no Python loops)
+            diff_img = ImageChops.difference(frame1, frame2)
+            stat = ImageStat.Stat(diff_img)
 
-            for y in range(height):
-                for x in range(width):
-                    r1, g1, b1 = pixels1[x, y]  # type: ignore
-                    r2, g2, b2 = pixels2[x, y]  # type: ignore
-                    diff += abs(r2 - r1) + abs(g2 - g1) + abs(b2 - b1)
+            # stat.sum gives [R_total, G_total, B_total] — sum all channels
+            total_diff = sum(stat.sum)
 
             # Normalize by image size and max possible difference (255*3 per pixel)
+            width, height = frame1.size
             max_diff = width * height * 255 * 3
-            normalized_score = diff / max_diff if max_diff > 0 else 0.0
+            normalized_score = total_diff / max_diff if max_diff > 0 else 0.0
             scores.append(normalized_score)
 
-        # Add first frame with zero motion
+        # Prepend zero: first frame has no preceding frame to diff against
         return [0.0] + scores
 
     def _interpolate_motion_scores(

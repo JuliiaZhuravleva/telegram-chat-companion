@@ -23,6 +23,7 @@ from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.rules import (
+    confirm_delete_rule_keyboard,
     rule_detail_keyboard,
     rule_type_keyboard,
     rules_chat_list_keyboard,
@@ -97,6 +98,21 @@ _RULE_CREATED: dict[str, str] = {
 _RULE_DELETED: dict[str, str] = {
     "ru": "Правило удалено.",
     "en": "Rule deleted.",
+}
+
+_RULE_NOT_FOUND: dict[str, str] = {
+    "ru": "Правило не найдено.",
+    "en": "Rule not found.",
+}
+
+_RULE_DEL_CONFIRM_TITLE: dict[str, str] = {
+    "ru": "<b>Удалить правило?</b>",
+    "en": "<b>Delete rule?</b>",
+}
+
+_RULE_DEL_CONFIRM_BODY: dict[str, str] = {
+    "ru": "Это действие необратимо.",
+    "en": "This action cannot be undone.",
 }
 
 _RULE_TOGGLED: dict[str, str] = {
@@ -344,6 +360,60 @@ async def handle_rule_toggle(
             parse_mode="HTML",
             reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
         )
+
+
+# ---------------------------------------------------------------------------
+# Ask confirmation before deleting a rule
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("ar_del_ask:"))
+async def handle_rule_delete_ask(
+    callback: CallbackQuery,
+    rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
+) -> None:
+    """Show confirmation prompt before deleting a rule."""
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    rule_id = int(parts[2]) if len(parts) > 2 else 0
+    chat_id = int(parts[3]) if len(parts) > 3 else 0
+    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+    await callback.answer()
+
+    rule = await rules_repo.get(rule_id)
+    msg = callback.message
+    if not isinstance(msg, Message):
+        return
+
+    if rule is None:
+        await msg.edit_text(
+            _RULE_NOT_FOUND[lang],
+            parse_mode="HTML",
+        )
+        return
+
+    config = rule.get("config", {})
+    if isinstance(config, str):
+        try:
+            import json as _json
+
+            config = _json.loads(config)
+        except (ValueError, KeyError):
+            config = {}
+    name = escape(config.get("name", f"#{rule_id}"))
+
+    text = f"{_RULE_DEL_CONFIRM_TITLE[lang]}\n\n{name}\n\n{_RULE_DEL_CONFIRM_BODY[lang]}"
+    await msg.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=confirm_delete_rule_keyboard(lang, rule_id, chat_id, page),
+    )
 
 
 # ---------------------------------------------------------------------------

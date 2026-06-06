@@ -468,6 +468,59 @@ async def handle_stats(
 
 
 # ---------------------------------------------------------------------------
+# Command: /costs (admin-only DM)
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("costs"), IsAdmin())
+async def handle_costs_command(
+    message: Message,
+    response_log_repo: FromDishka[ResponseLogRepository],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Show today's AI cost summary — admin-only private-chat command."""
+    if message.chat.type != "private":
+        return
+
+    lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
+
+    interval = _INTERVAL_MAP["24h"]
+    period_label = _PERIOD_LABELS["24h"][lang]
+
+    total_cost = await response_log_repo.get_total_cost(interval)
+    by_model = await response_log_repo.get_cost_by_model(interval)
+
+    if lang == "ru":
+        lines = [f"<b>Расходы на AI</b> ({period_label})\n"]
+        lines.append(f"<b>Итого:</b> ${total_cost:.4f}")
+        if by_model:
+            lines.append("\n<b>По модели:</b>")
+            for row in by_model[:8]:
+                model = row["model"] or "unknown"
+                cost = row["total_cost"]
+                count = row["call_count"]
+                lines.append(f"  {escape(model)}: ${cost:.4f} ({count}x)")
+    else:
+        lines = [f"<b>AI Costs</b> ({period_label})\n"]
+        lines.append(f"<b>Total:</b> ${total_cost:.4f}")
+        if by_model:
+            lines.append("\n<b>By model:</b>")
+            for row in by_model[:8]:
+                model = row["model"] or "unknown"
+                cost = row["total_cost"]
+                count = row["call_count"]
+                lines.append(f"  {escape(model)}: ${cost:.4f} ({count}x)")
+
+    text = "\n".join(lines)
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        reply_markup=costs_keyboard(lang, "24h"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Callback: AI costs
 # ---------------------------------------------------------------------------
 

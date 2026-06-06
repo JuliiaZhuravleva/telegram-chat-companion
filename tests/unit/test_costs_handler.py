@@ -1,4 +1,4 @@
-"""Tests for admin panel costs handlers."""
+"""Tests for admin panel costs handlers and /costs command."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot.handlers.admin import handle_costs, handle_costs_verify
+from src.bot.handlers.admin import handle_costs, handle_costs_command, handle_costs_verify
 
 # ---------------------------------------------------------------------------
 # Helpers (same pattern as test_admin_handler.py)
@@ -229,3 +229,122 @@ class TestHandleCostsVerify:
         await handle_costs_verify(cb, repo, settings, is_admin=False)
 
         repo.get_cost_by_provider.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# handle_costs_command (/costs DM command)
+# ---------------------------------------------------------------------------
+
+
+def _make_message_for_costs(
+    chat_type: str = "private",
+    user_id: int = 12345,
+) -> MagicMock:
+    """Mock aiogram Message for /costs command tests."""
+    msg = MagicMock()
+    msg.chat = MagicMock()
+    msg.chat.type = chat_type
+    msg.from_user = MagicMock()
+    msg.from_user.id = user_id
+    msg.answer = AsyncMock()
+    return msg
+
+
+def _make_admin_repo_for_costs(language: str = "ru") -> AsyncMock:
+    """Mock AdminRepository for /costs tests."""
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value=language)
+    return repo
+
+
+class TestHandleCostsCommand:
+    @pytest.mark.asyncio
+    async def test_shows_total_and_per_model_ru(self):
+        """Russian admin sees total cost and per-model breakdown."""
+        msg = _make_message_for_costs()
+        repo = _make_response_log_repo()
+        admin_repo = _make_admin_repo_for_costs("ru")
+        bot_config_repo = AsyncMock()
+
+        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
+
+        msg.answer.assert_awaited_once()
+        text = msg.answer.call_args.args[0]
+        assert "Расходы" in text
+        assert "Итого" in text
+        assert "$0.0150" in text
+        assert "gpt-5-nano" in text
+
+    @pytest.mark.asyncio
+    async def test_shows_total_and_per_model_en(self):
+        """English admin sees total cost and per-model breakdown."""
+        msg = _make_message_for_costs()
+        repo = _make_response_log_repo()
+        admin_repo = _make_admin_repo_for_costs("en")
+        bot_config_repo = AsyncMock()
+
+        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
+
+        msg.answer.assert_awaited_once()
+        text = msg.answer.call_args.args[0]
+        assert "AI Costs" in text
+        assert "Total" in text
+        assert "$0.0150" in text
+
+    @pytest.mark.asyncio
+    async def test_includes_reply_markup(self):
+        """Response carries inline keyboard for period navigation."""
+        msg = _make_message_for_costs()
+        repo = _make_response_log_repo()
+        admin_repo = _make_admin_repo_for_costs("en")
+        bot_config_repo = AsyncMock()
+
+        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
+
+        call_kwargs = msg.answer.call_args.kwargs
+        assert call_kwargs.get("reply_markup") is not None
+
+    @pytest.mark.asyncio
+    async def test_ignores_group_chat(self):
+        """Handler silently returns if invoked outside a DM."""
+        msg = _make_message_for_costs(chat_type="group")
+        repo = _make_response_log_repo()
+        admin_repo = _make_admin_repo_for_costs()
+        bot_config_repo = AsyncMock()
+
+        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
+
+        msg.answer.assert_not_awaited()
+        repo.get_total_cost.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_empty_model_list_shows_only_total(self):
+        """No rows in response_log → only total line, no by-model section."""
+        msg = _make_message_for_costs()
+        repo = _make_response_log_repo(total_cost=Decimal("0"))
+        # Override directly — `[] or [default]` is truthy, so can't use helper arg
+        repo.get_cost_by_model = AsyncMock(return_value=[])
+        admin_repo = _make_admin_repo_for_costs("en")
+        bot_config_repo = AsyncMock()
+
+        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
+
+        msg.answer.assert_awaited_once()
+        text = msg.answer.call_args.args[0]
+        assert "By model" not in text
+        assert "$0.0000" in text
+
+    @pytest.mark.asyncio
+    async def test_uses_24h_interval(self):
+        """Handler always queries with the 24h interval."""
+        from datetime import timedelta
+
+        msg = _make_message_for_costs()
+        repo = _make_response_log_repo()
+        admin_repo = _make_admin_repo_for_costs()
+        bot_config_repo = AsyncMock()
+
+        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
+
+        call_args = repo.get_total_cost.call_args.args
+        assert call_args[0] == timedelta(hours=24)
