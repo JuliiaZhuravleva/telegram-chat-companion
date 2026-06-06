@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,7 +26,7 @@ def _make_message_row(**overrides):
         "username": "alice",
         "first_name": "Alice",
         "content": "Hello there",
-        "created_at": MagicMock(strftime=lambda fmt: "12:00"),
+        "created_at": MagicMock(strftime=lambda _fmt: "12:00"),
         "is_bot_message": False,
     }
     row.update(overrides)
@@ -92,7 +92,9 @@ class TestSummaryLogUsage:
         assert positional_args[0] is expected_result
 
     @pytest.mark.asyncio
-    async def test_no_messages_returns_early_without_log(self, summary_service, ai_router, message_repo):
+    async def test_no_messages_returns_early_without_log(
+        self, summary_service, ai_router, message_repo
+    ):
         """When there are no messages, generate_text is never called."""
         message_repo.get_for_summary.return_value = []
 

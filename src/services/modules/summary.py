@@ -94,8 +94,6 @@ class SummaryService:
             return "Failed to generate summary. Please try again later."
 
         # Log usage explicitly — generate_text() does not auto-log (see ADR).
-        asyncio.ensure_future(
-            self._ai.log_usage(result, chat_id=chat_id, task_type="summary")
-        )
+        asyncio.ensure_future(self._ai.log_usage(result, chat_id=chat_id, task_type="summary"))
 
         return markdown_to_html(header + result.text)

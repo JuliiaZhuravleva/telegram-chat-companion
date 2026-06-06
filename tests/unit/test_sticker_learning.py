@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.ai.base import AIProviderError, EmbeddingResult, TextGenerationResult, VisionResult
+from src.services.ai.base import (
+    AIProviderError,
+    EmbeddingResult,
+    TextGenerationResult,
+    VisionResult,
+)
 from src.services.modules.sticker.learning import StickerLearningService
 from src.services.modules.sticker.models import StickerRenderError
 from src.services.modules.sticker.renderer import RenderedSticker

@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
-from src.services.costs.spend_limit import SpendLimitService, _DAILY_LIMIT_KEY, _WARNING_TEXT
-
+from src.services.costs.spend_limit import _DAILY_LIMIT_KEY, _WARNING_TEXT, SpendLimitService
 
 # ---------------------------------------------------------------------------
 # Helpers

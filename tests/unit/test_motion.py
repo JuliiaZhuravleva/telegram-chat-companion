@@ -120,6 +120,7 @@ def test_fallback_motion_evenly_spaced(analyzer: MotionAnalyzer) -> None:
 
 # --- _calculate_frame_differences ---
 
+
 def _solid_frame(color: tuple[int, int, int], size: int = 8) -> Image.Image:
     """Create a small solid-color RGB image for testing."""
     img = Image.new("RGB", (size, size), color)
@@ -132,9 +133,9 @@ def test_calculate_frame_differences_identical_frames(analyzer: MotionAnalyzer) 
     scores = analyzer._calculate_frame_differences([frame, frame, frame])
     # length = n_frames (first element always 0.0)
     assert len(scores) == 3
-    assert scores[0] == pytest.approx(0.0)   # first-frame sentinel
-    assert scores[1] == pytest.approx(0.0)   # identical pair
-    assert scores[2] == pytest.approx(0.0)   # identical pair
+    assert scores[0] == pytest.approx(0.0)  # first-frame sentinel
+    assert scores[1] == pytest.approx(0.0)  # identical pair
+    assert scores[2] == pytest.approx(0.0)  # identical pair
 
 
 def test_calculate_frame_differences_max_contrast(analyzer: MotionAnalyzer) -> None:
@@ -150,7 +151,7 @@ def test_calculate_frame_differences_max_contrast(analyzer: MotionAnalyzer) -> N
 def test_calculate_frame_differences_partial_change(analyzer: MotionAnalyzer) -> None:
     """Partial color change should produce a score between 0 and 1."""
     frame_a = _solid_frame((0, 0, 0))
-    frame_b = _solid_frame((128, 0, 0))   # only red channel, half-max
+    frame_b = _solid_frame((128, 0, 0))  # only red channel, half-max
     scores = analyzer._calculate_frame_differences([frame_a, frame_b])
     assert len(scores) == 2
     assert 0.0 < scores[1] < 1.0

@@ -95,9 +95,7 @@ class TestUpsert:
         assert row["enabled"] is True
 
     @pytest.mark.asyncio
-    async def test_no_fields_creates_row_with_defaults(
-        self, repo: ChatSettingsRepository
-    ) -> None:
+    async def test_no_fields_creates_row_with_defaults(self, repo: ChatSettingsRepository) -> None:
         await repo.upsert(-100603)
         row = await repo.get(-100603)
         assert row is not None

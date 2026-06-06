@@ -87,9 +87,7 @@ def _generate_migration_sql() -> str:
         text=True,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"alembic --sql generation failed:\n{result.stderr}"
-        )
+        raise RuntimeError(f"alembic --sql generation failed:\n{result.stderr}")
     return result.stdout
 
 
@@ -134,13 +132,12 @@ async def db_pool(pg_url: str, run_migrations: None) -> asyncpg.Pool:  # type: i
     Pool creation against a local Docker container is fast (< 50 ms); the
     overhead is acceptable for the isolation guarantee.
     """
+
     async def _init_conn(conn: asyncpg.Connection) -> None:
         """Register pgvector codec — mirrors src/database/connection.py."""
         await register_vector(conn)
 
-    pool: asyncpg.Pool = await asyncpg.create_pool(
-        pg_url, min_size=1, max_size=3, init=_init_conn
-    )
+    pool: asyncpg.Pool = await asyncpg.create_pool(pg_url, min_size=1, max_size=3, init=_init_conn)
     yield pool
     await pool.close()
 

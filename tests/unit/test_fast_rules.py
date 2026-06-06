@@ -87,11 +87,11 @@ class TestFastRulesQuestionShortcut:
     @pytest.mark.parametrize(
         "text",
         [
-            "Да?",       # 3 chars — Russian "Right?"
-            "Ну?",       # 3 chars — Russian "Well?"
-            "Как?",      # 4 chars — Russian "How?"
-            "Why?",      # 4 chars
-            "Правда?",   # longer question
+            "Да?",  # 3 chars — Russian "Right?"
+            "Ну?",  # 3 chars — Russian "Well?"
+            "Как?",  # 4 chars — Russian "How?"
+            "Why?",  # 4 chars
+            "Правда?",  # longer question
         ],
     )
     def test_passes_short_questions(self, text: str) -> None:

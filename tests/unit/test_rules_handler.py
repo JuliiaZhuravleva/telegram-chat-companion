@@ -8,7 +8,6 @@ import pytest
 
 from src.bot.handlers.rules import handle_rule_delete, handle_rule_delete_ask
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -194,10 +193,7 @@ class TestHandleRuleDelete:
 
         kb = confirm_delete_rule_keyboard("ru", rule_id=42, chat_id=99, page=0)
         callbacks = [
-            btn.callback_data
-            for row in kb.inline_keyboard
-            for btn in row
-            if btn.callback_data
+            btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data
         ]
         # Cancel must go to ar_list:, not ar_del:
         cancel_cbs = [c for c in callbacks if "Отмена" not in c and c.startswith("ar_list:")]
@@ -230,15 +226,14 @@ class TestRulesListKeyboardDeleteButton:
         ]
         kb = rules_list_keyboard("ru", rules, page=0, total_pages=1, chat_id=99)
         callbacks = [
-            btn.callback_data
-            for row in kb.inline_keyboard
-            for btn in row
-            if btn.callback_data
+            btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data
         ]
         # Must have ar_del_ask:, must NOT have ar_del: for the delete action
         assert any(c.startswith("ar_del_ask:") for c in callbacks), "Expected ar_del_ask:"
         # ar_del: should only be in confirm keyboard, not in list keyboard
-        assert not any(c.startswith("ar_del:") for c in callbacks), "ar_del: must not appear in list"
+        assert not any(c.startswith("ar_del:") for c in callbacks), (
+            "ar_del: must not appear in list"
+        )
 
     def test_detail_keyboard_delete_uses_ask(self):
         """🗑 Delete button in rule detail view also routes through confirmation."""
@@ -246,10 +241,9 @@ class TestRulesListKeyboardDeleteButton:
 
         kb = rule_detail_keyboard("ru", rule_id=10, chat_id=99)
         callbacks = [
-            btn.callback_data
-            for row in kb.inline_keyboard
-            for btn in row
-            if btn.callback_data
+            btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data
         ]
         assert any(c.startswith("ar_del_ask:") for c in callbacks), "Expected ar_del_ask:"
-        assert not any(c.startswith("ar_del:") for c in callbacks), "ar_del: must not appear in detail view"
+        assert not any(c.startswith("ar_del:") for c in callbacks), (
+            "ar_del: must not appear in detail view"
+        )

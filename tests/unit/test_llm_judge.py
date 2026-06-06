@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.services.ai.base import AIProviderError, TextGenerationResult
-from src.services.relevancy.llm_judge import JudgeResult, llm_judge
+from src.services.relevancy.llm_judge import llm_judge
 
 
 def _make_router(text: str = "YES", provider: str = "openai") -> AsyncMock:
@@ -49,9 +49,7 @@ class TestLlmJudgeDecision:
     @pytest.mark.asyncio
     async def test_error_defaults_to_no_fail_closed(self) -> None:
         router = AsyncMock()
-        router.generate_text = AsyncMock(
-            side_effect=AIProviderError("timeout", provider="openai")
-        )
+        router.generate_text = AsyncMock(side_effect=AIProviderError("timeout", provider="openai"))
         result = await llm_judge("test", [], router)
         assert result.should_respond is False
         assert result.reasoning == "llm_error"
@@ -92,9 +90,7 @@ class TestLlmJudgeProvider:
     @pytest.mark.asyncio
     async def test_provider_empty_on_error(self) -> None:
         router = AsyncMock()
-        router.generate_text = AsyncMock(
-            side_effect=AIProviderError("fail", provider="openai")
-        )
+        router.generate_text = AsyncMock(side_effect=AIProviderError("fail", provider="openai"))
         result = await llm_judge("test", [], router)
         assert result.provider == ""
 
@@ -107,7 +103,12 @@ class TestLlmJudgeHistoryFormatting:
         router = _make_router("YES")
         messages = [
             {"first_name": "Alice", "content": "first msg", "is_bot_message": False},
-            {"first_name": None, "username": "bob42", "content": "second msg", "is_bot_message": False},
+            {
+                "first_name": None,
+                "username": "bob42",
+                "content": "second msg",
+                "is_bot_message": False,
+            },
             {"first_name": "Bot", "content": "bot reply", "is_bot_message": True},
         ]
         await llm_judge("current message", messages, router)

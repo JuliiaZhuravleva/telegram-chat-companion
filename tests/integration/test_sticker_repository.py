@@ -72,9 +72,7 @@ class TestSaveStickerUpsert:
         assert row["file_id"] == "file-003-v2"
 
     @pytest.mark.asyncio
-    async def test_sets_analyzed_at_when_description_present(
-        self, repo: StickerRepository
-    ) -> None:
+    async def test_sets_analyzed_at_when_description_present(self, repo: StickerRepository) -> None:
         await repo.save_sticker(
             file_unique_id="unique-004",
             file_id="file-004",
