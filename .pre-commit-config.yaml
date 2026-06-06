@@ -5,3 +5,10 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
+
+  # Secret scanning — blocks commits that would introduce credentials.
+  # Pinned rev (supply-chain): bump deliberately, don't float.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
