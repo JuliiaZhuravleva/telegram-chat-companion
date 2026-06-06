@@ -4,7 +4,7 @@ Integration tests: StickerRepository against real pgvector Postgres.
 Covers the acceptance criteria in A-1 (TD-002):
   - save_sticker  → upsert semantics (insert then ON CONFLICT increment)
   - increment_usage → counters update correctly
-  - clear_for_reanalysis → analysis fields are nulled out
+  - clear_analysis → analysis fields are nulled out
 """
 
 from __future__ import annotations
@@ -151,12 +151,12 @@ class TestIncrementUsage:
 
 
 # ---------------------------------------------------------------------------
-# clear_for_reanalysis
+# clear_analysis
 # ---------------------------------------------------------------------------
 
 
-class TestClearForReanalysis:
-    """clear_for_reanalysis NULLs out analysis fields to trigger re-analysis."""
+class TestClearAnalysis:
+    """clear_analysis NULLs out analysis fields to trigger re-analysis."""
 
     @pytest.mark.asyncio
     async def test_clears_visual_description(self, repo: StickerRepository) -> None:
@@ -165,7 +165,7 @@ class TestClearForReanalysis:
             file_id="f-clr-001",
             visual_description="Old description",
         )
-        await repo.clear_for_reanalysis("clr-001")
+        await repo.clear_analysis("clr-001")
 
         row = await repo.get_by_file_unique_id("clr-001")
         assert row is not None
@@ -178,7 +178,7 @@ class TestClearForReanalysis:
             file_id="f-clr-002",
             visual_description="Will be cleared",
         )
-        await repo.clear_for_reanalysis("clr-002")
+        await repo.clear_analysis("clr-002")
 
         row = await repo.get_by_file_unique_id("clr-002")
         assert row is not None
@@ -191,7 +191,7 @@ class TestClearForReanalysis:
             file_id="f-clr-003",
             analysis_failed=True,
         )
-        await repo.clear_for_reanalysis("clr-003")
+        await repo.clear_analysis("clr-003")
 
         row = await repo.get_by_file_unique_id("clr-003")
         assert row is not None
@@ -205,7 +205,7 @@ class TestClearForReanalysis:
             visual_description="Has embedding",
         )
         await repo.update_embedding("clr-004", [0.1] * 768)
-        await repo.clear_for_reanalysis("clr-004")
+        await repo.clear_analysis("clr-004")
 
         row = await repo.get_by_file_unique_id("clr-004")
         assert row is not None
@@ -220,7 +220,7 @@ class TestClearForReanalysis:
             visual_description="Count me",
         )
         await repo.increment_usage("clr-005")
-        await repo.clear_for_reanalysis("clr-005")
+        await repo.clear_analysis("clr-005")
 
         row = await repo.get_by_file_unique_id("clr-005")
         assert row is not None

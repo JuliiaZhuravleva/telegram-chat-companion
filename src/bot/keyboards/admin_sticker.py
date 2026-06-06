@@ -10,26 +10,6 @@ import math
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def sticker_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Main sticker management menu."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="📦 Просмотр паков" if lang == "ru" else "📦 Browse packs",
-                    callback_data=f"adm_stk_sets:{lang}:0",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="◀️ Назад" if lang == "ru" else "◀️ Back",
-                    callback_data=f"adm_menu:{lang}",
-                ),
-            ],
-        ]
-    )
-
-
 def sticker_sets_keyboard(
     sets: list[dict[str, object]],
     *,
@@ -80,12 +60,12 @@ def sticker_sets_keyboard(
         )
     rows.append(nav)
 
-    # Back
+    # Back → main admin menu (no intermediate sticker menu)
     rows.append(
         [
             InlineKeyboardButton(
                 text="◀️ Назад" if lang == "ru" else "◀️ Back",
-                callback_data=f"adm_stk:{lang}:0",
+                callback_data=f"adm_menu:{lang}",
             ),
         ]
     )
@@ -175,8 +155,14 @@ def sticker_detail_keyboard(
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text="🔄 Переанализировать" if lang == "ru" else "🔄 Re-analyze",
+                text="🔄 Запустить заново" if lang == "ru" else "🔄 Run analysis",
                 callback_data=f"adm_stk_reanalyze:{lang}:{file_unique_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🧹 Очистить анализ" if lang == "ru" else "🧹 Clear analysis",
+                callback_data=f"adm_stk_clr_ask:{lang}:{file_unique_id}",
             ),
         ],
     ]
@@ -194,3 +180,25 @@ def sticker_detail_keyboard(
     )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def sticker_clear_confirm_keyboard(
+    file_unique_id: str,
+    *,
+    lang: str,
+) -> InlineKeyboardMarkup:
+    """Yes/Cancel for confirming analysis clear."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🧹 Очистить" if lang == "ru" else "🧹 Clear",
+                    callback_data=f"adm_stk_clr:{lang}:{file_unique_id}",
+                ),
+                InlineKeyboardButton(
+                    text="✖ Отмена" if lang == "ru" else "✖ Cancel",
+                    callback_data=f"adm_stk_view:{lang}:{file_unique_id}",
+                ),
+            ],
+        ]
+    )

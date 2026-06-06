@@ -20,8 +20,8 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_sticker import (
+    sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
-    sticker_menu_keyboard,
     sticker_set_detail_keyboard,
     sticker_sets_keyboard,
 )
@@ -158,33 +158,6 @@ async def handle_admin_sticker_reply(
             "AI не смог объединить описание. Заметка сохранена. "
             "Попробуй ещё раз или используй Re-analyze.",
         )
-
-
-# ── Sticker menu ────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("adm_stk:"))
-async def handle_sticker_menu(
-    callback: CallbackQuery,
-    **kwargs: Any,
-) -> None:
-    """Sticker management main menu."""
-    if not _is_private(callback):
-        await callback.answer()
-        return
-    if not await _check_admin(kwargs, callback.from_user.id if callback.from_user else None):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-
-    text = "Управление стикерами" if lang == "ru" else "Sticker Management"
-    keyboard = sticker_menu_keyboard(lang)
-
-    if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
 
 
 # ── Set list ─────────────────────────────────────────────────────────────
@@ -381,6 +354,8 @@ async def handle_sticker_detail(
     lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
     if sticker["visual_description"]:
         lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
+    else:
+        lines.append("<b>⏳ Визуальный анализ не выполнен</b>")
     if sticker["emotion"]:
         lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
     if sticker["character_or_meme"]:
@@ -446,16 +421,15 @@ async def handle_sticker_detail(
     await callback.answer()
 
 
-# ── Re-analyze ──────────────────────────────────────────────────────────
+# ── Clear analysis (confirm + commit) ───────────────────────────────────
 
 
-@router.callback_query(F.data.startswith("adm_stk_reanalyze:"))
-async def handle_reanalyze(
+@router.callback_query(F.data.startswith("adm_stk_clr_ask:"))
+async def handle_clear_ask(
     callback: CallbackQuery,
-    sticker_repo: FromDishka[StickerRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
 ) -> None:
-    """Clear sticker analysis to force re-analysis on next encounter."""
+    """Show confirm dialog before clearing sticker analysis."""
     if not _is_private(callback):
         await callback.answer()
         return
@@ -473,11 +447,95 @@ async def handle_reanalyze(
         await callback.answer("Missing sticker ID", show_alert=True)
         return
 
-    await sticker_repo.clear_for_reanalysis(file_unique_id)
-
-    msg = (
-        "Анализ сброшен. Стикер будет переанализирован при следующем использовании."
+    text = (
+        "Очистить анализ? Описание, эмоция, персонаж и контексты будут сброшены. "
+        "Ручные заметки и статистика использований сохранятся."
         if lang == "ru"
-        else "Analysis cleared. Sticker will be re-analyzed on next use."
+        else "Clear analysis? Description, emotion, character and contexts will be reset. "
+        "Admin notes and usage counters are preserved."
     )
+    keyboard = sticker_clear_confirm_keyboard(file_unique_id, lang=lang)
+
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_stk_clr:"))
+async def handle_clear(
+    callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Clear all vision-generated fields for a sticker."""
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    await sticker_repo.clear_analysis(file_unique_id)
+
+    msg = "Анализ очищен" if lang == "ru" else "Analysis cleared"
     await callback.answer(msg, show_alert=True)
+
+
+# ── Run analysis now ────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("adm_stk_reanalyze:"))
+async def handle_run_analysis(
+    callback: CallbackQuery,
+    sticker_service: FromDishka[StickerLearningService],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Run vision analysis on a sticker right now (admin action)."""
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    if not (isinstance(callback.message, Message) and callback.message.bot):
+        await callback.answer("Bot unavailable", show_alert=True)
+        return
+
+    start_msg = "Анализ запущен..." if lang == "ru" else "Analysis running..."
+    await callback.answer(start_msg)
+
+    ok = await sticker_service.reanalyze(callback.message.bot, file_unique_id)
+
+    result_msg = (
+        ("Анализ завершён" if lang == "ru" else "Analysis completed")
+        if ok
+        else ("Анализ не удался" if lang == "ru" else "Analysis failed")
+    )
+
+    with contextlib.suppress(Exception):
+        await callback.message.bot.send_message(
+            chat_id=callback.message.chat.id,
+            text=result_msg,
+        )

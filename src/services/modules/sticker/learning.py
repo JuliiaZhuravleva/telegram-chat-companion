@@ -60,6 +60,7 @@ class StickerLearningService:
         sticker: types.Sticker,
         image_data: bytes,
         preceding_messages: list[str] | None = None,
+        force_reanalyze: bool = False,
     ) -> StickerLearningResult:
         """Learn a new sticker or update usage of existing one.
 
@@ -67,6 +68,8 @@ class StickerLearningService:
             sticker: Telegram Sticker object.
             image_data: Raw file bytes (.webp/.tgs/.webm).
             preceding_messages: Last few chat messages for usage context.
+            force_reanalyze: Skip the "already exists" shortcut and run vision
+                analysis even if the sticker is in DB (used by admin re-analyze).
 
         Returns:
             StickerLearningResult with learning outcome.
@@ -75,7 +78,7 @@ class StickerLearningService:
 
         # Check if sticker already exists
         existing = await self._repo.get_by_file_unique_id(file_unique_id)
-        if existing:
+        if existing and not force_reanalyze:
             await self._repo.increment_usage(file_unique_id)
             # Accumulate usage context from preceding messages
             if preceding_messages:
@@ -283,6 +286,55 @@ class StickerLearningService:
             analysis_failed=analysis_failed,
             collage_png=vision_image if sticker_type != "static" else None,
         )
+
+    # ── Admin re-analyze ─────────────────────────────────────────────
+
+    async def reanalyze(self, bot: Bot, file_unique_id: str) -> bool:
+        """Re-run vision analysis for an existing sticker (admin action).
+
+        Downloads the sticker from Telegram, clears prior analysis fields,
+        and runs the full vision pipeline again. Returns True on success.
+        """
+        existing = await self._repo.get_by_file_unique_id(file_unique_id)
+        if not existing:
+            logger.warning("reanalyze: sticker not found", file_unique_id=file_unique_id)
+            return False
+
+        # Download sticker bytes from Telegram
+        try:
+            file = await bot.get_file(existing["file_id"])
+            if not file.file_path:
+                return False
+            buf = await bot.download_file(file.file_path)
+            if buf is None:
+                return False
+            image_data = buf.read()
+        except Exception:
+            logger.exception("reanalyze: failed to download sticker", file_unique_id=file_unique_id)
+            return False
+
+        # Clear old analysis so learn() sees a clean slate for this record
+        await self._repo.clear_analysis(file_unique_id)
+
+        # Reconstruct a minimal Sticker object for the analysis pipeline
+        sticker = types.Sticker(
+            file_id=existing["file_id"],
+            file_unique_id=file_unique_id,
+            type="regular",
+            width=512,
+            height=512,
+            is_animated=bool(existing["is_animated"]),
+            is_video=bool(existing["is_video"]),
+            set_name=existing["set_name"],
+            emoji=existing["emoji"],
+        )
+
+        result = await self.learn(
+            sticker=sticker,
+            image_data=image_data,
+            force_reanalyze=True,
+        )
+        return not result.analysis_failed
 
     # ── Search ───────────────────────────────────────────────────────
 

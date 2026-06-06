@@ -10,10 +10,16 @@ from aiogram.types import Message
 from src.bot.handlers.admin_sticker import (
     _extract_file_unique_id_from_reply,
     handle_admin_sticker_reply,
+    handle_clear,
+    handle_clear_ask,
+    handle_run_analysis,
     handle_sticker_back,
     handle_sticker_detail,
 )
-from src.bot.keyboards.admin_sticker import sticker_detail_keyboard
+from src.bot.keyboards.admin_sticker import (
+    sticker_clear_confirm_keyboard,
+    sticker_detail_keyboard,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -266,6 +272,7 @@ def _make_callback(
 
     bot = MagicMock()
     bot.delete_message = AsyncMock()
+    bot.send_message = AsyncMock()
     msg.bot = bot
 
     cb.message = msg
@@ -432,3 +439,125 @@ class TestStickerDetailKeyboard:
         kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru")
         back_btn = kb.inline_keyboard[-1][0]
         assert back_btn.callback_data == "adm_stk_sets:ru:0"
+
+    def test_has_clear_and_reanalyze_buttons(self) -> None:
+        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        # Run-now button actually triggers analysis
+        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
+        # Clear button routes through confirm step (adm_stk_clr_ask:)
+        assert "adm_stk_clr_ask:ru:AgADvh4AAlkbCFI" in callbacks
+
+    def test_clear_confirm_keyboard_has_yes_and_cancel(self) -> None:
+        kb = sticker_clear_confirm_keyboard("AgADvh4AAlkbCFI", lang="ru")
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "adm_stk_clr:ru:AgADvh4AAlkbCFI" in callbacks
+        # Cancel returns to sticker detail (no destructive action on cancel)
+        assert "adm_stk_view:ru:AgADvh4AAlkbCFI" in callbacks
+
+
+# ---------------------------------------------------------------------------
+# handle_clear_ask — shows confirm dialog, does NOT clear
+# ---------------------------------------------------------------------------
+
+
+class TestHandleClearAsk:
+    @pytest.mark.asyncio()
+    async def test_shows_confirm_does_not_clear(self) -> None:
+        cb = _make_callback("adm_stk_clr_ask:ru:AgADvh4AAlkbCFI")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_clear_ask(cb, bot_config_repo)
+
+        cb.message.edit_text.assert_awaited_once()
+        text_arg = cb.message.edit_text.call_args[0][0]
+        # Confirm text mentions both what's cleared AND what's preserved
+        assert "описание" in text_arg.lower() or "описания" in text_arg.lower()
+        assert "заметки" in text_arg.lower() or "заметк" in text_arg.lower()
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized(self) -> None:
+        cb = _make_callback("adm_stk_clr_ask:ru:AgADvh4AAlkbCFI", user_id=99999)
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_clear_ask(cb, bot_config_repo)
+
+        cb.message.edit_text.assert_not_awaited()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+
+# ---------------------------------------------------------------------------
+# handle_clear — calls repo.clear_analysis (broad scope)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleClear:
+    @pytest.mark.asyncio()
+    async def test_clears_analysis(self) -> None:
+        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.clear_analysis = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_clear(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.clear_analysis.assert_awaited_once_with("AgADvh4AAlkbCFI")
+        cb.answer.assert_awaited_once()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_clear(self) -> None:
+        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI", user_id=99999)
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.clear_analysis = AsyncMock()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_clear(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.clear_analysis.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# handle_run_analysis — calls sticker_service.reanalyze with bot + id
+# ---------------------------------------------------------------------------
+
+
+class TestHandleRunAnalysis:
+    @pytest.mark.asyncio()
+    async def test_triggers_reanalyze_success(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = MagicMock()
+        sticker_service.reanalyze = AsyncMock(return_value=True)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, bot_config_repo)
+
+        sticker_service.reanalyze.assert_awaited_once_with(cb.message.bot, "AgADvh4AAlkbCFI")
+        # Completion message is sent as a new message
+        cb.message.bot.send_message.assert_awaited_once()
+        sent_text = cb.message.bot.send_message.call_args.kwargs["text"]
+        assert "завершён" in sent_text.lower() or "completed" in sent_text.lower()
+
+    @pytest.mark.asyncio()
+    async def test_reports_failure(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = MagicMock()
+        sticker_service.reanalyze = AsyncMock(return_value=False)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, bot_config_repo)
+
+        sticker_service.reanalyze.assert_awaited_once()
+        sent_text = cb.message.bot.send_message.call_args.kwargs["text"]
+        assert "не удался" in sent_text.lower() or "failed" in sent_text.lower()
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_run(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI", user_id=99999)
+        sticker_service = MagicMock()
+        sticker_service.reanalyze = AsyncMock()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_run_analysis(cb, sticker_service, bot_config_repo)
+
+        sticker_service.reanalyze.assert_not_awaited()

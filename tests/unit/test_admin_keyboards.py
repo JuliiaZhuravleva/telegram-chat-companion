@@ -40,7 +40,7 @@ class TestMainMenuKeyboard:
         kb = main_menu_keyboard("ru")
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:" in c for c in callbacks)
-        assert any("adm_stk:" in c for c in callbacks)
+        assert any("adm_stk_sets:" in c for c in callbacks)
         assert any("adm_defs:" in c for c in callbacks)
         assert any("adm_stats:" in c for c in callbacks)
         assert any("adm_costs:" in c for c in callbacks)
