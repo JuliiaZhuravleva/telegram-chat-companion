@@ -520,8 +520,36 @@ class TestHandleClear:
         await handle_clear(cb, sticker_repo, bot_config_repo)
 
         sticker_repo.clear_analysis.assert_awaited_once_with("AgADvh4AAlkbCFI")
+        # Re-renders the detail in place rather than leaving the confirm prompt.
+        cb.message.edit_text.assert_awaited_once()
         cb.answer.assert_awaited_once()
         assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio()
+    async def test_rerenders_not_analyzed_detail_after_clear(self) -> None:
+        # After clearing, the repo returns the sticker with visual fields nulled;
+        # handle_clear must edit the message back to the detail view showing the
+        # ⏳ not-analyzed badge (regression: it used to stay on the confirm prompt).
+        cleared = {
+            **_SAMPLE_STICKER,
+            "visual_description": None,
+            "emotion": None,
+            "character_or_meme": None,
+            "suggested_contexts": None,
+        }
+        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo(sticker=cleared)
+        sticker_repo.clear_analysis = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_clear(cb, sticker_repo, bot_config_repo)
+
+        cb.message.edit_text.assert_awaited_once()
+        text_arg = cb.message.edit_text.call_args[0][0]
+        assert "не выполнен" in text_arg
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        buttons = [b.text for row in kb.inline_keyboard for b in row]
+        assert any("Запустить заново" in b for b in buttons)
 
     @pytest.mark.asyncio()
     async def test_not_authorized_does_not_clear(self) -> None:

@@ -325,6 +325,35 @@ async def handle_sticker_back(
 # ── Sticker detail ──────────────────────────────────────────────────────
 
 
+def _build_detail_text(sticker: dict[str, Any], file_unique_id: str, lang: str) -> str:
+    """Build the HTML detail body for a single sticker.
+
+    Shared by the detail view and the post-clear re-render so both render the
+    sticker identically — including the ⏳ not-analyzed badge when the visual
+    description is absent.
+    """
+    lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
+    if sticker["visual_description"]:
+        lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
+    else:
+        lines.append(f"<b>{html_lib.escape(_status_badge(sticker, lang, short=False))}</b>")
+    if sticker["emotion"]:
+        lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
+    if sticker["character_or_meme"]:
+        lines.append(f"<b>Персонаж:</b> {html_lib.escape(sticker['character_or_meme'])}")
+    if sticker["suggested_contexts"]:
+        contexts = ", ".join(html_lib.escape(c) for c in sticker["suggested_contexts"])
+        lines.append(f"<b>Контексты:</b> {contexts}")
+    lines.append(f"<b>Использований:</b> {sticker['total_uses']} (бот: {sticker['bot_uses']})")
+    lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
+    lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
+    lines.append(f"<b>Video:</b> {sticker['is_video']}")
+    if sticker.get("admin_notes"):
+        lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
+    lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data.startswith("adm_stk_view:"))
 async def handle_sticker_detail(
     callback: CallbackQuery,
@@ -354,27 +383,7 @@ async def handle_sticker_detail(
         await callback.answer("Sticker not found", show_alert=True)
         return
 
-    lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
-    if sticker["visual_description"]:
-        lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
-    else:
-        lines.append(f"<b>{html_lib.escape(_status_badge(sticker, lang, short=False))}</b>")
-    if sticker["emotion"]:
-        lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
-    if sticker["character_or_meme"]:
-        lines.append(f"<b>Персонаж:</b> {html_lib.escape(sticker['character_or_meme'])}")
-    if sticker["suggested_contexts"]:
-        contexts = ", ".join(html_lib.escape(c) for c in sticker["suggested_contexts"])
-        lines.append(f"<b>Контексты:</b> {contexts}")
-    lines.append(f"<b>Использований:</b> {sticker['total_uses']} (бот: {sticker['bot_uses']})")
-    lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
-    lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
-    lines.append(f"<b>Video:</b> {sticker['is_video']}")
-    if sticker.get("admin_notes"):
-        lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
-    lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
-
-    text = "\n".join(lines)
+    text = _build_detail_text(sticker, file_unique_id, lang)
 
     if isinstance(callback.message, Message):
         # Clean up previous sticker message (if any) to prevent orphans
@@ -488,6 +497,16 @@ async def handle_clear(
         return
 
     await sticker_repo.clear_analysis(file_unique_id)
+
+    # Re-render the detail in place so the admin lands back on the (now
+    # ⏳ not-analyzed) sticker detail instead of being stranded on the confirm
+    # prompt. Matches the edit-in-place idiom used by handle_run_analysis.
+    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
+    if sticker and isinstance(callback.message, Message):
+        text = _build_detail_text(sticker, file_unique_id, lang)
+        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker["set_name"])
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
     msg = "Анализ очищен" if lang == "ru" else "Analysis cleared"
     await callback.answer(msg, show_alert=True)
