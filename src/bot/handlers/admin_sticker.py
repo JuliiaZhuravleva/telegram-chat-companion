@@ -14,6 +14,7 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka import AsyncContainer
 from dishka.integrations.aiogram import FromDishka
@@ -23,6 +24,7 @@ from src.bot.keyboards.admin_sticker import (
     _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
+    sticker_reanalyze_retry_keyboard,
     sticker_set_detail_keyboard,
     sticker_sets_keyboard,
 )
@@ -491,6 +493,16 @@ async def handle_clear(
     await callback.answer(msg, show_alert=True)
 
 
+# ── Localized failure-reason copy ───────────────────────────────────────
+
+_REANALYZE_REASON_COPY: dict[str, dict[str, str]] = {
+    "download": {"ru": "Ошибка загрузки", "en": "Download error"},
+    "vision": {"ru": "Ошибка API", "en": "API error"},
+    "content_filter": {"ru": "Контент заблокирован", "en": "Content blocked"},
+    "empty": {"ru": "Пустой ответ", "en": "Empty response"},
+}
+
+
 # ── Run analysis now ────────────────────────────────────────────────────
 
 
@@ -498,9 +510,23 @@ async def handle_clear(
 async def handle_run_analysis(
     callback: CallbackQuery,
     sticker_service: FromDishka[StickerLearningService],
+    sticker_repo: FromDishka[StickerRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
 ) -> None:
-    """Run vision analysis on a sticker right now (admin action)."""
+    """Run vision analysis on a sticker right now (admin action).
+
+    Lifecycle (edit-in-place):
+    1. Edit message → ⏳ Анализирую… (hide buttons) before blocking vision call.
+    2. Call reanalyze().
+    3. Edit message → ✅ Анализ обновлён + new description + restored buttons,
+       OR ⚠️ Ошибка анализа: <reason> + Retry button.
+
+    Edge-cases:
+    - If the ⏳ edit fails (e.g. network glitch), log and continue — still emit result.
+    - TelegramBadRequest "message is not modified" on any status edit is suppressed.
+    - Double-tap: first tap removes the buttons; second tap hits an unmodified message
+      (suppressed) or arrives after the analysis has already finished.
+    """
     if not _is_private(callback):
         await callback.answer()
         return
@@ -522,19 +548,53 @@ async def handle_run_analysis(
         await callback.answer("Bot unavailable", show_alert=True)
         return
 
-    start_msg = "Анализ запущен..." if lang == "ru" else "Analysis running..."
-    await callback.answer(start_msg)
+    # Dismiss the callback spinner immediately
+    await callback.answer()
 
-    ok = await sticker_service.reanalyze(callback.message.bot, file_unique_id)
-
-    result_msg = (
-        ("Анализ завершён" if lang == "ru" else "Analysis completed")
-        if ok
-        else ("Анализ не удался" if lang == "ru" else "Analysis failed")
-    )
-
-    with contextlib.suppress(Exception):
-        await callback.message.bot.send_message(
-            chat_id=callback.message.chat.id,
-            text=result_msg,
+    # ── ⏳ in-progress edit: hide buttons so the admin knows work is underway ──
+    in_progress_text = "⏳ Анализирую…" if lang == "ru" else "⏳ Analyzing…"
+    try:
+        await callback.message.edit_text(
+            in_progress_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
         )
+    except TelegramBadRequest as exc:
+        # "message is not modified" = double-tap; another network issue = log + continue
+        logger.warning(
+            "handle_run_analysis: in-progress edit failed, continuing analysis",
+            file_unique_id=file_unique_id,
+            error=str(exc),
+        )
+
+    # ── Blocking vision call ─────────────────────────────────────────────────
+    result = await sticker_service.reanalyze(callback.message.bot, file_unique_id)
+
+    # ── Build result text + keyboard ─────────────────────────────────────────
+    if result.ok:
+        # Fetch the updated sticker record to show its new description
+        updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
+        desc_part = ""
+        set_name: str | None = None
+        if updated:
+            set_name = str(updated["set_name"]) if updated.get("set_name") else None
+            raw_desc = updated.get("visual_description")
+            if raw_desc:
+                desc_part = f"\n<b>Описание:</b> {html_lib.escape(str(raw_desc))}"
+        result_text = (
+            f"✅ Анализ обновлён{desc_part}" if lang == "ru" else f"✅ Analysis updated{desc_part}"
+        )
+        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=set_name)
+    else:
+        reason_key = result.reason or "empty"
+        reason_copy = _REANALYZE_REASON_COPY.get(reason_key, _REANALYZE_REASON_COPY["empty"])
+        reason_label = reason_copy.get(lang, reason_copy["ru"])
+        result_text = (
+            f"⚠️ Ошибка анализа: {reason_label}"
+            if lang == "ru"
+            else f"⚠️ Analysis error: {reason_label}"
+        )
+        keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
+
+    # ── Edit message with result (suppress "not modified" on double-tap) ─────
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)

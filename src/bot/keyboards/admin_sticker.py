@@ -208,6 +208,24 @@ def sticker_detail_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def sticker_reanalyze_retry_keyboard(
+    file_unique_id: str,
+    *,
+    lang: str,
+) -> InlineKeyboardMarkup:
+    """Single Retry button shown after a failed re-analysis."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔄 Повторить" if lang == "ru" else "🔄 Retry",
+                    callback_data=f"adm_stk_reanalyze:{lang}:{file_unique_id}",
+                ),
+            ],
+        ]
+    )
+
+
 def sticker_clear_confirm_keyboard(
     file_unique_id: str,
     *,
