@@ -73,6 +73,40 @@ def sticker_sets_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _status_badge(sticker: dict[str, object], lang: str, *, short: bool) -> str:
+    """Return a localized status string for sticker analysis state.
+
+    Three states: ✅ analyzed / ⏳ not analyzed / ⚠️ failed.
+    Derived from ``visual_description`` (NULL ⇒ not analyzed),
+    ``analysis_failed`` (bool), and ``analyzed_at`` (timestamp).
+
+    Args:
+        sticker: Row dict with at least ``visual_description`` and
+            ``analysis_failed`` keys.
+        lang: UI language — ``"ru"`` or ``"en"``.
+        short: ``True`` → concise form for char-limited keyboard buttons.
+            ``False`` → fuller form for detail-view lines.
+    """
+    failed = bool(sticker.get("analysis_failed", False))
+    visual = sticker.get("visual_description")
+
+    if failed:
+        if short:
+            return "⚠️ Ошибка" if lang == "ru" else "⚠️ Failed"
+        return "⚠️ Анализ провалился" if lang == "ru" else "⚠️ Analysis failed"
+    if not visual:
+        if short:
+            return "⏳ Не выполнен" if lang == "ru" else "⏳ Not analyzed"
+        return (
+            "⏳ Визуальный анализ не выполнен"
+            if lang == "ru"
+            else "⏳ Visual analysis not performed"
+        )
+    # Analyzed — return description (truncated for keyboard buttons)
+    desc = str(visual)
+    return desc[:25] if short else desc
+
+
 def sticker_set_detail_keyboard(
     stickers: list[dict[str, object]],
     *,
@@ -89,16 +123,8 @@ def sticker_set_detail_keyboard(
         fuid = str(s.get("file_unique_id", ""))
         emoji = str(s.get("emoji") or "")
         uses = s.get("total_uses", 0)
-        failed = s.get("analysis_failed", False)
-        visual = s.get("visual_description")
-
-        if failed:
-            label = f"{emoji} [FAILED] ({uses}x)"
-        elif not visual:
-            label = f"{emoji} ⏳ ожидает анализа ({uses}x)"
-        else:
-            desc = str(visual)[:25]
-            label = f"{emoji} {desc} ({uses}x)"
+        status = _status_badge(s, lang, short=True)
+        label = f"{emoji} {status} ({uses}x)"
         rows.append(
             [
                 InlineKeyboardButton(

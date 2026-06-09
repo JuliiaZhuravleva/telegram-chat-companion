@@ -20,6 +20,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_sticker import (
+    _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
     sticker_set_detail_keyboard,
@@ -355,7 +356,7 @@ async def handle_sticker_detail(
     if sticker["visual_description"]:
         lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
     else:
-        lines.append("<b>⏳ Визуальный анализ не выполнен</b>")
+        lines.append(f"<b>{html_lib.escape(_status_badge(sticker, lang, short=False))}</b>")
     if sticker["emotion"]:
         lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
     if sticker["character_or_meme"]:
@@ -367,8 +368,6 @@ async def handle_sticker_detail(
     lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
     lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
     lines.append(f"<b>Video:</b> {sticker['is_video']}")
-    if sticker["analysis_failed"]:
-        lines.append("<b>⚠️ Анализ провалился</b>")
     if sticker.get("admin_notes"):
         lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
     lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")

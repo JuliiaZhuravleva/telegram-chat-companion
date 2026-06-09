@@ -17,8 +17,10 @@ from src.bot.handlers.admin_sticker import (
     handle_sticker_detail,
 )
 from src.bot.keyboards.admin_sticker import (
+    _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
+    sticker_set_detail_keyboard,
 )
 
 # ---------------------------------------------------------------------------
@@ -561,3 +563,262 @@ class TestHandleRunAnalysis:
         await handle_run_analysis(cb, sticker_service, bot_config_repo)
 
         sticker_service.reanalyze.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _status_badge — unified status vocabulary helper
+# ---------------------------------------------------------------------------
+
+
+class TestStatusBadgeHelper:
+    """Tests for the unified _status_badge helper (A-1)."""
+
+    # ── ⏳ not-analyzed ─────────────────────────────────────────────────
+
+    def test_not_analyzed_short_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert "⏳" in badge
+        assert "Не выполнен" in badge
+
+    def test_not_analyzed_short_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "en", short=True)
+        assert "⏳" in badge
+        assert "Not analyzed" in badge
+
+    def test_not_analyzed_long_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=False)
+        assert "⏳" in badge
+        assert "Визуальный анализ не выполнен" in badge
+
+    def test_not_analyzed_long_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "en", short=False)
+        assert "⏳" in badge
+        assert "Visual analysis" in badge
+
+    # ── ⚠️ failed ─────────────────────────────────────────────────────
+
+    def test_failed_short_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert "⚠️" in badge
+        assert "Ошибка" in badge
+
+    def test_failed_short_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "en", short=True)
+        assert "⚠️" in badge
+        assert "Failed" in badge
+
+    def test_failed_long_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "ru", short=False)
+        assert "⚠️" in badge
+        assert "Анализ провалился" in badge
+
+    def test_failed_long_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "en", short=False)
+        assert "⚠️" in badge
+        assert "Analysis failed" in badge
+
+    # ── ✅ analyzed ───────────────────────────────────────────────────
+
+    def test_analyzed_short_truncates_at_25_chars(self) -> None:
+        long_desc = "a" * 30
+        sticker: dict[str, object] = {"visual_description": long_desc, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert badge == "a" * 25
+
+    def test_analyzed_short_no_truncation_under_25(self) -> None:
+        sticker: dict[str, object] = {"visual_description": "short", "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert badge == "short"
+
+    def test_analyzed_long_returns_full_description(self) -> None:
+        desc = "a happy cat with a big smile"
+        sticker: dict[str, object] = {"visual_description": desc, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=False)
+        assert badge == desc
+
+    # ── priority: failed takes precedence over not-analyzed ──────────
+
+    def test_failed_takes_priority_over_not_analyzed(self) -> None:
+        """analysis_failed=True + visual_description=None → ⚠️ (not ⏳)."""
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge_long = _status_badge(sticker, "ru", short=False)
+        assert "⚠️" in badge_long
+        assert "⏳" not in badge_long
+
+    # ── missing keys are treated as falsy ────────────────────────────
+
+    def test_missing_keys_treated_as_not_analyzed(self) -> None:
+        badge = _status_badge({}, "ru", short=True)
+        assert "⏳" in badge
+
+
+# ---------------------------------------------------------------------------
+# sticker_set_detail_keyboard — now uses _status_badge vocabulary
+# ---------------------------------------------------------------------------
+
+_STICKERS_FOR_KB: list[dict[str, object]] = [
+    {
+        "file_unique_id": "analyzed_id",
+        "emoji": "😀",
+        "total_uses": 5,
+        "analysis_failed": False,
+        "visual_description": "a happy cat face with big eyes",
+    },
+    {
+        "file_unique_id": "pending_id",
+        "emoji": "😢",
+        "total_uses": 3,
+        "analysis_failed": False,
+        "visual_description": None,
+    },
+    {
+        "file_unique_id": "failed_id",
+        "emoji": "😠",
+        "total_uses": 1,
+        "analysis_failed": True,
+        "visual_description": None,
+    },
+]
+
+
+class TestStickerSetDetailKeyboardStatusBadge:
+    """Keyboard uses _status_badge — one vocabulary for ✅/⏳/⚠️ (A-1)."""
+
+    def _labels(self, lang: str) -> list[str]:
+        kb = sticker_set_detail_keyboard(
+            _STICKERS_FOR_KB,
+            set_name="test_set",
+            lang=lang,
+            page=0,
+            total=3,
+        )
+        return [btn.text for row in kb.inline_keyboard for btn in row]
+
+    def test_analyzed_shows_truncated_description_ru(self) -> None:
+        labels = self._labels("ru")
+        assert any("a happy cat face with big" in label for label in labels)
+
+    def test_not_analyzed_shows_pending_badge_ru(self) -> None:
+        labels = self._labels("ru")
+        assert any("⏳" in label and "Не выполнен" in label for label in labels)
+
+    def test_not_analyzed_shows_pending_badge_en(self) -> None:
+        labels = self._labels("en")
+        assert any("⏳" in label and "Not analyzed" in label for label in labels)
+
+    def test_failed_shows_warning_badge_ru(self) -> None:
+        labels = self._labels("ru")
+        assert any("⚠️" in label and "Ошибка" in label for label in labels)
+
+    def test_failed_shows_warning_badge_en(self) -> None:
+        labels = self._labels("en")
+        assert any("⚠️" in label and "Failed" in label for label in labels)
+
+    def test_old_failed_bracket_label_not_present(self) -> None:
+        """Regression: [FAILED] label must no longer appear."""
+        for lang in ("ru", "en"):
+            labels = self._labels(lang)
+            assert not any("[FAILED]" in label for label in labels)
+
+    def test_old_awaits_label_not_present(self) -> None:
+        """Regression: 'ожидает анализа' must no longer appear (replaced by ⏳ badge)."""
+        labels = self._labels("ru")
+        assert not any("ожидает анализа" in label for label in labels)
+
+
+# ---------------------------------------------------------------------------
+# handle_sticker_detail — status badge used for ⏳ / ⚠️ display (A-1)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStickerDetailStatusBadge:
+    """Detail view uses _status_badge for the not-analyzed and failed cases."""
+
+    @pytest.mark.asyncio()
+    async def test_not_analyzed_shows_pending_badge_ru(self) -> None:
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": False}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⏳" in text
+        assert "Визуальный анализ не выполнен" in text
+
+    @pytest.mark.asyncio()
+    async def test_not_analyzed_shows_pending_badge_en(self) -> None:
+        cb = _make_callback("adm_stk_view:en:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": False}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⏳" in text
+        assert "Visual analysis" in text
+
+    @pytest.mark.asyncio()
+    async def test_failed_shows_warning_badge_ru(self) -> None:
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⚠️" in text
+        assert "Анализ провалился" in text
+
+    @pytest.mark.asyncio()
+    async def test_failed_shows_warning_badge_en(self) -> None:
+        cb = _make_callback("adm_stk_view:en:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⚠️" in text
+        assert "Analysis failed" in text
+
+    @pytest.mark.asyncio()
+    async def test_failed_does_not_also_show_pending_badge(self) -> None:
+        """Regression: failed state must show only ⚠️, not both ⚠️ and ⏳."""
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⏳" not in text
+
+    @pytest.mark.asyncio()
+    async def test_analyzed_shows_description_not_badge(self) -> None:
+        """Analyzed sticker: description shown inline, no ⏳ or ⚠️."""
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        # _SAMPLE_STICKER has visual_description="happy cat"
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "Описание" in text
+        assert "happy cat" in text
+        assert "⏳" not in text
+        assert "⚠️" not in text
