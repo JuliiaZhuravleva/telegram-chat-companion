@@ -105,3 +105,8 @@ tests/manual/
 
 # Test screenshots
 tests/manual/screenshots/
+
+# Plan-orchestration raw payloads (raw `claude -p` output may contain auth tokens — TD-021)
+# Keep the *.execution.md envelopes and *.log.jsonl audit trails tracked; ignore only raw dumps.
+*.execution.md.raw/
+docs/plans/.draft/
