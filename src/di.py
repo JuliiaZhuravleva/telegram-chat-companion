@@ -20,6 +20,7 @@ from src.database.repositories.activity import ActivityRepository
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.response_log import ResponseLogRepository
@@ -104,6 +105,10 @@ class RepositoryProvider(Provider):
     @provide
     def admin_repo(self, pool: asyncpg.Pool) -> AdminRepository:
         return AdminRepository(pool)
+
+    @provide
+    def knowledge_repo(self, pool: asyncpg.Pool) -> KnowledgeRepository:
+        return KnowledgeRepository(pool)
 
 
 class ServiceProvider(Provider):
