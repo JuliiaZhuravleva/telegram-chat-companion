@@ -7,9 +7,9 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.admin_kb import kb_view_keyboard
@@ -335,22 +335,91 @@ async def handle_remember(
 
 
 async def _resolve_author_label(
-    message: Message, chat_id: int, user_id: int | None, lang: str, cache: dict[int, str]
+    bot: Bot | None, chat_id: int, user_id: int | None, lang: str, cache: dict[int, str]
 ) -> str:
     if user_id is None:
         return "участник" if lang == "ru" else "member"
     if user_id in cache:
         return cache[user_id]
     label = "участник" if lang == "ru" else "member"
-    if message.bot:
+    if bot:
         try:
-            member = await message.bot.get_chat_member(chat_id, user_id)
+            member = await bot.get_chat_member(chat_id, user_id)
             user = member.user
             label = f"@{user.username}" if user.username else (user.first_name or label)
         except Exception:
             pass
     cache[user_id] = label
     return label
+
+
+def _slice_page(
+    facts: list[dict[str, Any]], page: int, page_size: int
+) -> tuple[list[dict[str, Any]], int]:
+    """Slice the (already-fetched, in-memory) active-facts list for a page.
+
+    Repository-level LIMIT/OFFSET isn't needed at Phase-1 volumes (a handful
+    of manually-entered facts per chat, per ADR-0003's budget rationale).
+    """
+    total_pages = max(1, (len(facts) + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    return facts[start : start + page_size], total_pages
+
+
+async def _render_kb_dm(
+    bot: Bot | None, chat_id: int, facts: list[dict[str, Any]], lang: str, page: int
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    page_facts, total_pages = _slice_page(facts, page, _KB_PAGE_SIZE_DM)
+
+    title = "📚 **База знаний чата**" if lang == "ru" else "📚 **Chat Knowledge Base**"
+    lines = [title, ""]
+    cache: dict[int, str] = {}
+    current_topic: str | None = None
+    for fact in page_facts:
+        topic = fact.get("topic") or _KB_TOPIC_GENERAL[lang]
+        if topic != current_topic:
+            lines.append(f"**{topic}**")
+            current_topic = topic
+        author = await _resolve_author_label(bot, chat_id, fact.get("source_user_id"), lang, cache)
+        date_str = _format_kb_date(fact.get("updated_at"))
+        updated_label = "обновлено" if lang == "ru" else "updated"
+        lines.append(f"• {fact['subject']} — {fact['predicate']}: {fact['value']}")
+        lines.append(f"  _{updated_label} {date_str}, {author}_")
+
+    lines.append("")
+    if total_pages > 1:
+        lines.append(f"◀️ {page + 1}/{total_pages} ▶️")
+
+    html = markdown_to_html("\n".join(lines).strip())
+    keyboard = (
+        kb_view_keyboard(lang, page=page, total_pages=total_pages) if total_pages > 1 else None
+    )
+    return html, keyboard
+
+
+def _render_kb_group(
+    facts: list[dict[str, Any]], lang: str, page: int
+) -> tuple[str, InlineKeyboardMarkup | None]:
+    page_facts, total_pages = _slice_page(facts, page, _KB_PAGE_SIZE_GROUP)
+    total = len(facts)
+
+    header = (
+        f"📚 База знаний ({total} факт(а/ов)):"
+        if lang == "ru"
+        else f"📚 Knowledge base ({total} facts):"
+    )
+    lines = [header]
+    for fact in page_facts:
+        lines.append(f"• {fact['subject']} — {fact['value']}")
+
+    if total_pages > 1:
+        lines.append(f"◀️ {page + 1}/{total_pages} ▶️")
+
+    keyboard = (
+        kb_view_keyboard(lang, page=page, total_pages=total_pages) if total_pages > 1 else None
+    )
+    return "\n".join(lines), keyboard
 
 
 @router.message(Command("kb"), F.chat.type == "private")
@@ -367,31 +436,7 @@ async def handle_kb_view_dm(
         await message.answer(_KB_EMPTY_DM[lang])
         return
 
-    page_facts = facts[:_KB_PAGE_SIZE_DM]
-    total_pages = max(1, (len(facts) + _KB_PAGE_SIZE_DM - 1) // _KB_PAGE_SIZE_DM)
-
-    title = "📚 **База знаний чата**" if lang == "ru" else "📚 **Chat Knowledge Base**"
-    lines = [title, ""]
-    cache: dict[int, str] = {}
-    current_topic: str | None = None
-    for fact in page_facts:
-        topic = fact.get("topic") or _KB_TOPIC_GENERAL[lang]
-        if topic != current_topic:
-            lines.append(f"**{topic}**")
-            current_topic = topic
-        author = await _resolve_author_label(
-            message, message.chat.id, fact.get("source_user_id"), lang, cache
-        )
-        date_str = _format_kb_date(fact.get("updated_at"))
-        updated_label = "обновлено" if lang == "ru" else "updated"
-        lines.append(f"• {fact['subject']} — {fact['predicate']}: {fact['value']}")
-        lines.append(f"  _{updated_label} {date_str}, {author}_")
-
-    lines.append("")
-    lines.append(f"◀️ 1/{total_pages} ▶️" if total_pages > 1 else "")
-
-    html = markdown_to_html("\n".join(lines).strip())
-    keyboard = kb_view_keyboard(lang, page=0, total_pages=total_pages) if total_pages > 1 else None
+    html, keyboard = await _render_kb_dm(message.bot, message.chat.id, facts, lang, 0)
     await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
 
 
@@ -409,21 +454,43 @@ async def handle_kb_view_group(
         await message.answer(_KB_EMPTY_GROUP[lang])
         return
 
-    page_facts = facts[:_KB_PAGE_SIZE_GROUP]
-    total = len(facts)
+    text, keyboard = _render_kb_group(facts, lang, 0)
+    await message.answer(text, reply_markup=keyboard)
 
-    header = (
-        f"📚 База знаний ({total} факт(а/ов)):"
-        if lang == "ru"
-        else f"📚 Knowledge base ({total} facts):"
-    )
-    lines = [header]
-    for fact in page_facts:
-        lines.append(f"• {fact['subject']} — {fact['value']}")
 
-    total_pages = max(1, (total + _KB_PAGE_SIZE_GROUP - 1) // _KB_PAGE_SIZE_GROUP)
-    if total_pages > 1:
-        lines.append(f"◀️ 1/{total_pages} ▶️")
+@router.callback_query(F.data.startswith("kb_view:"))
+async def handle_kb_view_page(
+    callback: CallbackQuery,
+    knowledge_repo: FromDishka[KnowledgeRepository],
+) -> None:
+    """Paginate an existing ``/kb`` view in place (public — no admin gating).
 
-    keyboard = kb_view_keyboard(lang, page=0, total_pages=total_pages) if total_pages > 1 else None
-    await message.answer("\n".join(lines), reply_markup=keyboard)
+    Re-fetches and re-slices the same way the initial command did; renders
+    group vs. DM the same way based on the callback's own chat type (the
+    message being paginated always lives in the chat it was first sent in).
+    """
+    if not isinstance(callback.message, Message):
+        await callback.answer()
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = parts[1] if len(parts) > 1 and parts[1] in ("ru", "en") else "ru"
+    try:
+        page = int(parts[2]) if len(parts) > 2 else 0
+    except ValueError:
+        page = 0
+
+    chat_id = callback.message.chat.id
+    facts = await knowledge_repo.get_active_facts(chat_id)
+    if not facts:
+        await callback.answer()
+        return
+
+    if callback.message.chat.type == "private":
+        html, keyboard = await _render_kb_dm(callback.bot, chat_id, facts, lang, page)
+        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=keyboard)
+    else:
+        text, keyboard = _render_kb_group(facts, lang, page)
+        await callback.message.edit_text(text, reply_markup=keyboard)
+
+    await callback.answer()

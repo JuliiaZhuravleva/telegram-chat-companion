@@ -6,10 +6,12 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.types import Message
 
 from src.bot.handlers.commands import (
     handle_kb_view_dm,
     handle_kb_view_group,
+    handle_kb_view_page,
     handle_remember,
 )
 
@@ -270,3 +272,74 @@ class TestHandleKbView:
         html = msg.answer.call_args[0][0]
         assert "event:лето" in html
         assert "Кафе Луна" in html
+
+
+def _make_facts(count: int) -> list[dict[str, object]]:
+    return [
+        {
+            "subject": f"subj{i}",
+            "predicate": "факт",
+            "value": f"val{i}",
+            "topic": None,
+            "source_user_id": None,
+            "updated_at": None,
+        }
+        for i in range(count)
+    ]
+
+
+def _make_kb_view_callback(data: str, chat_type: str = "group", chat_id: int = 1) -> MagicMock:
+    callback = MagicMock()
+    callback.data = data
+    callback.message = MagicMock(spec=Message)
+    callback.message.chat = MagicMock()
+    callback.message.chat.type = chat_type
+    callback.message.chat.id = chat_id
+    callback.message.edit_text = AsyncMock()
+    callback.answer = AsyncMock()
+    callback.bot = None
+    return callback
+
+
+class TestHandleKbViewPage:
+    """Regression coverage for the previously-dead ``kb_view:`` pagination callback."""
+
+    @pytest.mark.asyncio
+    async def test_group_second_page_shows_remaining_facts(self) -> None:
+        callback = _make_kb_view_callback("kb_view:ru:1", chat_type="group")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(10))  # 8/page -> page 1 has 2
+
+        await handle_kb_view_page(callback, repo)
+
+        callback.message.edit_text.assert_awaited_once()
+        text = callback.message.edit_text.call_args[0][0]
+        assert "subj8" in text
+        assert "subj0" not in text
+        assert "2/2" in text
+
+    @pytest.mark.asyncio
+    async def test_dm_second_page_renders_html(self) -> None:
+        callback = _make_kb_view_callback("kb_view:ru:1", chat_type="private")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(7))  # 5/page -> page 1 has 2
+
+        await handle_kb_view_page(callback, repo)
+
+        callback.message.edit_text.assert_awaited_once()
+        kwargs = callback.message.edit_text.call_args.kwargs
+        assert kwargs.get("parse_mode") == "HTML"
+        text = callback.message.edit_text.call_args[0][0]
+        assert "subj5" in text
+        assert "subj0" not in text
+
+    @pytest.mark.asyncio
+    async def test_answers_without_edit_when_no_facts(self) -> None:
+        callback = _make_kb_view_callback("kb_view:ru:0")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=[])
+
+        await handle_kb_view_page(callback, repo)
+
+        callback.message.edit_text.assert_not_awaited()
+        callback.answer.assert_awaited_once()
