@@ -1,6 +1,10 @@
-"""Command handlers: /start, /help, /summary."""
+"""Command handlers: /start, /help, /summary, /remember, /kb."""
 
 from __future__ import annotations
+
+import json
+from datetime import datetime
+from typing import Any
 
 import structlog
 from aiogram import F, Router
@@ -8,13 +12,88 @@ from aiogram.filters import Command
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.keyboards.admin_kb import kb_view_keyboard
 from src.bot.keyboards.help import help_keyboard
+from src.database.repositories.bot_config import BotConfigRepository
+from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.knowledge import KnowledgeRepository
 from src.models.chat_config import ChatConfig
+from src.services.ai.router import AIRouter
 from src.services.modules.summary import SummaryService
 from src.services.text.formatter import markdown_to_html
+from src.utils import parse_admin_ids
 
 router = Router(name="commands")
 logger = structlog.get_logger(__name__)
+
+_KB_PREDICATE_MANUAL = "факт"
+_KB_PAGE_SIZE_DM = 5
+_KB_PAGE_SIZE_GROUP = 8
+
+_REMEMBER_NO_REPLY = {
+    "ru": "↩️ Используйте /remember в ответ на сообщение, которое нужно сохранить.",
+    "en": "↩️ Use /remember as a reply to the message you want to save.",
+}
+_REMEMBER_MALFORMED = {
+    "ru": "🤔 Не смог распознать факт. Формат: `/remember тема: значение` (в ответ на сообщение).",
+    "en": "🤔 Couldn't parse that. Format: `/remember topic: value` (as a reply to a message).",
+}
+_REMEMBER_SUCCESS = {
+    "ru": "✅ Сохранено: **{subject}** — {value}",
+    "en": "✅ Saved: **{subject}** — {value}",
+}
+_REMEMBER_KB_DISABLED = {
+    "ru": "📚 База знаний отключена для этого чата. Включите её в админ-панели.",
+    "en": "📚 The knowledge base is disabled for this chat. Enable it from the admin panel.",
+}
+_REMEMBER_NOT_ALLOWED = {
+    "ru": "🚫 Сохранять факты могут только организаторы или админ бота.",
+    "en": "🚫 Only organizers or the bot admin can save facts.",
+}
+
+_KB_EMPTY_DM = {
+    "ru": "📚 База знаний пока пуста. Организаторы могут добавить факты через /remember или из админ-панели.",
+    "en": "📚 The knowledge base is empty. Organizers can add facts via /remember or from the admin panel.",
+}
+_KB_EMPTY_GROUP = {
+    "ru": "📚 База знаний этого чата пока пуста.",
+    "en": "📚 This chat's knowledge base is empty.",
+}
+_KB_TOPIC_GENERAL = {"ru": "Общее", "en": "General"}
+
+
+async def _is_organizer_or_admin(
+    user_id: int | None,
+    chat_id: int,
+    bot_config_repo: BotConfigRepository,
+    chat_settings_repo: ChatSettingsRepository,
+) -> bool:
+    """Manual /remember gate: bot admin (rank 4) or chat KB organizer (rank 3)."""
+    if user_id is None:
+        return False
+    admin_ids_raw = await bot_config_repo.get("admin_ids")
+    if user_id in parse_admin_ids(admin_ids_raw):
+        return True
+
+    settings = await chat_settings_repo.get(chat_id)
+    if not settings:
+        return False
+    raw = settings.get("kb_organizer_ids")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            raw = []
+    if not isinstance(raw, list):
+        return False
+    return user_id in {int(v) for v in raw}
+
+
+def _format_kb_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.strftime("%d.%m.%Y")
+    return "?"
+
 
 # --- i18n ---
 
@@ -167,3 +246,184 @@ async def handle_summary_dm(message: Message, chat_config: ChatConfig) -> None:
     """Handle /summary in a private (DM) chat — inform user it's group-only."""
     lang = chat_config.language if chat_config.language in _SUMMARY_DM_TEXT else "ru"
     await message.answer(_SUMMARY_DM_TEXT[lang])
+
+
+# ---------------------------------------------------------------------------
+# /remember — manual Knowledge Base fact save (A4, ADR-0003, Phase 1: manual MVP)
+# ---------------------------------------------------------------------------
+
+
+@router.message(Command("remember"))
+async def handle_remember(
+    message: Message,
+    chat_config: ChatConfig,
+    knowledge_repo: FromDishka[KnowledgeRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    ai_router: FromDishka[AIRouter],
+) -> None:
+    """Manually save a fact via reply: ``/remember <subject>: <value>``.
+
+    Phase 1 has no extraction/reconciliation (PH2 scope) — this inserts
+    directly as an ``active`` fact (ADR-0003's Phase-1 scope note).
+    """
+    lang = chat_config.language if chat_config.language in _REMEMBER_MALFORMED else "ru"
+
+    if not message.reply_to_message:
+        await message.reply(_REMEMBER_NO_REPLY[lang])
+        return
+
+    if not chat_config.kb_enabled:
+        await message.reply(_REMEMBER_KB_DISABLED[lang])
+        return
+
+    user_id = message.from_user.id if message.from_user else None
+    admin_ids_raw = await bot_config_repo.get("admin_ids")
+    is_bot_admin = user_id is not None and user_id in parse_admin_ids(admin_ids_raw)
+
+    if not is_bot_admin and not await _is_organizer_or_admin(
+        user_id, message.chat.id, bot_config_repo, chat_settings_repo
+    ):
+        await message.reply(_REMEMBER_NOT_ALLOWED[lang])
+        return
+
+    args = message.text or ""
+    args = args.split(maxsplit=1)[1] if " " in args else ""
+    if ":" not in args:
+        await message.reply(markdown_to_html(_REMEMBER_MALFORMED[lang]), parse_mode="HTML")
+        return
+
+    subject, _, value = args.partition(":")
+    subject = subject.strip()
+    value = value.strip()
+    if not subject or not value:
+        await message.reply(markdown_to_html(_REMEMBER_MALFORMED[lang]), parse_mode="HTML")
+        return
+
+    fact_text = f"{subject}: {value}"
+
+    embedding: list[float] | None = None
+    try:
+        embedding_result = await ai_router.generate_embedding(fact_text)
+        embedding = embedding_result.embedding
+    except Exception:
+        logger.warning("kb_remember_embedding_failed", chat_id=message.chat.id)
+
+    authority_level = 4 if is_bot_admin else 3
+
+    await knowledge_repo.upsert_fact(
+        chat_id=message.chat.id,
+        subject=subject,
+        predicate=_KB_PREDICATE_MANUAL,
+        value=value,
+        fact_text=fact_text,
+        source="manual",
+        embedding=embedding,
+        source_message_id=message.reply_to_message.message_id,
+        source_user_id=user_id,
+        authority_level=authority_level,
+        confidence=None,
+    )
+
+    text = _REMEMBER_SUCCESS[lang].format(subject=subject, value=value)
+    await message.reply(markdown_to_html(text), parse_mode="HTML")
+
+
+# ---------------------------------------------------------------------------
+# /kb — view active Knowledge Base facts (public, group=terse / DM=sectioned)
+# ---------------------------------------------------------------------------
+
+
+async def _resolve_author_label(
+    message: Message, chat_id: int, user_id: int | None, lang: str, cache: dict[int, str]
+) -> str:
+    if user_id is None:
+        return "участник" if lang == "ru" else "member"
+    if user_id in cache:
+        return cache[user_id]
+    label = "участник" if lang == "ru" else "member"
+    if message.bot:
+        try:
+            member = await message.bot.get_chat_member(chat_id, user_id)
+            user = member.user
+            label = f"@{user.username}" if user.username else (user.first_name or label)
+        except Exception:
+            pass
+    cache[user_id] = label
+    return label
+
+
+@router.message(Command("kb"), F.chat.type == "private")
+async def handle_kb_view_dm(
+    message: Message,
+    chat_config: ChatConfig,
+    knowledge_repo: FromDishka[KnowledgeRepository],
+) -> None:
+    """``/kb`` in DM: bold-title, topic-sectioned, paginated (5/page)."""
+    lang = chat_config.language if chat_config.language in _KB_EMPTY_DM else "ru"
+    facts = await knowledge_repo.get_active_facts(message.chat.id)
+
+    if not facts:
+        await message.answer(_KB_EMPTY_DM[lang])
+        return
+
+    page_facts = facts[:_KB_PAGE_SIZE_DM]
+    total_pages = max(1, (len(facts) + _KB_PAGE_SIZE_DM - 1) // _KB_PAGE_SIZE_DM)
+
+    title = "📚 **База знаний чата**" if lang == "ru" else "📚 **Chat Knowledge Base**"
+    lines = [title, ""]
+    cache: dict[int, str] = {}
+    current_topic: str | None = None
+    for fact in page_facts:
+        topic = fact.get("topic") or _KB_TOPIC_GENERAL[lang]
+        if topic != current_topic:
+            lines.append(f"**{topic}**")
+            current_topic = topic
+        author = await _resolve_author_label(
+            message, message.chat.id, fact.get("source_user_id"), lang, cache
+        )
+        date_str = _format_kb_date(fact.get("updated_at"))
+        updated_label = "обновлено" if lang == "ru" else "updated"
+        lines.append(f"• {fact['subject']} — {fact['predicate']}: {fact['value']}")
+        lines.append(f"  _{updated_label} {date_str}, {author}_")
+
+    lines.append("")
+    lines.append(f"◀️ 1/{total_pages} ▶️" if total_pages > 1 else "")
+
+    html = markdown_to_html("\n".join(lines).strip())
+    keyboard = kb_view_keyboard(lang, page=0, total_pages=total_pages) if total_pages > 1 else None
+    await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.message(Command("kb"), F.chat.type.in_({"group", "supergroup"}))
+async def handle_kb_view_group(
+    message: Message,
+    chat_config: ChatConfig,
+    knowledge_repo: FromDishka[KnowledgeRepository],
+) -> None:
+    """``/kb`` in group: terse flat list, no provenance, paginated (8/page)."""
+    lang = chat_config.language if chat_config.language in _KB_EMPTY_GROUP else "ru"
+    facts = await knowledge_repo.get_active_facts(message.chat.id)
+
+    if not facts:
+        await message.answer(_KB_EMPTY_GROUP[lang])
+        return
+
+    page_facts = facts[:_KB_PAGE_SIZE_GROUP]
+    total = len(facts)
+
+    header = (
+        f"📚 База знаний ({total} факт(а/ов)):"
+        if lang == "ru"
+        else f"📚 Knowledge base ({total} facts):"
+    )
+    lines = [header]
+    for fact in page_facts:
+        lines.append(f"• {fact['subject']} — {fact['value']}")
+
+    total_pages = max(1, (total + _KB_PAGE_SIZE_GROUP - 1) // _KB_PAGE_SIZE_GROUP)
+    if total_pages > 1:
+        lines.append(f"◀️ 1/{total_pages} ▶️")
+
+    keyboard = kb_view_keyboard(lang, page=0, total_pages=total_pages) if total_pages > 1 else None
+    await message.answer("\n".join(lines), reply_markup=keyboard)

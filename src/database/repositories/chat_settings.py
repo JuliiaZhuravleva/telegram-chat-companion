@@ -30,6 +30,7 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "rules_mode",
         "link_comments_enabled",
         "kb_enabled",
+        "kb_organizer_ids",
         "last_activity_at",
     }
 )
