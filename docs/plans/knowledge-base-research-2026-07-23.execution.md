@@ -213,13 +213,7 @@ review_gate:
   approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.knowledge-base-research-2026-07-23-wt/docs/plans/knowledge-base-research-2026-07-23.execution.md --resume
   reject_action: /plan-fixes docs/plans/knowledge-base-research-2026-07-23.md --revise /Users/julia/my-projects/telegram-chat-companion.knowledge-base-research-2026-07-23-wt/docs/plans/knowledge-base-research-2026-07-23.execution.md
 safe_to_replay_from: null
-clarifying_questions:
-- 'SCOPE (headless default — confirm): I scoped executable work to Phase 1 (manual KB MVP: G1-G2 design/ADR + A1-A6). Phases 2-4 are BLOCKED roadmap epics (PH2/PH3/PH4), deliberately coarse, to be decomposed in a later /plan-fixes pass. Execute Phase 1 now and re-plan Phase 2 separately once it ships — or expand this envelope to fully decompose Phase 2 now?'
-- 'MIGRATION NUMBER (resolved from evidence — confirm): research doc section 3.1 says migration 013, but ADR-0002 (accepted) reserves 013 for 013_spend_limit_per_chat.py and the last on-disk migration is 012. Item A1 therefore targets migration 014. Confirm 014, and that ADR-0002''s 013 lands independently (no Alembic version-graph collision).'
-- 'KB TOKEN BUDGET (design decision — gates A5): ADR-0001 sets CONTEXT_BUDGET_TOKENS=1200 (HISTORY 800 + RAG 400, budgeted independently, zero headroom). G1''s ADR-0001 addendum must carve a KB slot. Give KB its own additive budget (raises total input cost) or share/steal from the RAG allocation (cheaper, less RAG context)?'
-- 'EXTRACTOR MODELS (verify before PH2): section 3.3 names gpt-5-nano / gemini-3-flash. These must be validated against the AIRouter provider matrix before Phase 2 — wrong names cause silent premium-model fallback that breaks the low-cost extraction assumption. Are these the intended registered providers?'
-- 'ORGANIZER ROLE + /kb VISIBILITY + i18n (gates G2/A4 copy): (a) Is "организатор" the final user-facing term (vs куратор / ответственный / ведущий)? Designer needs it locked before writing copy. (b) Can non-organizer members view KB via /kb, or is it organizer/admin-only? (c) Bilingual ru/en (_L dict) or ru-only for Phase 1?'
-- 'RELEVANCE DEFAULTS (headless assumptions — confirm): I consulted architect, backend-dev, frontend-dev, qa, designer and SKIPPED accessibility (no web-UI a11y surface for a Telegram-bot backend feature). Also A4 (commands + admin UI) was routed to frontend-dev even though it sits atop A2''s repository. Confirm the accessibility skip and the frontend/backend split.'
+clarifying_questions: []
 ---
 
 
@@ -336,9 +330,14 @@ Read-only `claude -p` consults; each specialist's scratch-file writes to `~/.cla
 
 **Conflicts:** migration number (architect vs backend-dev) → resolved to 014 from ADR-0002 + on-disk evidence. **Agreements:** reconciler is highest-risk; phase-gated dispatch; reuse `sanitize_prompt_content`; callback_data 64B discipline.
 
-## Open questions
+## Decisions (Julia, 2026-07-24 — resolves all 6 clarifying questions)
 
-See frontmatter `clarifying_questions[]` (6). Top blockers: (1) scope — Phase 1 only vs. expand; (2) confirm migration 014; (3) KB token-budget policy; (5) organizer term + /kb visibility + i18n.
+1. **Scope: Phase 1 only.** G1–G2 + A1–A6 execute now; PH2/PH3/PH4 stay blocked roadmap epics, decomposed via a follow-up `/plan-fixes` after Phase 1 ships.
+2. **Migration 014 confirmed.** ADR-0002's 013 lands independently.
+3. **KB token budget: additive.** G1's ADR-0001 addendum carves a **separate KB slot of ~300 tokens** (total context budget 1200 → ~1500). RAG allocation (400) untouched.
+4. **Extractor models (Phase 2): verified.** Registered cheap ids in `capabilities.py` are `gpt-5-nano` / `gemini-3-flash-preview` — PH2 task config must use these exact ids (NB: `-preview` suffix on the Gemini model).
+5. **Copy: term = «организатор»; `/kb` visible to all chat members; bilingual ru+en** (`_L` dict pattern, consistent with existing admin i18n).
+6. **Relevance defaults confirmed:** accessibility skip stands; A4 frontend-dev / A2 backend-dev split stands.
 
 ## Approval workflow
 
