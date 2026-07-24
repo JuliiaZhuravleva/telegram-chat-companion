@@ -59,6 +59,13 @@ class TestLoadYamlConfig:
         config = load_yaml_config()
         assert config["bot"]["trigger_words"] == ["bot", "бот"]
 
+    def test_knowledge_base_module_disabled_by_default(self):
+        """kb_enabled (A3, ADR-0003) is opt-in -- the module YAML default is off."""
+        config = load_yaml_config()
+        kb_module = config["modules"]["knowledge_base"]
+        assert kb_module["enabled"] is False
+        assert "embeddings" in kb_module["requires"]
+
     def test_default_config_uses_no_expensive_models(self):
         """Cost policy: default.yml must only use cheap models."""
         config = load_yaml_config()

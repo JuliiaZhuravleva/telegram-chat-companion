@@ -53,3 +53,6 @@ class ChatConfig:
 
     # Relevancy gate (filters random responses for natural participation)
     relevancy_gate_enabled: bool = True
+
+    # Knowledge Base (opt-in per chat, ADR-0003)
+    kb_enabled: bool = False

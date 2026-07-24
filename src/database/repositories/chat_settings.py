@@ -29,6 +29,7 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "rules_enabled",
         "rules_mode",
         "link_comments_enabled",
+        "kb_enabled",
         "last_activity_at",
     }
 )
