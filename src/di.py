@@ -184,6 +184,7 @@ class ServiceProvider(Provider):
         rag_service: RAGMemoryService,
         link_service: LinkExtractorService,
         sticker_service: StickerResponderService,
+        knowledge_repo: KnowledgeRepository,
     ) -> TextProcessingPipeline:
         return TextProcessingPipeline(
             ai_router=ai_router,
@@ -193,6 +194,7 @@ class ServiceProvider(Provider):
             rag_service=rag_service,
             link_service=link_service,
             sticker_service=sticker_service,
+            knowledge_repo=knowledge_repo,
         )
 
     @provide

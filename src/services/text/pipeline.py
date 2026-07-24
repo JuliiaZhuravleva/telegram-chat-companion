@@ -20,6 +20,7 @@ from typing import Any
 
 import structlog
 
+from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.models.chat_config import ChatConfig
@@ -44,6 +45,11 @@ logger = structlog.get_logger(__name__)
 
 # Base max tokens for text generation
 _BASE_MAX_TOKENS = 2000
+
+# Max KB facts to retrieve per turn (ADR-0003 Part 2: KB_BUDGET_TOKENS=300
+# fits roughly 4-5 short facts; over-fetching just gets trimmed downstream by
+# trim_facts_to_budget(), so this is a DB round-trip cost cap, not a budget).
+_KB_SEARCH_LIMIT = 5
 
 
 @dataclass
@@ -82,6 +88,7 @@ class TextProcessingPipeline:
         rag_service: RAGMemoryService | None = None,
         link_service: LinkExtractorService | None = None,
         sticker_service: StickerResponderService | None = None,
+        knowledge_repo: KnowledgeRepository | None = None,
     ) -> None:
         self._ai = ai_router
         self._abuse = abuse_checker
@@ -90,6 +97,7 @@ class TextProcessingPipeline:
         self._rag = rag_service
         self._links = link_service
         self._sticker = sticker_service
+        self._knowledge = knowledge_repo
 
     async def process(
         self,
@@ -140,6 +148,10 @@ class TextProcessingPipeline:
         if config.rag_enabled and self._rag:
             rag_task = asyncio.ensure_future(self._rag.search(chat_id, message_text))
 
+        kb_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        if config.kb_enabled and self._knowledge:
+            kb_task = asyncio.ensure_future(self._safe_get_kb_facts(chat_id, message_text))
+
         link_task: asyncio.Task[str | None] | None = None
         if config.link_comments_enabled and self._links:
             link_task = asyncio.ensure_future(self._safe_extract_links(message_text))
@@ -153,6 +165,10 @@ class TextProcessingPipeline:
         rag_memories: list[dict[str, Any]] = []
         if rag_task:
             rag_memories = await rag_task
+
+        kb_facts: list[dict[str, Any]] = []
+        if kb_task:
+            kb_facts = await kb_task
 
         link_context_str: str | None = None
         if link_task:
@@ -178,6 +194,7 @@ class TextProcessingPipeline:
             jailbreak_hint=abuse_result.jailbreak_hint,
             recent_messages=history,
             message_lengths=message_lengths,
+            kb_facts=kb_facts,
             rag_memories=rag_memories,
             reply_author=reply_author,
             reply_text=reply_text,
@@ -337,6 +354,29 @@ class TextProcessingPipeline:
         except Exception:
             logger.warning("Sticker candidate search failed")
             return None
+
+    async def _safe_get_kb_facts(self, chat_id: int, message_text: str) -> list[dict[str, Any]]:
+        """Retrieve KB facts relevant to the current message (non-blocking on failure).
+
+        `AIRouter.generate_embedding()` self-logs cost (router-level
+        `ensure_future(self._log_usage(...))`) so no separate `log_usage`
+        call is needed here (cross-cutting constraint applies to
+        `generate_text`, which does not self-log -- embeddings already do).
+        """
+        if not self._knowledge:
+            return []
+        try:
+            embedding_result = await self._ai.generate_embedding(message_text)
+        except Exception:
+            logger.warning("KB embedding generation failed", chat_id=chat_id)
+            return []
+        try:
+            return await self._knowledge.search_by_similarity(
+                chat_id, embedding_result.embedding, limit=_KB_SEARCH_LIMIT
+            )
+        except Exception:
+            logger.warning("KB fact search failed", chat_id=chat_id)
+            return []
 
     async def _safe_extract_links(self, text: str) -> str | None:
         """Extract link context (non-blocking on failure)."""
