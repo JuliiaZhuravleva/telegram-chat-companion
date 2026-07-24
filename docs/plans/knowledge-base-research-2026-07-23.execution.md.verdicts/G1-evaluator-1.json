@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-07-24T15:04:04Z",
+  "role": "evaluator",
+  "item_id": "G1",
+  "verdict": "PASS",
+  "evidence": "Read ADR-0003 in full; independently grep-verified all three evidence claims: (1) prompt_builder.py has zero BUDGET/trim matches confirming the pre-existing ADR-0001 gap, (2) database/repositories/ contains stickers.py+memory.py while modules/sticker/ has no repo file, confirming the repository-location correction, (3) alembic/versions/ newest file is 012, and ADR-0002 text reserves 013, confirming the 014 migration-number correction. ADR content (schema DDL, bi-temporal lifecycle, supersession-in-transaction spec, ADR-0001 addendum with additive KB_BUDGET_TOKENS=300 matching Julia's decision #3) matches the item's described scope; item is docs-only and no application code was touched.",
+  "regression_risk": "low",
+  "notes": "Gap-flagging for A5 (implement KB's own trim, open separate tech-debt item rather than absorbing history/RAG trim gap) is clearly scoped and does not expand G1 itself. No issues found."
+}

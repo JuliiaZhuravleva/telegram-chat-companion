@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-07-24T15:03:09Z",
+  "role": "specialist",
+  "item_id": "G1",
+  "verdict": "PASS",
+  "cost_usd": 0.88,
+  "notes": "Wrote ADR-0003 (chat_facts schema + MemStrata bi-temporal lifecycle) and folded in the ADR-0001 KB token-budget addendum (KB_BUDGET_TOKENS=300, additive per Julia decision #3) into the same doc since both concern prompt_builder.py's budget module. Two evidence-based corrections beyond the source plan: (1) recorded the 013(ADR-0002 spend-limit)->014(chat_facts) migration-number reservation as durable ADR text, not just envelope metadata; (2) corrected A2's repository location from the source plan's modules/knowledge/ table entry to database/repositories/knowledge.py, matching the verified existing split (StickerRepository/MemoryRepository live in database/repositories/, modules/*/models.py is dataclasses-only) -- flagged so A2 doesn't introduce an unjustified new pattern. Also surfaced a pre-existing gap: ADR-0001's own budget constants/trim functions were never actually shipped in prompt_builder.py (grep-verified empty) -- recommended A5 implement KB's own trim only and open a separate tech-debt item rather than silently absorbing that gap into Phase 1 scope. Docs only, no application code touched.",
+  "result": {
+    "kind": "file",
+    "ref": "docs/decisions/ADR-0003-chat-facts-data-model.md",
+    "verification": "grep-verified repository split (stickers.py/memory.py in database/repositories vs modules/*/models.py dataclasses-only) and grep-verified ADR-0001 budget constants absent from prompt_builder.py before writing the addendum; on-disk alembic/versions/ listing confirms 012 is newest, 013 unclaimed on disk but reserved by ADR-0002 text"
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

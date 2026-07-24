@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-07-24T15:57:53Z",
+  "role": "evaluator",
+  "item_id": "A5",
+  "verdict": "PASS",
+  "evidence": "git show f208286 confirms _kb_section()/trim_facts_to_budget() in prompt_builder.py exactly match ADR-0003 Part 2 (KB_BUDGET_TOKENS=300, MAX_FACT_CHARS=600, no re-sort of A2's salience-DESC/similarity-DESC ordering, placed before RAG sharing one double-fence reminder, sanitize_prompt_content reused not reinvented); pipeline.py/di.py wiring uses AIRouter.generate_embedding (self-logging, verified in router.py) and KnowledgeRepository.search_by_similarity (signature matches). Ran pytest tests/unit/test_prompt_builder.py tests/unit/test_text_pipeline.py (71 passed) and full tests/unit (909 passed); ruff and mypy clean on the 3 touched source files.",
+  "regression_risk": "low",
+  "notes": "Scope slightly exceeds ADR-0003's narrow 3-item note (adds pipeline.py/di.py wiring) but this is necessary for the feature to function end-to-end and was explicitly justified in the specialist's note; not a concern. Open tech-debt item (pre-existing ADR-0001 history/RAG trim gap) correctly deferred rather than absorbed, per ADR-0003's explicit recommendation."
+}
