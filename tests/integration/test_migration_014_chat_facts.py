@@ -92,10 +92,12 @@ class TestChatFactsTableShape:
             RETURNING id
             """
         )
+        # NB different subject: the UNIQUE partial index forbids a second
+        # active row at the same (chat_id, subject, predicate) key.
         second = await db_conn.fetchval(
             """
             INSERT INTO chat_facts (chat_id, subject, predicate, value, fact_text, source, superseded_by)
-            VALUES (-900002, 's', 'p', 'v2', 'fact 2', 'manual', NULL)
+            VALUES (-900002, 's2', 'p', 'v2', 'fact 2', 'manual', NULL)
             RETURNING id
             """
         )
@@ -106,6 +108,37 @@ class TestChatFactsTableShape:
         row = await db_conn.fetchrow("SELECT superseded_by FROM chat_facts WHERE id = $1", first)
         assert row is not None
         assert row["superseded_by"] == second
+
+    @pytest.mark.asyncio
+    async def test_unique_partial_index_rejects_second_active_row_same_key(
+        self, db_conn: asyncpg.Connection
+    ) -> None:
+        """DB-level backstop for ADR-0003's 'one active row per key' (review fix)."""
+        await db_conn.execute(
+            """
+            INSERT INTO chat_facts (chat_id, subject, predicate, value, fact_text, source)
+            VALUES (-900012, 'uniq', 'p', 'v1', 'fact 1', 'manual')
+            """
+        )
+        with pytest.raises(asyncpg.UniqueViolationError):
+            # Savepoint so the violation doesn't poison the test connection.
+            async with db_conn.transaction():
+                await db_conn.execute(
+                    """
+                    INSERT INTO chat_facts (chat_id, subject, predicate, value, fact_text, source)
+                    VALUES (-900012, 'uniq', 'p', 'v2', 'fact 2', 'manual')
+                    """
+                )
+        # A superseded (closed) row at the same key is fine.
+        await db_conn.execute(
+            "UPDATE chat_facts SET valid_to = NOW() WHERE chat_id = -900012 AND subject = 'uniq'"
+        )
+        await db_conn.execute(
+            """
+            INSERT INTO chat_facts (chat_id, subject, predicate, value, fact_text, source)
+            VALUES (-900012, 'uniq', 'p', 'v3', 'fact 3', 'manual')
+            """
+        )
 
     @pytest.mark.asyncio
     async def test_superseded_by_rejects_nonexistent_id(self, db_conn: asyncpg.Connection) -> None:
@@ -186,13 +219,18 @@ class TestChatFactsIndexesAndTrigger:
 
 class TestChatSettingsKbColumns:
     @pytest.mark.asyncio
-    async def test_kb_enabled_defaults_false(self, db_conn: asyncpg.Connection) -> None:
+    async def test_kb_enabled_defaults_null_deferring_to_global(
+        self, db_conn: asyncpg.Connection
+    ) -> None:
+        """Review fix: no column DEFAULT — a fresh row leaves kb_enabled NULL
+        so the bot_config default_kb_enabled layer stays effective until the
+        chat explicitly opts in/out."""
         await db_conn.execute(
             "INSERT INTO chat_settings (chat_id) VALUES (-900005) ON CONFLICT DO NOTHING"
         )
         row = await db_conn.fetchrow("SELECT kb_enabled FROM chat_settings WHERE chat_id = -900005")
         assert row is not None
-        assert row["kb_enabled"] is False
+        assert row["kb_enabled"] is None
 
     @pytest.mark.asyncio
     async def test_kb_organizer_ids_defaults_empty_array(self, db_conn: asyncpg.Connection) -> None:

@@ -49,15 +49,76 @@ class KnowledgeRepository:
         the new row's id) and the new row is inserted -- **never** `DELETE`,
         **never** a bare `UPDATE` of the old row's `value`. Both statements
         run in one transaction so a reader never observes zero or two active
-        rows for the same key. The existing-row lookup uses `FOR UPDATE` to
-        serialize concurrent writers racing on the same `(subject, predicate)`
-        key (ADR-0003 + A6's flagged race scenario).
+        rows for the same key.
+
+        Concurrency: writers on the same key are serialized by a
+        transaction-scoped advisory lock (covers the create-create race,
+        where there is no row for `FOR UPDATE` to lock, and the READ
+        COMMITTED re-check path, where a superseded row silently drops out
+        of the locking SELECT). The UNIQUE partial index
+        `idx_chat_facts_active_key` backstops the invariant at the DB level;
+        a unique-violation is retried once, by which point the winning
+        writer's row is visible and gets superseded normally.
 
         If no active row exists for the key, this is a plain insert.
 
         Returns the new row's id.
         """
+        for attempt in (1, 2):
+            try:
+                return await self._upsert_fact_once(
+                    chat_id=chat_id,
+                    subject=subject,
+                    predicate=predicate,
+                    value=value,
+                    fact_text=fact_text,
+                    source=source,
+                    topic=topic,
+                    embedding=embedding,
+                    source_message_id=source_message_id,
+                    source_user_id=source_user_id,
+                    authority_level=authority_level,
+                    confidence=confidence,
+                    salience=salience,
+                )
+            except asyncpg.UniqueViolationError:
+                if attempt == 2:
+                    raise
+                logger.warning(
+                    "kb_upsert_unique_race_retry",
+                    chat_id=chat_id,
+                    subject=subject,
+                    predicate=predicate,
+                )
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _upsert_fact_once(
+        self,
+        *,
+        chat_id: int,
+        subject: str,
+        predicate: str,
+        value: str,
+        fact_text: str,
+        source: str,
+        topic: str | None,
+        embedding: list[float] | None,
+        source_message_id: int | None,
+        source_user_id: int | None,
+        authority_level: int,
+        confidence: float | None,
+        salience: float,
+    ) -> int:
         async with self._pool.acquire() as conn, conn.transaction():
+            # Serialize all writers of this key for the transaction's duration
+            # (released automatically at commit/rollback).
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1 || ':' || $2 || ':' || $3, 0))",
+                str(chat_id),
+                subject,
+                predicate,
+            )
+
             existing = await conn.fetchrow(
                 """
                 SELECT id FROM chat_facts
@@ -69,6 +130,21 @@ class KnowledgeRepository:
                 subject,
                 predicate,
             )
+
+            # Close the old row BEFORE inserting the new one: the UNIQUE
+            # partial index checks per-statement, so two active rows may
+            # never coexist even transiently inside the transaction.
+            old_id: int | None = None
+            if existing is not None:
+                old_id = int(existing["id"])
+                await conn.execute(
+                    """
+                    UPDATE chat_facts
+                    SET valid_to = NOW(), status = 'superseded'
+                    WHERE id = $1
+                    """,
+                    old_id,
+                )
 
             new_row = await conn.fetchrow(
                 """
@@ -98,14 +174,9 @@ class KnowledgeRepository:
             assert new_row is not None
             new_id = int(new_row["id"])
 
-            if existing is not None:
-                old_id = int(existing["id"])
+            if old_id is not None:
                 await conn.execute(
-                    """
-                    UPDATE chat_facts
-                    SET valid_to = NOW(), status = 'superseded', superseded_by = $2
-                    WHERE id = $1
-                    """,
+                    "UPDATE chat_facts SET superseded_by = $2 WHERE id = $1",
                     old_id,
                     new_id,
                 )

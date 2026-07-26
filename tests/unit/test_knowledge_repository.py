@@ -66,8 +66,10 @@ async def test_upsert_fact_no_existing_row_is_plain_insert(repo, conn):
     pool.acquire.assert_called_once()
     conn.transaction.assert_called_once()
     assert conn.fetchrow.await_count == 2
-    # No existing row -> no supersession UPDATE.
-    conn.execute.assert_not_awaited()
+    # Advisory lock is the only execute() — no supersession UPDATEs.
+    conn.execute.assert_awaited_once()
+    lock_sql = conn.execute.await_args_list[0].args[0]
+    assert "pg_advisory_xact_lock" in lock_sql
 
     select_sql = conn.fetchrow.await_args_list[0].args[0]
     assert "FOR UPDATE" in select_sql
@@ -96,13 +98,48 @@ async def test_upsert_fact_supersedes_existing_active_row(repo, conn):
     )
 
     assert new_id == 6
-    conn.execute.assert_awaited_once()
-    update_sql, old_id, superseded_by = conn.execute.await_args.args
-    assert "UPDATE chat_facts" in update_sql
-    assert "status = 'superseded'" in update_sql
-    assert "superseded_by" in update_sql
-    assert old_id == 5
+    # execute order: advisory lock -> close old row -> stamp superseded_by.
+    # The old row must be closed BEFORE the new INSERT (unique partial index
+    # forbids two active rows for the key even transiently).
+    assert conn.execute.await_count == 3
+    lock_sql = conn.execute.await_args_list[0].args[0]
+    assert "pg_advisory_xact_lock" in lock_sql
+
+    close_sql, close_old_id = conn.execute.await_args_list[1].args
+    assert "UPDATE chat_facts" in close_sql
+    assert "status = 'superseded'" in close_sql
+    assert close_old_id == 5
+
+    stamp_sql, stamp_old_id, superseded_by = conn.execute.await_args_list[2].args
+    assert "superseded_by" in stamp_sql
+    assert stamp_old_id == 5
     assert superseded_by == 6
+
+
+@pytest.mark.asyncio
+async def test_upsert_fact_retries_once_on_unique_violation(repo, conn):
+    """Create-create race backstop: unique violation -> one retry that supersedes."""
+    import asyncpg
+
+    repo_, _pool = repo
+    conn.fetchrow.side_effect = [
+        None,  # attempt 1: no existing row
+        asyncpg.UniqueViolationError("duplicate key value violates unique constraint"),
+        {"id": 7},  # attempt 2: the racing winner's row is now visible
+        {"id": 8},  # attempt 2: new row insert RETURNING id
+    ]
+
+    new_id = await repo_.upsert_fact(
+        chat_id=1,
+        subject="s",
+        predicate="p",
+        value="v",
+        fact_text="ft",
+        source="manual",
+    )
+
+    assert new_id == 8
+    assert conn.fetchrow.await_count == 4
 
 
 @pytest.mark.asyncio

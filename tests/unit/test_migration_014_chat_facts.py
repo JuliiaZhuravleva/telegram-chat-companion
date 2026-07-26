@@ -88,10 +88,13 @@ class TestUpgradeStatements:
         assert "CREATE INDEX IF NOT EXISTS idx_chat_facts_status" in sql
         assert "ON chat_facts(chat_id, status, valid_to)" in sql
 
-    def test_creates_active_key_partial_index(self, captured_sql):
+    def test_creates_active_key_partial_index_unique(self, captured_sql):
+        """UNIQUE — the DB-level backstop for 'one active row per key' (review fix)."""
         sql = "\n".join(captured_sql)
-        assert "idx_chat_facts_active_key" in sql
+        assert "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_facts_active_key" in sql
         assert "WHERE valid_to IS NULL" in sql
+        # Upgrades dev DBs that had the pre-review non-unique version.
+        assert "DROP INDEX IF EXISTS idx_chat_facts_active_key" in sql
 
     def test_creates_ivfflat_embedding_index_lists_10(self, captured_sql):
         sql = "\n".join(captured_sql)
@@ -110,9 +113,16 @@ class TestUpgradeStatements:
         sql = "\n".join(captured_sql)
         assert "ADD COLUMN IF NOT EXISTS kb_organizer_ids JSONB NOT NULL DEFAULT '[]'" in sql
 
-    def test_adds_kb_enabled_column_defaulting_false(self, captured_sql):
-        sql = "\n".join(captured_sql)
-        assert "ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN NOT NULL DEFAULT false" in sql
+    def test_adds_kb_enabled_column_nullable_no_default(self, captured_sql):
+        """No NOT NULL, no DEFAULT: NULL = defer to the global default layer
+        (review fix — a DEFAULT would materialize on ensure_exists and shadow
+        bot_config's default_kb_enabled forever)."""
+        sql = " ".join(" ".join(captured_sql).split())
+        assert "ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN" in sql
+        assert "kb_enabled BOOLEAN NOT NULL" not in sql
+        assert "kb_enabled BOOLEAN DEFAULT" not in sql
+        assert "ALTER COLUMN kb_enabled DROP NOT NULL" in sql
+        assert "ALTER COLUMN kb_enabled DROP DEFAULT" in sql
 
     def test_all_statements_are_idempotent(self, captured_sql):
         """Every CREATE/ADD/DROP statement guards against re-run failures."""
@@ -120,11 +130,11 @@ class TestUpgradeStatements:
             normalized = " ".join(stmt.split())
             if "CREATE TABLE" in normalized:
                 assert "IF NOT EXISTS" in normalized, normalized
-            if "CREATE INDEX" in normalized:
+            if "CREATE INDEX" in normalized or "CREATE UNIQUE INDEX" in normalized:
                 assert "IF NOT EXISTS" in normalized, normalized
             if "ADD COLUMN" in normalized:
                 assert "IF NOT EXISTS" in normalized, normalized
-            if normalized.startswith("DROP TRIGGER"):
+            if normalized.startswith(("DROP TRIGGER", "DROP INDEX")):
                 assert "IF EXISTS" in normalized, normalized
 
 

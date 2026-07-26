@@ -258,6 +258,47 @@ class TestUpsertFactSupersession:
             assert row["valid_to"] is not None
             assert row["superseded_by"] is not None
 
+    @pytest.mark.asyncio
+    async def test_concurrent_first_writers_new_key_resolve_to_single_active_row(
+        self, repo: KnowledgeRepository
+    ) -> None:
+        """Create-create race (review finding): with NO pre-existing row for
+        the key, FOR UPDATE has nothing to lock -- serialization must come
+        from the advisory lock, with the UNIQUE partial index as backstop.
+        Two concurrent first writes must end as exactly one active row and
+        one superseded row, never two active."""
+        chat_id = -910016
+        results = await asyncio.gather(
+            repo.upsert_fact(
+                chat_id=chat_id,
+                subject="новый-ключ",
+                predicate="p",
+                value="vA",
+                fact_text="vA",
+                source="manual",
+            ),
+            repo.upsert_fact(
+                chat_id=chat_id,
+                subject="новый-ключ",
+                predicate="p",
+                value="vB",
+                fact_text="vB",
+                source="manual",
+            ),
+        )
+        assert len(set(results)) == 2
+
+        active = await repo.get_active_facts(chat_id)
+        assert len(active) == 1
+        assert active[0]["id"] in results
+
+        loser_id = next(r for r in results if r != active[0]["id"])
+        loser = await repo.get_by_id(loser_id, chat_id=chat_id)
+        assert loser is not None
+        assert loser["status"] == "superseded"
+        assert loser["valid_to"] is not None
+        assert loser["superseded_by"] == active[0]["id"]
+
 
 # ---------------------------------------------------------------------------
 # get_by_id / get_active_facts

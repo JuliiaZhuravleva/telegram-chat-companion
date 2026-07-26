@@ -119,37 +119,31 @@ class TestKbEnabledGlobalDefaultInteraction:
         assert config.kb_enabled is True
 
     @pytest.mark.asyncio
-    async def test_existing_chat_row_shadows_global_default_even_at_column_default(
+    async def test_global_default_applies_to_onboarded_chat_until_explicit_choice(
         self,
         service: ChatConfigService,
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
     ) -> None:
-        """FINDING (flagged for backend-dev, not a blocker for this item):
-        every sibling per-chat boolean toggle (`rag_enabled`, `abuse_filter_enabled`,
-        `sticker_learning_enabled`, `save_messages`, `rules_enabled`) is declared
-        nullable (`BOOLEAN DEFAULT ...`) in its migration, so a chat_settings row
-        can exist with that column still NULL -- letting the global `bot_config`
-        default (layer 2) take effect until a chat explicitly opts in/out.
-        `kb_enabled` (migration 014) is declared `BOOLEAN NOT NULL DEFAULT false`
-        -- the ONLY per-chat toggle column with a NOT NULL constraint. That means
-        as soon as *any* chat_settings row exists for a chat (e.g. via
-        `ensure_exists`, which every chat gets on first bot interaction,
-        unrelated to KB), `chat_row["kb_enabled"]` is always present (never NULL)
-        and `ChatConfigService._merge()`'s per-chat layer unconditionally wins --
-        silently making `default_kb_enabled` in `bot_config` dead for any chat
-        that has ever interacted with the bot before an admin sets a global
-        default. This test documents the CURRENT (surprising) behavior; it is
-        not asserting this is correct. Recommend backend-dev align the column
-        to `BOOLEAN DEFAULT false` (nullable) to match the other 5 toggles'
-        precedent if a global rollout default is ever intended to work for
-        already-onboarded chats.
+        """Review fix: `kb_enabled` is declared plain `BOOLEAN` (no NOT NULL,
+        no DEFAULT), so an onboarding `ensure_exists` row leaves it NULL and
+        `_merge()`'s per-chat layer skips it -- the global
+        `default_kb_enabled` (layer 2) takes effect for already-onboarded
+        chats until the chat explicitly opts in/out via the admin toggle.
+        (The pre-review `NOT NULL DEFAULT false` silently killed the global
+        layer for every chat the bot had ever seen. NB: siblings with a
+        column DEFAULT still have that gap -- tracked as a separate backlog
+        item, not KB scope.)
         """
         chat_id = -920005
         await chat_settings_repo.ensure_exists(chat_id)  # unrelated onboarding write
         await bot_config_repo.set("default_kb_enabled", True)
 
         config = await service.get_config(chat_id)
-        # Documents the shadowing: global True is silently overridden by the
-        # NOT-NULL column's implicit False, unlike every other toggle.
-        assert config.kb_enabled is False
+        # Row exists but kb_enabled is NULL -> global True shows through.
+        assert config.kb_enabled is True
+
+        # An explicit per-chat choice still wins over the global default.
+        await chat_settings_repo.set_field(chat_id, "kb_enabled", False)
+        service.invalidate(chat_id)
+        assert (await service.get_config(chat_id)).kb_enabled is False

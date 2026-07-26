@@ -66,8 +66,16 @@ def upgrade() -> None:
         ON chat_facts(chat_id, status, valid_to)
     """)
 
+    # UNIQUE: DB-level backstop for the "exactly one active row per key"
+    # invariant (ADR-0003). Application-level serialization alone (FOR UPDATE)
+    # cannot cover the create-create race — with no existing row there is
+    # nothing to lock. The DROP first upgrades any dev DB that already has the
+    # pre-review non-unique version of this index.
     op.execute("""
-        CREATE INDEX IF NOT EXISTS idx_chat_facts_active_key
+        DROP INDEX IF EXISTS idx_chat_facts_active_key
+    """)
+    op.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_facts_active_key
         ON chat_facts(chat_id, subject, predicate) WHERE valid_to IS NULL
     """)
 
@@ -94,9 +102,24 @@ def upgrade() -> None:
         ALTER TABLE chat_settings
         ADD COLUMN IF NOT EXISTS kb_organizer_ids JSONB NOT NULL DEFAULT '[]'
     """)
+    # No NOT NULL and no DEFAULT: a chat_settings row leaves kb_enabled NULL
+    # until the chat explicitly opts in/out, so the three-layer merge's
+    # global layer (bot_config default_kb_enabled) actually applies to
+    # already-onboarded chats. (Siblings with DEFAULT materialize a value on
+    # ensure_exists and silently shadow their global default — pre-existing
+    # gap, tracked separately.) The two ALTERs upgrade dev DBs that ran the
+    # pre-review NOT NULL DEFAULT false version; both are idempotent.
     op.execute("""
         ALTER TABLE chat_settings
-        ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN NOT NULL DEFAULT false
+        ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN
+    """)
+    op.execute("""
+        ALTER TABLE chat_settings
+        ALTER COLUMN kb_enabled DROP NOT NULL
+    """)
+    op.execute("""
+        ALTER TABLE chat_settings
+        ALTER COLUMN kb_enabled DROP DEFAULT
     """)
 
 
