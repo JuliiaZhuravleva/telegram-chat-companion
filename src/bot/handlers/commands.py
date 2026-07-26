@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from html import escape as html_escape
 from typing import Any
 
 import structlog
@@ -14,6 +15,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.admin_kb import kb_view_keyboard
 from src.bot.keyboards.help import help_keyboard
+from src.bot.utils import resolve_display_name, safe_edit_text
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.knowledge import KnowledgeRepository
@@ -42,6 +44,18 @@ _REMEMBER_SUCCESS = {
     "ru": "✅ Сохранено: **{subject}** — {value}",
     "en": "✅ Saved: **{subject}** — {value}",
 }
+_REMEMBER_SUCCESS_NO_EMBED = {
+    "ru": (
+        "✅ Сохранено: **{subject}** — {value}\n"
+        "⚠️ Семантический поиск для этого факта сейчас недоступен — "
+        "он виден только через /kb."
+    ),
+    "en": (
+        "✅ Saved: **{subject}** — {value}\n"
+        "⚠️ Semantic search is unavailable for this fact right now — "
+        "it is only visible via /kb."
+    ),
+}
 _REMEMBER_KB_DISABLED = {
     "ru": "📚 База знаний отключена для этого чата. Включите её в админ-панели.",
     "en": "📚 The knowledge base is disabled for this chat. Enable it from the admin panel.",
@@ -62,18 +76,18 @@ _KB_EMPTY_GROUP = {
 _KB_TOPIC_GENERAL = {"ru": "Общее", "en": "General"}
 
 
-async def _is_organizer_or_admin(
+async def _is_kb_organizer(
     user_id: int | None,
     chat_id: int,
-    bot_config_repo: BotConfigRepository,
     chat_settings_repo: ChatSettingsRepository,
 ) -> bool:
-    """Manual /remember gate: bot admin (rank 4) or chat KB organizer (rank 3)."""
+    """Manual /remember gate, organizer half (rank 3).
+
+    Bot-admin status (rank 4) is checked by the caller, which already holds
+    the fetched admin_ids — this function deliberately does not re-query it.
+    """
     if user_id is None:
         return False
-    admin_ids_raw = await bot_config_repo.get("admin_ids")
-    if user_id in parse_admin_ids(admin_ids_raw):
-        return True
 
     settings = await chat_settings_repo.get(chat_id)
     if not settings:
@@ -281,8 +295,8 @@ async def handle_remember(
     admin_ids_raw = await bot_config_repo.get("admin_ids")
     is_bot_admin = user_id is not None and user_id in parse_admin_ids(admin_ids_raw)
 
-    if not is_bot_admin and not await _is_organizer_or_admin(
-        user_id, message.chat.id, bot_config_repo, chat_settings_repo
+    if not is_bot_admin and not await _is_kb_organizer(
+        user_id, message.chat.id, chat_settings_repo
     ):
         await message.reply(_REMEMBER_NOT_ALLOWED[lang])
         return
@@ -325,7 +339,8 @@ async def handle_remember(
         confidence=None,
     )
 
-    text = _REMEMBER_SUCCESS[lang].format(subject=subject, value=value)
+    template = _REMEMBER_SUCCESS if embedding is not None else _REMEMBER_SUCCESS_NO_EMBED
+    text = template[lang].format(subject=subject, value=value)
     await message.reply(markdown_to_html(text), parse_mode="HTML")
 
 
@@ -337,18 +352,12 @@ async def handle_remember(
 async def _resolve_author_label(
     bot: Bot | None, chat_id: int, user_id: int | None, lang: str, cache: dict[int, str]
 ) -> str:
+    fallback = "участник" if lang == "ru" else "member"
     if user_id is None:
-        return "участник" if lang == "ru" else "member"
+        return fallback
     if user_id in cache:
         return cache[user_id]
-    label = "участник" if lang == "ru" else "member"
-    if bot:
-        try:
-            member = await bot.get_chat_member(chat_id, user_id)
-            user = member.user
-            label = f"@{user.username}" if user.username else (user.first_name or label)
-        except Exception:
-            pass
+    label = await resolve_display_name(bot, chat_id, user_id, fallback)
     cache[user_id] = label
     return label
 
@@ -411,7 +420,9 @@ def _render_kb_group(
     )
     lines = [header]
     for fact in page_facts:
-        lines.append(f"• {fact['subject']} — {fact['value']}")
+        # Facts are raw user input; the bot-wide default parse_mode is HTML,
+        # so unescaped '&'/'<' would break rendering or inject markup.
+        lines.append(f"• {html_escape(fact['subject'])} — {html_escape(fact['value'])}")
 
     if total_pages > 1:
         lines.append(f"◀️ {page + 1}/{total_pages} ▶️")
@@ -488,9 +499,9 @@ async def handle_kb_view_page(
 
     if callback.message.chat.type == "private":
         html, keyboard = await _render_kb_dm(callback.bot, chat_id, facts, lang, page)
-        await callback.message.edit_text(html, parse_mode="HTML", reply_markup=keyboard)
+        await safe_edit_text(callback.message, html, parse_mode="HTML", reply_markup=keyboard)
     else:
         text, keyboard = _render_kb_group(facts, lang, page)
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await safe_edit_text(callback.message, text, reply_markup=keyboard)
 
     await callback.answer()

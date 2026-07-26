@@ -15,6 +15,7 @@ docs/decisions/ADR-0003-chat-facts-data-model.md (G1) for the schema.
 from __future__ import annotations
 
 import json
+from html import escape as html_escape
 from typing import Any
 
 import structlog
@@ -29,6 +30,7 @@ from src.bot.keyboards.admin_kb import (
     kb_organizers_keyboard,
 )
 from src.bot.states.admin import AdminStates
+from src.bot.utils import resolve_display_name, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -120,7 +122,7 @@ async def _render_chat_picker(
     keyboard = kb_chat_picker_keyboard(chats, lang=lang, page=page, total=total, per_page=_PER_PAGE)
 
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await safe_edit_text(callback.message, text, reply_markup=keyboard)
 
 
 async def _render_kb_menu(
@@ -133,7 +135,8 @@ async def _render_kb_menu(
     kb_enabled = bool(row.get("kb_enabled")) if row else False
 
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(
+        await safe_edit_text(
+            callback.message,
             _KB_MENU_TITLE[lang],
             reply_markup=kb_menu_keyboard(lang, chat_id=chat_id, kb_enabled=kb_enabled),
         )
@@ -151,16 +154,8 @@ async def _render_organizers(
 
     organizers: list[dict[str, object]] = []
     for user_id in organizer_ids:
-        display_name = str(user_id)
-        if callback.bot:
-            try:
-                member = await callback.bot.get_chat_member(chat_id, user_id)
-                user = member.user
-                display_name = (
-                    f"@{user.username}" if user.username else (user.first_name or str(user_id))
-                )
-            except Exception:
-                display_name = ("участник " if lang == "ru" else "member ") + str(user_id)
+        fallback = ("участник " if lang == "ru" else "member ") + str(user_id)
+        display_name = await resolve_display_name(callback.bot, chat_id, user_id, fallback)
         organizers.append({"user_id": user_id, "display_name": display_name})
 
     total = len(organizers)
@@ -173,7 +168,7 @@ async def _render_organizers(
     )
 
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await safe_edit_text(callback.message, text, reply_markup=keyboard)
 
 
 # ── Chat picker ───────────────────────────────────────────────────────────
@@ -199,8 +194,8 @@ async def handle_kb_picker(
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
     page = int(parts[2]) if len(parts) > 2 else 0
 
-    await _render_chat_picker(callback, admin_repo, lang, page)
     await callback.answer()
+    await _render_chat_picker(callback, admin_repo, lang, page)
 
 
 # ── Per-chat submenu ─────────────────────────────────────────────────────
@@ -230,8 +225,8 @@ async def handle_kb_menu(
         await callback.answer("Invalid data", show_alert=True)
         return
 
-    await _render_kb_menu(callback, chat_settings_repo, lang, chat_id)
     await callback.answer()
+    await _render_kb_menu(callback, chat_settings_repo, lang, chat_id)
 
 
 @router.callback_query(F.data.startswith("adm_kb_toggle:"))
@@ -294,8 +289,8 @@ async def handle_kb_organizers(
         await callback.answer("Invalid data", show_alert=True)
         return
 
-    await _render_organizers(callback, chat_settings_repo, lang, chat_id, page)
     await callback.answer()
+    await _render_organizers(callback, chat_settings_repo, lang, chat_id, page)
 
 
 @router.callback_query(F.data.startswith("adm_kb_org_rm:"))
@@ -410,4 +405,4 @@ async def handle_kb_organizer_add_reply(
         organizer_ids.append(user_id)
         await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
 
-    await message.reply(_ADD_SUCCESS[lang].format(name=display_name))
+    await message.reply(_ADD_SUCCESS[lang].format(name=html_escape(display_name)))
