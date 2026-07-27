@@ -128,6 +128,11 @@ modules:
   link_comments:
     enabled: false
 
+  knowledge_base:
+    enabled: false  # Disabled by default (opt-in per chat, ADR-0003)
+    requires:
+      - "embeddings"
+
   admin_panel:
     enabled: true
 

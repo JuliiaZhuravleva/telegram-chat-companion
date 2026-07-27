@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-07-24T15:16:36Z",
+  "role": "evaluator",
+  "item_id": "A2",
+  "verdict": "PASS",
+  "evidence": "Verified commit 7088f9f: KnowledgeRepository in src/database/repositories/knowledge.py matches ADR-0003's repository-location correction and migration 014's DDL exactly (columns, FOR UPDATE supersession, never-DELETE, salience DESC/similarity DESC retrieval order); ChatFact dataclass + FactStatus/FactSource enums in modules/knowledge/models.py; registered in di.py's RepositoryProvider. Independently re-ran pytest tests/unit/test_knowledge_repository.py (10 passed), ruff check (clean), and mypy src/ (clean, 106 files) -- all match specialist's claims.",
+  "regression_risk": "low",
+  "notes": "Test coverage is solid for the mocked-pool unit scope claimed; FOR UPDATE race and real-pgvector ranking correctly deferred to A6 integration tests as noted."
+}

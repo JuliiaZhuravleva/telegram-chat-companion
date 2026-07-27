@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from src.database.repositories.abuse import AntiAbuseResult
 from src.models.enums import ResponseType, TriggerType
-from src.services.ai.base import AIProviderError, TextGenerationResult
+from src.services.ai.base import AIProviderError, EmbeddingResult, TextGenerationResult
 from src.services.text.pipeline import TextProcessingPipeline
 
 
@@ -51,6 +51,9 @@ def _make_pipeline(
     rag_memories=None,
     ai_error=None,
     link_service=None,
+    knowledge_repo=None,
+    kb_facts=None,
+    embedding_error=None,
 ):
     """Build a pipeline with mocked dependencies."""
     abuse_checker = AsyncMock()
@@ -62,6 +65,16 @@ def _make_pipeline(
         ai_router.generate_text.side_effect = ai_error
     else:
         ai_router.generate_text.return_value = ai_result or _make_ai_result()
+
+    if embedding_error:
+        ai_router.generate_embedding.side_effect = embedding_error
+    else:
+        ai_router.generate_embedding.return_value = EmbeddingResult(
+            embedding=[0.1] * 768,
+            model="mock-embed",
+            provider="mock",
+            dimensions=768,
+        )
 
     message_repo = AsyncMock()
     message_repo.get_recent.return_value = recent_msgs or []
@@ -75,6 +88,10 @@ def _make_pipeline(
     rag_service.search.return_value = rag_memories or []
     rag_service.store = AsyncMock()
 
+    if knowledge_repo is None:
+        knowledge_repo = AsyncMock()
+        knowledge_repo.search_by_similarity.return_value = kb_facts or []
+
     pipeline = TextProcessingPipeline(
         ai_router=ai_router,
         abuse_checker=abuse_checker,
@@ -82,6 +99,7 @@ def _make_pipeline(
         response_log_repo=response_log_repo,
         rag_service=rag_service,
         link_service=link_service,
+        knowledge_repo=knowledge_repo,
     )
     return pipeline, {
         "abuse_checker": abuse_checker,
@@ -90,6 +108,7 @@ def _make_pipeline(
         "response_log_repo": response_log_repo,
         "rag_service": rag_service,
         "link_service": link_service,
+        "knowledge_repo": knowledge_repo,
     }
 
 
@@ -491,3 +510,131 @@ class TestPipelineLinkExtraction:
         )
 
         assert result.should_respond is True
+
+
+class TestPipelineKnowledgeBase:
+    """A5: _kb_section retrieval wiring (KnowledgeRepository.search_by_similarity)."""
+
+    async def test_kb_disabled_skips_search(self, make_chat_config):
+        """kb_enabled=False should not touch the knowledge repository at all."""
+        config = make_chat_config(enabled=True, kb_enabled=False)
+        pipeline, mocks = _make_pipeline()
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        mocks["ai_router"].generate_embedding.assert_not_called()
+        mocks["knowledge_repo"].search_by_similarity.assert_not_called()
+
+    async def test_kb_enabled_calls_search_by_similarity(self, make_chat_config):
+        """kb_enabled=True should embed the message and search active facts."""
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_facts=[{"fact_text": "мероприятие: дата 2026-08-01", "salience": 0.9}]
+        )
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="когда мероприятие?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        assert result.should_respond is True
+        mocks["ai_router"].generate_embedding.assert_called_once_with("когда мероприятие?")
+        mocks["knowledge_repo"].search_by_similarity.assert_called_once()
+        call_args = mocks["knowledge_repo"].search_by_similarity.call_args
+        assert call_args.args[0] == -100123
+        assert call_args.args[1] == [0.1] * 768
+
+    async def test_kb_facts_passed_to_ai_prompt(self, make_chat_config):
+        """Retrieved KB facts must reach the assembled system prompt."""
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_facts=[{"fact_text": "мероприятие: дата 2026-08-01", "salience": 0.9}]
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="когда мероприятие?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        call_kwargs = mocks["ai_router"].generate_text.call_args.kwargs
+        assert "мероприятие: дата 2026-08-01" in call_kwargs["system_prompt"]
+
+    async def test_kb_embedding_failure_does_not_block(self, make_chat_config):
+        """Embedding-generation failure must not prevent an AI response."""
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(embedding_error=RuntimeError("embedding API error"))
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        assert result.should_respond is True
+        mocks["knowledge_repo"].search_by_similarity.assert_not_called()
+
+    async def test_kb_search_failure_does_not_block(self, make_chat_config):
+        """KnowledgeRepository failure must not prevent an AI response."""
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        knowledge_repo = AsyncMock()
+        knowledge_repo.search_by_similarity.side_effect = RuntimeError("db error")
+        pipeline, _ = _make_pipeline(knowledge_repo=knowledge_repo)
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        assert result.should_respond is True
+
+    async def test_kb_no_knowledge_repo_configured(self, make_chat_config):
+        """kb_enabled=True but no knowledge_repo wired (e.g. older DI config) is a no-op."""
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        abuse_checker = AsyncMock()
+        abuse_checker.check.return_value = _make_abuse_result()
+        ai_router = AsyncMock()
+        ai_router.generate_text.return_value = _make_ai_result()
+        message_repo = AsyncMock()
+        message_repo.get_recent_lengths.return_value = []
+        response_log_repo = AsyncMock()
+
+        pipeline = TextProcessingPipeline(
+            ai_router=ai_router,
+            abuse_checker=abuse_checker,
+            message_repo=message_repo,
+            response_log_repo=response_log_repo,
+        )
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        assert result.should_respond is True
+        ai_router.generate_embedding.assert_not_called()

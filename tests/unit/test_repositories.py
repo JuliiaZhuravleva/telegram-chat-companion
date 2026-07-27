@@ -141,6 +141,21 @@ class TestChatSettingsRepository:
             await repo_.set_field(123, "bad_column", "value")
 
     @pytest.mark.asyncio
+    async def test_set_field_kb_enabled(self, repo):
+        """kb_enabled (A3: chat_facts KB opt-in toggle) is writable."""
+        repo_, pool = repo
+        await repo_.set_field(123, "kb_enabled", True)
+        pool.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_kb_enabled(self, repo):
+        repo_, pool = repo
+        await repo_.upsert(123, kb_enabled=True)
+        pool.execute.assert_awaited_once()
+        sql = pool.execute.call_args[0][0]
+        assert "kb_enabled" in sql
+
+    @pytest.mark.asyncio
     async def test_list_enabled(self, repo):
         repo_, pool = repo
         pool.fetch.return_value = [

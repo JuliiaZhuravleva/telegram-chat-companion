@@ -17,3 +17,6 @@ class AdminStates(StatesGroup):
 
     # Rules: waiting for JSON config
     awaiting_rule_config = State()
+
+    # Knowledge Base: waiting for a forwarded message / @username to add an organizer
+    awaiting_kb_organizer = State()
