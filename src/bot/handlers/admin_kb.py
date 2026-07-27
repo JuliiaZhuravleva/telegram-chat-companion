@@ -125,14 +125,32 @@ async def _render_chat_picker(
         await safe_edit_text(callback.message, text, reply_markup=keyboard)
 
 
+async def _effective_kb_enabled(
+    chat_settings_repo: ChatSettingsRepository,
+    bot_config_repo: BotConfigRepository,
+    chat_id: int,
+) -> bool:
+    """Resolve kb_enabled the way the running bot does (3-layer merge subset).
+
+    The raw column is nullable: NULL means "defer to bot_config's
+    default_kb_enabled". Displaying/toggling the raw value would misrepresent
+    a chat that is effectively ON via the global default (review finding).
+    """
+    row = await chat_settings_repo.get(chat_id)
+    raw = row.get("kb_enabled") if row else None
+    if raw is not None:
+        return bool(raw)
+    return bool(await bot_config_repo.get("default_kb_enabled"))
+
+
 async def _render_kb_menu(
     callback: CallbackQuery,
     chat_settings_repo: ChatSettingsRepository,
+    bot_config_repo: BotConfigRepository,
     lang: str,
     chat_id: int,
 ) -> None:
-    row = await chat_settings_repo.get(chat_id)
-    kb_enabled = bool(row.get("kb_enabled")) if row else False
+    kb_enabled = await _effective_kb_enabled(chat_settings_repo, bot_config_repo, chat_id)
 
     if isinstance(callback.message, Message):
         await safe_edit_text(
@@ -226,7 +244,7 @@ async def handle_kb_menu(
         return
 
     await callback.answer()
-    await _render_kb_menu(callback, chat_settings_repo, lang, chat_id)
+    await _render_kb_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id)
 
 
 @router.callback_query(F.data.startswith("adm_kb_toggle:"))
@@ -253,12 +271,15 @@ async def handle_kb_toggle(
         await callback.answer("Invalid data", show_alert=True)
         return
 
-    row = await chat_settings_repo.get(chat_id)
-    new_value = not bool(row.get("kb_enabled")) if row else True
+    # Flip the EFFECTIVE value (raw column may be NULL = inherited global
+    # default): a chat that is ON via default_kb_enabled must turn OFF on the
+    # first tap, not "enable" what was already effectively enabled.
+    effective = await _effective_kb_enabled(chat_settings_repo, bot_config_repo, chat_id)
+    new_value = not effective
     await chat_settings_repo.set_field(chat_id, "kb_enabled", new_value)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])
-    await _render_kb_menu(callback, chat_settings_repo, lang, chat_id)
+    await _render_kb_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id)
 
 
 # ── Organizers ────────────────────────────────────────────────────────────

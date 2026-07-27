@@ -82,7 +82,12 @@ CREATE TABLE IF NOT EXISTS chat_facts (
 CREATE INDEX IF NOT EXISTS idx_chat_facts_status
     ON chat_facts(chat_id, status, valid_to);
 
-CREATE INDEX IF NOT EXISTS idx_chat_facts_active_key
+-- UNIQUE (review fix 2026-07-26): DB-level backstop for the "exactly one
+-- active row per key" invariant. FOR UPDATE alone cannot cover the
+-- create-create race (no row to lock); writers are serialized by a
+-- pg_advisory_xact_lock on the key in KnowledgeRepository.upsert_fact,
+-- with this index catching anything that slips through (retried once).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_facts_active_key
     ON chat_facts(chat_id, subject, predicate) WHERE valid_to IS NULL;
 
 -- ivfflat: lists=10 for small initial dataset (same rationale as migration 005's
@@ -102,12 +107,19 @@ Plus, in the same migration (014):
 ```sql
 ALTER TABLE chat_settings
   ADD COLUMN IF NOT EXISTS kb_organizer_ids JSONB NOT NULL DEFAULT '[]',
-  ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN NOT NULL DEFAULT false;
+  ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN;  -- nullable, NO default
 ```
 
-`kb_enabled` defaults to `false` — the KB feature is opt-in per chat (consistent
-with the plan's Phase-1 scope: manual-only, no behavior change for chats that don't
-opt in). `update_updated_at()` already exists (created in migration 001; reused, not
+`kb_enabled` is nullable with **no column default** (review fix 2026-07-26; the
+original draft said `NOT NULL DEFAULT false`). `NULL` means "no explicit per-chat
+choice": `ChatConfigService._merge()` skips NULL per-chat values, so
+`bot_config.default_kb_enabled` (layer 2) applies to already-onboarded chats until
+an admin toggles the chat explicitly. A column DEFAULT would be materialized by
+`ensure_exists` on first contact and permanently shadow the global layer (this
+exact gap exists for the sibling toggles — tracked as a separate backlog item).
+The effective value for a chat with an unset column is still `false` while no
+global default is configured, preserving Phase-1's opt-in posture.
+`update_updated_at()` already exists (created in migration 001; reused, not
 redefined — same pattern as migrations 005 and 008).
 
 ### Lifecycle semantics (MemStrata / Graphiti bi-temporal pattern)

@@ -33,16 +33,27 @@ def _make_callback(data: str, user_id: int = ADMIN_ID, chat_type: str = "private
     return callback
 
 
-def _make_bot_config_repo(admin_ids: list[int] | None = None) -> MagicMock:
+def _make_bot_config_repo(
+    admin_ids: list[int] | None = None, default_kb_enabled: bool | None = None
+) -> MagicMock:
     repo = MagicMock()
+
     # BotConfigRepository.get() already returns json.loads() output (a parsed
-    # list), not a raw JSON string -- see src/utils/parse_admin_ids docstring.
-    repo.get = AsyncMock(return_value=admin_ids or [ADMIN_ID])
+    # list/bool), not a raw JSON string -- see src/utils/parse_admin_ids docstring.
+    # Key-aware: _effective_kb_enabled() queries "default_kb_enabled" too.
+    async def _get(key: str):
+        if key == "admin_ids":
+            return admin_ids or [ADMIN_ID]
+        if key == "default_kb_enabled":
+            return default_kb_enabled
+        return None
+
+    repo.get = AsyncMock(side_effect=_get)
     return repo
 
 
 def _make_chat_settings_repo(
-    kb_enabled: bool = False, organizer_ids: list[int] | None = None
+    kb_enabled: bool | None = False, organizer_ids: list[int] | None = None
 ) -> MagicMock:
     repo = MagicMock()
     repo.get = AsyncMock(
@@ -75,6 +86,28 @@ class TestHandleKbToggle:
         callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
         chat_settings_repo = _make_chat_settings_repo(kb_enabled=False)
         bot_config_repo = _make_bot_config_repo()
+
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
+
+        chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "kb_enabled", True)
+
+    @pytest.mark.asyncio
+    async def test_null_column_with_global_default_on_toggles_off(self) -> None:
+        """Review fix: NULL column + default_kb_enabled=True means the chat is
+        effectively ON — the first tap must turn it OFF, not 're-enable' it."""
+        callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
+        chat_settings_repo = _make_chat_settings_repo(kb_enabled=None)
+        bot_config_repo = _make_bot_config_repo(default_kb_enabled=True)
+
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
+
+        chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "kb_enabled", False)
+
+    @pytest.mark.asyncio
+    async def test_null_column_without_global_default_toggles_on(self) -> None:
+        callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
+        chat_settings_repo = _make_chat_settings_repo(kb_enabled=None)
+        bot_config_repo = _make_bot_config_repo(default_kb_enabled=None)
 
         await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
 

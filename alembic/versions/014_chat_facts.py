@@ -19,7 +19,8 @@ down_revision expectation before this merges.
 Adds:
 - chat_facts table (schema + indexes + updated_at trigger)
 - chat_settings.kb_organizer_ids (JSONB, default '[]')
-- chat_settings.kb_enabled (BOOLEAN, default false -- opt-in per chat)
+- chat_settings.kb_enabled (BOOLEAN, nullable, no default -- NULL defers to
+  bot_config.default_kb_enabled until the chat explicitly opts in/out)
 """
 
 from collections.abc import Sequence
@@ -107,8 +108,11 @@ def upgrade() -> None:
     # global layer (bot_config default_kb_enabled) actually applies to
     # already-onboarded chats. (Siblings with DEFAULT materialize a value on
     # ensure_exists and silently shadow their global default — pre-existing
-    # gap, tracked separately.) The two ALTERs upgrade dev DBs that ran the
-    # pre-review NOT NULL DEFAULT false version; both are idempotent.
+    # gap, tracked separately.) The two ALTERs are idempotent no-ops on a
+    # fresh DB; NB alembic does not re-run an already-applied revision, so a
+    # dev DB that ran the pre-review NOT NULL DEFAULT false version needs a
+    # downgrade/upgrade cycle (rows materialized as false are not backfilled
+    # to NULL — 014 has never been deployed beyond dev/test containers).
     op.execute("""
         ALTER TABLE chat_settings
         ADD COLUMN IF NOT EXISTS kb_enabled BOOLEAN
