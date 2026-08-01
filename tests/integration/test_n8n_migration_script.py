@@ -274,11 +274,17 @@ async def _seed_source(conn: asyncpg.Connection) -> None:
         )
         """
     )
+    # In production every admin_action is NULL — n8n recorded the decision by
+    # moving chat_settings.chat_status instead. Cover both shapes.
     await conn.execute(
         """
         INSERT INTO unauthorized_attempts (chat_id, chat_title, chat_type, user_id, username,
                                            first_name, message_text, admin_action)
-        VALUES (-999, 'Stranger', 'group', 7, 'stranger', 'Stran', 'let me in', 'rejected')
+        VALUES
+            (-999, 'Stranger', 'group', 7, 'stranger', 'Stran', 'let me in', 'rejected'),
+            (-100, 'Live chat', 'supergroup', 8, 'member', 'Mem', 'hi', NULL),
+            (-300, 'Banned', 'group', 9, 'banned', 'Ban', 'let me in', NULL),
+            (-888, 'Unknown', 'group', 10, 'who', 'Who', 'hello?', NULL)
         """
     )
     await conn.execute(
@@ -487,6 +493,99 @@ class TestChatStatusMapping:
             await target.close()
 
 
+class TestAttemptStatusInference:
+    """n8n leaves admin_action NULL and records the decision in chat_status, so
+    the attempt's status has to be inferred from the chat — otherwise every
+    already-handled request reappears in the admin panel's pending tab."""
+
+    @pytest.mark.asyncio
+    async def test_attempt_for_whitelisted_chat_becomes_approved(
+        self, migration_env: dict[str, Any]
+    ) -> None:
+        await _apply(migration_env)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            status = await target.fetchval(
+                "SELECT status FROM unauthorized_attempts WHERE chat_id = -100"
+            )
+            assert status == "approved"
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_attempt_for_blacklisted_chat_becomes_rejected(
+        self, migration_env: dict[str, Any]
+    ) -> None:
+        await _apply(migration_env)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            statuses = {
+                r["status"]
+                for r in await target.fetch(
+                    "SELECT status FROM unauthorized_attempts WHERE chat_id = -300"
+                )
+            }
+            assert statuses == {"rejected"}
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_attempt_for_unknown_chat_stays_pending(
+        self, migration_env: dict[str, Any]
+    ) -> None:
+        await _apply(migration_env)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            status = await target.fetchval(
+                "SELECT status FROM unauthorized_attempts WHERE chat_id = -888"
+            )
+            assert status == "pending"
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_explicit_admin_action_wins_over_inference(
+        self, migration_env: dict[str, Any]
+    ) -> None:
+        await _apply(migration_env)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            status = await target.fetchval(
+                "SELECT status FROM unauthorized_attempts WHERE chat_id = -999"
+            )
+            assert status == "rejected"
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_admin_panel_pending_list_shows_only_the_unknown_chat(
+        self, migration_env: dict[str, Any]
+    ) -> None:
+        """The user-visible outcome: after migrating, the pending tab lists the
+        genuinely unhandled request and nothing else."""
+        await _apply(migration_env)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            rows = await target.fetch(
+                """
+                SELECT ua.chat_id FROM unauthorized_attempts ua
+                WHERE ua.status = 'pending'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM chat_settings cs
+                      WHERE cs.chat_id = ua.chat_id AND cs.enabled = true
+                  )
+                """
+            )
+            assert sorted(r["chat_id"] for r in rows) == [-888, -200]
+        finally:
+            await target.close()
+
+
 # ---------------------------------------------------------------------------
 # custom_rules folding
 # ---------------------------------------------------------------------------
@@ -579,8 +678,10 @@ class TestRerun:
             assert await target.fetchval("SELECT COUNT(*) FROM chat_settings") == 3
             assert await target.fetchval("SELECT COUNT(*) FROM custom_rules") == 1
             assert await target.fetchval("SELECT COUNT(*) FROM sticker_knowledge") == 1
-            # One row per (chat, status), not one per run.
-            assert await target.fetchval("SELECT COUNT(*) FROM unauthorized_attempts") == 3
+            # 4 copied from the source + 1 derived for the pending chat -200.
+            # Chat -300 gets no derived row: the source already supplies a
+            # rejected attempt for it, and _record_attempt is NOT EXISTS-guarded.
+            assert await target.fetchval("SELECT COUNT(*) FROM unauthorized_attempts") == 5
         finally:
             await target.close()
 
