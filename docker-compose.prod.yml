@@ -1,0 +1,64 @@
+# Production compose for the Mac mini (deployed by `claw-deploy`, runs as the
+# non-admin `claw` user inside a Colima VM).
+#
+# STANDALONE — this is NOT an override layer over docker-compose.yml. Compose
+# merges list-valued options (ports, volumes) by APPENDING, so a layered
+# base + prod would keep the dev port publications instead of replacing them.
+# `claw-deploy` picks this file over docker-compose.yml automatically and always
+# passes `-p companion`, so container names are companion-<service>-1.
+#
+# Differences from the dev compose, and why:
+#   1. Postgres data lives on a HOST bind mount, not a named volume. The mini's
+#      colima autostart self-heals a power-loss-corrupted VM with `colima delete -f`,
+#      which destroys named volumes. /Users/claw/data is on the host's journaled
+#      APFS and survives that.
+#   2. Nothing is published to the host. The bot reaches Postgres over the compose
+#      network; publishing 5432 would expose it on the mini's Tailscale interface.
+#   3. No container_name — it would escape the `-p companion` namespace.
+#   4. Secrets come from .env, which claw-deploy renders at deploy time from
+#      /usr/local/etc/claw-deploy/env.d/companion.map (backed by 1Password).
+#      Never commit a .env.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:?Set POSTGRES_USER in the env map}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the env map}
+      - POSTGRES_DB=${POSTGRES_DB:?Set POSTGRES_DB in the env map}
+
+    volumes:
+      # HOST bind mount — survives `colima delete`. claw-deploy's assert_safe_mounts
+      # only permits paths inside the project dir or /Users/claw/data/companion.
+      - /Users/claw/data/companion/postgres:/var/lib/postgresql/data
+      # Enables the pgvector extension on FIRST init only (initdb hook).
+      - ./docker/init/01_init.sh:/docker-entrypoint-initdb.d/01_init.sh:ro
+
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  bot:
+    build: .
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    env_file: .env
+
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+
+    healthcheck:
+      test: ['CMD-SHELL', 'python -c "import time; t=float(open(\"/tmp/healthcheck\").read()); exit(0 if time.time()-t<600 else 1)"']
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
