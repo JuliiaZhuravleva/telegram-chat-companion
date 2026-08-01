@@ -43,6 +43,15 @@ services:
       retries: 5
       start_period: 30s
 
+    # Memory ceiling only — deliberately NO cpu cap. Throttling a database's CPU
+    # degrades latency for every query rather than bounding a burst, and Postgres
+    # is not what competes for CPU here (the sticker path is). The cap exists so a
+    # runaway query can't starve the shared VM.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
   bot:
     build: .
     restart: unless-stopped
@@ -62,3 +71,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 120s
+
+    # The mini's Colima VM has 4 CPUs and is SHARED with the nutricore stack.
+    # Sticker learning is the only genuinely CPU-bound path here: it shells out to
+    # ffmpeg (motion.py) and renders .tgs through the blocking rlottie binding
+    # (renderer.py). Neither bounds itself — ffmpeg is invoked without -threads, so
+    # it sizes its thread pool to every CPU it can see, and rlottie runs via
+    # asyncio.to_thread whose default executor is min(32, cpus+4) threads. A single
+    # burst of new (uncached) stickers could therefore saturate the whole VM and
+    # make nutricore stutter.
+    #
+    # This cgroup quota is the hard boundary: the kernel enforces it across every
+    # process in the container, whatever spawned them. 1.5 of 4 CPUs leaves 2.5
+    # guaranteed to nutricore. Sticker analysis gets slower under load, which is the
+    # right trade — it's background enrichment, not a reply-latency path.
+    #
+    # Verified on the mini before committing: Compose v5.3.0 under Colima does honour
+    # these keys (they are not swarm-only here) — a probe container came back with
+    # NanoCpus=1500000000 and Memory=536870912.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1500m
