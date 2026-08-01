@@ -45,12 +45,19 @@ def upgrade() -> None:
         ON custom_rules(chat_id, enabled) WHERE enabled = true;
     """)
 
-    # 3. Auto-update trigger
+    # 3. Auto-update trigger.
+    # NB two separate op.execute() calls, exactly as migration 001 does it: alembic
+    # runs online through SQLAlchemy's asyncpg dialect, which PREPAREs every
+    # statement, and PostgreSQL rejects a prepared statement holding more than one
+    # command ("cannot insert multiple commands into a prepared statement").
+    # Putting DROP and CREATE in one string makes `alembic upgrade head` fail
+    # against a real database — tests never caught it because the integration
+    # conftest applies migrations via offline --sql mode instead.
+    op.execute("DROP TRIGGER IF EXISTS custom_rules_updated_at ON custom_rules")
     op.execute("""
-        DROP TRIGGER IF EXISTS custom_rules_updated_at ON custom_rules;
         CREATE TRIGGER custom_rules_updated_at
             BEFORE UPDATE ON custom_rules
-            FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at()
     """)
 
     # 4. Add rules columns to chat_settings
@@ -78,4 +85,6 @@ def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS custom_rules_updated_at ON custom_rules;")
     op.execute("DROP INDEX IF EXISTS idx_custom_rules_chat_enabled;")
     op.execute("DROP TABLE IF EXISTS custom_rules;")
-    op.execute("DELETE FROM bot_config WHERE key IN ('default_rules_mode', 'default_rules_enabled');")
+    op.execute(
+        "DELETE FROM bot_config WHERE key IN ('default_rules_mode', 'default_rules_enabled');"
+    )
