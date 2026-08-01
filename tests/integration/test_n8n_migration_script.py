@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -340,6 +341,12 @@ async def migration_env(pg_url: str) -> dict[str, Any]:  # type: ignore[misc]
 
 async def _apply(env: dict[str, Any]) -> int:
     return await env["script"].run(env["source_url"], env["target_url"], dry_run=False, only=None)
+
+
+async def _apply_since(env: dict[str, Any], since: datetime) -> int:
+    return await env["script"].run(
+        env["source_url"], env["target_url"], dry_run=False, only=None, since=since
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -725,5 +732,186 @@ class TestMissingSourceTables:
         target = await asyncpg.connect(migration_env["target_url"])
         try:
             assert await target.fetchval("SELECT COUNT(*) FROM chat_messages") == 2
+        finally:
+            await target.close()
+
+
+# ---------------------------------------------------------------------------
+# Catch-up run (--since) — the cutover step
+# ---------------------------------------------------------------------------
+
+
+class TestCatchUp:
+    """The cutover does: full migration from dump #1, bot keeps running for days,
+    then a --since run picks up everything that accumulated."""
+
+    @staticmethod
+    async def _watermark(env: dict[str, Any]) -> datetime:
+        """The source database's own clock, as dump-n8n.sh records it."""
+        source = await asyncpg.connect(env["source_url"])
+        try:
+            value: datetime = await source.fetchval("SELECT now()")
+            return value
+        finally:
+            await source.close()
+
+    @pytest.mark.asyncio
+    async def test_new_rows_are_picked_up(self, migration_env: dict[str, Any]) -> None:
+        await _apply(migration_env)
+        watermark = await self._watermark(migration_env)
+
+        source = await asyncpg.connect(migration_env["source_url"])
+        try:
+            await register_vector(source)
+            await source.execute(
+                """
+                INSERT INTO chat_messages (chat_id, message_id, user_id, message_type, content)
+                VALUES (-100, 3, 42, 'text', 'said after the dump')
+                """
+            )
+            await source.execute(
+                """
+                INSERT INTO chat_memory (chat_id, content, embedding, importance_score)
+                VALUES (-100, 'learned after the dump', $1, 0.9)
+                """,
+                _EMBEDDING,
+            )
+        finally:
+            await source.close()
+
+        await _apply_since(migration_env, watermark)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            assert await target.fetchval("SELECT COUNT(*) FROM chat_messages") == 3
+            assert (
+                await target.fetchval(
+                    "SELECT content FROM chat_messages WHERE chat_id = -100 AND message_id = 3"
+                )
+                == "said after the dump"
+            )
+            assert await target.fetchval("SELECT COUNT(*) FROM chat_memory") == 2
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_edit_of_an_old_message_is_picked_up(self, migration_env: dict[str, Any]) -> None:
+        """created_at is older than the watermark but edited_at is newer — the
+        GREATEST() freshness expression is what catches this."""
+        await _apply(migration_env)
+        watermark = await self._watermark(migration_env)
+
+        source = await asyncpg.connect(migration_env["source_url"])
+        try:
+            await source.execute(
+                """
+                UPDATE chat_messages
+                SET content = 'hello (edited)', edited_at = now(), edit_count = 1,
+                    original_content = 'hello'
+                WHERE chat_id = -100 AND message_id = 1
+                """
+            )
+        finally:
+            await source.close()
+
+        await _apply_since(migration_env, watermark)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            row = await target.fetchrow(
+                "SELECT content, edit_count, original_content FROM chat_messages "
+                "WHERE chat_id = -100 AND message_id = 1"
+            )
+            assert row is not None
+            assert row["content"] == "hello (edited)"
+            assert row["edit_count"] == 1
+            assert row["original_content"] == "hello"
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_untouched_rows_are_not_recopied(self, migration_env: dict[str, Any]) -> None:
+        """Proves the filter actually filters: a sentinel written directly into
+        the target survives a catch-up run, because that row is older than the
+        watermark and never changed in the source."""
+        await _apply(migration_env)
+        watermark = await self._watermark(migration_env)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            await target.execute(
+                "UPDATE chat_messages SET content = 'SENTINEL' "
+                "WHERE chat_id = -100 AND message_id = 2"
+            )
+        finally:
+            await target.close()
+
+        await _apply_since(migration_env, watermark)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            assert (
+                await target.fetchval(
+                    "SELECT content FROM chat_messages WHERE chat_id = -100 AND message_id = 2"
+                )
+                == "SENTINEL"
+            )
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_mutable_tables_are_still_fully_resynced(
+        self, migration_env: dict[str, Any]
+    ) -> None:
+        """sticker_knowledge has no freshness column on purpose: usage counters
+        and admin notes change in place with no timestamp to filter on, so a
+        catch-up must re-sync it whole."""
+        await _apply(migration_env)
+        watermark = await self._watermark(migration_env)
+
+        source = await asyncpg.connect(migration_env["source_url"])
+        try:
+            await source.execute(
+                "UPDATE sticker_knowledge SET total_uses = 99, admin_notes = 'winks' "
+                "WHERE file_unique_id = 'uniq-1'"
+            )
+            await source.execute(
+                "UPDATE chat_settings SET style_prompt = 'be terse' WHERE chat_id = -100"
+            )
+        finally:
+            await source.close()
+
+        await _apply_since(migration_env, watermark)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            row = await target.fetchrow(
+                "SELECT total_uses, admin_notes FROM sticker_knowledge "
+                "WHERE file_unique_id = 'uniq-1'"
+            )
+            assert row is not None
+            assert row["total_uses"] == 99
+            assert row["admin_notes"] == "winks"
+            assert (
+                await target.fetchval(
+                    "SELECT system_prompt FROM chat_settings WHERE chat_id = -100"
+                )
+                == "be terse"
+            )
+        finally:
+            await target.close()
+
+    @pytest.mark.asyncio
+    async def test_catch_up_with_no_changes_is_a_no_op(self, migration_env: dict[str, Any]) -> None:
+        await _apply(migration_env)
+        watermark = await self._watermark(migration_env)
+
+        await _apply_since(migration_env, watermark)
+
+        target = await asyncpg.connect(migration_env["target_url"])
+        try:
+            assert await target.fetchval("SELECT COUNT(*) FROM chat_messages") == 2
+            assert await target.fetchval("SELECT COUNT(*) FROM chat_memory") == 1
+            assert await target.fetchval("SELECT COUNT(*) FROM chat_settings") == 3
         finally:
             await target.close()
