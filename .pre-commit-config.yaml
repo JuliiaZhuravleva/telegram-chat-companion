@@ -12,3 +12,12 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+
+  # Shell linting. The backup and restore scripts run unattended against a
+  # production database, where the usual shell traps (unquoted expansions, a
+  # typo'd variable silently becoming an empty string) are expensive rather than
+  # merely annoying. Every script in the repo passes at the time of adding this.
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
+    hooks:
+      - id: shellcheck

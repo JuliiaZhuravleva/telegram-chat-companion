@@ -94,3 +94,56 @@ services:
         limits:
           cpus: "1.5"
           memory: 1500m
+
+  # Nightly encrypted database backup, uploaded off-host. See docs/backups.md.
+  #
+  # It is a container rather than a host crontab because the harness only knows
+  # how to `docker compose up -d`: a crontab would live outside this repository
+  # and outside the deploy, so it would silently stop tracking the code. As a
+  # service it starts, restarts and reports health like everything else here.
+  #
+  # Does nothing at all until BACKUP_ENABLED=true is present in .env — an
+  # unconfigured deploy idles quietly instead of crash-looping.
+  backup:
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    # Same .env as the bot: the Postgres credentials, the age PUBLIC key and the
+    # rclone remote (RCLONE_CONFIG_<NAME>_*) all arrive through the harness's
+    # existing secret-rendering path. No rclone.conf is mounted — see the
+    # Dockerfile for why the config is environment-only.
+    env_file: .env
+
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+
+    volumes:
+      # Sibling of the postgres data dir, under the same designated persistent
+      # root, so backups survive a `colima delete` for exactly the same reason
+      # the database does. Local copies are the fast restore path; the off-host
+      # upload is what survives losing this machine.
+      - /Users/claw/data/companion/backups:/backups
+
+    # Reports unhealthy once no backup has succeeded in over a day, so a run of
+    # silently failing nights is visible in `docker ps` and not only in logs.
+    healthcheck:
+      test: ["CMD", "/opt/companion/backup-healthcheck.sh"]
+      interval: 15m
+      timeout: 10s
+      retries: 2
+      start_period: 1m
+
+    # A nightly burst on a VM shared with a co-tenant: capped so compression and
+    # encryption cannot monopolise it. Backups taking longer costs nothing.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m

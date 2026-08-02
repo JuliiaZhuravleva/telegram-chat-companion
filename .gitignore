@@ -45,6 +45,13 @@ config/local.yml
 *.pem
 *.key
 
+# age key pairs. docs/backups.md says to generate these outside any working
+# tree, but `age-keygen -o companion-backup-key.txt` writes to the CURRENT
+# directory — so if that instruction is followed from inside the repo, the
+# private half of the backup key lands right here. This is the backstop.
+*key.txt
+*.age
+
 # Testing
 .coverage
 coverage.xml
@@ -91,6 +98,16 @@ workflow-*.json
 *_backup.dump
 *_backup.sql
 schema_backup.sql
+
+# Database backups (scripts/backup-db.sh, and the dev compose `backup` profile).
+# These are FULL dumps of real chat history — private messages, usernames, chat
+# titles, admin ids. gitleaks cannot save you here: a dump has no credential
+# shape, so a clean scan says nothing about it. Encrypted or not, it never
+# belongs in a public repository.
+backups/
+*.dump
+*.dump.age
+*.manifest.json
 
 # Internal notes and planning
 .internal/

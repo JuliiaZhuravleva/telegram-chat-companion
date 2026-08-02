@@ -69,6 +69,20 @@ cp config/.env.example .env
 docker compose up -d
 ```
 
+### Backups
+
+A `backup` service ships with both compose files: a nightly `pg_dump`, encrypted
+to an [age](https://age-encryption.org/) public key before it leaves the host and
+uploaded with [rclone](https://rclone.org/) (Google Drive by default). It stays
+off until `BACKUP_ENABLED=true` is set, and it is opt-in on the dev compose
+(`--profile backup`).
+
+`scripts/restore-db.sh` is the other half — it verifies the archive, refuses to
+overwrite a database that already has tables, and checks the restored row counts
+against the backup's manifest.
+
+See [docs/backups.md](docs/backups.md) for the one-time key and rclone setup.
+
 ## Architecture
 
 ```
@@ -143,6 +157,7 @@ pre-commit install           # Set up git hooks
 - [Architecture Overview](docs/architecture.md)
 - [Setup Guide](docs/setup.md)
 - [Configuration Reference](docs/configuration.md)
+- [Database Backups](docs/backups.md) — nightly encrypted dumps, off-host upload, restore and rehearsal
 - [Functionality Overview](docs/FUNCTIONALITY.md) — full feature catalogue with live-QA observations and improvement recommendations
 
 ## Contributing
