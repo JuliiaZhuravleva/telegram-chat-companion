@@ -99,6 +99,34 @@ class ModuleConfig(BaseSettings):
     requires: list[str] = Field(default_factory=list)
 
 
+class MaintenanceSettings(BaseSettings):
+    """Data retention windows for the periodic cleanup task.
+
+    Mirrors the reference bot's ``periodic_cleanup()`` (see
+    internal/n8n-reference/data/data-lifecycle.md).  Any window set to ``None``
+    disables cleanup for that table, so an operator can always opt out of
+    deleting a specific kind of data.
+    """
+
+    enabled: bool = True
+    interval_seconds: int = 3600  # hourly; user_activity has a 1-hour window
+
+    # Ephemeral: rebuilt continuously, only used for spam/velocity windows.
+    user_activity_hours: int | None = 1
+
+    # Deliberately longer than the reference bot's 30 days: the n8n migration
+    # carries ~36k historical messages over and they must survive the first
+    # cleanup pass.  Raise further before migrating if older history matters.
+    chat_messages_days: int | None = 365
+
+    # Backs /costs analytics (a Python-only feature the reference bot lacked),
+    # so kept far longer than n8n's 7-day debug-log window.
+    response_log_days: int | None = 90
+
+    unauthorized_attempts_days: int | None = 30
+    abuse_blocked_log_days: int | None = 30
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -124,6 +152,7 @@ class Settings(BaseSettings):
     bot: BotSettings = Field(default_factory=BotSettings)
     rag: RAGSettings = Field(default_factory=RAGSettings)
     ai: AISettings = Field(default_factory=AISettings)
+    maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
     modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:

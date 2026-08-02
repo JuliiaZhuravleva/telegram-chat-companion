@@ -30,6 +30,7 @@ from src.bot.middleware import (
 from src.config import Settings
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
 from src.services.health.checker import HealthChecker
+from src.services.maintenance.cleanup import RetentionCleaner
 from src.services.modules.sticker.scheduler import StickerSetSyncScheduler
 from src.utils import parse_admin_ids
 
@@ -131,6 +132,13 @@ async def main() -> None:
     dp.callback_query.middleware(topic_mw)
     dp.callback_query.middleware(access_control_mw)
 
+    # Edited messages: gate on the whitelist, then let MessageSaverMiddleware
+    # re-save the message so save()'s ON CONFLICT branch records the edit.
+    # ActivityTracker and Rules are deliberately left out — an edit is not new
+    # activity and must not re-fire rule actions on the same message.
+    for mw in (chat_config_mw, topic_mw, access_control_mw, message_saver_mw):
+        dp.edited_message.middleware(mw)
+
     dp.include_router(main_router)
 
     # Register bot commands with Telegram API for autocomplete hints
@@ -150,11 +158,15 @@ async def main() -> None:
     sticker_sync = StickerSetSyncScheduler(pool=pool, bot=bot)
     await sticker_sync.start()
 
+    retention_cleaner = RetentionCleaner(pool=pool, config=settings.maintenance)
+    await retention_cleaner.start()
+
     try:
         logger.info("Bot started, listening for messages...")
         await dp.start_polling(bot)
     finally:
         logger.info("Shutting down...")
+        await retention_cleaner.stop()
         await sticker_sync.stop()
         await health_checker.stop()
         await container.close()

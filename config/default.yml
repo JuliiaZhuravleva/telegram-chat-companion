@@ -81,6 +81,25 @@ rag:
   # Memory importance scoring
   default_importance: 0.5
 
+# Data retention for the periodic cleanup task.
+# Set any window to null to never delete that table.
+maintenance:
+  enabled: true
+  interval_seconds: 3600
+
+  # Ephemeral — only feeds spam/velocity windows.
+  user_activity_hours: 1
+
+  # Longer than the reference n8n bot's 30 days on purpose: the migration
+  # carries ~36k historical messages over and they must survive the first pass.
+  chat_messages_days: 365
+
+  # Backs /costs analytics, so kept longer than a debug log would be.
+  response_log_days: 90
+
+  unauthorized_attempts_days: 30
+  abuse_blocked_log_days: 30
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:

@@ -8,6 +8,7 @@ from src.bot.handlers.admin import router as admin_router
 from src.bot.handlers.admin_kb import router as admin_kb_router
 from src.bot.handlers.admin_sticker import router as admin_sticker_router
 from src.bot.handlers.callbacks import router as callbacks_router
+from src.bot.handlers.chat_events import router as chat_events_router
 from src.bot.handlers.commands import router as commands_router
 from src.bot.handlers.media import router as media_router
 from src.bot.handlers.message import router as message_router
@@ -19,6 +20,9 @@ from src.bot.handlers.rules import router as rules_router
 # organizer-add reply handler), then rules (ar_ callbacks + FSM state),
 # then commands, then callbacks, media (voice/photo/sticker),
 # then the generic text handler last.
+#
+# chat_events observes edited_message / my_chat_member, which no other router
+# handles, so its position among the message routers is irrelevant.
 router = Router(name="main")
 router.include_router(admin_sticker_router)
 router.include_router(admin_kb_router)
@@ -26,6 +30,7 @@ router.include_router(admin_router)
 router.include_router(rules_router)
 router.include_router(commands_router)
 router.include_router(callbacks_router)
+router.include_router(chat_events_router)
 router.include_router(media_router)
 router.include_router(message_router)
 
