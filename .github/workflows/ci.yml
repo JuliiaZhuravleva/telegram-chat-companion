@@ -15,8 +15,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install ruff
-      - run: ruff check src/ tests/
-      - run: ruff format --check src/ tests/
+      # Whole repo, not just src/ tests/ — the gap was alembic/, which is the
+      # code that runs on every deploy and where this project has already had a
+      # production blocker. Two lint errors had sat in alembic/env.py since the
+      # first commit, invisible because CI never looked there. ruff honours
+      # .gitignore, so this stays limited to tracked files.
+      - run: ruff check .
+      - run: ruff format --check .
 
   typecheck:
     runs-on: ubuntu-latest

@@ -7,9 +7,10 @@ Reads DATABASE_URL from environment variables.
 import asyncio
 import os
 
-from alembic import context
-from sqlalchemy import pool, text
+from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
 
 
 def get_url() -> str:
