@@ -48,5 +48,41 @@ services:
       retries: 3
       start_period: 120s
 
+  # Database backup — OPT-IN here, unlike production where it always runs.
+  # Dev data is disposable and nobody wants their laptop pushing dumps to a
+  # cloud drive by surprise, so this service only starts when asked:
+  #
+  #   docker compose --profile backup up -d backup      # start the nightly loop
+  #   docker compose --profile backup run --rm backup \
+  #       /opt/companion/backup-db.sh --no-upload       # one local backup, now
+  #
+  # Handy for rehearsing a restore against a copy of production. See docs/backups.md.
+  backup:
+    profiles: ["backup"]
+    build:
+      context: .
+      dockerfile: docker/backup/Dockerfile
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    env_file: .env
+
+    environment:
+      - PGHOST=postgres
+      - PGPORT=5432
+
+    volumes:
+      - ./backups:/backups
+
+    healthcheck:
+      test: ["CMD", "/opt/companion/backup-healthcheck.sh"]
+      interval: 15m
+      timeout: 10s
+      retries: 2
+      start_period: 1m
+
 volumes:
   postgres-data:
