@@ -31,8 +31,13 @@ services:
 
     volumes:
       # HOST bind mount — survives `colima delete`. The harness refuses to deploy
-      # a mount outside the project dir or its designated persistent-data root.
-      - /Users/claw/data/companion/postgres:/var/lib/postgresql/data
+      # a mount outside the project dir or its designated persistent-data root,
+      # and COMPANION_DATA_DIR is exactly that root, supplied by its env map.
+      # Parametrized rather than hardcoded because this repository is public and
+      # a literal path here names a real directory on a real host. `:?` so a map
+      # missing the variable fails at `compose config` with a readable message
+      # instead of silently mounting `/postgres` at the filesystem root.
+      - ${COMPANION_DATA_DIR:?Set COMPANION_DATA_DIR in the env map}/postgres:/var/lib/postgresql/data
       # Enables the pgvector extension on FIRST init only (initdb hook).
       - ./docker/init/01_init.sh:/docker-entrypoint-initdb.d/01_init.sh:ro
 
@@ -129,7 +134,7 @@ services:
       # root, so backups survive a `colima delete` for exactly the same reason
       # the database does. Local copies are the fast restore path; the off-host
       # upload is what survives losing this machine.
-      - /Users/claw/data/companion/backups:/backups
+      - ${COMPANION_DATA_DIR:?Set COMPANION_DATA_DIR in the env map}/backups:/backups
 
     # Reports unhealthy once no backup has succeeded in over a day, so a run of
     # silently failing nights is visible in `docker ps` and not only in logs.

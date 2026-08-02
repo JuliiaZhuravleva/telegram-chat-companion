@@ -151,6 +151,20 @@ the same word in lower case: `backup:telegram-chat-companion`.
 > is expected with environment-only config — there is no file to write back to.
 > The refresh token is long-lived and each run derives its own access token.
 
+If the token is stored in a secrets manager, **check its shape, not just that it
+is there.** A presence-or-length probe passes on a bare access token, which works
+for under an hour and then fails with nothing to refresh from — a silent failure
+that surfaces at the first scheduled run, typically hours later and unattended.
+This has already happened once during setup. Assert the structure instead:
+
+```bash
+op read "op://<vault>/<item>/token" | jq -e '.refresh_token | length'
+```
+
+It prints the length and exits non-zero if `refresh_token` is missing, without
+ever printing the value. Generalised: for a JSON-valued secret, non-empty is not
+the same as valid.
+
 ### 3. Turn it on
 
 ```ini
