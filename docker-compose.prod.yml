@@ -1,22 +1,22 @@
-# Production compose for the Mac mini (deployed by `claw-deploy`, runs as the
-# non-admin `claw` user inside a Colima VM).
+# Production compose — deployed by an external harness onto a single-host Docker
+# runtime (a Colima VM on macOS), running as a non-admin service user.
 #
 # STANDALONE — this is NOT an override layer over docker-compose.yml. Compose
 # merges list-valued options (ports, volumes) by APPENDING, so a layered
 # base + prod would keep the dev port publications instead of replacing them.
-# `claw-deploy` picks this file over docker-compose.yml automatically and always
+# The harness picks this file over docker-compose.yml automatically and always
 # passes `-p companion`, so container names are companion-<service>-1.
 #
 # Differences from the dev compose, and why:
-#   1. Postgres data lives on a HOST bind mount, not a named volume. The mini's
+#   1. Postgres data lives on a HOST bind mount, not a named volume. The host's
 #      colima autostart self-heals a power-loss-corrupted VM with `colima delete -f`,
-#      which destroys named volumes. /Users/claw/data is on the host's journaled
-#      APFS and survives that.
+#      which destroys named volumes. The bind-mount root is on the host's
+#      journaled APFS and survives that.
 #   2. Nothing is published to the host. The bot reaches Postgres over the compose
-#      network; publishing 5432 would expose it on the mini's Tailscale interface.
+#      network; publishing 5432 would expose it on the host's network interfaces.
 #   3. No container_name — it would escape the `-p companion` namespace.
-#   4. Secrets come from .env, which claw-deploy renders at deploy time from
-#      /usr/local/etc/claw-deploy/env.d/companion.map (backed by 1Password).
+#   4. Secrets come from .env, which the harness renders at deploy time from an
+#      env map it keeps outside this repository, backed by a secrets manager.
 #      Never commit a .env.
 
 services:
@@ -30,8 +30,8 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:?Set POSTGRES_DB in the env map}
 
     volumes:
-      # HOST bind mount — survives `colima delete`. claw-deploy's assert_safe_mounts
-      # only permits paths inside the project dir or /Users/claw/data/companion.
+      # HOST bind mount — survives `colima delete`. The harness refuses to deploy
+      # a mount outside the project dir or its designated persistent-data root.
       - /Users/claw/data/companion/postgres:/var/lib/postgresql/data
       # Enables the pgvector extension on FIRST init only (initdb hook).
       - ./docker/init/01_init.sh:/docker-entrypoint-initdb.d/01_init.sh:ro
@@ -72,21 +72,21 @@ services:
       retries: 3
       start_period: 120s
 
-    # The mini's Colima VM has 4 CPUs and is SHARED with the nutricore stack.
+    # The production VM has 4 CPUs and is SHARED with an unrelated co-tenant stack.
     # Sticker learning is the only genuinely CPU-bound path here: it shells out to
     # ffmpeg (motion.py) and renders .tgs through the blocking rlottie binding
     # (renderer.py). Neither bounds itself — ffmpeg is invoked without -threads, so
     # it sizes its thread pool to every CPU it can see, and rlottie runs via
     # asyncio.to_thread whose default executor is min(32, cpus+4) threads. A single
     # burst of new (uncached) stickers could therefore saturate the whole VM and
-    # make nutricore stutter.
+    # make the co-tenant stutter.
     #
     # This cgroup quota is the hard boundary: the kernel enforces it across every
     # process in the container, whatever spawned them. 1.5 of 4 CPUs leaves 2.5
-    # guaranteed to nutricore. Sticker analysis gets slower under load, which is the
-    # right trade — it's background enrichment, not a reply-latency path.
+    # guaranteed to the co-tenant. Sticker analysis gets slower under load, which is
+    # the right trade — it's background enrichment, not a reply-latency path.
     #
-    # Verified on the mini before committing: Compose v5.3.0 under Colima does honour
+    # Verified on the host before committing: Compose v5.3.0 under Colima does honour
     # these keys (they are not swarm-only here) — a probe container came back with
     # NanoCpus=1500000000 and Memory=536870912.
     deploy:
