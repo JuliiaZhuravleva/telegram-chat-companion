@@ -97,7 +97,13 @@ maintenance:
   # Backs /costs analytics, so kept longer than a debug log would be.
   response_log_days: 90
 
-  unauthorized_attempts_days: 30
+  # null on purpose — this table is state, not a log. has_rejected_attempt()
+  # queries it with no time bound and the access middleware short-circuits on
+  # the answer, so a rejected row IS the ban record; ageing it out silently
+  # un-bans the chat. The live migration carried 147 rows for ~6 months, so
+  # there is nothing to reclaim here anyway.
+  unauthorized_attempts_days: null
+
   abuse_blocked_log_days: 30
 
 # Module Configuration

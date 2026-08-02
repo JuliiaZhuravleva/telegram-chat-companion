@@ -26,19 +26,37 @@ def _make_cleaner(**overrides: object) -> RetentionCleaner:
 # ---------------------------------------------------------------------------
 
 
+# Tables that are eligible for pruning but deliberately have no default window.
+# Keeping this explicit is the point: an unscheduled table either grows forever
+# (a bug) or holds state that must not age out (a decision). Say which.
+_EXEMPT_BY_DESIGN = {
+    # `has_rejected_attempt()` reads this with no time bound and the access
+    # middleware short-circuits on it, so a rejected row IS the ban record.
+    # See tests/integration/test_retention_preserves_bans.py.
+    "unauthorized_attempts",
+}
+
+
 class TestWindows:
-    def test_defaults_cover_every_retention_table(self) -> None:
-        """A table listed as prunable but never scheduled would grow forever."""
+    def test_defaults_cover_every_retention_table_except_the_exempt_ones(self) -> None:
+        """A table listed as prunable but never scheduled would grow forever —
+        unless its exemption is deliberate, in which case it is listed above."""
         windows = _make_cleaner()._windows()
-        assert set(windows) == set(RETENTION_TABLES)
+        assert set(windows) == set(RETENTION_TABLES) - _EXEMPT_BY_DESIGN
+
+    def test_exempt_tables_are_still_prunable_when_asked(self) -> None:
+        """The exemption is a default, not a prohibition — an operator who
+        explicitly sets a window still gets one."""
+        windows = _make_cleaner(unauthorized_attempts_days=30)._windows()
+        assert windows["unauthorized_attempts"] == timedelta(days=30)
 
     def test_default_windows_match_config(self) -> None:
         windows = _make_cleaner()._windows()
         assert windows["user_activity"] == timedelta(hours=1)
         assert windows["chat_messages"] == timedelta(days=365)
         assert windows["response_log"] == timedelta(days=90)
-        assert windows["unauthorized_attempts"] == timedelta(days=30)
         assert windows["abuse_blocked_log"] == timedelta(days=30)
+        assert "unauthorized_attempts" not in windows
 
     def test_none_window_disables_that_table(self) -> None:
         """Operators must be able to opt out of deleting a specific table."""
@@ -80,8 +98,9 @@ class TestRunOnce:
         cleaner = _make_cleaner()
         deleted = await cleaner.run_once()
 
-        assert deleted == dict.fromkeys(RETENTION_TABLES, 3)
-        assert repo.delete_older_than.await_count == len(RETENTION_TABLES)
+        scheduled = set(RETENTION_TABLES) - _EXEMPT_BY_DESIGN
+        assert deleted == dict.fromkeys(scheduled, 3)
+        assert repo.delete_older_than.await_count == len(scheduled)
 
     @pytest.mark.asyncio
     async def test_omits_tables_with_nothing_to_delete(
@@ -115,7 +134,7 @@ class TestRunOnce:
         deleted = await _make_cleaner().run_once()
 
         assert "chat_messages" not in deleted
-        assert len(deleted) == len(RETENTION_TABLES) - 1
+        assert len(deleted) == len(set(RETENTION_TABLES) - _EXEMPT_BY_DESIGN) - 1
 
     @pytest.mark.asyncio
     async def test_passes_timedelta_not_string(self, monkeypatch: pytest.MonkeyPatch) -> None:

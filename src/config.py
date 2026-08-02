@@ -123,7 +123,17 @@ class MaintenanceSettings(BaseSettings):
     # so kept far longer than n8n's 7-day debug-log window.
     response_log_days: int | None = 90
 
-    unauthorized_attempts_days: int | None = 30
+    # NOT pruned, deliberately — unlike the reference bot, this table is not a
+    # log here, it is state.  `AdminRepository.has_rejected_attempt()` asks it
+    # "was this chat ever rejected?" with no time bound, and
+    # `AccessControlMiddleware` short-circuits on the answer.  A rejected row IS
+    # the ban record, so ageing it out silently un-bans the chat: the bot starts
+    # notifying the admin about it again, having lost the evidence that someone
+    # already decided.  n8n could prune at 30 days because it recorded the
+    # decision in chat_settings.chat_status instead.  Volume is a non-issue —
+    # the live migration carried 147 rows for ~6 months of production.
+    unauthorized_attempts_days: int | None = None
+
     abuse_blocked_log_days: int | None = 30
 
 
