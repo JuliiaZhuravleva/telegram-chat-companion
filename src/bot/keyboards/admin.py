@@ -300,6 +300,29 @@ def access_keyboard(lang: str, attempt_id: int) -> InlineKeyboardMarkup:
 
 
 # ---------------------------------------------------------------------------
+# Shared: numbered list-item buttons
+# ---------------------------------------------------------------------------
+#
+# ``pending_list_keyboard``, ``rejected_list_keyboard``, and ``chats_list_keyboard``
+# all render one row of action buttons per list item, on a page whose message body
+# numbers items via ``enumerate(items, start=start_index + 1)`` (``start_index`` is
+# ``page * _PER_PAGE`` — see ``_render_wl_pending`` / ``_render_wl_rejected`` /
+# ``_render_wl_chats`` in ``handlers/admin.py``). Every action button in all three
+# keyboards must go through ``_numbered_button`` below so the "button number ==
+# body item number" rule lives in exactly one place instead of drifting per list.
+
+
+def _numbered_button(index: int, label: str, callback_data: str) -> InlineKeyboardButton:
+    """Build an inline button whose visible label is prefixed with its item number.
+
+    ``index`` is the 1-based display number (i.e. ``enumerate(items,
+    start=start_index + 1)``), matching the number printed for the same item in
+    the message body above the keyboard.
+    """
+    return InlineKeyboardButton(text=f"{index} {label}", callback_data=callback_data)
+
+
+# ---------------------------------------------------------------------------
 # Whitelisted chats list (paginated)
 # ---------------------------------------------------------------------------
 
@@ -309,12 +332,18 @@ def chats_list_keyboard(
     chats: list[dict[str, object]],
     page: int,
     total_pages: int,
+    start_index: int,
 ) -> InlineKeyboardMarkup:
-    """Paginated list of whitelisted chats with Remove buttons."""
+    """Paginated list of whitelisted chats with Remove buttons.
+
+    ``start_index`` is the 0-based offset of the first item on this page
+    (``page * per_page``), so the number on each Remove button lines up with
+    the numbering rendered in the message body (see ``_numbered_button``).
+    """
     from html import escape
 
     rows: list[list[InlineKeyboardButton]] = []
-    for chat in chats:
+    for i, chat in enumerate(chats, start=start_index + 1):
         title = str(chat.get("chat_title") or chat.get("chat_id", "?"))
         ctype = chat.get("chat_type", "")
         label = f"{escape(title)}"
@@ -334,10 +363,7 @@ def chats_list_keyboard(
         rows.append(
             [
                 title_btn,
-                InlineKeyboardButton(
-                    text="❌",
-                    callback_data=f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}",
-                ),
+                _numbered_button(i, "❌", f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}"),
             ]
         )
 
@@ -415,22 +441,27 @@ def rejected_list_keyboard(
     attempts: list[dict[str, object]],
     page: int,
     total_pages: int,
+    start_index: int,
 ) -> InlineKeyboardMarkup:
-    """Paginated list of rejected attempts with Restore/Delete per item."""
+    """Paginated list of rejected attempts with Restore/Delete per item.
+
+    ``start_index`` is the 0-based offset of the first item on this page
+    (``page * per_page``), so the number on each Restore/Delete button lines
+    up with the numbering rendered in the message body (see
+    ``_numbered_button``).
+    """
     restore_label = {"ru": "🔄 Вернуть", "en": "🔄 Restore"}
     rows: list[list[InlineKeyboardButton]] = []
-    for attempt in attempts:
+    for i, attempt in enumerate(attempts, start=start_index + 1):
         aid = attempt["id"]
         rows.append(
             [
-                InlineKeyboardButton(
-                    text=restore_label.get(lang, "Restore"),
-                    callback_data=f"adm_wl_restore:{lang}:{aid}:{page}",
+                _numbered_button(
+                    i,
+                    restore_label.get(lang, "Restore"),
+                    f"adm_wl_restore:{lang}:{aid}:{page}",
                 ),
-                InlineKeyboardButton(
-                    text="🗑",
-                    callback_data=f"adm_wl_del_ask:{lang}:{aid}:{page}",
-                ),
+                _numbered_button(i, "🗑", f"adm_wl_del_ask:{lang}:{aid}:{page}"),
             ]
         )
 
@@ -499,21 +530,23 @@ def pending_list_keyboard(
     attempts: list[dict[str, object]],
     page: int,
     total_pages: int,
+    start_index: int,
 ) -> InlineKeyboardMarkup:
-    """Paginated list of pending requests with Approve/Reject per item."""
+    """Paginated list of pending requests with Approve/Reject per item.
+
+    ``start_index`` is the 0-based offset of the first item on this page
+    (i.e. ``page * per_page``), so the numbers on the Approve/Reject buttons
+    line up with the numbering rendered in the message body
+    (``enumerate(attempts, start=offset + 1)`` in ``handlers/admin.py``; see
+    ``_numbered_button``).
+    """
     rows: list[list[InlineKeyboardButton]] = []
-    for attempt in attempts:
+    for i, attempt in enumerate(attempts, start=start_index + 1):
         aid = attempt["id"]
         rows.append(
             [
-                InlineKeyboardButton(
-                    text="✅",
-                    callback_data=f"adm_wl_apr:{lang}:{aid}:{page}",
-                ),
-                InlineKeyboardButton(
-                    text="❌",
-                    callback_data=f"adm_wl_rej:{lang}:{aid}:{page}",
-                ),
+                _numbered_button(i, "✅", f"adm_wl_apr:{lang}:{aid}:{page}"),
+                _numbered_button(i, "❌", f"adm_wl_rej:{lang}:{aid}:{page}"),
             ]
         )
 

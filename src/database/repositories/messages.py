@@ -242,6 +242,103 @@ class MessageRepository:
             }
         return dict(row)
 
+    async def find_by_username(self, chat_id: int, username: str) -> asyncpg.Record | None:
+        """Find the most recent user_id seen posting under `username` in this chat.
+
+        Case-insensitive (Telegram usernames are case-insensitive). Used to
+        resolve a plain ``@username`` reply into a concrete user id when
+        adding a KB organizer (B-1 stage 2) — the Bot API has no
+        username-to-user lookup, so this chat-scoped message history is the
+        only available index. Returns ``None`` if this chat's history has no
+        record of that username (caller should then check
+        ``username_seen_elsewhere`` to phrase the right not-found copy).
+        """
+        return await self._pool.fetchrow(
+            """
+            SELECT user_id, first_name
+            FROM chat_messages
+            WHERE chat_id = $1
+              AND user_id IS NOT NULL
+              AND username IS NOT NULL
+              AND LOWER(username) = LOWER($2)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            chat_id,
+            username,
+        )
+
+    async def username_seen_elsewhere(self, chat_id: int, username: str) -> bool:
+        """Check whether `username` has posted in a chat other than `chat_id`.
+
+        Lets the organizer-add flow distinguish "don't know this username at
+        all" from "know them, but not in this chat" (B-1 stage 2).
+        """
+        row = await self._pool.fetchrow(
+            """
+            SELECT 1
+            FROM chat_messages
+            WHERE chat_id != $1
+              AND user_id IS NOT NULL
+              AND username IS NOT NULL
+              AND LOWER(username) = LOWER($2)
+            LIMIT 1
+            """,
+            chat_id,
+            username,
+        )
+        return row is not None
+
+    async def get_top_active_users(
+        self, chat_id: int, page: int, per_page: int = 5
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated distinct posters in a chat, ranked by message count desc.
+
+        Powers the KB organizer picker (B-2): lets an admin pick a candidate
+        from chat participants instead of guessing a forward/@username.
+        Excludes bot messages and rows with no `user_id` (e.g. service
+        messages). `username`/`first_name` reflect that user's most recent
+        message in this chat -- same chat-scoped-history constraint as
+        `find_by_username` (no live Bot API lookup here). The existing
+        `idx_chat_messages_user(chat_id, user_id, created_at DESC)` serves the
+        per-chat grouping; the final `ORDER BY message_count DESC` still sorts,
+        because it orders by an aggregate no index can precompute -- acceptable
+        for a low-frequency admin action. `user_id ASC` is a stable tiebreaker
+        so page contents don't reshuffle across requests when counts are equal.
+        Note the count and the page are two separate statements, so under
+        concurrent writes `total` may disagree slightly with the rows returned;
+        harmless for a picker, worth knowing before reusing this elsewhere.
+        Returns (candidates, total_distinct_posters).
+        """
+        total = (
+            await self._pool.fetchval(
+                """
+                SELECT COUNT(DISTINCT user_id)
+                FROM chat_messages
+                WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+                """,
+                chat_id,
+            )
+            or 0
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT user_id,
+                   (array_agg(username ORDER BY created_at DESC))[1] AS username,
+                   (array_agg(first_name ORDER BY created_at DESC))[1] AS first_name,
+                   COUNT(*)::int AS message_count
+            FROM chat_messages
+            WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+            GROUP BY user_id
+            ORDER BY message_count DESC, user_id ASC
+            LIMIT $2 OFFSET $3
+            """,
+            chat_id,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
+
     async def get_for_summary(
         self,
         chat_id: int,

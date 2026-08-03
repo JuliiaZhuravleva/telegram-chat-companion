@@ -1,5 +1,8 @@
 """Tests for admin panel keyboards."""
 
+from unittest.mock import patch
+
+import src.bot.keyboards.admin as admin_kb
 from src.bot.keyboards.admin import (
     access_keyboard,
     approved_notification_keyboard,
@@ -147,7 +150,7 @@ class TestChatsListKeyboard:
             {"chat_id": -100, "chat_title": "Alpha", "chat_type": "group"},
             {"chat_id": -200, "chat_title": "Beta", "chat_type": "supergroup"},
         ]
-        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)
         # ❌ now routes through the confirmation step
         assert any("adm_wl_rm_ask:ru:-100:0" in c for c in callbacks)
@@ -156,13 +159,13 @@ class TestChatsListKeyboard:
         assert not any(c.startswith("adm_wl_rm:") for c in callbacks)
 
     def test_has_back_button(self):
-        kb = chats_list_keyboard("en", [], page=0, total_pages=1)
+        kb = chats_list_keyboard("en", [], page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:en" in c for c in callbacks)
 
     def test_pagination_shown_for_multiple_pages(self):
         chats = [{"chat_id": -100, "chat_title": "A", "chat_type": "group"}]
-        kb = chats_list_keyboard("ru", chats, page=0, total_pages=3)
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=3, start_index=0)
         callbacks = _get_callbacks(kb)
         # Should have next page button
         assert any("adm_wl_chats:ru:1" in c for c in callbacks)
@@ -172,7 +175,7 @@ class TestChatsListKeyboard:
 
     def test_no_pagination_for_single_page(self):
         chats = [{"chat_id": -100, "chat_title": "A", "chat_type": "group"}]
-        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
         labels = _get_labels(kb)
         # No page indicator
         assert not any("/" in label and label[0].isdigit() for label in labels)
@@ -185,7 +188,7 @@ class TestChatsListKeyboard:
                 "chat_type": "supergroup",
             },
         ]
-        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1)
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
         urls = _get_urls(kb)
         # Internal id: strip sign + "100" prefix
         assert "https://t.me/c/1234567890" in urls
@@ -198,7 +201,7 @@ class TestChatsListKeyboard:
                 "chat_type": "private",
             },
         ]
-        kb = chats_list_keyboard("en", chats, page=0, total_pages=1)
+        kb = chats_list_keyboard("en", chats, page=0, total_pages=1, start_index=0)
         urls = _get_urls(kb)
         assert "tg://user?id=1234567890" in urls
 
@@ -209,13 +212,53 @@ class TestChatsListKeyboard:
         chats = [
             {"chat_id": -100, "chat_title": "Legacy Group", "chat_type": "group"},
         ]
-        kb = chats_list_keyboard("ru", chats, page=2, total_pages=5)
+        kb = chats_list_keyboard("ru", chats, page=2, total_pages=5, start_index=0)
         urls = _get_urls(kb)
         assert not any("-100" in (u or "") for u in urls)
         # Find the row for this chat (first data row) and check its title button
         title_btn = kb.inline_keyboard[0][0]
         assert title_btn.url is None
         assert title_btn.callback_data == "noop"
+
+    def test_button_number_starts_at_one_on_first_page(self):
+        """With start_index=0 (page 1), numbering starts at 1."""
+        chats = [
+            {"chat_id": -100, "chat_title": "Alpha", "chat_type": "group"},
+            {"chat_id": -200, "chat_title": "Beta", "chat_type": "supergroup"},
+        ]
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
+        labels = _get_labels(kb)
+        assert "1 ❌" in labels
+        assert "2 ❌" in labels
+
+    def test_button_number_matches_body_numbering_on_third_page(self):
+        """Remove-button numbers must match the message-body numbering.
+
+        The body numbers entries via ``enumerate(chats, start=page * _PER_PAGE + 1)``
+        (see ``handlers/admin.py`` ``_render_wl_chats``). With ``_PER_PAGE=5`` and
+        ``page=2`` (the 3rd page, 0-based), the first item on the page is #11.
+        """
+        per_page = 5
+        page = 2
+        start_index = page * per_page
+        chats = [
+            {"chat_id": -100, "chat_title": "Alpha", "chat_type": "group"},
+            {"chat_id": -200, "chat_title": "Beta", "chat_type": "supergroup"},
+        ]
+        kb = chats_list_keyboard(
+            "ru",
+            chats,
+            page=page,
+            total_pages=5,
+            start_index=start_index,
+        )
+        labels = _get_labels(kb)
+        assert "11 ❌" in labels
+        assert "12 ❌" in labels
+        # Ensure the callback data still ties back to the right chat/page.
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl_rm_ask:ru:-100:2" in c for c in callbacks)
+        assert any("adm_wl_rm_ask:ru:-200:2" in c for c in callbacks)
 
 
 class TestConfirmRemoveChatKeyboard:
@@ -246,7 +289,7 @@ class TestRejectedListKeyboard:
             {"id": 1, "chat_id": -100},
             {"id": 2, "chat_id": -200},
         ]
-        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=1)
+        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)
         assert any("adm_wl_restore:ru:1:0" in c for c in callbacks)
         assert any("adm_wl_del_ask:ru:1:0" in c for c in callbacks)
@@ -257,21 +300,62 @@ class TestRejectedListKeyboard:
 
     def test_pagination_uses_rejected_callback(self):
         attempts = [{"id": 1, "chat_id": -100}]
-        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=3)
+        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=3, start_index=0)
         callbacks = _get_callbacks(kb)
         assert any("adm_wl_rejected:ru:1" in c for c in callbacks)
 
     def test_back_returns_to_whitelist_menu(self):
-        kb = rejected_list_keyboard("en", [], page=0, total_pages=1)
+        kb = rejected_list_keyboard("en", [], page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:en" in c for c in callbacks)
 
     def test_restore_label_per_language(self):
         attempts = [{"id": 1, "chat_id": -100}]
-        ru = _get_labels(rejected_list_keyboard("ru", attempts, 0, 1))
-        en = _get_labels(rejected_list_keyboard("en", attempts, 0, 1))
+        ru = _get_labels(rejected_list_keyboard("ru", attempts, 0, 1, start_index=0))
+        en = _get_labels(rejected_list_keyboard("en", attempts, 0, 1, start_index=0))
         assert any("Вернуть" in lab for lab in ru)
         assert any("Restore" in lab for lab in en)
+
+    def test_button_number_starts_at_one_on_first_page(self):
+        """With start_index=0 (page 1), numbering starts at 1."""
+        attempts = [{"id": 1, "chat_id": -100}, {"id": 2, "chat_id": -200}]
+        kb = rejected_list_keyboard("ru", attempts, page=0, total_pages=1, start_index=0)
+        labels = _get_labels(kb)
+        assert any(lab.startswith("1 ") and "Вернуть" in lab for lab in labels)
+        assert "1 🗑" in labels
+        assert any(lab.startswith("2 ") and "Вернуть" in lab for lab in labels)
+        assert "2 🗑" in labels
+
+    def test_button_number_matches_body_numbering_on_third_page(self):
+        """Button numbers must match the message-body numbering.
+
+        The body numbers items via ``enumerate(attempts, start=page * _PER_PAGE + 1)``
+        (see ``handlers/admin.py`` ``_render_wl_rejected``). With ``_PER_PAGE=5`` and
+        ``page=2`` (the 3rd page, 0-based), the first item on the page is #11.
+        """
+        per_page = 5
+        page = 2
+        start_index = page * per_page
+        attempts = [
+            {"id": 101, "chat_id": -100},
+            {"id": 102, "chat_id": -200},
+        ]
+        kb = rejected_list_keyboard(
+            "ru",
+            attempts,
+            page=page,
+            total_pages=5,
+            start_index=start_index,
+        )
+        labels = _get_labels(kb)
+        assert any(lab.startswith("11 ") and "Вернуть" in lab for lab in labels)
+        assert "11 🗑" in labels
+        assert any(lab.startswith("12 ") and "Вернуть" in lab for lab in labels)
+        assert "12 🗑" in labels
+        # Ensure the callback data still ties back to the right attempt/page.
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl_restore:ru:101:2" in c for c in callbacks)
+        assert any("adm_wl_restore:ru:102:2" in c for c in callbacks)
 
 
 class TestConfirmDeleteAttemptKeyboard:
@@ -295,7 +379,7 @@ class TestPendingListKeyboard:
             {"id": 1, "chat_id": -100, "chat_title": "Test"},
             {"id": 2, "chat_id": -200, "chat_title": "Test2"},
         ]
-        kb = pending_list_keyboard("ru", attempts, page=0, total_pages=1)
+        kb = pending_list_keyboard("ru", attempts, page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)
         assert any("adm_wl_apr:ru:1:0" in c for c in callbacks)
         assert any("adm_wl_rej:ru:1:0" in c for c in callbacks)
@@ -303,9 +387,77 @@ class TestPendingListKeyboard:
         assert any("adm_wl_rej:ru:2:0" in c for c in callbacks)
 
     def test_has_back_button(self):
-        kb = pending_list_keyboard("en", [], page=0, total_pages=1)
+        kb = pending_list_keyboard("en", [], page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:en" in c for c in callbacks)
+
+    def test_button_number_starts_at_one_on_first_page(self):
+        """With start_index=0 (page 1), numbering starts at 1."""
+        attempts = [{"id": 1, "chat_id": -100}, {"id": 2, "chat_id": -200}]
+        kb = pending_list_keyboard("ru", attempts, page=0, total_pages=1, start_index=0)
+        labels = _get_labels(kb)
+        assert "1 ✅" in labels
+        assert "1 ❌" in labels
+        assert "2 ✅" in labels
+        assert "2 ❌" in labels
+
+    def test_button_number_matches_body_numbering_on_third_page(self):
+        """Button numbers must match the message-body numbering.
+
+        The body numbers items via ``enumerate(attempts, start=page * _PER_PAGE + 1)``
+        (see ``handlers/admin.py`` ``_render_wl_pending``). With ``_PER_PAGE=5`` and
+        ``page=2`` (the 3rd page, 0-based), the first item on the page is #11.
+        """
+        per_page = 5
+        page = 2
+        start_index = page * per_page
+        attempts = [
+            {"id": 101, "chat_id": -100},
+            {"id": 102, "chat_id": -200},
+        ]
+        kb = pending_list_keyboard(
+            "ru",
+            attempts,
+            page=page,
+            total_pages=5,
+            start_index=start_index,
+        )
+        labels = _get_labels(kb)
+        assert "11 ✅" in labels
+        assert "11 ❌" in labels
+        assert "12 ✅" in labels
+        assert "12 ❌" in labels
+        # Ensure the callback data still ties back to the right attempt/page.
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl_apr:ru:101:2" in c for c in callbacks)
+        assert any("adm_wl_apr:ru:102:2" in c for c in callbacks)
+
+
+class TestNumberedButtonSharedAcrossLists:
+    """A-2: pending/rejected/chats must share ONE numbering helper.
+
+    If a future edit re-inlines per-list numbering instead of going through
+    ``_numbered_button``, this fails loudly instead of letting the three
+    lists silently drift apart again.
+    """
+
+    def test_pending_routes_through_shared_helper(self):
+        attempts = [{"id": 1, "chat_id": -100}]
+        with patch.object(admin_kb, "_numbered_button", wraps=admin_kb._numbered_button) as helper:
+            admin_kb.pending_list_keyboard("ru", attempts, page=0, total_pages=1, start_index=0)
+        assert helper.called
+
+    def test_rejected_routes_through_shared_helper(self):
+        attempts = [{"id": 1, "chat_id": -100}]
+        with patch.object(admin_kb, "_numbered_button", wraps=admin_kb._numbered_button) as helper:
+            admin_kb.rejected_list_keyboard("ru", attempts, page=0, total_pages=1, start_index=0)
+        assert helper.called
+
+    def test_chats_routes_through_shared_helper(self):
+        chats = [{"chat_id": -100, "chat_title": "Alpha", "chat_type": "group"}]
+        with patch.object(admin_kb, "_numbered_button", wraps=admin_kb._numbered_button) as helper:
+            admin_kb.chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
+        assert helper.called
 
 
 class TestNotificationStatusKeyboards:

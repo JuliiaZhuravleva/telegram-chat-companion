@@ -860,11 +860,11 @@ async def _render_wl_chats(
         chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
+    offset = page * _PER_PAGE
     if total == 0:
         text = f"{_WL_CHATS_TITLE[lang]}\n\n{_WL_NO_CHATS[lang]}"
     else:
         lines = [f"{_WL_CHATS_TITLE[lang]} ({total})\n"]
-        offset = page * _PER_PAGE
         for i, chat in enumerate(chats, start=offset + 1):
             chat_id = chat.get("chat_id", "?")
             title = chat.get("chat_title")
@@ -886,7 +886,11 @@ async def _render_wl_chats(
                         chat_id=chat_id,
                         exc_info=True,
                     )
-            entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
+            entry = (
+                f"{i}. {escape(str(title))} <code>{chat_id}</code>"
+                if title
+                else f"{i}. <code>{chat_id}</code>"
+            )
             ctype = chat.get("chat_type", "")
             if ctype:
                 entry += f" <i>[{escape(str(ctype))}]</i>"
@@ -899,7 +903,7 @@ async def _render_wl_chats(
             await msg.edit_text(
                 text,
                 parse_mode="HTML",
-                reply_markup=chats_list_keyboard(lang, chats, page, total_pages),
+                reply_markup=chats_list_keyboard(lang, chats, page, total_pages, offset),
             )
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
@@ -935,7 +939,9 @@ async def handle_wl_remove_ask(
     title = row.get("chat_title") if row else None
     label = escape(str(title)) if title else str(chat_id)
 
-    text = f"{_WL_CONFIRM_TITLE[lang]}\n\n{label} <i>({chat_id})</i>\n\n{_WL_CONFIRM_BODY[lang]}"
+    text = (
+        f"{_WL_CONFIRM_TITLE[lang]}\n\n{label} <code>{chat_id}</code>\n\n{_WL_CONFIRM_BODY[lang]}"
+    )
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
@@ -1026,11 +1032,11 @@ async def _render_wl_pending(
         attempts, total = await admin_repo.get_pending_attempts_page(page, _PER_PAGE)
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
+    offset = page * _PER_PAGE
     if total == 0:
         text = f"{_WL_PENDING_TITLE[lang]}\n\n{_WL_NO_PENDING[lang]}"
     else:
         lines = [f"{_WL_PENDING_TITLE[lang]} ({total})\n"]
-        offset = page * _PER_PAGE
         for i, attempt in enumerate(attempts, start=offset + 1):
             chat_id = attempt.get("chat_id", "?")
             title = attempt.get("chat_title")
@@ -1050,7 +1056,11 @@ async def _render_wl_pending(
             uname = attempt.get("user_username")
             user_display = f"@{escape(str(uname))}" if uname else (user or "?")
 
-            entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
+            entry = (
+                f"{i}. {escape(str(title))} <code>{chat_id}</code>"
+                if title
+                else f"{i}. <code>{chat_id}</code>"
+            )
             if ctype:
                 entry += f" <i>[{escape(str(ctype))}]</i>"
             entry += f"\n    👤 {user_display}"
@@ -1066,7 +1076,7 @@ async def _render_wl_pending(
         await msg.edit_text(
             text,
             parse_mode="HTML",
-            reply_markup=pending_list_keyboard(lang, attempts, page, total_pages),
+            reply_markup=pending_list_keyboard(lang, attempts, page, total_pages, offset),
         )
 
 
@@ -1129,11 +1139,11 @@ async def _render_wl_rejected(
         )
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
+    offset = page * _PER_PAGE
     if total == 0:
         text = f"{_WL_REJECTED_TITLE[lang]}\n\n{_WL_NO_REJECTED[lang]}"
     else:
         lines = [f"{_WL_REJECTED_TITLE[lang]} ({total})\n"]
-        offset = page * _PER_PAGE
         for i, attempt in enumerate(attempts, start=offset + 1):
             chat_id = int(attempt.get("chat_id", 0))
             title = attempt.get("chat_title")
@@ -1143,7 +1153,7 @@ async def _render_wl_rejected(
             uname = attempt.get("user_username")
             user_display = f"@{escape(str(uname))}" if uname else (user or "?")
 
-            entry = f"{i}. {chat_link} <i>({chat_id})</i>"
+            entry = f"{i}. {chat_link} <code>{chat_id}</code>"
             if ctype:
                 entry += f" <i>[{escape(str(ctype))}]</i>"
             entry += f"\n    👤 {user_display}"
@@ -1165,6 +1175,7 @@ async def _render_wl_rejected(
                     attempts,
                     page,
                     total_pages,
+                    offset,
                 ),
                 disable_web_page_preview=True,
             )
@@ -1250,7 +1261,7 @@ async def handle_wl_delete_ask(
 
     text = (
         f"{_WL_DELETE_CONFIRM_TITLE[lang]}\n\n"
-        f"{chat_link} <i>({chat_id})</i>\n\n"
+        f"{chat_link} <code>{chat_id}</code>\n\n"
         f"{_WL_DELETE_CONFIRM_BODY[lang]}"
     )
     await callback.answer()

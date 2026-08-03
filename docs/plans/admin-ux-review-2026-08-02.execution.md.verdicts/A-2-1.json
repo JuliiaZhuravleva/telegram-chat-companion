@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T09:21:38Z",
+  "role": "specialist",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "cost_usd": 1.83,
+  "notes": "Extracted _numbered_button() as the single shared numbering helper (per A-2 spec: one common numbering helper for all three lists) and routed pending_list_keyboard (refactored, behavior-preserving), rejected_list_keyboard, and chats_list_keyboard through it. Threaded start_index=page*_PER_PAGE into rejected/chats keyboards mirroring A-1's pending pattern; hoisted the offset computation above the total==0 branch in _render_wl_rejected/_render_wl_chats to avoid the same latent NameError A-1 fixed. Chats-list numbering applied to the Remove button, consistent with the action-button numbering pattern used by the other two lists. Own unit tests added: numbering-matches-body tests for chats and rejected keyboards (mirroring A-1's pending tests), plus a TestNumberedButtonSharedAcrossLists class that patches admin_kb._numbered_button and asserts all three keyboard builders call it -- covers the plan's cross-list QA note at the unit level; no separate qa item needed for that specific check. No integration-test gap: pure keyboard-construction logic, no DB/network involved.",
+  "result": {
+    "kind": "commit",
+    "ref": "cbaeb0c",
+    "verification": "pytest tests/unit/test_admin_keyboards.py tests/unit/test_admin_handler.py -q: 120 passed; full pytest tests/unit/ -q: 952 passed; ruff check src/ clean; mypy src/ clean (113 files)"
+  },
+  "confidence": 0.93,
+  "clarification_request": null,
+  "session_id": null
+}

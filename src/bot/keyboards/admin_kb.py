@@ -168,6 +168,106 @@ def kb_organizers_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def kb_org_add_prompt_keyboard(lang: str, *, chat_id: int) -> InlineKeyboardMarkup:
+    """Single-button footer on the add-organizer prompt (B-2 picker entry point).
+
+    Offers "show participants" as an alternative to the forward/@username
+    reply the prompt text asks for -- browsing the picker doesn't cancel
+    the pending reply, both paths stay live until one resolves it.
+    """
+    text = "👥 Показать участников" if lang == "ru" else "👥 Show participants"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:0",
+                ),
+            ],
+        ]
+    )
+
+
+def _candidate_label(candidate: dict[str, object]) -> str:
+    """Format a picker candidate as ``Name (@nick)`` per the B-2 review spec.
+
+    Falls back to whichever of first_name/username is present, then the
+    raw user_id -- mirrors ``kb_organizers_keyboard``'s existing
+    organizer-row fallback chain.
+    """
+    first_name = candidate.get("first_name")
+    username = candidate.get("username")
+    if first_name and username:
+        label = f"{first_name} (@{username})"
+    elif username:
+        label = f"@{username}"
+    elif first_name:
+        label = str(first_name)
+    else:
+        label = str(candidate.get("user_id"))
+    return label[:35]
+
+
+def kb_organizer_picker_keyboard(
+    candidates: list[dict[str, object]],
+    *,
+    lang: str,
+    chat_id: int,
+    page: int,
+    total: int,
+    per_page: int = 5,
+) -> InlineKeyboardMarkup:
+    """Paginated participant picker for adding an organizer (B-2).
+
+    Candidates arrive pre-sorted by message count desc (``MessageRepository.
+    get_top_active_users``); tapping a row adds that user directly -- same
+    single-tap, no-confirm convention as ``kb_organizers_keyboard``'s remove
+    row (low-blast-radius: easy to undo via that same remove button).
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+
+    for candidate in candidates:
+        user_id = candidate.get("user_id")
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_candidate_label(candidate),
+                    callback_data=f"adm_kb_org_pick:{lang}:{chat_id}:{user_id}",
+                ),
+            ]
+        )
+
+    total_pages = max(1, math.ceil(total / per_page)) if total else 1
+    if total > per_page:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    text="◀️",
+                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:{page - 1}",
+                )
+            )
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(
+                InlineKeyboardButton(
+                    text="▶️",
+                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:{page + 1}",
+                )
+            )
+        rows.append(nav)
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="◀️ Назад" if lang == "ru" else "◀️ Back",
+                callback_data=f"adm_kb_orgs:{lang}:{chat_id}:0",
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def kb_view_keyboard(lang: str, *, page: int, total_pages: int) -> InlineKeyboardMarkup:
     """Pagination-only footer for the public ``/kb`` view (DM, not admin-namespaced)."""
     nav: list[InlineKeyboardButton] = []
