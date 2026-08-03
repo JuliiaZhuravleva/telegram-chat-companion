@@ -304,14 +304,28 @@ async def test_photo_handler_analysis_fails():
 # ── Photo handler: typing-indicator wiring (I-3) ───────────────────────
 
 
-def _make_photo_deps(*, caption: str | None, thread_id: int | None = None):
-    """Common mocks for handle_photo_message indicator tests."""
+def _make_photo_deps(
+    *,
+    caption: str | None,
+    thread_id: int | None = None,
+    random_reply: bool = False,
+):
+    """Common mocks for handle_photo_message indicator tests.
+
+    ``random_reply=False`` (default) makes the caption match a trigger word, so
+    should_respond() returns TriggerType.TRIGGER — an explicitly requested
+    reply. ``random_reply=True`` forces the unprompted RANDOM branch instead,
+    which per owner decision Q1 must NOT show the indicator.
+    """
     message = _make_message(caption=caption)
     photo = MagicMock()
     photo.file_id = "photo-file-id"
     message.photo = [photo]
 
-    chat_config = _make_chat_config(trigger_words=(), random_response_chance=1.0)
+    if random_reply:
+        chat_config = _make_chat_config(trigger_words=(), random_response_chance=1.0)
+    else:
+        chat_config = _make_chat_config(trigger_words=("look",), random_response_chance=0.0)
     bot = _make_bot()
 
     image_service = MagicMock()
@@ -450,6 +464,95 @@ class TestHandlePhotoMessageTypingIndicator:
         mock_indicator.assert_called_once_with(
             deps["bot"], deps["message"].chat.id, 777, enabled=True
         )
+
+    @pytest.mark.asyncio
+    async def test_no_indicator_for_random_reply_to_captioned_photo(self):
+        """Owner decision Q1: unprompted RANDOM replies get no indicator.
+
+        The text path (handlers/message.py) has always honoured this; the photo
+        path decided `enabled` from the caption alone, before the trigger type
+        was known, so a random reply to a captioned photo still announced
+        itself. Guards against that divergence returning.
+        """
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this", random_reply=True)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, None, enabled=False
+        )
+        # The reply itself still happens — only the indicator is suppressed.
+        deps["pipeline"].process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_indicator_closes_before_reply_is_sent(self):
+        """The indicator must not still be running once the reply is visible.
+
+        post_send() generates an embedding (a network call), so leaving it
+        inside the block made "typing" linger after the answer had landed.
+        """
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this")
+        order: list[str] = []
+
+        def _record_answer(*_args, **_kwargs):
+            order.append("answer")
+            return MagicMock(message_id=42)
+
+        def _record_post_send(*_args, **_kwargs):
+            order.append("post_send")
+
+        def _record_indicator_off(*_args):
+            order.append("indicator_off")
+            return False
+
+        deps["message"].answer = AsyncMock(side_effect=_record_answer)
+        deps["pipeline"].post_send = AsyncMock(side_effect=_record_post_send)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(side_effect=_record_indicator_off)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        assert order == ["indicator_off", "answer", "post_send"], order
 
     @pytest.mark.asyncio
     async def test_indicator_stops_even_if_analysis_raises(self):

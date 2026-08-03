@@ -21,7 +21,7 @@ from src.models.enums import TriggerType
 from src.services.modules.image import ImageAnalysisService
 from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.voice import VoiceTranscriptionService
-from src.services.text.pipeline import TextProcessingPipeline
+from src.services.text.pipeline import PipelineResult, TextProcessingPipeline
 from src.utils import parse_admin_ids
 from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
@@ -129,14 +129,31 @@ async def handle_photo_message(
         )
         return
 
-    # Keep "typing" alive across analysis + the follow-on text generation for
-    # captioned photos (a reply is guaranteed). Photos without a caption only
-    # save the description and may produce no response at all, so per owner
-    # decision (Q2) they get no indicator (enabled=False -> no-op context).
-    # The reply here is always text (pipeline.process -> message.answer), the
-    # bot never uploads an image of its own, so "typing" is the honest action
-    # — not "upload_photo".
-    async with typing_indicator(bot, message.chat.id, message_thread_id, enabled=bool(caption)):
+    # Decide the response intent BEFORE the analysis so the indicator can be
+    # scoped honestly: should_respond() reads the caption, not the vision
+    # description, so it does not need the analysis to have run.
+    respond = False
+    trigger_type = TriggerType.NONE
+    if caption:
+        bot_id: int | None = kwargs.get("bot_id")
+        if bot_id is None:
+            bot_id = (await bot.me()).id
+        respond, trigger_type = should_respond(message, chat_config, bot_id)
+
+    # Show "typing" only when a reply is actually coming AND it was asked for.
+    # A captioned photo is NOT a guarantee of a reply: should_respond() can
+    # decline, and the pipeline can still suppress afterwards. RANDOM triggers
+    # are excluded per owner decision Q1 — same rule as the text path in
+    # handlers/message.py; unprompted replies get no indicator.
+    # "typing" (not "upload_photo") is the honest action: the reply is text,
+    # the bot never uploads an image of its own.
+    result: PipelineResult | None = None
+    async with typing_indicator(
+        bot,
+        message.chat.id,
+        message_thread_id,
+        enabled=respond and trigger_type != TriggerType.RANDOM,
+    ):
         # Analyze image
         description = await image_service.analyze(image_data)
 
@@ -150,20 +167,9 @@ async def handle_photo_message(
         if description is None:
             return
 
-        if caption:
-            # photo_with_text: decide whether to respond via text pipeline
-            bot_id: int | None = kwargs.get("bot_id")
-            if bot_id is None:
-                bot_id = (await bot.me()).id
-            respond, trigger_type = should_respond(message, chat_config, bot_id)
-
-            if not respond:
-                # Still save the description to message history
-                await _update_message_content(
-                    message_repo, message.chat.id, message.message_id, description
-                )
-                return
-
+        # `and caption` is redundant at runtime (respond implies a caption) but
+        # narrows it to str for the type checker.
+        if respond and caption:
             user = message.from_user
             user_id = user.id if user else 0
             user_name = (user.first_name if user else None) or "Unknown"
@@ -193,25 +199,36 @@ async def handle_photo_message(
                 message_thread_id=message_thread_id,
             )
 
-            if not result.should_respond or not result.html_text:
-                return
-
-            reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
-
-            # Send to correct topic in forum chats
-            # Note: message.answer() inherits message_thread_id from the original message
-            sent = await message.answer(
-                result.html_text,
-                parse_mode="HTML",
-                reply_to_message_id=reply_to,
-            )
-
-            await pipeline.post_send(result, bot_message_id=sent.message_id)
-        else:
-            # photo_only: save description to message history, no response
+    # Indicator is off from here on: the reply is sent and its bookkeeping runs
+    # outside the block, so "typing" never lingers after the reply is visible
+    # (post_send generates an embedding — a network call).
+    if caption:
+        if not respond:
+            # Still save the description to message history
             await _update_message_content(
                 message_repo, message.chat.id, message.message_id, description
             )
+            return
+
+        if result is None or not result.should_respond or not result.html_text:
+            return
+
+        reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
+
+        # Send to correct topic in forum chats
+        # Note: message.answer() inherits message_thread_id from the original message
+        sent = await message.answer(
+            result.html_text,
+            parse_mode="HTML",
+            reply_to_message_id=reply_to,
+        )
+
+        await pipeline.post_send(result, bot_message_id=sent.message_id)
+    else:
+        # photo_only: save description to message history, no response
+        await _update_message_content(
+            message_repo, message.chat.id, message.message_id, description
+        )
 
     # Image comment sticker (works for both photo_with_text and photo_only)
     if (
