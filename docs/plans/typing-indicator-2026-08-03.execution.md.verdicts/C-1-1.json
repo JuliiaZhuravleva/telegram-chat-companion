@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T13:01:30Z",
+  "role": "specialist",
+  "item_id": "C-1",
+  "verdict": "PASS",
+  "cost_usd": 0.52,
+  "notes": "Wrote ADR-0004 documenting the as-built typing_indicator() shared helper (I-6/I-2/I-3/I-5): required message_thread_id, action-as-parameter, enabled as the single future per-chat-toggle seam (doubles as today's Q1/Q2 suppression predicate). Recorded and justified the rejected middleware alternative -- the enable/disable predicate is computed inside the handler after routing (trigger_type, caption presence), which a dispatch-level middleware cannot see without duplicating business logic; also noted why TopicMiddleware and this explicit helper are complementary, not competing. Also recorded two lesser alternatives (copy the old asyncio.create_task pattern; call ChatActionSender directly with no wrapper) and their rejection reasons.",
+  "result": {
+    "kind": "file",
+    "ref": "docs/decisions/ADR-0004-typing-indicator-shared-helper.md",
+    "verification": "ADR records the as-built I-6 pattern (required message_thread_id, action param, enabled seam), the I-2/I-3 suppression rules routed through that seam, and the rejected middleware alternative with concrete reasoning tied to Q1/Q2; cross-referenced against src/utils/telegram.py::typing_indicator and its four call sites."
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

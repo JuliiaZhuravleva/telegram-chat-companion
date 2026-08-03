@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T12:53:32Z",
+  "role": "evaluator",
+  "item_id": "I-3",
+  "verdict": "PASS",
+  "evidence": "git show 916de6e8 confirms image_service.analyze() + follow-on pipeline.process() for captioned photos are wrapped in the shared typing_indicator(bot, chat_id, message_thread_id, enabled=bool(caption)) helper from I-6, matching Q2 (no indicator without caption); pytest tests/unit/test_media_handler.py -q -> 14 passed, ruff and mypy clean, reproducing the specialist's claimed results.",
+  "regression_risk": "low",
+  "notes": "Minor design note (not blocking): unlike I-2's TriggerType.RANDOM exclusion, I-3's captioned-photo path does not exclude RANDOM triggers from the indicator, so a relevancy-gate veto after a RANDOM photo trigger could still show a brief false 'typing'. Not required by I-3's stated scope (only caption presence is specified), but worth a note in C-1's ADR for consistency."
+}
