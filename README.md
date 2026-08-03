@@ -119,6 +119,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually
+- **Reactions** — records who added or removed which reaction, and can answer with a reaction instead of words when it decides not to speak. Opt-in per chat, with a separate switch for the history; **requires the bot to be a chat administrator**, as Telegram sends no reaction updates otherwise — the admin panel shows that status live
 - **Link comments** — extract and comment on YouTube/TikTok links
 - **Custom rules** — keyword triggers, spam detection, regex matching
 
