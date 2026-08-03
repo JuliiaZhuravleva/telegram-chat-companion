@@ -136,6 +136,13 @@ class MaintenanceSettings(BaseSettings):
 
     abuse_blocked_log_days: int | None = 30
 
+    # Short, separate window (ADR-0004 Decision 3): message_reactions is a
+    # behavioral trail ("who reacted to what"), more sensitive than message
+    # text, so it does NOT reuse chat_messages_days (365, RAG continuity) or
+    # response_log_days (90, cost analytics). Same order as
+    # abuse_blocked_log_days, the other "short, sensitive, recent-signal" table.
+    reactions_days: int | None = 30
+
 
 class Settings(BaseSettings):
     """Main application settings."""

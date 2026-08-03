@@ -152,6 +152,8 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "link_comments_enabled",
         "relevancy_gate_enabled",
         "kb_enabled",
+        "reactions_enabled",
+        "reactions_history_enabled",
     }
 )
 

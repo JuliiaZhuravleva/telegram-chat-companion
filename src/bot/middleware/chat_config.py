@@ -7,7 +7,7 @@ from typing import Any
 
 import structlog
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, MessageReactionUpdated, TelegramObject
 from dishka import AsyncContainer
 
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -64,17 +64,22 @@ class ChatConfigMiddleware(BaseMiddleware):
 
 
 def _extract_chat_id(event: TelegramObject) -> int | None:
-    """Extract chat_id from Message or CallbackQuery."""
+    """Extract chat_id from Message, CallbackQuery, or MessageReactionUpdated."""
     if isinstance(event, Message) and event.chat is not None:
         return event.chat.id
     if isinstance(event, CallbackQuery) and event.message and event.message.chat:
         return event.message.chat.id
+    if isinstance(event, MessageReactionUpdated):
+        return event.chat.id
     return None
 
 
 def _extract_chat_info(event: TelegramObject) -> tuple[str | None, str]:
     """Extract chat_title and chat_type from event."""
     if isinstance(event, Message) and event.chat is not None:
+        title = event.chat.title or event.chat.full_name
+        return title, event.chat.type or "group"
+    if isinstance(event, MessageReactionUpdated):
         title = event.chat.title or event.chat.full_name
         return title, event.chat.type or "group"
     return None, "group"

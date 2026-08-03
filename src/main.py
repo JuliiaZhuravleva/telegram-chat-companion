@@ -139,6 +139,13 @@ async def main() -> None:
     for mw in (chat_config_mw, topic_mw, access_control_mw, message_saver_mw):
         dp.edited_message.middleware(mw)
 
+    # Reactions (ADR-0004, R-1): only needs chat_config (reactions_enabled /
+    # reactions_history_enabled toggles). No whitelist/admin notification flow
+    # here -- AccessControlMiddleware's unauthorized-attempt notifications are
+    # designed around Message/CallbackQuery and out of R-1's scope; the
+    # module's own opt-in toggle (default off) is the gate.
+    dp.message_reaction.middleware(chat_config_mw)
+
     dp.include_router(main_router)
 
     # Register bot commands with Telegram API for autocomplete hints

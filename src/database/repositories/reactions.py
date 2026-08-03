@@ -1,0 +1,56 @@
+"""Repository for the message_reactions table (ADR-0004, R-1)."""
+
+from __future__ import annotations
+
+import asyncpg
+
+from src.services.modules.reactions.models import ReactionEvent
+
+
+class ReactionRepository:
+    """Data access layer for recorded reaction add/remove events."""
+
+    def __init__(self, pool: asyncpg.Pool) -> None:
+        self._pool = pool
+
+    async def insert_events(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        user_id: int | None,
+        actor_chat_id: int | None,
+        events: list[ReactionEvent],
+    ) -> None:
+        """Insert one row per diffed reaction event.
+
+        `user_id`/`actor_chat_id` are passed through as-is (both may be None --
+        a future Bot API edge case shouldn't hard-fail the insert, per
+        ADR-0004 Decision 1; no CHECK constraint enforces "exactly one set").
+        A no-op for an empty event list.
+        """
+        if not events:
+            return
+
+        await self._pool.executemany(
+            """
+            INSERT INTO message_reactions (
+                chat_id, message_id, user_id, actor_chat_id,
+                action, reaction_type, emoji, custom_emoji_id
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            """,
+            [
+                (
+                    chat_id,
+                    message_id,
+                    user_id,
+                    actor_chat_id,
+                    event.action,
+                    event.reaction_type,
+                    event.emoji,
+                    event.custom_emoji_id,
+                )
+                for event in events
+            ],
+        )
