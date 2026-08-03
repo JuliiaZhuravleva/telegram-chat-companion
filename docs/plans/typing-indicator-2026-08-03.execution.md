@@ -10,8 +10,8 @@ approved_at: '2026-08-03T12:35:46Z'
 approved_by: julia
 specialist_roster_source: ~/.claude/agents/specialist-*.md + <project>/.claude/agents/specialist-*.md
 execution:
-  status: approved
-  started_at: null
+  status: partial
+  started_at: '2026-08-03T12:36:10Z'
   completed_at: null
   current_batch: null
   task_list_id: typing-indicator-2026-08-03
@@ -20,69 +20,81 @@ items:
   title: Общий помощник «бот печатает» (keep-alive + гарантированная остановка, обязательный message_thread_id, тип действия параметром) + перевод голос/видео-обработчика на него — чинит I-1, поглощает I-8/I-9
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 2.5h
-  confidence: null
+  confidence: 0.9
   consult_session_id: 80a3ccf0-d4d9-413c-b0f7-b7249114ae8c
-  specialist_session_id: null
+  specialist_session_id: 77b83652-199b-4f82-8186-539bc11d7b3c
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T12:42:41Z'
+    executor: backend-dev
+    note: 'Added typing_indicator() to src/utils/telegram.py: async context-manager wrapping aiogram''s ChatActionSender (interval=4.0s, under Telegram''s ~5s client expiry). message_thread_id has no default (positional-required) per the plan''s mandate; action type is a parameter (default typing); enabled=True kwarg is the single future per-chat-toggle point (no ChatConfig field/migration added -- none exists yet, per Q4 decision). Migrated handle_voice_message in media.py off the one-shot asyncio.create_task(bot.send_chat_action(...)) -- fixes I-1. I-2/I-3/I-5 (text pipeline, photo analysis, AI commands) still need to be wired to this helper -- those are separate downstream items already in the plan. qa should still add the broader forum message_thread_id regression sweep across all indicator call sites once I-2/I-3/I-5 land, per the plan''s requerimiento-qa note.'
+  result:
+    kind: commit
+    ref: 798b2da1bbbb2f4ec686fd29739dc919e0e2562c
+    verification: 'pytest tests/unit/test_telegram_utils.py tests/unit/test_media_handler.py -v: 35 passed; full tests/unit: 1004 passed; ruff check src/ tests/: clean; mypy src/: Success, no issues in 113 source files'
 - id: I-2
   title: Индикатор на основном текстовом пути (ответ на упоминание/триггер/реплай, pipeline.process) — самый частый пробел
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - I-6
   estimated_effort: 1.5h
-  confidence: null
+  confidence: 0.9
   consult_session_id: 80a3ccf0-d4d9-413c-b0f7-b7249114ae8c
-  specialist_session_id: null
+  specialist_session_id: 77370cfd-28ad-471b-8607-e379ee55e098
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T12:46:57Z'
+    executor: backend-dev
+    note: 'Wrapped pipeline.process() in handle_text_message (message.py) with the shared typing_indicator() helper from I-6. Per Q1 owner decision, indicator disabled (enabled=trigger_type != TriggerType.RANDOM) even after the relevancy gate approves a RANDOM trigger, since pipeline.process() can still veto via blacklist/cooldown/abuse checks. Added injected bot: Bot param matching media.py''s established pattern, replacing the ad-hoc message.bot null-check. Wrote 5 unit tests: wrap-for-trigger-word, message_thread_id forwarding, disabled-for-random, exception propagation through the context manager. No qa follow-up needed beyond the plan''s already-noted broader forum message_thread_id regression sweep (tracked against I-6, to be done once I-2/I-3/I-5 all land).'
+  result:
+    kind: commit
+    ref: ac4a1f6
+    verification: 'pytest tests/unit/test_message_handler.py -v: 13 passed; full tests/unit: 1008 passed; ruff check src/ tests/: All checks passed; mypy src/: Success, no issues in 113 source files'
 - id: I-3
   title: Индикатор на анализе фото (+ follow-on генерация для фото с подписью); upload_photo где честно
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - I-6
   estimated_effort: 1h
-  confidence: null
+  confidence: 0.9
   consult_session_id: 80a3ccf0-d4d9-413c-b0f7-b7249114ae8c
-  specialist_session_id: null
+  specialist_session_id: 3fc04585-373a-4a6d-b229-c3114992ca0a
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T12:52:20Z'
+    executor: backend-dev
+    note: 'Wrapped image_service.analyze() and the follow-on pipeline.process() text-response generation for captioned photos in media.py:handle_photo_message under the shared typing_indicator() helper from I-6 (enabled=bool(caption), per Q2: photos without a caption may produce no response and get no indicator). Default action=typing (not upload_photo): confirmed by grep there is no image-generation path in this codebase -- the bot''s reply after photo analysis is always text via pipeline.process/message.answer, so upload_photo would be dishonest here; the title''s ''upload_photo где честно'' turns out not to apply to this call site. Wrote 4 unit tests in tests/unit/test_media_handler.py::TestHandlePhotoMessageTypingIndicator mirroring the I-2/I-6 regression-test pattern: wrap-for-caption, no-indicator-without-caption, message_thread_id forwarding, exception propagation through the context manager. No qa follow-up needed beyond the plan''s already-noted broader forum message_thread_id regression sweep (tracked against I-6, to run once I-2/I-3/I-5 all land -- I-5 is still pending).'
+  result:
+    kind: commit
+    ref: 916de6e8253b67a32e307216352d64eea6b66ccb
+    verification: 'pytest tests/unit/test_media_handler.py -v: 14 passed; full tests/unit: 1012 passed; ruff check src/ tests/: All checks passed; mypy src/: Success, no issues in 113 source files'
 - id: I-5
   title: 'Индикатор на AI-командах: /remember (эмбеддинг) и админ-мастер стикеров; добавить message_thread_id в handle_remember (сейчас отсутствует)'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - I-6
   estimated_effort: 1h
-  confidence: null
+  confidence: 0.9
   consult_session_id: 80a3ccf0-d4d9-413c-b0f7-b7249114ae8c
-  specialist_session_id: null
+  specialist_session_id: 2d842056-0cef-4807-8383-95e54fe6799f
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T12:58:27Z'
+    executor: backend-dev
+    note: 'Wired the shared typing_indicator() helper (I-6) into both AI-command call sites: /remember''s embedding generation (commands.py::handle_remember) and the admin sticker-description merge (admin_sticker.py::handle_admin_sticker_reply). Added the previously-missing message_thread_id param to handle_remember per the plan''s explicit callout. Both handlers now take bot: Bot (required) + message_thread_id: int | None = None (auto-injected by the existing TopicMiddleware), matching the I-2/I-3 pattern exactly -- no enabled= kwarg needed since both call sites always produce a reply once the guard clauses pass. Updated the 13 pre-existing unit tests in test_commands_kb.py/test_admin_sticker_handler.py that called these handlers positionally (added a bot fixture arg) and added 8 new regression tests: indicator wraps the call, message_thread_id forwarding, no-indicator-on-early-guard-return, and exception-still-reaches-existing-except-handling. No qa follow-up needed beyond the plan''s already-noted broader forum message_thread_id regression sweep (tracked against I-6, all of I-2/I-3/I-5 have now landed so that sweep can proceed).'
+  result:
+    kind: commit
+    ref: 4766bca
+    verification: 'pytest tests/unit/test_commands_kb.py tests/unit/test_admin_sticker_handler.py -v: 44 passed; full tests/unit: 1020 passed; ruff check src/ tests/: All checks passed; mypy src/: Success, no issues in 113 source files'
 - id: I-4
   title: Индикатор на обучении на стикерах (vision) — ответ не гарантирован, актуальность зависит от решения владельца (Q2)
   specialist: backend-dev
@@ -138,23 +150,26 @@ items:
   title: 'ADR: паттерн общего TypingIndicator (as-built, после I-6) + зафиксировать отклонённую альтернативу с middleware'
   specialist: architect
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - I-6
   estimated_effort: 0.5h
-  confidence: null
+  confidence: 0.85
   consult_session_id: 43958ece-c2aa-4c81-b664-319614913876
-  specialist_session_id: null
+  specialist_session_id: 684bc3a2-6037-442a-af57-7b45218e8210
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T13:01:39Z'
+    executor: architect
+    note: 'Wrote ADR-0004 documenting the as-built typing_indicator() shared helper (I-6/I-2/I-3/I-5): required message_thread_id, action-as-parameter, enabled as the single future per-chat-toggle seam (doubles as today''s Q1/Q2 suppression predicate). Recorded and justified the rejected middleware alternative -- the enable/disable predicate is computed inside the handler after routing (trigger_type, caption presence), which a dispatch-level middleware cannot see without duplicating business logic; also noted why TopicMiddleware and this explicit helper are complementary, not competing. Also recorded two lesser alternatives (copy the old asyncio.create_task pattern; call ChatActionSender directly with no wrapper) and their rejection reasons.'
+  result:
+    kind: file
+    ref: docs/decisions/ADR-0004-typing-indicator-shared-helper.md
+    verification: ADR records the as-built I-6 pattern (required message_thread_id, action param, enabled seam), the I-2/I-3 suppression rules routed through that seam, and the rejected middleware alternative with concrete reasoning tied to Q1/Q2; cross-referenced against src/utils/telegram.py::typing_indicator and its four call sites.
 budget:
   max_usd_per_item: 6.0
   max_usd_per_plan: 30.0
-  consumed_usd: 0.0
+  consumed_usd: 8.054
 review_gate:
   why: []
   approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.typing-indicator-2026-08-03-wt/docs/plans/typing-indicator-2026-08-03.execution.md --resume
@@ -195,6 +210,23 @@ human_feedback:
   addressed_at: '2026-08-03T12:31:47Z'
   addressed_by: julia
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
