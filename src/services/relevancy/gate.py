@@ -140,5 +140,13 @@ class RelevancyGate:
                 tokens_output=tokens_output,
                 cost_usd=cost_usd,
             )
-        except Exception:
-            logger.warning("Failed to log relevancy check usage", chat_id=chat_id)
+        except Exception as exc:
+            # Silently losing these rows makes SpendLimitService under-report
+            # tier-3 spend indefinitely, so the cause has to be recoverable
+            # from the log alone.
+            logger.warning(
+                "Failed to log relevancy check usage",
+                chat_id=chat_id,
+                error=str(exc),
+                exc_info=True,
+            )

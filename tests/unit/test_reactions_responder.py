@@ -5,7 +5,11 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramRetryAfter,
+)
 from aiogram.types import ReactionTypeEmoji
 
 from src.services.modules.reactions.responder import set_reaction
@@ -45,9 +49,39 @@ class TestSetReaction:
         assert result is False
 
     @pytest.mark.asyncio
-    async def test_other_exceptions_are_not_swallowed(self) -> None:
-        """Only TelegramBadRequest is this function's concern; anything else
-        propagates so the caller's own safety net (if any) decides."""
+    async def test_forbidden_is_swallowed(self) -> None:
+        """The bot being kicked/blocked is exactly what R-D1 exists to surface,
+        so it must degrade to False rather than escape.
+
+        Contract change (was: only TelegramBadRequest caught). These classes are
+        siblings under TelegramAPIError, not subclasses of TelegramBadRequest,
+        so the narrower catch let them through while the docstring promised
+        "never raises into the caller".
+        """
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(
+            side_effect=TelegramForbiddenError(
+                method=MagicMock(), message="Forbidden: bot was kicked"
+            )
+        )
+
+        assert await set_reaction(bot, chat_id=-100, message_id=42, emoji="🔥") is False
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_swallowed(self) -> None:
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(
+            side_effect=TelegramRetryAfter(
+                method=MagicMock(), message="Too Many Requests", retry_after=5
+            )
+        )
+
+        assert await set_reaction(bot, chat_id=-100, message_id=42, emoji="🔥") is False
+
+    @pytest.mark.asyncio
+    async def test_non_telegram_exceptions_are_not_swallowed(self) -> None:
+        """A programming error is not an API failure -- it must stay visible
+        rather than be reported as a benign `False`."""
         bot = MagicMock()
         bot.set_message_reaction = AsyncMock(side_effect=RuntimeError("boom"))
 

@@ -57,8 +57,16 @@ class ChatConfigMiddleware(BaseMiddleware):
                 try:
                     repo = await container.get(ChatSettingsRepository)
                     await repo.ensure_exists(chat_id, chat_title, chat_type)
-                except Exception:
-                    logger.warning("Failed to update chat title", chat_id=chat_id)
+                except Exception as exc:
+                    # Now also on the message_reaction path, where a chat can
+                    # first be seen via a reaction rather than a message -- a
+                    # cause specific to that path would otherwise be invisible.
+                    logger.warning(
+                        "Failed to update chat title",
+                        chat_id=chat_id,
+                        error=str(exc),
+                        exc_info=True,
+                    )
 
         return await handler(event, data)
 

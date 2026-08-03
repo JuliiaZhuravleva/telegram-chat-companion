@@ -116,8 +116,18 @@ async def llm_judge(
             max_tokens=4096,
             temperature=1.0,
         )
-    except AIProviderError:
-        logger.warning("llm_judge_failed", reason="all_providers_failed")
+    except AIProviderError as exc:
+        # Log the provider's own message: this path fails the gate closed (no
+        # reply AND no R-5 reaction), so when it starts firing the operator
+        # needs to tell rate-limiting from empty-content from a timeout. A bare
+        # "all_providers_failed" gives no way to choose a remedy.
+        logger.warning(
+            "llm_judge_failed",
+            reason="all_providers_failed",
+            error=str(exc),
+            provider=getattr(exc, "provider", None),
+            exc_info=True,
+        )
         return JudgeResult(should_respond=False, reasoning="llm_error")
 
     # Parse YES / NO from the response
