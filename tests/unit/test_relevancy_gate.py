@@ -322,3 +322,58 @@ class TestRelevancyGateTier3:
         assert alice_pos < charlie_pos, (
             "History should be oldest→newest; Charlie appeared before Alice in the prompt"
         )
+
+
+class TestRelevancyGateSuggestedEmoji:
+    """R-5 (ADR-0004 Decision 4): the tier-3 piggyback passes through GateDecision."""
+
+    @pytest.mark.asyncio
+    async def test_suggested_emoji_passed_through_on_no(self) -> None:
+        config = _make_config()
+        gate = RelevancyGate(
+            ai_router=_make_ai_router("Not a fit.\nNO\n🔥"),
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+        )
+        decision = await gate.evaluate(
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт пасты?",
+            config=config,
+        )
+        assert decision.should_respond is False
+        assert decision.suggested_emoji == "🔥"
+
+    @pytest.mark.asyncio
+    async def test_suggested_emoji_none_on_yes(self) -> None:
+        config = _make_config()
+        gate = RelevancyGate(
+            ai_router=_make_ai_router("Good fit.\nYES"),
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+        )
+        decision = await gate.evaluate(
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт пасты?",
+            config=config,
+        )
+        assert decision.should_respond is True
+        assert decision.suggested_emoji is None
+
+    @pytest.mark.asyncio
+    async def test_suggested_emoji_none_on_earlier_tier_rejection(self) -> None:
+        """Only tier == 'llm_judge' ever sets suggested_emoji."""
+        config = _make_config()
+        ai = _make_ai_router("Not a fit.\nNO\n🔥")
+        gate = RelevancyGate(
+            ai_router=ai,
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+        )
+        decision = await gate.evaluate(
+            chat_id=-100,
+            message_text="ладно",
+            config=config,
+        )
+        assert decision.tier == "fast_rules"
+        assert decision.suggested_emoji is None
+        ai.generate_text.assert_not_called()

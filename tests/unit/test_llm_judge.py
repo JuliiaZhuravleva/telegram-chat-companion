@@ -179,3 +179,59 @@ class TestLlmJudgeCost:
         router = _make_router(long_response)
         result = await llm_judge("test", [], router)
         assert len(result.reasoning) <= 100
+
+
+class TestLlmJudgeSuggestedEmoji:
+    """R-5 (ADR-0004 Decision 4): tier-3 reaction piggyback, only when NO."""
+
+    @pytest.mark.asyncio
+    async def test_no_response_with_emoji_last_line(self) -> None:
+        router = _make_router("Not relevant.\nNO\n🔥")
+        result = await llm_judge("test", [], router)
+        assert result.should_respond is False
+        assert result.suggested_emoji == "🔥"
+
+    @pytest.mark.asyncio
+    async def test_no_response_with_none_last_line(self) -> None:
+        router = _make_router("Not relevant.\nNO\nNONE")
+        result = await llm_judge("test", [], router)
+        assert result.should_respond is False
+        assert result.suggested_emoji is None
+
+    @pytest.mark.asyncio
+    async def test_no_response_case_insensitive_none(self) -> None:
+        router = _make_router("Not relevant.\nNO\nnone")
+        result = await llm_judge("test", [], router)
+        assert result.suggested_emoji is None
+
+    @pytest.mark.asyncio
+    async def test_yes_response_never_carries_suggested_emoji(self) -> None:
+        """The piggyback is only meaningful when the bot stays silent --
+        even if the last line looks like an emoji, YES suppresses it."""
+        router = _make_router("Great fit.\nYES\n🔥")
+        result = await llm_judge("test", [], router)
+        assert result.should_respond is True
+        assert result.suggested_emoji is None
+
+    @pytest.mark.asyncio
+    async def test_prose_last_line_is_not_a_suggestion(self) -> None:
+        """A model that didn't follow the emoji-only-last-line format (e.g.
+        an ambiguous/error response) must not leak prose downstream."""
+        router = _make_router("I am not entirely sure about this.")
+        result = await llm_judge("test", [], router)
+        assert result.should_respond is False
+        assert result.suggested_emoji is None
+
+    @pytest.mark.asyncio
+    async def test_error_response_has_no_suggested_emoji(self) -> None:
+        router = AsyncMock()
+        router.generate_text = AsyncMock(side_effect=AIProviderError("timeout", provider="openai"))
+        result = await llm_judge("test", [], router)
+        assert result.suggested_emoji is None
+
+    @pytest.mark.asyncio
+    async def test_allowed_emoji_list_included_in_prompt(self) -> None:
+        router = _make_router("NO\n🔥")
+        await llm_judge("test", [], router)
+        prompt: str = router.generate_text.call_args.kwargs["prompt"]
+        assert "🔥" in prompt and "👍" in prompt

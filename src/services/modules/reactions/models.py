@@ -18,6 +18,90 @@ from aiogram.types import ReactionTypeCustomEmoji, ReactionTypeEmoji, ReactionTy
 ACTION_ADDED = "added"
 ACTION_REMOVED = "removed"
 
+# The fixed set of standard emoji a non-premium bot can set via
+# `setMessageReaction` (ADR-0004 Decision 4). Telegram's Bot API does not
+# expose this list programmatically -- it's static platform knowledge, same
+# category as `EXPENSIVE_MODELS` being a hardcoded list in `capabilities.py`.
+# Source: source plan §3 (partial list) + Telegram's own documented reaction
+# set; best-effort platform data, not independently re-verified against a
+# live `getMessageReactionCount`/Bot API call in this sandbox -- QA-1's live
+# checklist should spot-check a handful of these against a real chat.
+ALLOWED_REACTION_EMOJI: tuple[str, ...] = (
+    "👍",
+    "👎",
+    "❤",
+    "🔥",
+    "🥰",
+    "👏",
+    "😁",
+    "🤔",
+    "🤯",
+    "😱",
+    "🤬",
+    "😢",
+    "🎉",
+    "🤩",
+    "🤮",
+    "💩",
+    "🙏",
+    "👌",
+    "🕊",
+    "🤡",
+    "🥱",
+    "🥴",
+    "😍",
+    "🐳",
+    "❤‍🔥",
+    "🌚",
+    "🌭",
+    "💯",
+    "🤣",
+    "⚡",
+    "🍌",
+    "🏆",
+    "💔",
+    "🤨",
+    "😐",
+    "🍓",
+    "🍾",
+    "💋",
+    "🖕",
+    "😈",
+    "😴",
+    "😭",
+    "🤓",
+    "👻",
+    "👨‍💻",
+    "👀",
+    "🎃",
+    "🙈",
+    "😇",
+    "😨",
+    "🤝",
+    "✍",
+    "🤗",
+    "🫡",
+    "🎅",
+    "🎄",
+    "☃",
+    "💅",
+    "🤪",
+    "🗿",
+    "🆒",
+    "💘",
+    "🙉",
+    "🦄",
+    "😘",
+    "💊",
+    "🙊",
+    "😎",
+    "👾",
+    "🤷‍♂",
+    "🤷",
+    "🤷‍♀",
+    "😡",
+)
+
 
 @dataclass(frozen=True)
 class ReactionEvent:

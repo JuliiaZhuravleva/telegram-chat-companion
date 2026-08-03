@@ -35,6 +35,10 @@ class GateDecision:
     tier: str  # "fast_rules" | "engagement" | "llm_judge" | "disabled"
     reason: str
     cost_usd: Decimal = Decimal("0")
+    # Tier-3 reaction piggyback (R-5, ADR-0004 Decision 4): the emoji
+    # `llm_judge` suggests when it says NO, at zero extra token cost. Only
+    # ever set when tier == "llm_judge"; None on every other tier.
+    suggested_emoji: str | None = None
 
 
 class RelevancyGate:
@@ -90,6 +94,7 @@ class RelevancyGate:
             tier="llm_judge",
             reason=judge.reasoning,
             cost_usd=judge.cost_usd,
+            suggested_emoji=judge.suggested_emoji,
         )
 
         # Log LLM cost to response_log for cost tracking

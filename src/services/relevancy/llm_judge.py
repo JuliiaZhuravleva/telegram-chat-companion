@@ -16,6 +16,7 @@ import structlog
 from src.services.ai.base import AIProviderError
 from src.services.ai.pricing import calculate_cost
 from src.services.ai.router import AIRouter
+from src.services.modules.reactions.models import ALLOWED_REACTION_EMOJI
 
 logger = structlog.get_logger(__name__)
 
@@ -31,9 +32,16 @@ Should the bot respond? Consider:
 - PRO: Is there something interesting to add? An information gap to fill?
 - CONTRA: Would responding feel forced, repetitive, or annoying?
 
-Think briefly, then answer YES or NO on the last line."""
+Think briefly. On the second-to-last line answer YES or NO.
+If NO, on the last line suggest ONE emoji reaction from this list that fits \
+the message, or NONE if nothing fits: {allowed_emoji}"""
 
 _YES_NO_RE = re.compile(r"\b(YES|NO)\b", re.IGNORECASE)
+# A candidate reaction line must be a bare emoji token, not prose -- any
+# Latin letter means the model didn't follow the "last line = emoji" format
+# (e.g. an ambiguous/error response), so treat it as no suggestion at all
+# rather than pass prose through to ReactionSelector (ADR-0004 Decision 4).
+_PROSE_RE = re.compile(r"[A-Za-z]")
 
 
 @dataclass(frozen=True)
@@ -47,6 +55,25 @@ class JudgeResult:
     model: str = ""
     provider: str = ""
     cost_usd: Decimal = Decimal("0")
+    suggested_emoji: str | None = None  # only meaningful when should_respond is False (R-5)
+
+
+def _extract_suggested_emoji(text: str) -> str | None:
+    """Pull the tier-3 reaction suggestion off the last non-empty line.
+
+    Fail-closed: parse failure, "NONE", or prose (contains a Latin letter)
+    all resolve to None -- final validation against `ALLOWED_REACTION_EMOJI`
+    happens downstream in `ReactionSelector`, this is just cheap pre-filtering.
+    """
+    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+    last_line = lines[-1]
+    if not last_line or last_line.upper() == "NONE":
+        return None
+    if _PROSE_RE.search(last_line):
+        return None
+    return last_line
 
 
 async def llm_judge(
@@ -67,7 +94,11 @@ async def llm_judge(
         lines.append(f"  {prefix}: {content}")
 
     history = "\n".join(lines) if lines else "  (no recent messages)"
-    prompt = _JUDGE_PROMPT.format(history=history, message=message_text[:200])
+    prompt = _JUDGE_PROMPT.format(
+        history=history,
+        message=message_text[:200],
+        allowed_emoji=" ".join(ALLOWED_REACTION_EMOJI),
+    )
 
     try:
         result = await ai_router.generate_text(
@@ -85,6 +116,9 @@ async def llm_judge(
     match = _YES_NO_RE.search(result.text)
     should_respond = match.group(1).upper() == "YES" if match else False
 
+    # Piggyback: only meaningful when the bot is staying silent (R-5).
+    suggested_emoji = None if should_respond else _extract_suggested_emoji(result.text)
+
     cost = calculate_cost(
         result.model,
         tokens_input=result.tokens_input,
@@ -99,4 +133,5 @@ async def llm_judge(
         model=result.model,
         provider=result.provider,
         cost_usd=cost,
+        suggested_emoji=suggested_emoji,
     )

@@ -14,7 +14,9 @@ from dishka.integrations.aiogram import FromDishka
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.costs.spend_limit import SpendLimitService
-from src.services.relevancy.gate import RelevancyGate
+from src.services.modules.reactions.responder import set_reaction
+from src.services.modules.reactions.selector import ReactionSelector
+from src.services.relevancy.gate import GateDecision, RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
 
 router = Router(name="messages")
@@ -62,6 +64,44 @@ def should_respond(
     return False, TriggerType.NONE
 
 
+async def _react_to_silence(
+    message: Message,
+    config: ChatConfig,
+    gate_decision: GateDecision,
+) -> None:
+    """R-5: tier-3 silence -> optionally react instead of a text reply.
+
+    `gate_decision.suggested_emoji` is only ever populated on the tier-3
+    `llm_judge` path (ADR-0004 Decision 4) -- every other tier leaves it
+    `None`, so this is a no-op there. Gated on `reactions_enabled` only,
+    never `reactions_history_enabled` (Decision 3): R-5 needs no history at
+    all, `llm_judge` decides live, per-call.
+    """
+    if not config.reactions_enabled or message.bot is None:
+        return
+
+    emoji = ReactionSelector.select(gate_decision.suggested_emoji)
+    if emoji is None:
+        return
+
+    try:
+        await set_reaction(
+            message.bot,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            emoji=emoji,
+        )
+    except Exception:
+        # `set_reaction` already swallows TelegramBadRequest; this is a
+        # last-resort net for anything else (e.g. a transient network error)
+        # so a suppressed text reply never turns into an unhandled crash.
+        logger.warning(
+            "Failed to set reaction on silence",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+
+
 @router.message(F.text)
 async def handle_text_message(
     message: Message,
@@ -91,6 +131,7 @@ async def handle_text_message(
             config=chat_config,
         )
         if not gate_decision.should_respond:
+            await _react_to_silence(message, chat_config, gate_decision)
             return
 
     user = message.from_user
