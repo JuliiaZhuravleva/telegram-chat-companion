@@ -345,6 +345,66 @@ class TestHandleCostsVerify:
         assert "Scoped to project" not in text
 
     @pytest.mark.asyncio
+    async def test_identical_result_does_not_raise(self):
+        """Pressing the button twice is normal: same bucket, same text.
+
+        Regression guard — this reached production as an unhandled
+        TelegramBadRequest, i.e. the button silently doing nothing.
+        """
+        from aiogram.exceptions import TelegramBadRequest
+
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:24h")
+        cb.message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=MagicMock(),
+                message="Bad Request: message is not modified: specified new message content...",
+            )
+        )
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)  # must not raise
+
+        cb.message.edit_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_other_bad_request_still_propagates(self):
+        """Only the not-modified case is swallowed; real errors must surface."""
+        from aiogram.exceptions import TelegramBadRequest
+
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:24h")
+        cb.message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=MagicMock(), message="Bad Request: can't parse entities"
+            )
+        )
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            with pytest.raises(TelegramBadRequest):
+                await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+    @pytest.mark.asyncio
     async def test_project_filter_ignored_is_localised(self):
         from src.services.ai.billing import OpenAICostReport
 

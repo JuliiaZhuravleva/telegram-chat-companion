@@ -706,6 +706,30 @@ _BILLING_ERRORS: dict[str, dict[str, str]] = {
 }
 
 
+async def _edit_verify_screen(callback: CallbackQuery, text: str, lang: str, period: str) -> None:
+    """Render the verification screen, tolerating an unchanged result.
+
+    Pressing the button twice is the normal case here, not an edge one: the
+    missing-settings screen is static, and two checks a minute apart usually
+    land in the same OpenAI bucket and produce byte-identical text. Telegram
+    rejects that edit, and unhandled it surfaces as the button doing nothing
+    at all (the callback was already answered).
+    """
+    msg = callback.message
+    if not isinstance(msg, Message):
+        return
+    try:
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=costs_keyboard(lang, period),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
+
 @router.callback_query(F.data.startswith("adm_costs_verify:"))
 async def handle_costs_verify(
     callback: CallbackQuery,
@@ -747,14 +771,12 @@ async def handle_costs_verify(
     ]
     if missing:
         details = "\n\n".join(_MISSING_SETTING[name][lang] for name in missing)
-        msg = callback.message
-        if isinstance(msg, Message):
-            await msg.edit_text(
-                f"<b>{header}</b>\n\n{_MISSING_INTRO[lang]}\n\n{details}",
-                parse_mode="HTML",
-                disable_web_page_preview=True,
-                reply_markup=costs_keyboard(lang, period),
-            )
+        await _edit_verify_screen(
+            callback,
+            f"<b>{header}</b>\n\n{_MISSING_INTRO[lang]}\n\n{details}",
+            lang,
+            period,
+        )
         return
 
     client = OpenAIBillingClient(api_key)
@@ -828,14 +850,7 @@ async def handle_costs_verify(
             ]
         text = "\n".join(lines)
 
-    msg = callback.message
-    if isinstance(msg, Message):
-        await msg.edit_text(
-            text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=costs_keyboard(lang, period),
-        )
+    await _edit_verify_screen(callback, text, lang, period)
 
 
 # ---------------------------------------------------------------------------
