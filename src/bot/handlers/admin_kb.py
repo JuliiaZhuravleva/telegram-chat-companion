@@ -5,7 +5,10 @@ Handles:
 - ``adm_kb_menu:*``  — per-chat submenu (organizers + kb_enabled toggle)
 - ``adm_kb_toggle:*`` — flip kb_enabled
 - ``adm_kb_orgs:*``  — paginated organizer list
-- ``adm_kb_org_add:*`` / message reply — add organizer (forward a message)
+- ``adm_kb_org_add:*`` / message reply — add organizer (forward a message,
+  plain @username, or the B-2 participant picker below)
+- ``adm_kb_org_list:*`` — B-2 participant picker, paginated by message count
+- ``adm_kb_org_pick:*`` — B-2 picker selection (adds the tapped participant)
 - ``adm_kb_org_rm:*`` — remove organizer
 
 See docs/design/kb-copy-register.md (G2) for copy and
@@ -28,6 +31,8 @@ from dishka.integrations.aiogram import FromDishka
 from src.bot.keyboards.admin_kb import (
     kb_chat_picker_keyboard,
     kb_menu_keyboard,
+    kb_org_add_prompt_keyboard,
+    kb_organizer_picker_keyboard,
     kb_organizers_keyboard,
 )
 from src.bot.states.admin import AdminStates
@@ -43,6 +48,8 @@ logger = structlog.get_logger(__name__)
 router = Router(name="admin_kb")
 
 _PER_PAGE = 10
+# B-2 picker page size: Julia proposed a top-5 default in the review transcript.
+_PICKER_PER_PAGE = 5
 
 _KB_MENU_TITLE = {
     "ru": "📚 База знаний",
@@ -91,6 +98,16 @@ _ADD_NOT_IN_CHAT = {
     "en": "🤔 I know that @username, but haven't seen them in this chat.",
 }
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
+
+# B-2: participant picker, alternative to the forward/@username prompt above.
+_PICKER_TITLE = {
+    "ru": "👥 Выберите организатора из участников чата (по числу сообщений):",
+    "en": "👥 Pick an organizer from chat participants (by message count):",
+}
+_PICKER_EMPTY = {
+    "ru": "🤔 Не нашёл ни одного участника с сообщениями в этом чате.",
+    "en": "🤔 Couldn't find any participants with messages in this chat.",
+}
 
 # B-1 stage 2: chat-scoped username resolution has no lookup path via the Bot
 # API (get_chat_member requires a numeric id), so a plain @username reply is
@@ -216,6 +233,24 @@ async def _render_organizers(
     text = _ORGS_TITLE[lang] if total else f"{_ORGS_TITLE[lang]}\n\n{_ORGS_EMPTY[lang]}"
     keyboard = kb_organizers_keyboard(
         page_items, lang=lang, chat_id=chat_id, page=page, total=total, per_page=_PER_PAGE
+    )
+
+    if isinstance(callback.message, Message):
+        await safe_edit_text(callback.message, text, reply_markup=keyboard)
+
+
+async def _render_organizer_picker(
+    callback: CallbackQuery,
+    message_repo: MessageRepository,
+    lang: str,
+    chat_id: int,
+    page: int,
+) -> None:
+    """Render the B-2 participant picker page (candidates ranked by activity)."""
+    candidates, total = await message_repo.get_top_active_users(chat_id, page, _PICKER_PER_PAGE)
+    text = _PICKER_TITLE[lang] if total else _PICKER_EMPTY[lang]
+    keyboard = kb_organizer_picker_keyboard(
+        candidates, lang=lang, chat_id=chat_id, page=page, total=total, per_page=_PICKER_PER_PAGE
     )
 
     if isinstance(callback.message, Message):
@@ -411,7 +446,84 @@ async def handle_kb_organizer_add_prompt(
 
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer(_ADD_PROMPT[lang])
+        await callback.message.answer(
+            _ADD_PROMPT[lang],
+            reply_markup=kb_org_add_prompt_keyboard(lang, chat_id=chat_id),
+        )
+
+
+@router.callback_query(F.data.startswith("adm_kb_org_list:"))
+async def handle_kb_organizer_list(
+    callback: CallbackQuery,
+    bot_config_repo: FromDishka[BotConfigRepository],
+    message_repo: FromDishka[MessageRepository],
+) -> None:
+    """Show the B-2 participant picker: add an organizer by tapping a name
+    instead of guessing a forward/@username."""
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+        page = int(parts[3]) if len(parts) > 3 else 0
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    await callback.answer()
+    await _render_organizer_picker(callback, message_repo, lang, chat_id, page)
+
+
+@router.callback_query(F.data.startswith("adm_kb_org_pick:"))
+async def handle_kb_organizer_pick(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+) -> None:
+    """Add the tapped participant as organizer (B-2 picker selection).
+
+    Single tap, no confirm -- mirrors ``adm_kb_org_rm``'s low-blast-radius
+    convention (also easy to undo via that same remove button). Clears the
+    ``awaiting_kb_organizer`` FSM state set by the add-prompt screen, so a
+    stray text message sent afterwards isn't misread as a username reply.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await _check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+        user_id = int(parts[3])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    await state.clear()
+
+    row = await chat_settings_repo.get(chat_id)
+    organizer_ids = _parse_organizer_ids(row.get("kb_organizer_ids") if row else None)
+    if user_id not in organizer_ids:
+        organizer_ids.append(user_id)
+        await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
+
+    await callback.answer()
+    await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0)
 
 
 @router.message(AdminStates.awaiting_kb_organizer, F.chat.type == "private")

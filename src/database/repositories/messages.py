@@ -289,6 +289,53 @@ class MessageRepository:
         )
         return row is not None
 
+    async def get_top_active_users(
+        self, chat_id: int, page: int, per_page: int = 5
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated distinct posters in a chat, ranked by message count desc.
+
+        Powers the KB organizer picker (B-2): lets an admin pick a candidate
+        from chat participants instead of guessing a forward/@username.
+        Excludes bot messages and rows with no `user_id` (e.g. service
+        messages). `username`/`first_name` reflect that user's most recent
+        message in this chat -- same chat-scoped-history constraint as
+        `find_by_username` (no live Bot API lookup here, and no dedicated
+        index beyond the existing `idx_chat_messages_user(chat_id, user_id,
+        created_at DESC)`, which already supports this GROUP BY without a
+        sort -- acceptable for a low-frequency admin action, same call as
+        B-1 stage 2). `user_id ASC` is a stable tiebreaker so page contents
+        don't reshuffle across requests when counts are equal. Returns
+        (candidates, total_distinct_posters).
+        """
+        total = (
+            await self._pool.fetchval(
+                """
+                SELECT COUNT(DISTINCT user_id)
+                FROM chat_messages
+                WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+                """,
+                chat_id,
+            )
+            or 0
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT user_id,
+                   (array_agg(username ORDER BY created_at DESC))[1] AS username,
+                   (array_agg(first_name ORDER BY created_at DESC))[1] AS first_name,
+                   COUNT(*)::int AS message_count
+            FROM chat_messages
+            WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+            GROUP BY user_id
+            ORDER BY message_count DESC, user_id ASC
+            LIMIT $2 OFFSET $3
+            """,
+            chat_id,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
+
     async def get_for_summary(
         self,
         chat_id: int,

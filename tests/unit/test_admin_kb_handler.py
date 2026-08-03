@@ -18,7 +18,10 @@ from aiogram.types import (
 
 from src.bot.handlers.admin_kb import (
     _extract_username,
+    handle_kb_organizer_add_prompt,
     handle_kb_organizer_add_reply,
+    handle_kb_organizer_list,
+    handle_kb_organizer_pick,
     handle_kb_organizer_remove,
     handle_kb_toggle,
 )
@@ -174,11 +177,14 @@ class TestHandleKbOrganizerRemove:
 
 
 def _make_message_repo(
-    found: dict[str, object] | None = None, known_elsewhere: bool = False
+    found: dict[str, object] | None = None,
+    known_elsewhere: bool = False,
+    top_active_users: tuple[list[dict[str, object]], int] = ([], 0),
 ) -> MagicMock:
     repo = MagicMock()
     repo.find_by_username = AsyncMock(return_value=found)
     repo.username_seen_elsewhere = AsyncMock(return_value=known_elsewhere)
+    repo.get_top_active_users = AsyncMock(return_value=top_active_users)
     return repo
 
 
@@ -188,6 +194,8 @@ def _make_state(text_state_data: dict[str, object] | None = None) -> MagicMock:
         return_value=text_state_data or {"kb_chat_id": CHAT_ID, "kb_lang": "ru"}
     )
     state.clear = AsyncMock()
+    state.set_state = AsyncMock()
+    state.update_data = AsyncMock()
     return state
 
 
@@ -338,3 +346,145 @@ class TestHandleKbOrganizerAddReply:
         chat_settings_repo.set_field.assert_not_awaited()
         message_repo.find_by_username.assert_not_awaited()
         assert "Не нашёл" in message.reply.call_args[0][0]
+
+
+class TestHandleKbOrganizerAddPrompt:
+    """B-2: the add-organizer prompt now offers a picker entry point too."""
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_show_participants_button(self) -> None:
+        callback = _make_callback(f"adm_kb_org_add:ru:{CHAT_ID}")
+        callback.message.answer = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_add_prompt(callback, bot_config_repo, state)
+
+        callback.message.answer.assert_awaited_once()
+        _, kwargs = callback.message.answer.call_args
+        keyboard = kwargs["reply_markup"]
+        callbacks = [
+            btn.callback_data
+            for row in keyboard.inline_keyboard
+            for btn in row
+            if btn.callback_data
+        ]
+        assert f"adm_kb_org_list:ru:{CHAT_ID}:0" in callbacks
+
+    @pytest.mark.asyncio
+    async def test_denies_non_admin(self) -> None:
+        callback = _make_callback(f"adm_kb_org_add:ru:{CHAT_ID}", user_id=999)
+        callback.message.answer = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_add_prompt(callback, bot_config_repo, state)
+
+        callback.message.answer.assert_not_awaited()
+        state.set_state.assert_not_awaited()
+
+
+class TestHandleKbOrganizerList:
+    """B-2: paginated participant picker, ranked by message count."""
+
+    @pytest.mark.asyncio
+    async def test_denies_non_admin(self) -> None:
+        callback = _make_callback(f"adm_kb_org_list:ru:{CHAT_ID}:0", user_id=999)
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo()
+
+        await handle_kb_organizer_list(callback, bot_config_repo, message_repo)
+
+        message_repo.get_top_active_users.assert_not_awaited()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_renders_candidates_ranked_page(self) -> None:
+        callback = _make_callback(f"adm_kb_org_list:ru:{CHAT_ID}:1")
+        bot_config_repo = _make_bot_config_repo()
+        candidates = [{"user_id": 111, "first_name": "Alice", "username": "alice"}]
+        message_repo = _make_message_repo(top_active_users=(candidates, 12))
+
+        await handle_kb_organizer_list(callback, bot_config_repo, message_repo)
+
+        message_repo.get_top_active_users.assert_awaited_once_with(CHAT_ID, 1, 5)
+        callback.message.edit_text.assert_awaited_once()
+        _, kwargs = callback.message.edit_text.call_args
+        keyboard = kwargs["reply_markup"]
+        labels = [btn.text for row in keyboard.inline_keyboard for btn in row]
+        assert "Alice (@alice)" in labels
+
+    @pytest.mark.asyncio
+    async def test_empty_state_when_chat_has_no_participants(self) -> None:
+        callback = _make_callback(f"adm_kb_org_list:ru:{CHAT_ID}:0")
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo(top_active_users=([], 0))
+
+        await handle_kb_organizer_list(callback, bot_config_repo, message_repo)
+
+        text = callback.message.edit_text.call_args[0][0]
+        assert "Не нашёл" in text
+
+
+class TestHandleKbOrganizerPick:
+    """B-2: tapping a picker candidate adds them as organizer directly."""
+
+    @pytest.mark.asyncio
+    async def test_denies_non_admin(self) -> None:
+        callback = _make_callback(f"adm_kb_org_pick:ru:{CHAT_ID}:888", user_id=999)
+        chat_settings_repo = _make_chat_settings_repo()
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_pick(callback, chat_settings_repo, bot_config_repo, state)
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        state.clear.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_adds_picked_user_as_organizer(self) -> None:
+        callback = _make_callback(f"adm_kb_org_pick:ru:{CHAT_ID}:888")
+        chat_settings_repo = _make_chat_settings_repo(organizer_ids=[ORG_USER_ID])
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_pick(callback, chat_settings_repo, bot_config_repo, state)
+
+        chat_settings_repo.set_field.assert_awaited_once_with(
+            CHAT_ID, "kb_organizer_ids", json.dumps([ORG_USER_ID, 888])
+        )
+
+    @pytest.mark.asyncio
+    async def test_clears_awaiting_organizer_state(self) -> None:
+        """Picking from the list must not leave a stray awaiting-reply state
+        that would misread a later text message as a username."""
+        callback = _make_callback(f"adm_kb_org_pick:ru:{CHAT_ID}:888")
+        chat_settings_repo = _make_chat_settings_repo(organizer_ids=[ORG_USER_ID])
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_pick(callback, chat_settings_repo, bot_config_repo, state)
+
+        state.clear.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_noop_when_already_organizer(self) -> None:
+        callback = _make_callback(f"adm_kb_org_pick:ru:{CHAT_ID}:{ORG_USER_ID}")
+        chat_settings_repo = _make_chat_settings_repo(organizer_ids=[ORG_USER_ID])
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_pick(callback, chat_settings_repo, bot_config_repo, state)
+
+        chat_settings_repo.set_field.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_re_renders_organizers_list(self) -> None:
+        callback = _make_callback(f"adm_kb_org_pick:ru:{CHAT_ID}:888")
+        chat_settings_repo = _make_chat_settings_repo(organizer_ids=[ORG_USER_ID, 888])
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_kb_organizer_pick(callback, chat_settings_repo, bot_config_repo, state)
+
+        callback.message.edit_text.assert_awaited_once()
