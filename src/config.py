@@ -159,6 +159,15 @@ class Settings(BaseSettings):
 
     # Optional API keys (from environment)
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    # Organization-level Admin key (sk-admin-…), NOT the regular API key above.
+    # Only used for the /v1/organization/* billing endpoints — an admin key is
+    # rejected on /v1/chat/completions, so the two are never interchangeable.
+    openai_admin_api_key: str | None = Field(default=None, alias="OPENAI_ADMIN_API_KEY")
+    # Project the admin key should report on (proj_…). Required alongside the
+    # admin key: the costs endpoint answers organization-wide unless filtered,
+    # and an org-wide figure compared against this bot's own log is not a
+    # reconciliation, just a difference.
+    openai_project_id: str | None = Field(default=None, alias="OPENAI_PROJECT_ID")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     grok_api_key: str | None = Field(default=None, alias="GROK_API_KEY")
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")

@@ -10,7 +10,9 @@ All callbacks embed language in callback_data for stateless operation:
 
 from __future__ import annotations
 
+import time
 from datetime import timedelta
+from decimal import Decimal
 from html import escape
 from typing import Any
 
@@ -621,6 +623,155 @@ async def handle_costs(
 # Callback: cost verification (OpenAI billing API)
 # ---------------------------------------------------------------------------
 
+_ADMIN_KEYS_URL = "https://platform.openai.com/settings/organization/admin-keys"
+_PROJECTS_URL = "https://platform.openai.com/settings/organization/projects"
+
+_VERIFY_HEADER: dict[str, str] = {
+    "ru": "Сверка расходов",
+    "en": "Cost Verification",
+}
+
+# Cost verification needs BOTH the admin key and the project it should report
+# on. Named separately so a half-finished setup says which half is missing
+# instead of a generic "not configured".
+_MISSING_SETTING: dict[str, dict[str, str]] = {
+    "OPENAI_ADMIN_API_KEY": {
+        "ru": (
+            "<code>OPENAI_ADMIN_API_KEY</code> — отдельный ключ организации, "
+            "а не тот, которым бот генерирует ответы: биллинговые эндпоинты "
+            f'принимают только его. <a href="{_ADMIN_KEYS_URL}">Создать</a> '
+            "(доступно только владельцу организации)."
+        ),
+        "en": (
+            "<code>OPENAI_ADMIN_API_KEY</code> — a separate organization-level "
+            "key, not the one the bot generates replies with: the billing "
+            f'endpoints accept only an admin key. <a href="{_ADMIN_KEYS_URL}">'
+            "Create one</a> (organization owners only)."
+        ),
+    },
+    "OPENAI_PROJECT_ID": {
+        "ru": (
+            "<code>OPENAI_PROJECT_ID</code> — проект, по которому считать "
+            "расходы (<code>proj_…</code>). Без него OpenAI отвечает по всей "
+            f'организации. <a href="{_PROJECTS_URL}">Посмотреть проекты</a>.'
+        ),
+        "en": (
+            "<code>OPENAI_PROJECT_ID</code> — the project to report on "
+            "(<code>proj_…</code>). Without it OpenAI answers organization-wide. "
+            f'<a href="{_PROJECTS_URL}">View projects</a>.'
+        ),
+    },
+}
+
+_MISSING_INTRO: dict[str, str] = {
+    "ru": "Сверка требует двух настроек, не хватает:",
+    "en": "Cost verification needs two settings; missing:",
+}
+
+# Unlike the other admin screens, this one makes an outbound call to a metered
+# third-party API on every press. Held or double-tapped, it is the one button
+# here that can cost money and earn a rate limit, so it gets its own cooldown.
+_VERIFY_COOLDOWN_SECONDS = 10.0
+_VERIFY_COOLDOWN_MAX_ENTRIES = 100
+_last_verify: dict[int, float] = {}
+
+_VERIFY_COOLDOWN_MSG: dict[str, str] = {
+    "ru": "Подождите немного перед повторной сверкой.",
+    "en": "Give it a moment before checking again.",
+}
+
+
+def _verify_on_cooldown(user_id: int) -> bool:
+    """Report whether this admin checked too recently, and record the attempt.
+
+    Monotonic clock deliberately: a wall-clock jump (NTP, DST) must not hand
+    out a free pass or a stuck lockout.
+    """
+    now = time.monotonic()
+    last = _last_verify.get(user_id)
+    if last is not None and now - last < _VERIFY_COOLDOWN_SECONDS:
+        return True
+    # Bounded: one entry per admin who ever pressed the button would otherwise
+    # live for the process lifetime. Drop everything already expired.
+    if len(_last_verify) >= _VERIFY_COOLDOWN_MAX_ENTRIES:
+        for uid, ts in list(_last_verify.items()):
+            if now - ts >= _VERIFY_COOLDOWN_SECONDS:
+                del _last_verify[uid]
+    _last_verify[user_id] = now
+    return False
+
+
+# Localised text per OpenAICostReport.error_code. Anything unmapped falls back
+# to the client's own English message.
+_BILLING_ERRORS: dict[str, dict[str, str]] = {
+    "no_billing_access": {
+        "ru": (
+            "OpenAI ответил 403: ключ есть, но он не админский ключ организации. "
+            f'Нужен ключ отсюда: <a href="{_ADMIN_KEYS_URL}">admin keys</a>.'
+        ),
+        "en": (
+            "OpenAI returned 403: the key is valid but is not an organization "
+            f'admin key. Create one at <a href="{_ADMIN_KEYS_URL}">admin keys</a>.'
+        ),
+    },
+    "invalid_key": {
+        "ru": "OpenAI ответил 401: ключ не принят — недействителен или отозван.",
+        "en": "OpenAI returned 401: the key was rejected — invalid or revoked.",
+    },
+    "timeout": {
+        "ru": "OpenAI не ответил вовремя. Попробуйте ещё раз.",
+        "en": "OpenAI did not respond in time. Try again.",
+    },
+    "pagination_stuck": {
+        "ru": (
+            "OpenAI не закончил постраничную выдачу — итог был бы завышен, "
+            "поэтому сверка отменена. Подробности в логах бота."
+        ),
+        "en": (
+            "OpenAI never finished paginating — the total would be inflated, "
+            "so the check was aborted. Details are in the bot logs."
+        ),
+    },
+    "project_filter_ignored": {
+        "ru": (
+            "OpenAI вернул данные по другим проектам — фильтр не применился. "
+            "Цифры были бы по всей организации, поэтому сверка отменена. "
+            f"Проверь <code>OPENAI_PROJECT_ID</code> в "
+            f'<a href="{_PROJECTS_URL}">списке проектов</a>.'
+        ),
+        "en": (
+            "OpenAI returned data for other projects — the filter did not apply. "
+            "The figures would be organization-wide, so the check was aborted. "
+            f"Verify <code>OPENAI_PROJECT_ID</code> against the "
+            f'<a href="{_PROJECTS_URL}">project list</a>.'
+        ),
+    },
+}
+
+
+async def _edit_verify_screen(callback: CallbackQuery, text: str, lang: str, period: str) -> None:
+    """Render the verification screen, tolerating an unchanged result.
+
+    Pressing the button twice is the normal case here, not an edge one: the
+    missing-settings screen is static, and two checks a minute apart usually
+    land in the same OpenAI bucket and produce byte-identical text. Telegram
+    rejects that edit, and unhandled it surfaces as the button doing nothing
+    at all (the callback was already answered).
+    """
+    msg = callback.message
+    if not isinstance(msg, Message):
+        return
+    try:
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+            reply_markup=costs_keyboard(lang, period),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
 
 @router.callback_query(F.data.startswith("adm_costs_verify:"))
 async def handle_costs_verify(
@@ -642,71 +793,114 @@ async def handle_costs_verify(
     if period not in _INTERVAL_MAP:
         period = "24h"
 
+    # Before answering: the cooldown reply IS the answer, and a toast leaves the
+    # screen untouched, which is also what we want for a rejected press.
+    user = callback.from_user
+    if user is not None and _verify_on_cooldown(user.id):
+        await callback.answer(_VERIFY_COOLDOWN_MSG[lang])
+        return
+
     await callback.answer()
 
-    interval = _INTERVAL_MAP[period]
     days = {"1h": 1, "24h": 1, "7d": 7}[period]
+    header = _VERIFY_HEADER[lang]
 
-    # Our calculated cost (OpenAI only)
-    by_provider = await response_log_repo.get_cost_by_provider(interval)
-    our_openai = next(
-        (r["total_cost"] for r in by_provider if r["provider"] == "openai"),
-        0,
-    )
-
-    api_key = settings.openai_api_key or ""
-    if not api_key:
-        if lang == "ru":
-            err_text = "<b>Сверка расходов</b>\n\nOpenAI API ключ не настроен."
-        else:
-            err_text = "<b>Cost Verification</b>\n\nOpenAI API key not configured."
-        msg = callback.message
-        if isinstance(msg, Message):
-            await msg.edit_text(
-                err_text,
-                parse_mode="HTML",
-                reply_markup=costs_keyboard(lang, period),
-            )
+    # Both settings are required, and neither substitutes for the other: the key
+    # buys access, the project id makes the answer about this bot. Check before
+    # spending a round trip, and name what is missing rather than saying "not
+    # configured" — a half-done setup is the likeliest state to land here in.
+    api_key = settings.openai_admin_api_key or ""
+    project_id = settings.openai_project_id or ""
+    missing = [
+        name
+        for name, value in (
+            ("OPENAI_ADMIN_API_KEY", api_key),
+            ("OPENAI_PROJECT_ID", project_id),
+        )
+        if not value
+    ]
+    if missing:
+        details = "\n\n".join(_MISSING_SETTING[name][lang] for name in missing)
+        await _edit_verify_screen(
+            callback,
+            f"<b>{header}</b>\n\n{_MISSING_INTRO[lang]}\n\n{details}",
+            lang,
+            period,
+        )
         return
 
     client = OpenAIBillingClient(api_key)
     try:
-        report = await client.get_costs(days=days)
+        report = await client.get_costs(days=days, project_id=project_id)
     finally:
         await client.close()
 
     if report.error:
-        if lang == "ru":
-            text = f"<b>Сверка расходов</b>\n\n{escape(report.error)}"
-        else:
-            text = f"<b>Cost Verification</b>\n\n{escape(report.error)}"
+        localised = _BILLING_ERRORS.get(report.error_code or "", {}).get(lang)
+        body = localised or escape(report.error)
+        text = f"<b>{header}</b>\n\n{body}"
     else:
-        openai_total = report.total_usd
-        delta = openai_total - our_openai if our_openai else openai_total
+        # OpenAI answers in whole aligned buckets, which routinely reach further
+        # back than the window we asked for (its smallest bucket is a full day,
+        # so "1h" gets a day or more). Comparing our own figure over the period
+        # the *user* picked would then subtract two different windows and report
+        # the difference as a costing error. Measure ourselves over whatever
+        # span the buckets actually cover.
+        interval = _INTERVAL_MAP[period]
+        covered_from = report.covered_from
+        if covered_from is not None:
+            covered_seconds = max(int(time.time()) - covered_from, 0)
+            if covered_seconds:
+                interval = timedelta(seconds=covered_seconds)
 
+        by_provider = await response_log_repo.get_cost_by_provider(interval)
+        our_openai = next(
+            (r["total_cost"] for r in by_provider if r["provider"] == "openai"),
+            Decimal("0"),
+        )
+
+        openai_total = report.total_usd
+        delta = openai_total - Decimal(our_openai)
+        window_h = round(interval.total_seconds() / 3600)
+
+        # The filter was requested and no foreign project came back, but an
+        # all-null response means grouping was dropped and the scoping could not
+        # be confirmed from the payload. Say which of the two happened rather
+        # than presenting an unverified figure as a checked one.
+        scoped = project_id in report.project_ids_seen
         if lang == "ru":
+            note = (
+                f"<i>Только проект <code>{escape(project_id)}</code>.</i>"
+                if scoped
+                else "<i>OpenAI не вернул разбивку по проектам — "
+                "принадлежность цифры к проекту не подтверждена.</i>"
+            )
             lines = [
-                "<b>Сверка расходов (OpenAI)</b>\n",
+                f"<b>{header} (OpenAI)</b>\n",
+                f"Окно: последние {window_h} ч",
                 f"OpenAI отчёт: ${openai_total:.4f}",
                 f"Наш расчёт: ${our_openai:.4f}",
-                f"Разница: ${delta:.4f}",
+                f"Разница: ${delta:.4f}\n",
+                note,
             ]
         else:
+            note = (
+                f"<i>Scoped to project <code>{escape(project_id)}</code>.</i>"
+                if scoped
+                else "<i>OpenAI returned no per-project breakdown — the figure's "
+                "scoping could not be confirmed.</i>"
+            )
             lines = [
-                "<b>Cost Verification (OpenAI)</b>\n",
+                f"<b>{header} (OpenAI)</b>\n",
+                f"Window: last {window_h}h",
                 f"OpenAI reported: ${openai_total:.4f}",
                 f"Our calculation: ${our_openai:.4f}",
-                f"Delta: ${delta:.4f}",
+                f"Delta: ${delta:.4f}\n",
+                note,
             ]
         text = "\n".join(lines)
 
-    msg = callback.message
-    if isinstance(msg, Message):
-        await msg.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=costs_keyboard(lang, period),
-        )
+    await _edit_verify_screen(callback, text, lang, period)
 
 
 # ---------------------------------------------------------------------------
