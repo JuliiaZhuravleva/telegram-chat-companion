@@ -19,6 +19,13 @@
 #      env map it keeps outside this repository, backed by a secrets manager.
 #      Never commit a .env.
 
+# Pinned to match the `-p companion` the harness always passes. The flag wins
+# over this line, so it changes nothing for an automated deploy — it exists for
+# the manual `docker compose` run on the host, which would otherwise take the
+# project name from the deploy directory, land in a DIFFERENT project, and
+# orphan the running stack while appearing to work.
+name: companion
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
