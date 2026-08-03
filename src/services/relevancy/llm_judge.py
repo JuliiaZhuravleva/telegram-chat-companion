@@ -105,7 +105,15 @@ async def llm_judge(
             prompt=prompt,
             system_prompt=None,
             model="gpt-5-nano",
-            max_tokens=1024,  # gpt-5-nano uses internal reasoning tokens
+            # gpt-5-nano spends internal reasoning tokens out of this same
+            # budget. At 1024 it can burn the whole allowance thinking and
+            # return empty content (finish_reason=length) -- observed live on
+            # 2026-08-03, surfacing as llm_judge_failed/all_providers_failed,
+            # which fails the gate closed: the bot stays silent AND sets no
+            # R-5 reaction. R-5 made this likelier by adding the full
+            # ALLOWED_REACTION_EMOJI list to the prompt. CLAUDE.md's rule for
+            # reasoning models is 4096+.
+            max_tokens=4096,
             temperature=1.0,
         )
     except AIProviderError:

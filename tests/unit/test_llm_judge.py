@@ -235,3 +235,16 @@ class TestLlmJudgeSuggestedEmoji:
         await llm_judge("test", [], router)
         prompt: str = router.generate_text.call_args.kwargs["prompt"]
         assert "🔥" in prompt and "👍" in prompt
+
+    @pytest.mark.asyncio
+    async def test_token_budget_survives_internal_reasoning(self) -> None:
+        """gpt-5-nano spends reasoning tokens out of `max_tokens`.
+
+        At 1024 it exhausted the budget thinking and returned empty content
+        (finish_reason=length) -- observed live 2026-08-03. That fails the gate
+        closed: no reply AND no R-5 reaction. CLAUDE.md requires 4096+ for
+        reasoning models; this pins it so the regression can't return quietly.
+        """
+        router = _make_router("NO\n🔥")
+        await llm_judge("test", [], router)
+        assert router.generate_text.call_args.kwargs["max_tokens"] >= 4096
