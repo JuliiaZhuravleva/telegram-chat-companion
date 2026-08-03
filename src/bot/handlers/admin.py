@@ -668,6 +668,39 @@ _MISSING_INTRO: dict[str, str] = {
     "en": "Cost verification needs two settings; missing:",
 }
 
+# Unlike the other admin screens, this one makes an outbound call to a metered
+# third-party API on every press. Held or double-tapped, it is the one button
+# here that can cost money and earn a rate limit, so it gets its own cooldown.
+_VERIFY_COOLDOWN_SECONDS = 10.0
+_VERIFY_COOLDOWN_MAX_ENTRIES = 100
+_last_verify: dict[int, float] = {}
+
+_VERIFY_COOLDOWN_MSG: dict[str, str] = {
+    "ru": "Подождите немного перед повторной сверкой.",
+    "en": "Give it a moment before checking again.",
+}
+
+
+def _verify_on_cooldown(user_id: int) -> bool:
+    """Report whether this admin checked too recently, and record the attempt.
+
+    Monotonic clock deliberately: a wall-clock jump (NTP, DST) must not hand
+    out a free pass or a stuck lockout.
+    """
+    now = time.monotonic()
+    last = _last_verify.get(user_id)
+    if last is not None and now - last < _VERIFY_COOLDOWN_SECONDS:
+        return True
+    # Bounded: one entry per admin who ever pressed the button would otherwise
+    # live for the process lifetime. Drop everything already expired.
+    if len(_last_verify) >= _VERIFY_COOLDOWN_MAX_ENTRIES:
+        for uid, ts in list(_last_verify.items()):
+            if now - ts >= _VERIFY_COOLDOWN_SECONDS:
+                del _last_verify[uid]
+    _last_verify[user_id] = now
+    return False
+
+
 # Localised text per OpenAICostReport.error_code. Anything unmapped falls back
 # to the client's own English message.
 _BILLING_ERRORS: dict[str, dict[str, str]] = {
@@ -688,6 +721,16 @@ _BILLING_ERRORS: dict[str, dict[str, str]] = {
     "timeout": {
         "ru": "OpenAI не ответил вовремя. Попробуйте ещё раз.",
         "en": "OpenAI did not respond in time. Try again.",
+    },
+    "pagination_stuck": {
+        "ru": (
+            "OpenAI не закончил постраничную выдачу — итог был бы завышен, "
+            "поэтому сверка отменена. Подробности в логах бота."
+        ),
+        "en": (
+            "OpenAI never finished paginating — the total would be inflated, "
+            "so the check was aborted. Details are in the bot logs."
+        ),
     },
     "project_filter_ignored": {
         "ru": (
@@ -749,6 +792,13 @@ async def handle_costs_verify(
     period = parts[2] if len(parts) > 2 else "24h"
     if period not in _INTERVAL_MAP:
         period = "24h"
+
+    # Before answering: the cooldown reply IS the answer, and a toast leaves the
+    # screen untouched, which is also what we want for a rejected press.
+    user = callback.from_user
+    if user is not None and _verify_on_cooldown(user.id):
+        await callback.answer(_VERIFY_COOLDOWN_MSG[lang])
+        return
 
     await callback.answer()
 

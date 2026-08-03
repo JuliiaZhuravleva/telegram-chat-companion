@@ -170,6 +170,149 @@ class TestHandleCosts:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _clear_verify_cooldown():
+    """The cooldown is module state; leaking it across tests is a false pass."""
+    from src.bot.handlers.admin import _last_verify
+
+    _last_verify.clear()
+    yield
+    _last_verify.clear()
+
+
+class TestVerifyCooldown:
+    """The verify button spends money on a third-party API per press."""
+
+    @pytest.mark.asyncio
+    async def test_second_press_makes_no_api_call(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            first = _make_callback("adm_costs_verify:en:24h", user_id=777)
+            await handle_costs_verify(first, repo, settings, is_admin=True)
+            second = _make_callback("adm_costs_verify:en:24h", user_id=777)
+            await handle_costs_verify(second, repo, settings, is_admin=True)
+
+        assert MockClient.call_count == 1
+        # Rejected press leaves the screen alone and explains itself in a toast.
+        second.message.edit_text.assert_not_awaited()
+        assert "moment" in second.answer.call_args.args[0].lower()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_is_per_user(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(
+                _make_callback("adm_costs_verify:en:24h", user_id=1), repo, settings, is_admin=True
+            )
+            await handle_costs_verify(
+                _make_callback("adm_costs_verify:en:24h", user_id=2), repo, settings, is_admin=True
+            )
+
+        assert MockClient.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_press_allowed_after_window(self):
+        """Age the recorded press rather than patching the global clock."""
+        import time as _time
+
+        from src.bot.handlers.admin import _VERIFY_COOLDOWN_SECONDS, _last_verify
+        from src.services.ai.billing import OpenAICostReport
+
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(
+                _make_callback("adm_costs_verify:en:24h", user_id=9), repo, settings, is_admin=True
+            )
+            _last_verify[9] = _time.monotonic() - (_VERIFY_COOLDOWN_SECONDS + 1)
+            await handle_costs_verify(
+                _make_callback("adm_costs_verify:en:24h", user_id=9), repo, settings, is_admin=True
+            )
+
+        assert MockClient.call_count == 2
+
+    def test_cooldown_dict_is_bounded(self):
+        """In-memory cooldown maps have leaked in this project before."""
+        import time as _time
+
+        from src.bot.handlers import admin as A
+
+        # Pre-fill past the cap with entries old enough to be prunable.
+        stale = _time.monotonic() - (A._VERIFY_COOLDOWN_SECONDS + 60)
+        for uid in range(A._VERIFY_COOLDOWN_MAX_ENTRIES + 50):
+            A._last_verify[uid] = stale
+
+        assert not A._verify_on_cooldown(999_999)
+        assert len(A._last_verify) <= A._VERIFY_COOLDOWN_MAX_ENTRIES
+
+    def test_cooldown_dict_keeps_live_entries_when_full(self):
+        """Pruning must not hand out free passes to admins still on cooldown."""
+        import time as _time
+
+        from src.bot.handlers import admin as A
+
+        now = _time.monotonic()
+        for uid in range(A._VERIFY_COOLDOWN_MAX_ENTRIES + 5):
+            A._last_verify[uid] = now  # all fresh — nothing is prunable
+
+        A._verify_on_cooldown(999_999)
+
+        assert A._verify_on_cooldown(0) is True
+
+    @pytest.mark.asyncio
+    async def test_cooldown_message_is_localised(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(
+                _make_callback("adm_costs_verify:ru:24h", user_id=55), repo, settings, is_admin=True
+            )
+            second = _make_callback("adm_costs_verify:ru:24h", user_id=55)
+            await handle_costs_verify(second, repo, settings, is_admin=True)
+
+        assert "подождите" in second.answer.call_args.args[0].lower()
+
+
 class TestHandleCostsVerify:
     @pytest.mark.asyncio
     async def test_shows_comparison(self):

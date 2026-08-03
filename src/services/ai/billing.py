@@ -39,6 +39,10 @@ _COSTS_URL = "https://api.openai.com/v1/organization/costs"
 # The API caps `limit` at 180 buckets; anything above is rejected outright.
 _MAX_BUCKETS = 180
 
+# With the limit below, any window this feature offers fits in a single page,
+# so this is a runaway guard rather than a real ceiling.
+_MAX_PAGES = 20
+
 
 def _as_timestamp(value: Any) -> int | None:
     """Coerce an untrusted bucket timestamp to a sane unix time, else None.
@@ -117,7 +121,10 @@ class OpenAIBillingClient:
         params: dict[str, Any] = {
             "start_time": start_time,
             "bucket_width": "1d",
-            "limit": max(1, min(days, _MAX_BUCKETS)),
+            # Ask for the requested days plus slack. Buckets are aligned to UTC
+            # midnight, so an N-day window always straddles N+1 of them, and a
+            # too-small limit turns every ordinary call into a paginated one.
+            "limit": max(2, min(days + 2, _MAX_BUCKETS)),
         }
         if project_id:
             params["project_ids"] = [project_id]
@@ -128,6 +135,8 @@ class OpenAIBillingClient:
         covered_from: int | None = None
         project_ids_seen: set[str] = set()
         page_cursor: str | None = None
+        seen_cursors: set[str] = set()
+        pages = 0
 
         try:
             while True:
@@ -197,9 +206,30 @@ class OpenAIBillingClient:
                             )
                         )
 
+                pages += 1
                 page_cursor = data.get("next_page")
                 if not page_cursor:
                     break
+
+                # Neither condition should ever fire against a healthy API, and
+                # that is the point: without them a cursor that stops advancing
+                # loops forever, re-adding the same page's money to `total` on
+                # every turn. A silently inflated "OpenAI reported" figure is
+                # the worst possible output from a tool whose whole job is
+                # spotting cost discrepancies, so stop and say so instead.
+                if page_cursor in seen_cursors or pages >= _MAX_PAGES:
+                    logger.warning(
+                        "OpenAI billing: pagination did not terminate",
+                        pages=pages,
+                        repeated_cursor=page_cursor in seen_cursors,
+                    )
+                    return OpenAICostReport(
+                        total_usd=Decimal("0"),
+                        buckets=[],
+                        error="OpenAI pagination did not terminate; totals would be unreliable",
+                        error_code="pagination_stuck",
+                    )
+                seen_cursors.add(page_cursor)
 
         except httpx.TimeoutException:
             return OpenAICostReport(

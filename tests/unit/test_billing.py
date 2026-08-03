@@ -369,6 +369,90 @@ class TestLimitBounds:
             limit = mock_get.call_args.kwargs["params"]["limit"]
             assert 1 <= limit <= 180, f"days={days} produced limit={limit}"
 
+    async def test_limit_covers_bucket_alignment(self, client):
+        """An N-day window straddles N+1 UTC-aligned buckets.
+
+        A limit of exactly `days` made every ordinary call paginate.
+        """
+        mock_resp = _mock_response(json_data={"data": [], "next_page": None})
+
+        for days in (1, 7):
+            with patch.object(
+                client._client, "get", new_callable=AsyncMock, return_value=mock_resp
+            ) as mock_get:
+                await client.get_costs(days=days)
+            assert mock_get.call_args.kwargs["params"]["limit"] > days
+
+
+class TestPaginationTermination:
+    """The loop must end even when the API's cursor misbehaves."""
+
+    @staticmethod
+    def _page(cursor):
+        return _mock_response(
+            json_data={
+                "data": [
+                    {
+                        "start_time": 1700000000,
+                        "end_time": 1700086400,
+                        "results": [{"amount": {"value": 0.01}}],
+                    }
+                ],
+                "next_page": cursor,
+            }
+        )
+
+    async def test_repeated_cursor_aborts(self, client):
+        """Positive control: a cursor that never advances used to loop forever.
+
+        Left unguarded it also re-adds the same page's money to the total on
+        every turn, i.e. silently inflates the figure this feature exists to
+        check.
+        """
+        calls = 0
+
+        def never_advances(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            assert calls < 50, "pagination still unbounded"
+            return self._page("SAME_CURSOR")
+
+        with patch.object(
+            client._client, "get", new_callable=AsyncMock, side_effect=never_advances
+        ):
+            report = await client.get_costs(days=1)
+
+        assert report.error_code == "pagination_stuck"
+        assert report.total_usd == Decimal("0")  # never a partial/inflated number
+        assert calls <= 3
+
+    async def test_page_cap_aborts_endless_distinct_cursors(self, client):
+        """A cursor that always advances is just as unbounded."""
+        calls = 0
+
+        def always_new(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            assert calls < 100, "page cap not enforced"
+            return self._page(f"cursor_{calls}")
+
+        with patch.object(client._client, "get", new_callable=AsyncMock, side_effect=always_new):
+            report = await client.get_costs(days=1)
+
+        assert report.error_code == "pagination_stuck"
+        assert calls <= 21
+
+    async def test_normal_multipage_still_works(self, client):
+        """Negative control: honest pagination must not trip the guard."""
+        pages = [self._page("cursor_a"), self._page("cursor_b"), self._page(None)]
+
+        with patch.object(client._client, "get", new_callable=AsyncMock, side_effect=pages):
+            report = await client.get_costs(days=1)
+
+        assert report.error is None
+        assert report.total_usd == Decimal("0.03")
+        assert len(report.buckets) == 3
+
 
 class TestClose:
     async def test_close_calls_aclose(self, client):
