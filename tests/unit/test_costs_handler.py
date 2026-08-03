@@ -76,9 +76,21 @@ def _make_response_log_repo(
     return repo
 
 
-def _make_settings(openai_api_key: str = "sk-test") -> MagicMock:
+def _make_settings(
+    openai_api_key: str = "sk-test",
+    openai_admin_api_key: str = "sk-admin-test",
+    openai_project_id: str = "proj_test",
+) -> MagicMock:
+    """Mock Settings.
+
+    Every field is set explicitly: a bare MagicMock returns a truthy attribute
+    for anything, so an unset key would silently pass the presence checks the
+    handler is supposed to enforce.
+    """
     s = MagicMock()
     s.openai_api_key = openai_api_key
+    s.openai_admin_api_key = openai_admin_api_key
+    s.openai_project_id = openai_project_id
     return s
 
 
@@ -185,15 +197,179 @@ class TestHandleCostsVerify:
         assert "$0.0150" in text  # Our calculation
 
     @pytest.mark.asyncio
-    async def test_no_api_key_shows_error(self):
+    async def test_no_admin_key_names_the_missing_setting(self):
         cb = _make_callback("adm_costs_verify:en:24h")
         repo = _make_response_log_repo()
-        settings = _make_settings("")
+        settings = _make_settings(openai_admin_api_key="")
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        MockClient.assert_not_called()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "OPENAI_ADMIN_API_KEY" in text
+        assert "OPENAI_PROJECT_ID" not in text  # that one IS set
+
+    @pytest.mark.asyncio
+    async def test_no_project_id_names_the_missing_setting(self):
+        """The project id is required even when the admin key is present."""
+        cb = _make_callback("adm_costs_verify:en:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(openai_project_id="")
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        MockClient.assert_not_called()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "OPENAI_PROJECT_ID" in text
+        assert "OPENAI_ADMIN_API_KEY" not in text  # that one IS set
+
+    @pytest.mark.asyncio
+    async def test_both_missing_lists_both(self):
+        cb = _make_callback("adm_costs_verify:en:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(openai_admin_api_key="", openai_project_id="")
 
         await handle_costs_verify(cb, repo, settings, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
-        assert "not configured" in text.lower() or "не настроен" in text.lower()
+        assert "OPENAI_ADMIN_API_KEY" in text
+        assert "OPENAI_PROJECT_ID" in text
+
+    @pytest.mark.asyncio
+    async def test_missing_setting_message_is_localised(self):
+        cb = _make_callback("adm_costs_verify:ru:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(openai_admin_api_key="")
+
+        await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "не хватает" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_regular_key_alone_is_not_enough(self):
+        """A project key does not stand in for the admin key.
+
+        Regression guard: the handler used to send `openai_api_key` to the
+        billing endpoint, which always 403s.
+        """
+        cb = _make_callback("adm_costs_verify:en:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(openai_api_key="sk-proj-test", openai_admin_api_key="")
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        MockClient.assert_not_called()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "OPENAI_ADMIN_API_KEY" in text
+
+    @pytest.mark.asyncio
+    async def test_uses_admin_key_and_passes_project_id(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(
+            openai_api_key="sk-proj-regular",
+            openai_admin_api_key="sk-admin-billing",
+            openai_project_id="proj_bot",
+        )
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        MockClient.assert_called_once_with("sk-admin-billing")
+        assert instance.get_costs.call_args.kwargs["project_id"] == "proj_bot"
+
+    @pytest.mark.asyncio
+    async def test_confirmed_scoping_names_the_project(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(openai_project_id="proj_bot")
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(
+                    total_usd=Decimal("0.02"),
+                    buckets=[],
+                    project_ids_seen={"proj_bot"},
+                )
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "Scoped to project" in text
+        assert "proj_bot" in text
+
+    @pytest.mark.asyncio
+    async def test_unconfirmed_scoping_says_so(self):
+        """No per-project breakdown → the figure must not claim to be scoped."""
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings(openai_project_id="proj_bot")
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(
+                    total_usd=Decimal("0.02"),
+                    buckets=[],
+                    project_ids_seen=set(),
+                )
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "could not be confirmed" in text
+        assert "Scoped to project" not in text
+
+    @pytest.mark.asyncio
+    async def test_project_filter_ignored_is_localised(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:ru:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(
+                    total_usd=Decimal("0"),
+                    buckets=[],
+                    error="OpenAI ignored the project filter — figures would be org-wide",
+                    error_code="project_filter_ignored",
+                )
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "фильтр не применился" in text
+        assert "OPENAI_PROJECT_ID" in text
 
     @pytest.mark.asyncio
     async def test_api_error_shows_message(self):
@@ -201,12 +377,13 @@ class TestHandleCostsVerify:
 
         cb = _make_callback("adm_costs_verify:ru:24h")
         repo = _make_response_log_repo()
-        settings = _make_settings("sk-test")
+        settings = _make_settings()
 
         mock_report = OpenAICostReport(
             total_usd=Decimal("0"),
             buckets=[],
             error="API key lacks billing access (admin key required)",
+            error_code="no_billing_access",
         )
 
         with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
@@ -218,7 +395,101 @@ class TestHandleCostsVerify:
             await handle_costs_verify(cb, repo, settings, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
-        assert "billing access" in text.lower()
+        assert "403" in text
+        assert "admin" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_unmapped_error_falls_back_to_english(self):
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:ru:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        mock_report = OpenAICostReport(
+            total_usd=Decimal("0"),
+            buckets=[],
+            error="OpenAI API error: HTTP 500",
+            error_code="http_error",
+        )
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(return_value=mock_report)
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "HTTP 500" in text
+
+    @pytest.mark.asyncio
+    async def test_compares_over_window_openai_actually_returned(self):
+        """Our own figure must span the buckets OpenAI sent, not the button.
+
+        The smallest OpenAI bucket is a full day, so "1h" comes back covering
+        far more; querying our own cost over 1h would subtract two different
+        windows and show the gap as a costing error.
+        """
+        import time as _time
+        from datetime import timedelta
+
+        from src.services.ai.billing import OpenAICostBucket, OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:1h")
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        bucket_start = int(_time.time()) - 36 * 3600
+        mock_report = OpenAICostReport(
+            total_usd=Decimal("0.02"),
+            buckets=[
+                OpenAICostBucket(
+                    start_time=bucket_start,
+                    end_time=bucket_start + 86400,
+                    amount_usd=Decimal("0.02"),
+                )
+            ],
+            covered_from=bucket_start,
+        )
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(return_value=mock_report)
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        used_interval = repo.get_cost_by_provider.call_args.args[0]
+        assert used_interval > timedelta(hours=35)
+        assert used_interval != timedelta(hours=1)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "36h" in text
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_period_when_no_buckets(self):
+        from datetime import timedelta
+
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback("adm_costs_verify:en:7d")
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            await handle_costs_verify(cb, repo, settings, is_admin=True)
+
+        assert repo.get_cost_by_provider.call_args.args[0] == timedelta(days=7)
 
     @pytest.mark.asyncio
     async def test_blocks_non_admin(self):
