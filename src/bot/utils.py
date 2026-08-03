@@ -10,10 +10,36 @@ from __future__ import annotations
 
 import structlog
 from aiogram import Bot
+from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, Message
 
 logger = structlog.get_logger(__name__)
+
+_ADMIN_STATUSES = frozenset({ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR})
+
+
+async def is_bot_chat_admin(bot: Bot, chat_id: int, bot_id: int) -> bool:
+    """Live-check whether the bot is an administrator in a chat.
+
+    ADR-0004 Decision 5 (R-D1): called live at two moments -- when an admin
+    toggles ``reactions_enabled`` on, and when the admin panel renders the
+    module's status line -- never cached. Telegram gives no notification
+    when a bot is demoted, so a persisted ``bot_is_admin`` column would go
+    stale silently and recreate the exact failure this check exists to
+    prevent ("The bot must be an administrator" -- without it,
+    `message_reaction` updates simply stop arriving, no error raised).
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, bot_id)
+    except Exception as exc:
+        logger.warning(
+            "bot_admin_check_failed",
+            chat_id=chat_id,
+            error=str(exc),
+        )
+        return False
+    return member.status in _ADMIN_STATUSES
 
 
 async def resolve_display_name(
