@@ -37,6 +37,8 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "kb_enabled",
         "kb_organizer_ids",
         "last_activity_at",
+        "reactions_enabled",
+        "reactions_history_enabled",
     }
 )
 

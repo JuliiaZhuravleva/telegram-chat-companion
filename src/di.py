@@ -23,6 +23,7 @@ from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
+from src.database.repositories.reactions import ReactionRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.database.repositories.rules import RulesRepository
 from src.database.repositories.stickers import StickerRepository
@@ -109,6 +110,10 @@ class RepositoryProvider(Provider):
     @provide
     def knowledge_repo(self, pool: asyncpg.Pool) -> KnowledgeRepository:
         return KnowledgeRepository(pool)
+
+    @provide
+    def reaction_repo(self, pool: asyncpg.Pool) -> ReactionRepository:
+        return ReactionRepository(pool)
 
 
 class ServiceProvider(Provider):

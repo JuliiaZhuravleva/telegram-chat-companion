@@ -35,6 +35,10 @@ class GateDecision:
     tier: str  # "fast_rules" | "engagement" | "llm_judge" | "disabled"
     reason: str
     cost_usd: Decimal = Decimal("0")
+    # Tier-3 reaction piggyback (R-5, ADR-0004 Decision 4): the emoji
+    # `llm_judge` suggests when it says NO, at zero extra token cost. Only
+    # ever set when tier == "llm_judge"; None on every other tier.
+    suggested_emoji: str | None = None
 
 
 class RelevancyGate:
@@ -83,13 +87,19 @@ class RelevancyGate:
         # so the LLM sees the conversation as it unfolded (oldest → newest).
         recent = await self._messages.get_recent(chat_id, limit=5)
         history = [dict(r) for r in reversed(recent)]
-        judge = await llm_judge(message_text, history, self._ai)
+        # Ask for the R-5 emoji suggestion only where it can be used: the
+        # instruction plus the 73-emoji list are otherwise dead prompt weight in
+        # every tier-3 check, and reactions are opt-in per chat (default off).
+        judge = await llm_judge(
+            message_text, history, self._ai, want_emoji=config.reactions_enabled
+        )
 
         decision = GateDecision(
             should_respond=judge.should_respond,
             tier="llm_judge",
             reason=judge.reasoning,
             cost_usd=judge.cost_usd,
+            suggested_emoji=judge.suggested_emoji,
         )
 
         # Log LLM cost to response_log for cost tracking
@@ -135,5 +145,13 @@ class RelevancyGate:
                 tokens_output=tokens_output,
                 cost_usd=cost_usd,
             )
-        except Exception:
-            logger.warning("Failed to log relevancy check usage", chat_id=chat_id)
+        except Exception as exc:
+            # Silently losing these rows makes SpendLimitService under-report
+            # tier-3 spend indefinitely, so the cause has to be recoverable
+            # from the log alone.
+            logger.warning(
+                "Failed to log relevancy check usage",
+                chat_id=chat_id,
+                error=str(exc),
+                exc_info=True,
+            )
