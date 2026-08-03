@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.types import Message
+from aiogram.types import (
+    Chat,
+    Message,
+    MessageOriginChannel,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
+    User,
+)
 
 from src.bot.handlers.admin_kb import (
+    _extract_username,
     handle_kb_organizer_add_reply,
     handle_kb_organizer_remove,
     handle_kb_toggle,
@@ -66,6 +75,32 @@ def _make_chat_settings_repo(
     )
     repo.set_field = AsyncMock()
     return repo
+
+
+class TestExtractUsername:
+    def test_strips_leading_at(self) -> None:
+        assert _extract_username("@newbie") == "newbie"
+
+    def test_accepts_bare_username(self) -> None:
+        assert _extract_username("newbie") == "newbie"
+
+    def test_strips_surrounding_whitespace(self) -> None:
+        assert _extract_username("  @newbie  ") == "newbie"
+
+    def test_none_when_no_text(self) -> None:
+        assert _extract_username(None) is None
+
+    def test_none_when_too_short(self) -> None:
+        assert _extract_username("@abc") is None
+
+    def test_none_when_too_long(self) -> None:
+        assert _extract_username("@" + "a" * 33) is None
+
+    def test_none_when_not_a_single_token(self) -> None:
+        assert _extract_username("please add @newbie") is None
+
+    def test_none_when_invalid_characters(self) -> None:
+        assert _extract_username("@new-bie!") is None
 
 
 class TestHandleKbToggle:
@@ -138,22 +173,50 @@ class TestHandleKbOrganizerRemove:
         chat_settings_repo.set_field.assert_not_awaited()
 
 
+def _make_message_repo(
+    found: dict[str, object] | None = None, known_elsewhere: bool = False
+) -> MagicMock:
+    repo = MagicMock()
+    repo.find_by_username = AsyncMock(return_value=found)
+    repo.username_seen_elsewhere = AsyncMock(return_value=known_elsewhere)
+    return repo
+
+
+def _make_state(text_state_data: dict[str, object] | None = None) -> MagicMock:
+    state = MagicMock()
+    state.get_data = AsyncMock(
+        return_value=text_state_data or {"kb_chat_id": CHAT_ID, "kb_lang": "ru"}
+    )
+    state.clear = AsyncMock()
+    return state
+
+
+def _make_add_reply_message(*, forward_origin: object = None, text: str | None = None) -> MagicMock:
+    message = MagicMock()
+    message.from_user = MagicMock(id=ADMIN_ID)
+    message.forward_origin = forward_origin
+    message.text = text
+    message.reply = AsyncMock()
+    return message
+
+
 class TestHandleKbOrganizerAddReply:
     @pytest.mark.asyncio
     async def test_adds_forwarded_user(self) -> None:
-        state = MagicMock()
-        state.get_data = AsyncMock(return_value={"kb_chat_id": CHAT_ID, "kb_lang": "ru"})
-        state.clear = AsyncMock()
-
-        message = MagicMock()
-        message.from_user = MagicMock(id=ADMIN_ID)
-        message.forward_from = MagicMock(id=888, username="newbie", first_name="New")
-        message.reply = AsyncMock()
+        state = _make_state()
+        origin = MessageOriginUser(
+            date=datetime.now(),
+            sender_user=User(id=888, is_bot=False, first_name="New", username="newbie"),
+        )
+        message = _make_add_reply_message(forward_origin=origin)
 
         chat_settings_repo = _make_chat_settings_repo(organizer_ids=[ORG_USER_ID])
         bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo()
 
-        await handle_kb_organizer_add_reply(message, chat_settings_repo, bot_config_repo, state)
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
 
         chat_settings_repo.set_field.assert_awaited_once_with(
             CHAT_ID, "kb_organizer_ids", json.dumps([ORG_USER_ID, 888])
@@ -162,21 +225,116 @@ class TestHandleKbOrganizerAddReply:
         assert "@newbie" in message.reply.call_args[0][0]
 
     @pytest.mark.asyncio
-    async def test_not_found_when_no_forward(self) -> None:
-        state = MagicMock()
-        state.get_data = AsyncMock(return_value={"kb_chat_id": CHAT_ID, "kb_lang": "ru"})
-        state.clear = AsyncMock()
-
-        message = MagicMock()
-        message.from_user = MagicMock(id=ADMIN_ID)
-        message.forward_from = None
-        message.reply = AsyncMock()
+    async def test_forward_privacy_hidden_gets_dedicated_copy(self) -> None:
+        """MessageOriginHiddenUser (forward privacy on) is not the generic not_found."""
+        state = _make_state()
+        origin = MessageOriginHiddenUser(date=datetime.now(), sender_user_name="Hidden Someone")
+        message = _make_add_reply_message(forward_origin=origin)
 
         chat_settings_repo = _make_chat_settings_repo()
         bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo()
 
-        await handle_kb_organizer_add_reply(message, chat_settings_repo, bot_config_repo, state)
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
 
         chat_settings_repo.set_field.assert_not_awaited()
         message.reply.assert_awaited_once()
+        reply_text = message.reply.call_args[0][0]
+        assert "приватность" in reply_text
+        assert "Не нашёл" not in reply_text
+
+    @pytest.mark.asyncio
+    async def test_forwarded_from_channel_falls_back_to_not_found(self) -> None:
+        state = _make_state()
+        origin = MessageOriginChannel(
+            date=datetime.now(),
+            chat=Chat(id=-1009999, type="channel"),
+            message_id=1,
+        )
+        message = _make_add_reply_message(forward_origin=origin)
+
+        chat_settings_repo = _make_chat_settings_repo()
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo()
+
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        assert "Не нашёл" in message.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_resolves_username_from_chat_history(self) -> None:
+        state = _make_state()
+        message = _make_add_reply_message(text="@newbie")
+
+        chat_settings_repo = _make_chat_settings_repo(organizer_ids=[ORG_USER_ID])
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo(found={"user_id": 888, "first_name": "New"})
+
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
+
+        message_repo.find_by_username.assert_awaited_once_with(CHAT_ID, "newbie")
+        chat_settings_repo.set_field.assert_awaited_once_with(
+            CHAT_ID, "kb_organizer_ids", json.dumps([ORG_USER_ID, 888])
+        )
+        assert "@newbie" in message.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_username_known_elsewhere_gets_dedicated_copy(self) -> None:
+        """Seen in another chat's history, but not this one -- distinct from not_found."""
+        state = _make_state()
+        message = _make_add_reply_message(text="@elsewhere_user")
+
+        chat_settings_repo = _make_chat_settings_repo()
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo(found=None, known_elsewhere=True)
+
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        reply_text = message.reply.call_args[0][0]
+        assert "не видел его в этом чате" in reply_text
+        assert "Не нашёл" not in reply_text
+
+    @pytest.mark.asyncio
+    async def test_not_found_when_no_forward_and_unknown_username(self) -> None:
+        state = _make_state()
+        message = _make_add_reply_message(text="@totally_unknown")
+
+        chat_settings_repo = _make_chat_settings_repo()
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo(found=None, known_elsewhere=False)
+
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        message.reply.assert_awaited_once()
+        assert "Не нашёл" in message.reply.call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_not_found_when_no_forward_and_no_text(self) -> None:
+        """Non-text, non-forward reply (e.g. a sticker) -- can't extract a username."""
+        state = _make_state()
+        message = _make_add_reply_message(text=None)
+
+        chat_settings_repo = _make_chat_settings_repo()
+        bot_config_repo = _make_bot_config_repo()
+        message_repo = _make_message_repo()
+
+        await handle_kb_organizer_add_reply(
+            message, chat_settings_repo, bot_config_repo, message_repo, state
+        )
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        message_repo.find_by_username.assert_not_awaited()
         assert "Не нашёл" in message.reply.call_args[0][0]

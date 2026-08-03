@@ -242,6 +242,53 @@ class MessageRepository:
             }
         return dict(row)
 
+    async def find_by_username(self, chat_id: int, username: str) -> asyncpg.Record | None:
+        """Find the most recent user_id seen posting under `username` in this chat.
+
+        Case-insensitive (Telegram usernames are case-insensitive). Used to
+        resolve a plain ``@username`` reply into a concrete user id when
+        adding a KB organizer (B-1 stage 2) — the Bot API has no
+        username-to-user lookup, so this chat-scoped message history is the
+        only available index. Returns ``None`` if this chat's history has no
+        record of that username (caller should then check
+        ``username_seen_elsewhere`` to phrase the right not-found copy).
+        """
+        return await self._pool.fetchrow(
+            """
+            SELECT user_id, first_name
+            FROM chat_messages
+            WHERE chat_id = $1
+              AND user_id IS NOT NULL
+              AND username IS NOT NULL
+              AND LOWER(username) = LOWER($2)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            chat_id,
+            username,
+        )
+
+    async def username_seen_elsewhere(self, chat_id: int, username: str) -> bool:
+        """Check whether `username` has posted in a chat other than `chat_id`.
+
+        Lets the organizer-add flow distinguish "don't know this username at
+        all" from "know them, but not in this chat" (B-1 stage 2).
+        """
+        row = await self._pool.fetchrow(
+            """
+            SELECT 1
+            FROM chat_messages
+            WHERE chat_id != $1
+              AND user_id IS NOT NULL
+              AND username IS NOT NULL
+              AND LOWER(username) = LOWER($2)
+            LIMIT 1
+            """,
+            chat_id,
+            username,
+        )
+        return row is not None
+
     async def get_for_summary(
         self,
         chat_id: int,

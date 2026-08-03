@@ -15,13 +15,14 @@ docs/decisions/ADR-0003-chat-facts-data-model.md (G1) for the schema.
 from __future__ import annotations
 
 import json
+import re
 from html import escape as html_escape
 from typing import Any
 
 import structlog
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, MessageOriginHiddenUser, MessageOriginUser
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.admin_kb import (
@@ -34,6 +35,7 @@ from src.bot.utils import resolve_display_name, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.messages import MessageRepository
 from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
@@ -76,11 +78,42 @@ _ADD_NOT_FOUND = {
     "ru": "🤔 Не нашёл такого участника в этом чате.",
     "en": "🤔 Couldn't find that member in this chat.",
 }
+_ADD_FORWARD_HIDDEN = {
+    "ru": "🔒 У отправителя пересланного сообщения включена приватность форвардов — "
+    "Telegram не показывает боту, кто это. Попросите переслать ещё раз после "
+    "отключения этой настройки, или отправьте его @username.",
+    "en": "🔒 The forwarded message's sender has forward privacy enabled — Telegram "
+    "doesn't tell the bot who they are. Ask them to disable that setting and "
+    "forward again, or send their @username instead.",
+}
+_ADD_NOT_IN_CHAT = {
+    "ru": "🤔 Знаю такой @username, но не видел его в этом чате.",
+    "en": "🤔 I know that @username, but haven't seen them in this chat.",
+}
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
+
+# B-1 stage 2: chat-scoped username resolution has no lookup path via the Bot
+# API (get_chat_member requires a numeric id), so a plain @username reply is
+# only resolvable if the bot has already recorded that username posting in
+# this chat's message history. Telegram username format: letters/digits/
+# underscores, 5-32 chars (leading "@" stripped before matching).
+_USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{5,32}$")
 
 
 def _get_lang(raw: str | None) -> str:
     return raw if raw in ("ru", "en") else "ru"
+
+
+def _extract_username(text: str | None) -> str | None:
+    """Parse a plain `@username` (or bare username) reply into a valid handle.
+
+    Returns None if the text doesn't look like a single Telegram username —
+    those replies fall back to the generic not_found copy, same as before.
+    """
+    if text is None:
+        return None
+    candidate = text.strip().lstrip("@")
+    return candidate if _USERNAME_RE.match(candidate) else None
 
 
 def _is_private(callback: CallbackQuery) -> bool:
@@ -386,14 +419,21 @@ async def handle_kb_organizer_add_reply(
     message: Message,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    message_repo: FromDishka[MessageRepository],
     state: FSMContext,
 ) -> None:
-    """Resolve the forwarded message (or @username) into a new organizer.
+    """Resolve a forwarded message or a plain `@username` into a new organizer.
 
-    Phase 1 scope: only forwarded-message resolution is reliable (gives a
-    concrete user id directly). A plain ``@username`` with no forward has no
-    lookup path yet (no chat-scoped username index) and falls through to the
-    same not_found copy — flagged as a follow-up, not silently faked.
+    Two independent resolution paths (B-1):
+    - Forward: uses `forward_origin` (not the legacy `forward_from`, which
+      Telegram stopped populating — that was the original dead-end bug).
+      `MessageOriginHiddenUser` means the sender has forward privacy on;
+      that's a distinct, actionable case from "no forward at all", so it
+      gets its own copy rather than the generic not_found.
+    - Plain `@username`: resolved via this chat's message history (the Bot
+      API has no username lookup). Only works for usernames the bot has
+      already seen post in this chat; distinguishes "never seen this
+      username anywhere" from "seen it, just not in this chat".
     """
     if not await _check_admin_direct(
         bot_config_repo, message.from_user.id if message.from_user else None
@@ -408,17 +448,37 @@ async def handle_kb_organizer_add_reply(
     if chat_id is None:
         return
 
-    forward_user = getattr(message, "forward_from", None)
-    if forward_user is None:
-        await message.reply(_ADD_NOT_FOUND[lang])
-        return
+    user_id: int
+    display_name: str
 
-    user_id = forward_user.id
-    display_name = (
-        f"@{forward_user.username}"
-        if forward_user.username
-        else (forward_user.first_name or str(user_id))
-    )
+    origin = message.forward_origin
+    if origin is not None:
+        if isinstance(origin, MessageOriginHiddenUser):
+            await message.reply(_ADD_FORWARD_HIDDEN[lang])
+            return
+        if not isinstance(origin, MessageOriginUser):
+            # Forwarded from a chat/channel, not a user -- not organizer material.
+            await message.reply(_ADD_NOT_FOUND[lang])
+            return
+        forward_user = origin.sender_user
+        user_id = forward_user.id
+        display_name = (
+            f"@{forward_user.username}"
+            if forward_user.username
+            else (forward_user.first_name or str(user_id))
+        )
+    else:
+        username = _extract_username(message.text)
+        if username is None:
+            await message.reply(_ADD_NOT_FOUND[lang])
+            return
+        found = await message_repo.find_by_username(chat_id, username)
+        if found is None:
+            known_elsewhere = await message_repo.username_seen_elsewhere(chat_id, username)
+            await message.reply(_ADD_NOT_IN_CHAT[lang] if known_elsewhere else _ADD_NOT_FOUND[lang])
+            return
+        user_id = found["user_id"]
+        display_name = f"@{username}"
 
     row = await chat_settings_repo.get(chat_id)
     organizer_ids = _parse_organizer_ids(row.get("kb_organizer_ids") if row else None)
