@@ -332,7 +332,7 @@ def chats_list_keyboard(
     chats: list[dict[str, object]],
     page: int,
     total_pages: int,
-    start_index: int = 0,
+    start_index: int,
 ) -> InlineKeyboardMarkup:
     """Paginated list of whitelisted chats with Remove buttons.
 
@@ -441,7 +441,7 @@ def rejected_list_keyboard(
     attempts: list[dict[str, object]],
     page: int,
     total_pages: int,
-    start_index: int = 0,
+    start_index: int,
 ) -> InlineKeyboardMarkup:
     """Paginated list of rejected attempts with Restore/Delete per item.
 
@@ -530,7 +530,7 @@ def pending_list_keyboard(
     attempts: list[dict[str, object]],
     page: int,
     total_pages: int,
-    start_index: int = 0,
+    start_index: int,
 ) -> InlineKeyboardMarkup:
     """Paginated list of pending requests with Approve/Reject per item.
 

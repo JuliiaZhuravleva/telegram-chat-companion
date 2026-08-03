@@ -299,13 +299,16 @@ class MessageRepository:
         Excludes bot messages and rows with no `user_id` (e.g. service
         messages). `username`/`first_name` reflect that user's most recent
         message in this chat -- same chat-scoped-history constraint as
-        `find_by_username` (no live Bot API lookup here, and no dedicated
-        index beyond the existing `idx_chat_messages_user(chat_id, user_id,
-        created_at DESC)`, which already supports this GROUP BY without a
-        sort -- acceptable for a low-frequency admin action, same call as
-        B-1 stage 2). `user_id ASC` is a stable tiebreaker so page contents
-        don't reshuffle across requests when counts are equal. Returns
-        (candidates, total_distinct_posters).
+        `find_by_username` (no live Bot API lookup here). The existing
+        `idx_chat_messages_user(chat_id, user_id, created_at DESC)` serves the
+        per-chat grouping; the final `ORDER BY message_count DESC` still sorts,
+        because it orders by an aggregate no index can precompute -- acceptable
+        for a low-frequency admin action. `user_id ASC` is a stable tiebreaker
+        so page contents don't reshuffle across requests when counts are equal.
+        Note the count and the page are two separate statements, so under
+        concurrent writes `total` may disagree slightly with the rows returned;
+        harmless for a picker, worth knowing before reusing this elsewhere.
+        Returns (candidates, total_distinct_posters).
         """
         total = (
             await self._pool.fetchval(
