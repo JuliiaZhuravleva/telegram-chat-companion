@@ -24,6 +24,7 @@ from src.services.ai.router import AIRouter
 from src.services.modules.summary import SummaryService
 from src.services.text.formatter import markdown_to_html
 from src.utils import parse_admin_ids
+from src.utils.telegram import typing_indicator
 
 router = Router(name="commands")
 logger = structlog.get_logger(__name__)
@@ -275,6 +276,8 @@ async def handle_remember(
     bot_config_repo: FromDishka[BotConfigRepository],
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     ai_router: FromDishka[AIRouter],
+    bot: Bot,
+    message_thread_id: int | None = None,
 ) -> None:
     """Manually save a fact via reply: ``/remember <subject>: <value>``.
 
@@ -318,7 +321,8 @@ async def handle_remember(
 
     embedding: list[float] | None = None
     try:
-        embedding_result = await ai_router.generate_embedding(fact_text)
+        async with typing_indicator(bot, message.chat.id, message_thread_id):
+            embedding_result = await ai_router.generate_embedding(fact_text)
         embedding = embedding_result.embedding
     except Exception:
         logger.warning("kb_remember_embedding_failed", chat_id=message.chat.id)
