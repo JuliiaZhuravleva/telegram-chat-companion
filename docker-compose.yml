@@ -1,3 +1,13 @@
+# Dev stack. Pinned so the project name does not follow the directory: a plain
+# `docker compose up` from a git worktree would otherwise start a SECOND project
+# with its own empty database volume, and two repos that both keep a compose
+# file in a same-named folder would collapse into one project, where `up -d` in
+# either deletes the other's containers.
+#
+# This is the local name already in use — pinning it changes nothing today.
+# Production uses `companion`; see docker-compose.prod.yml.
+name: telegram-chat-companion
+
 services:
   # PostgreSQL with pgvector
   postgres:

@@ -161,6 +161,7 @@ pre-commit install           # Set up git hooks
 - [Architecture Overview](docs/architecture.md)
 - [Setup Guide](docs/setup.md)
 - [Configuration Reference](docs/configuration.md)
+- [Deployment](docs/deployment.md) — **merging to `main` deploys to production**: the gates, what this repo must keep true, and the failure modes
 - [Database Backups](docs/backups.md) — nightly encrypted dumps, off-host upload, restore and rehearsal
 - [Functionality Overview](docs/FUNCTIONALITY.md) — full feature catalogue with live-QA observations and improvement recommendations
 
