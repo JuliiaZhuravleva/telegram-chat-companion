@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import random
 import time
 from typing import Any
 
 import structlog
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatAction
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
@@ -26,7 +23,7 @@ from src.services.modules.sticker import StickerLearningService, StickerResponde
 from src.services.modules.voice import VoiceTranscriptionService
 from src.services.text.pipeline import TextProcessingPipeline
 from src.utils import parse_admin_ids
-from src.utils.telegram import TelegramFileError, download_telegram_file
+from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
 router = Router(name="media")
 logger = structlog.get_logger(__name__)
@@ -72,31 +69,20 @@ async def handle_voice_message(
         )
         return
 
-    # Send typing action in parallel with transcription (route to correct topic)
+    # Keep "typing" alive for the whole transcription (route to correct topic)
     user = message.from_user
     user_name = (user.first_name if user else None) or "Unknown"
     message_type = "voice" if is_voice else "video_note"
 
-    typing_task = asyncio.create_task(
-        bot.send_chat_action(
-            message.chat.id,
-            ChatAction.TYPING,
-            message_thread_id=message_thread_id,
+    async with typing_indicator(bot, message.chat.id, message_thread_id):
+        result = await voice_service.transcribe(
+            audio_data=audio_data,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            user_first_name=user_name,
+            message_type=message_type,
+            language=chat_config.language,
         )
-    )
-
-    result = await voice_service.transcribe(
-        audio_data=audio_data,
-        chat_id=message.chat.id,
-        message_id=message.message_id,
-        user_first_name=user_name,
-        message_type=message_type,
-        language=chat_config.language,
-    )
-
-    # Ensure typing task completes (ignore errors)
-    with contextlib.suppress(Exception):
-        await typing_task
 
     if result is None:
         return

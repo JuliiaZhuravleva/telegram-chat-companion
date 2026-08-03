@@ -140,6 +140,47 @@ async def test_voice_handler_disabled():
 
 
 @pytest.mark.asyncio
+async def test_voice_handler_forwards_message_thread_id_to_typing_indicator():
+    """Regression guard for I-9 (forum topic routing) after the I-6 refactor
+    to the shared typing_indicator helper.
+    """
+    from src.bot.handlers.media import handle_voice_message
+
+    message = _make_message()
+    voice = MagicMock()
+    voice.file_id = "voice-file-id"
+    message.voice = voice
+    message.video_note = None
+
+    chat_config = _make_chat_config()
+    bot = _make_bot()
+
+    voice_service = MagicMock()
+    voice_service.transcribe = AsyncMock(
+        return_value=TranscriptionResult(
+            text="Hello world",
+            model="whisper-1",
+            provider="openai",
+        )
+    )
+
+    with (
+        patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new_callable=AsyncMock,
+            return_value=b"fake-audio",
+        ),
+        patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+    ):
+        mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+        mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await handle_voice_message(message, chat_config, voice_service, bot, message_thread_id=777)
+
+    mock_indicator.assert_called_once_with(bot, message.chat.id, 777)
+
+
+@pytest.mark.asyncio
 async def test_voice_handler_transcription_returns_none():
     from src.bot.handlers.media import handle_voice_message
 

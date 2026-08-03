@@ -1,4 +1,5 @@
-"""Telegram helpers: file download, chat URL formatting, MIME detection.
+"""Telegram helpers: file download, chat URL formatting, MIME detection,
+chat-action ("bot is typing") indicator.
 
 Shared by voice, image, sticker, and admin panel handlers.
 """
@@ -6,12 +7,19 @@ Shared by voice, image, sticker, and admin panel handlers.
 from __future__ import annotations
 
 import mimetypes
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from io import BytesIO
 
 import structlog
 from aiogram import Bot
+from aiogram.utils.chat_action import ChatActionSender
 
 logger = structlog.get_logger(__name__)
+
+# Re-send the chat action slightly under Telegram's ~5s client-side expiry
+# so the indicator never visibly flickers off between re-sends.
+_TYPING_INDICATOR_INTERVAL = 4.0
 
 
 def build_chat_url(
@@ -108,3 +116,51 @@ def detect_mime_type(file_path: str) -> str:
         "webm": "video/webm",
     }
     return ext_map.get(ext, "application/octet-stream")
+
+
+@asynccontextmanager
+async def typing_indicator(
+    bot: Bot,
+    chat_id: int,
+    message_thread_id: int | None,
+    action: str = "typing",
+    *,
+    enabled: bool = True,
+) -> AsyncIterator[None]:
+    """Show a chat action (default "typing") for the duration of the block.
+
+    Thin wrapper around aiogram's ``ChatActionSender``: it keep-alives the
+    action by re-sending every ~4s (Telegram expires it client-side after
+    ~5s) and guarantees it stops on exit — including when the wrapped
+    operation raises. Use this instead of a one-shot ``bot.send_chat_action``
+    call or a hand-rolled ``asyncio.create_task``; a single send goes stale
+    and silently drops on any operation over ~5s (this is what I-1 fixed).
+
+    Args:
+        bot: Bot instance.
+        chat_id: Target chat id.
+        message_thread_id: Forum topic id, or ``None`` for non-forum chats.
+            **Required** — unlike ``message.answer()``, ``bot.send_chat_action``
+            does NOT inherit the topic from the triggering message. Omitting
+            it silently routes the indicator to the forum's General topic.
+        action: Chat action type — ``"typing"`` by default, ``"choose_sticker"``
+            / ``"upload_photo"`` where the bot is committed to a sticker/image
+            reply. See ``ChatActionSender`` classmethods for the full set of
+            valid Bot API chat actions.
+        enabled: Single point through which a future per-chat toggle is meant
+            to flow (read from ``ChatConfig`` once `chat_settings` gains a
+            column for it — none exists yet). Defaults to ``True``; callers
+            should rely on the default rather than hardcoding ``enabled=True``.
+    """
+    if not enabled:
+        yield
+        return
+
+    async with ChatActionSender(
+        bot=bot,
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        action=action,
+        interval=_TYPING_INDICATOR_INTERVAL,
+    ):
+        yield

@@ -1,5 +1,7 @@
 """Tests for Telegram file download utilities."""
 
+import asyncio
+import inspect
 from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +12,7 @@ from src.utils.telegram import (
     build_chat_url,
     detect_mime_type,
     download_telegram_file,
+    typing_indicator,
 )
 
 
@@ -119,3 +122,64 @@ class TestBuildChatUrl:
     def test_unknown_chat_type_returns_none(self):
         assert build_chat_url(-100) is None
         assert build_chat_url(-100, chat_type=None) is None
+
+
+class TestTypingIndicator:
+    """Tests for the shared "bot is typing" keep-alive helper (I-6)."""
+
+    def test_message_thread_id_has_no_default(self):
+        """Regression guard for I-9: callers must pass message_thread_id
+        explicitly — a silent default=None would let forum indicators leak
+        to the General topic the way the old media.py call did.
+        """
+        sig = inspect.signature(typing_indicator)
+        assert sig.parameters["message_thread_id"].default is inspect.Parameter.empty
+
+    def test_message_thread_id_missing_raises_type_error(self):
+        with pytest.raises(TypeError):
+            typing_indicator(MagicMock(), 1)  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_sends_action_with_given_type_and_thread_id(self):
+        bot = MagicMock()
+        bot.send_chat_action = AsyncMock()
+
+        async with typing_indicator(bot, -100123, 42, "choose_sticker"):
+            await asyncio.sleep(0.01)
+
+        bot.send_chat_action.assert_awaited()
+        call_kwargs = bot.send_chat_action.call_args.kwargs
+        assert call_kwargs["chat_id"] == -100123
+        assert call_kwargs["message_thread_id"] == 42
+        assert call_kwargs["action"] == "choose_sticker"
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_typing_action(self):
+        bot = MagicMock()
+        bot.send_chat_action = AsyncMock()
+
+        async with typing_indicator(bot, -100123, None):
+            await asyncio.sleep(0.01)
+
+        assert bot.send_chat_action.call_args.kwargs["action"] == "typing"
+
+    @pytest.mark.asyncio
+    async def test_disabled_skips_sending_entirely(self):
+        bot = MagicMock()
+        bot.send_chat_action = AsyncMock()
+
+        async with typing_indicator(bot, -100123, None, enabled=False):
+            await asyncio.sleep(0.01)
+
+        bot.send_chat_action.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stops_and_propagates_on_exception(self):
+        """Guaranteed stop even when the wrapped operation raises."""
+        bot = MagicMock()
+        bot.send_chat_action = AsyncMock()
+
+        with pytest.raises(ValueError, match="boom"):
+            async with typing_indicator(bot, -100123, None):
+                await asyncio.sleep(0.01)
+                raise ValueError("boom")
