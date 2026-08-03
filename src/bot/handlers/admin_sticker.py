@@ -25,6 +25,7 @@ from src.bot.keyboards.admin_sticker import (
     sticker_set_detail_keyboard,
     sticker_sets_keyboard,
 )
+from src.bot.utils import check_admin_direct
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
@@ -40,14 +41,6 @@ router = Router(name="admin_sticker")
 
 def _get_lang(raw: str | None) -> str:
     return raw if raw in ("ru", "en") else "ru"
-
-
-async def _check_admin_direct(bot_config_repo: BotConfigRepository, user_id: int | None) -> bool:
-    """Check if user is admin (for handlers with FromDishka parameters)."""
-    if user_id is None:
-        return False
-    admin_ids_raw = await bot_config_repo.get("admin_ids")
-    return user_id in parse_admin_ids(admin_ids_raw)
 
 
 async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bool:
@@ -200,7 +193,7 @@ async def handle_sticker_sets(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer("Not authorized", show_alert=True)
@@ -268,7 +261,7 @@ async def handle_sticker_set_view(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer("Not authorized", show_alert=True)
@@ -303,7 +296,7 @@ async def handle_sticker_back(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer("Not authorized", show_alert=True)
@@ -359,7 +352,7 @@ async def handle_sticker_detail(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer("Not authorized", show_alert=True)
@@ -459,7 +452,7 @@ async def handle_reanalyze(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer("Not authorized", show_alert=True)

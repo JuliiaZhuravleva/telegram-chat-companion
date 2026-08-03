@@ -28,11 +28,10 @@ from src.bot.keyboards.admin_reactions import (
     reactions_chat_picker_keyboard,
     reactions_menu_keyboard,
 )
-from src.bot.utils import is_bot_chat_admin, safe_edit_text
+from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
-from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -84,19 +83,6 @@ def _get_lang(raw: str | None) -> str:
 
 def _is_private(callback: CallbackQuery) -> bool:
     return isinstance(callback.message, Message) and callback.message.chat.type == "private"
-
-
-async def _check_admin_direct(bot_config_repo: BotConfigRepository, user_id: int | None) -> bool:
-    """Check bot-admin status directly (mirrors admin_kb.py's/admin_sticker.py's helper).
-
-    Third occurrence of this exact check -- worth extracting to
-    ``src/bot/utils.py`` (TD, not done here to keep this item's blast radius
-    to the new reactions sub-router only).
-    """
-    if user_id is None:
-        return False
-    admin_ids_raw = await bot_config_repo.get("admin_ids")
-    return user_id in parse_admin_ids(admin_ids_raw)
 
 
 def _effective(row: dict[str, Any] | None, field: str, default: bool) -> bool:
@@ -213,7 +199,7 @@ async def handle_reactions_picker(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -241,7 +227,7 @@ async def handle_reactions_menu(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -279,7 +265,7 @@ async def handle_reactions_toggle(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
