@@ -116,6 +116,7 @@ async def handle_photo_message(
 
     # Select highest resolution (last in array)
     photo = message.photo[-1]
+    caption = message.caption
 
     # Download image
     try:
@@ -128,83 +129,89 @@ async def handle_photo_message(
         )
         return
 
-    # Analyze image
-    description = await image_service.analyze(image_data)
+    # Keep "typing" alive across analysis + the follow-on text generation for
+    # captioned photos (a reply is guaranteed). Photos without a caption only
+    # save the description and may produce no response at all, so per owner
+    # decision (Q2) they get no indicator (enabled=False -> no-op context).
+    # The reply here is always text (pipeline.process -> message.answer), the
+    # bot never uploads an image of its own, so "typing" is the honest action
+    # — not "upload_photo".
+    async with typing_indicator(bot, message.chat.id, message_thread_id, enabled=bool(caption)):
+        # Analyze image
+        description = await image_service.analyze(image_data)
 
-    logger.info(
-        "Photo analysis result",
-        chat_id=message.chat.id,
-        has_description=description is not None,
-        has_caption=bool(message.caption),
-    )
+        logger.info(
+            "Photo analysis result",
+            chat_id=message.chat.id,
+            has_description=description is not None,
+            has_caption=bool(caption),
+        )
 
-    if description is None:
-        return
+        if description is None:
+            return
 
-    caption = message.caption
+        if caption:
+            # photo_with_text: decide whether to respond via text pipeline
+            bot_id: int | None = kwargs.get("bot_id")
+            if bot_id is None:
+                bot_id = (await bot.me()).id
+            respond, trigger_type = should_respond(message, chat_config, bot_id)
 
-    if caption:
-        # photo_with_text: decide whether to respond via text pipeline
-        bot_id: int | None = kwargs.get("bot_id")
-        if bot_id is None:
-            bot_id = (await bot.me()).id
-        respond, trigger_type = should_respond(message, chat_config, bot_id)
+            if not respond:
+                # Still save the description to message history
+                await _update_message_content(
+                    message_repo, message.chat.id, message.message_id, description
+                )
+                return
 
-        if not respond:
-            # Still save the description to message history
+            user = message.from_user
+            user_id = user.id if user else 0
+            user_name = (user.first_name if user else None) or "Unknown"
+
+            # Extract reply context
+            reply_author: str | None = None
+            reply_text: str | None = None
+            reply_is_bot = False
+            if message.reply_to_message:
+                rpl = message.reply_to_message
+                if rpl.from_user:
+                    reply_author = rpl.from_user.first_name
+                    reply_is_bot = rpl.from_user.is_bot
+                reply_text = (rpl.text or rpl.caption or "")[:500]
+
+            result = await pipeline.process(
+                chat_id=message.chat.id,
+                user_id=user_id,
+                user_name=user_name,
+                message_text=caption,
+                trigger_type=trigger_type,
+                config=chat_config,
+                reply_author=reply_author,
+                reply_text=reply_text,
+                reply_is_bot=reply_is_bot,
+                image_context=description,
+                message_thread_id=message_thread_id,
+            )
+
+            if not result.should_respond or not result.html_text:
+                return
+
+            reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
+
+            # Send to correct topic in forum chats
+            # Note: message.answer() inherits message_thread_id from the original message
+            sent = await message.answer(
+                result.html_text,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to,
+            )
+
+            await pipeline.post_send(result, bot_message_id=sent.message_id)
+        else:
+            # photo_only: save description to message history, no response
             await _update_message_content(
                 message_repo, message.chat.id, message.message_id, description
             )
-            return
-
-        user = message.from_user
-        user_id = user.id if user else 0
-        user_name = (user.first_name if user else None) or "Unknown"
-
-        # Extract reply context
-        reply_author: str | None = None
-        reply_text: str | None = None
-        reply_is_bot = False
-        if message.reply_to_message:
-            rpl = message.reply_to_message
-            if rpl.from_user:
-                reply_author = rpl.from_user.first_name
-                reply_is_bot = rpl.from_user.is_bot
-            reply_text = (rpl.text or rpl.caption or "")[:500]
-
-        result = await pipeline.process(
-            chat_id=message.chat.id,
-            user_id=user_id,
-            user_name=user_name,
-            message_text=caption,
-            trigger_type=trigger_type,
-            config=chat_config,
-            reply_author=reply_author,
-            reply_text=reply_text,
-            reply_is_bot=reply_is_bot,
-            image_context=description,
-            message_thread_id=message_thread_id,
-        )
-
-        if not result.should_respond or not result.html_text:
-            return
-
-        reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
-
-        # Send to correct topic in forum chats
-        # Note: message.answer() inherits message_thread_id from the original message
-        sent = await message.answer(
-            result.html_text,
-            parse_mode="HTML",
-            reply_to_message_id=reply_to,
-        )
-
-        await pipeline.post_send(result, bot_message_id=sent.message_id)
-    else:
-        # photo_only: save description to message history, no response
-        await _update_message_content(
-            message_repo, message.chat.id, message.message_id, description
-        )
 
     # Image comment sticker (works for both photo_with_text and photo_only)
     if (

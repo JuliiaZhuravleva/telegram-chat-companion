@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import TranscriptionResult
+from src.services.text.pipeline import PipelineResult
 
 
 def _make_message(
@@ -297,6 +299,180 @@ async def test_photo_handler_analysis_fails():
         )
 
     message_repo.save.assert_not_called()
+
+
+# ── Photo handler: typing-indicator wiring (I-3) ───────────────────────
+
+
+def _make_photo_deps(*, caption: str | None, thread_id: int | None = None):
+    """Common mocks for handle_photo_message indicator tests."""
+    message = _make_message(caption=caption)
+    photo = MagicMock()
+    photo.file_id = "photo-file-id"
+    message.photo = [photo]
+
+    chat_config = _make_chat_config(trigger_words=(), random_response_chance=1.0)
+    bot = _make_bot()
+
+    image_service = MagicMock()
+    image_service.analyze = AsyncMock(return_value="A cat on a table")
+
+    pipeline = MagicMock()
+    pipeline.process = AsyncMock(
+        return_value=PipelineResult(
+            should_respond=True,
+            html_text="Nice cat!",
+            trigger_type=TriggerType.TRIGGER,
+            response_type=ResponseType.NORMAL,
+        )
+    )
+    pipeline.post_send = AsyncMock()
+
+    message_repo = MagicMock()
+    message_repo.save = AsyncMock()
+
+    sticker_responder = MagicMock()
+    sticker_responder.get_sticker_candidates = AsyncMock(return_value=[])
+
+    return {
+        "message": message,
+        "chat_config": chat_config,
+        "bot": bot,
+        "image_service": image_service,
+        "pipeline": pipeline,
+        "message_repo": message_repo,
+        "sticker_responder": sticker_responder,
+        "message_thread_id": thread_id,
+    }
+
+
+class TestHandlePhotoMessageTypingIndicator:
+    """Regression guard: image_service.analyze() and, for captioned photos,
+    the follow-on pipeline.process() text generation must run under the
+    shared typing_indicator helper. Photos without a caption may produce no
+    response at all, so per owner decision (Q2) they get no indicator.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wraps_analysis_and_pipeline_for_caption(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this")
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, None, enabled=True
+        )
+        deps["image_service"].analyze.assert_awaited_once()
+        deps["pipeline"].process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_indicator_without_caption(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption=None)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, None, enabled=False
+        )
+        deps["image_service"].analyze.assert_awaited_once()
+        deps["pipeline"].process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_forwards_message_thread_id(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this", thread_id=777)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+                message_thread_id=777,
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, 777, enabled=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_indicator_stops_even_if_analysis_raises(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this")
+        deps["image_service"].analyze = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new_callable=AsyncMock,
+            return_value=b"fake-image",
+        ):
+            with pytest.raises(RuntimeError):
+                await handle_photo_message(
+                    deps["message"],
+                    deps["chat_config"],
+                    deps["image_service"],
+                    deps["pipeline"],
+                    deps["sticker_responder"],
+                    deps["message_repo"],
+                    deps["bot"],
+                )
 
 
 # ── Sticker handler tests ────────────────────────────────────────────
