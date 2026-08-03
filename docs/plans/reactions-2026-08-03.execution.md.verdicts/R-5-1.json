@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T17:41:33Z",
+  "role": "specialist",
+  "item_id": "R-5",
+  "verdict": "PASS",
+  "cost_usd": 2.95,
+  "notes": "Implemented per ADR-0004 Decision 4: llm_judge returns a NO-only suggested_emoji at zero extra token cost (fail-closed parsing: prose/NONE/YES all -> None); GateDecision carries it through only on tier=llm_judge; new modules/reactions/selector.py (ReactionSelector, fail-closed against hardcoded ALLOWED_REACTION_EMOJI, exact-match only, never substitutes a default) and responder.py (wraps bot.set_message_reaction, swallows TelegramBadRequest); message.py reacts instead of replying on tier-3 silence, gated on reactions_enabled only (not reactions_history_enabled per Decision 3), with a broad try/except safety net around set_reaction. CAVEAT: ALLOWED_REACTION_EMOJI (73 entries) is hardcoded platform knowledge -- Bot API doesn't expose this list and I could not verify it live in this sandbox; ASSUMED/best-effort (source plan section 3 partial list + recalled Telegram docs), recommend QA-1 spot-check a few against a real setMessageReaction call. Did not touch R-D1/QA-1. Only unit coverage (mocked Bot/AI router) per backend-dev scope; PM may want a qa follow-up for a live smoke-test of the reaction-on-silence path specifically, since QA-1 does not call it out by name.",
+  "result": {
+    "kind": "commit",
+    "ref": "d2b78af",
+    "verification": "pytest tests/unit -q: 1072 passed; ruff check src/ tests/unit/: clean; mypy src/: no issues in 119 files"
+  },
+  "confidence": 0.8,
+  "clarification_request": null,
+  "session_id": null
+}
