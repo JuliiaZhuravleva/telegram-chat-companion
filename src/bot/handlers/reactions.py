@@ -52,7 +52,12 @@ async def handle_message_reaction(
 
     events = diff(event.old_reaction, event.new_reaction)
     if not events:
-        # Same reaction set before/after (e.g. a duplicate update) -- nothing changed.
+        # Same reaction set before/after -- nothing actually changed.
+        #
+        # This does NOT cover a redelivered update: that carries the identical
+        # old/new pair as the first delivery, so the diff is non-empty and
+        # produces the same events again. Idempotency comes from `event_date`
+        # plus the unique index in migration 019, not from this check.
         return
 
     if not chat_config.reactions_history_enabled:
@@ -73,6 +78,7 @@ async def handle_message_reaction(
             user_id=user_id,
             actor_chat_id=actor_chat_id,
             events=events,
+            event_date=event.date,
         )
     except Exception:
         logger.exception(

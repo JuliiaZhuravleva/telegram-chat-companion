@@ -16,6 +16,8 @@ passed to a mock; it never touches a database).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import asyncpg
 import pytest
 import pytest_asyncio
@@ -233,3 +235,107 @@ class TestReactionRepositoryRealInsert:
             "SELECT count(*) FROM message_reactions WHERE chat_id = -900107 AND message_id = 3"
         )
         assert count == 0
+
+
+class TestRedeliveryDeduplication:
+    """Migration 019. Telegram redelivers an update whenever the polling offset
+    was not confirmed -- a restart mid-batch is enough -- and the redelivery
+    carries the identical old/new pair, so the handler's diff produces the same
+    events again.
+
+    Asserting "ON CONFLICT DO NOTHING is in the SQL" proves only what the string
+    says; these drive the real index in Postgres.
+    """
+
+    @staticmethod
+    def _events() -> list[ReactionEvent]:
+        return [ReactionEvent(action="added", reaction_type="emoji", emoji="👍")]
+
+    @pytest.mark.asyncio
+    async def test_same_update_twice_writes_one_row(
+        self, repo: ReactionRepository, db_conn: asyncpg.Connection
+    ) -> None:
+        stamp = datetime(2026, 8, 3, 18, 24, 3, tzinfo=UTC)
+        for _ in range(2):
+            await repo.insert_events(
+                chat_id=-900108,
+                message_id=10,
+                user_id=42,
+                actor_chat_id=None,
+                events=self._events(),
+                event_date=stamp,
+            )
+
+        count = await db_conn.fetchval(
+            "SELECT count(*) FROM message_reactions WHERE chat_id = -900108 AND message_id = 10"
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_genuine_repeat_later_is_still_recorded(
+        self, repo: ReactionRepository, db_conn: asyncpg.Connection
+    ) -> None:
+        """Re-adding the same emoji later is a real second event, not a
+        redelivery -- deduplication must not swallow it."""
+        for minute in (0, 5):
+            await repo.insert_events(
+                chat_id=-900109,
+                message_id=11,
+                user_id=42,
+                actor_chat_id=None,
+                events=self._events(),
+                event_date=datetime(2026, 8, 3, 18, minute, 0, tzinfo=UTC),
+            )
+
+        count = await db_conn.fetchval(
+            "SELECT count(*) FROM message_reactions WHERE chat_id = -900109 AND message_id = 11"
+        )
+        assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_anonymous_reactor_duplicates_are_caught(
+        self, repo: ReactionRepository, db_conn: asyncpg.Connection
+    ) -> None:
+        """NULL never equals NULL in a plain unique index, so without the
+        COALESCE sentinels anonymous-reactor rows (user_id NULL) would duplicate
+        freely -- precisely the rows the index is there to protect."""
+        stamp = datetime(2026, 8, 3, 18, 30, 0, tzinfo=UTC)
+        for _ in range(2):
+            await repo.insert_events(
+                chat_id=-900110,
+                message_id=12,
+                user_id=None,
+                actor_chat_id=-900110,
+                events=self._events(),
+                event_date=stamp,
+            )
+
+        count = await db_conn.fetchval(
+            "SELECT count(*) FROM message_reactions WHERE chat_id = -900110 AND message_id = 12"
+        )
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_custom_emoji_duplicates_are_caught(
+        self, repo: ReactionRepository, db_conn: asyncpg.Connection
+    ) -> None:
+        """Same NULL-inequality trap on the other side: a custom-emoji row has
+        emoji NULL."""
+        stamp = datetime(2026, 8, 3, 18, 35, 0, tzinfo=UTC)
+        events = [
+            ReactionEvent(action="added", reaction_type="custom_emoji", custom_emoji_id="7788")
+        ]
+        for _ in range(2):
+            await repo.insert_events(
+                chat_id=-900111,
+                message_id=13,
+                user_id=42,
+                actor_chat_id=None,
+                events=events,
+                event_date=stamp,
+            )
+
+        count = await db_conn.fetchval(
+            "SELECT count(*) FROM message_reactions WHERE chat_id = -900111 AND message_id = 13"
+        )
+        assert count == 1

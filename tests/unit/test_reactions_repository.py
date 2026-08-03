@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -45,8 +46,8 @@ class TestInsertEvents:
         sql, rows = pool.executemany.await_args.args
         assert "INSERT INTO message_reactions" in sql
         assert rows == [
-            (100, 200, 300, None, "added", "emoji", "👍", None),
-            (100, 200, 300, None, "removed", "emoji", "🔥", None),
+            (100, 200, 300, None, "added", "emoji", "👍", None, None),
+            (100, 200, 300, None, "removed", "emoji", "🔥", None, None),
         ]
 
     @pytest.mark.asyncio
@@ -61,7 +62,7 @@ class TestInsertEvents:
         )
 
         _, rows = pool.executemany.await_args.args
-        assert rows == [(1, 2, None, -100999, "added", "emoji", "👍", None)]
+        assert rows == [(1, 2, None, -100999, "added", "emoji", "👍", None, None)]
 
     @pytest.mark.asyncio
     async def test_custom_emoji_and_paid_columns(
@@ -78,6 +79,49 @@ class TestInsertEvents:
 
         _, rows = pool.executemany.await_args.args
         assert rows == [
-            (1, 2, 9, None, "added", "custom_emoji", None, "42"),
-            (1, 2, 9, None, "added", "paid", None, None),
+            (1, 2, 9, None, "added", "custom_emoji", None, "42", None),
+            (1, 2, 9, None, "added", "paid", None, None, None),
         ]
+
+
+class TestRedeliveryIdempotency:
+    """A redelivered update carries the identical old/new pair, so the caller's
+    diff yields the same events again. `event_date` (stable across
+    redeliveries, unlike our own created_at) plus the unique index from
+    migration 019 are what stop the second write."""
+
+    @pytest.mark.asyncio
+    async def test_event_date_is_passed_through(
+        self, repo: ReactionRepository, pool: AsyncMock
+    ) -> None:
+        stamp = datetime(2026, 8, 3, 18, 24, 3, tzinfo=UTC)
+        events = [ReactionEvent(action="added", reaction_type="emoji", emoji="👍")]
+
+        await repo.insert_events(
+            chat_id=1,
+            message_id=2,
+            user_id=3,
+            actor_chat_id=None,
+            events=events,
+            event_date=stamp,
+        )
+
+        _, rows = pool.executemany.await_args.args
+        assert rows == [(1, 2, 3, None, "added", "emoji", "👍", None, stamp)]
+
+    @pytest.mark.asyncio
+    async def test_insert_ignores_conflicts(
+        self, repo: ReactionRepository, pool: AsyncMock
+    ) -> None:
+        """Without ON CONFLICT the redelivery would raise instead of being
+        dropped, turning a routine restart into a logged error."""
+        await repo.insert_events(
+            chat_id=1,
+            message_id=2,
+            user_id=3,
+            actor_chat_id=None,
+            events=[ReactionEvent(action="added", reaction_type="emoji", emoji="👍")],
+        )
+
+        sql, _ = pool.executemany.await_args.args
+        assert "ON CONFLICT DO NOTHING" in sql
