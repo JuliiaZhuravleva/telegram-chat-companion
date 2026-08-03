@@ -111,8 +111,11 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 ### Commands
 - `/help` — dynamic feature list based on enabled modules
 - `/summary` — AI-generated chat summary
+- `/remember` — save a fact from a replied-to message into the chat's knowledge base
+- `/kb` — browse the facts remembered for this chat
 
 ### Optional Modules
+- **Knowledge base** — per-chat facts the bot remembers and reuses as context; curated by chat organizers from the admin panel
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually
