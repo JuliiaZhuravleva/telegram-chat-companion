@@ -307,6 +307,47 @@ class TestPendingListKeyboard:
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:en" in c for c in callbacks)
 
+    def test_button_number_defaults_to_one_based(self):
+        """Without an explicit start_index, numbering starts at 1 (page 1)."""
+        attempts = [{"id": 1, "chat_id": -100}, {"id": 2, "chat_id": -200}]
+        kb = pending_list_keyboard("ru", attempts, page=0, total_pages=1)
+        labels = _get_labels(kb)
+        assert "1 ✅" in labels
+        assert "1 ❌" in labels
+        assert "2 ✅" in labels
+        assert "2 ❌" in labels
+
+    def test_button_number_matches_body_numbering_on_third_page(self):
+        """Button numbers must match the message-body numbering.
+
+        The body numbers items via ``enumerate(attempts, start=page * _PER_PAGE + 1)``
+        (see ``handlers/admin.py`` ``_render_wl_pending``). With ``_PER_PAGE=5`` and
+        ``page=2`` (the 3rd page, 0-based), the first item on the page is #11.
+        """
+        per_page = 5
+        page = 2
+        start_index = page * per_page
+        attempts = [
+            {"id": 101, "chat_id": -100},
+            {"id": 102, "chat_id": -200},
+        ]
+        kb = pending_list_keyboard(
+            "ru",
+            attempts,
+            page=page,
+            total_pages=5,
+            start_index=start_index,
+        )
+        labels = _get_labels(kb)
+        assert "11 ✅" in labels
+        assert "11 ❌" in labels
+        assert "12 ✅" in labels
+        assert "12 ❌" in labels
+        # Ensure the callback data still ties back to the right attempt/page.
+        callbacks = _get_callbacks(kb)
+        assert any("adm_wl_apr:ru:101:2" in c for c in callbacks)
+        assert any("adm_wl_apr:ru:102:2" in c for c in callbacks)
+
 
 class TestNotificationStatusKeyboards:
     def test_approved_keyboard_ru(self):

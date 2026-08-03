@@ -1026,11 +1026,11 @@ async def _render_wl_pending(
         attempts, total = await admin_repo.get_pending_attempts_page(page, _PER_PAGE)
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
+    offset = page * _PER_PAGE
     if total == 0:
         text = f"{_WL_PENDING_TITLE[lang]}\n\n{_WL_NO_PENDING[lang]}"
     else:
         lines = [f"{_WL_PENDING_TITLE[lang]} ({total})\n"]
-        offset = page * _PER_PAGE
         for i, attempt in enumerate(attempts, start=offset + 1):
             chat_id = attempt.get("chat_id", "?")
             title = attempt.get("chat_title")
@@ -1066,7 +1066,7 @@ async def _render_wl_pending(
         await msg.edit_text(
             text,
             parse_mode="HTML",
-            reply_markup=pending_list_keyboard(lang, attempts, page, total_pages),
+            reply_markup=pending_list_keyboard(lang, attempts, page, total_pages, offset),
         )
 
 

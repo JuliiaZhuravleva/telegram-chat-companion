@@ -499,19 +499,26 @@ def pending_list_keyboard(
     attempts: list[dict[str, object]],
     page: int,
     total_pages: int,
+    start_index: int = 0,
 ) -> InlineKeyboardMarkup:
-    """Paginated list of pending requests with Approve/Reject per item."""
+    """Paginated list of pending requests with Approve/Reject per item.
+
+    ``start_index`` is the 0-based offset of the first item on this page
+    (i.e. ``page * per_page``), so the numbers on the Approve/Reject buttons
+    line up with the numbering rendered in the message body
+    (``enumerate(attempts, start=offset + 1)`` in ``handlers/admin.py``).
+    """
     rows: list[list[InlineKeyboardButton]] = []
-    for attempt in attempts:
+    for i, attempt in enumerate(attempts, start=start_index + 1):
         aid = attempt["id"]
         rows.append(
             [
                 InlineKeyboardButton(
-                    text="✅",
+                    text=f"{i} ✅",
                     callback_data=f"adm_wl_apr:{lang}:{aid}:{page}",
                 ),
                 InlineKeyboardButton(
-                    text="❌",
+                    text=f"{i} ❌",
                     callback_data=f"adm_wl_rej:{lang}:{aid}:{page}",
                 ),
             ]
