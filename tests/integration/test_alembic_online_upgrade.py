@@ -115,6 +115,7 @@ class TestOnlineUpgrade:
         revisions = [
             "001", "002", "003", "004", "005", "006", "007",
             "008", "009", "010", "011", "012", "014", "015",
+            "016", "017", "018",
         ]  # fmt: skip
         for revision in revisions:
             result = _run_alembic(empty_database, "upgrade", revision)
