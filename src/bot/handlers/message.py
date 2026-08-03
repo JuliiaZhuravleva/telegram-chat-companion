@@ -13,6 +13,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
+from src.services.abuse.checker import AntiAbuseChecker
 from src.services.costs.spend_limit import SpendLimitService
 from src.services.modules.reactions.responder import set_reaction
 from src.services.modules.reactions.selector import ReactionSelector
@@ -68,6 +69,7 @@ async def _react_to_silence(
     message: Message,
     config: ChatConfig,
     gate_decision: GateDecision,
+    abuse_checker: AntiAbuseChecker,
 ) -> None:
     """R-5: tier-3 silence -> optionally react instead of a text reply.
 
@@ -76,12 +78,28 @@ async def _react_to_silence(
     `None`, so this is a no-op there. Gated on `reactions_enabled` only,
     never `reactions_history_enabled` (Decision 3): R-5 needs no history at
     all, `llm_judge` decides live, per-call.
+
+    Anti-abuse: this path returns before `TextProcessingPipeline.process()`,
+    so the pipeline's Stage 1 abuse gate never runs for it. Setting a reaction
+    is an outbound, user-visible action, so it must respect the same "be quiet
+    toward this user" signal a text reply would. The cooldown is probed
+    read-only and *after* the cheap guards, so a message the bot was never
+    going to react to costs no query at all.
     """
     if not config.reactions_enabled or message.bot is None:
         return
 
     emoji = ReactionSelector.select(gate_decision.suggested_emoji)
     if emoji is None:
+        return
+
+    user = message.from_user
+    if user is not None and await abuse_checker.is_in_cooldown(message.chat.id, user.id):
+        logger.debug(
+            "Skipping silence reaction: user in cooldown",
+            chat_id=message.chat.id,
+            user_id=user.id,
+        )
         return
 
     try:
@@ -91,14 +109,17 @@ async def _react_to_silence(
             message_id=message.message_id,
             emoji=emoji,
         )
-    except Exception:
-        # `set_reaction` already swallows TelegramBadRequest; this is a
-        # last-resort net for anything else (e.g. a transient network error)
+    except Exception as exc:
+        # `set_reaction` swallows TelegramAPIError; this is a last-resort net
+        # for anything else (e.g. a programming error after a signature change)
         # so a suppressed text reply never turns into an unhandled crash.
         logger.warning(
             "Failed to set reaction on silence",
             chat_id=message.chat.id,
             message_id=message.message_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
         )
 
 
@@ -109,6 +130,7 @@ async def handle_text_message(
     pipeline: FromDishka[TextProcessingPipeline],
     relevancy_gate: FromDishka[RelevancyGate],
     spend_limit_svc: FromDishka[SpendLimitService],
+    abuse_checker: FromDishka[AntiAbuseChecker],
     message_thread_id: int | None = None,
     **kwargs: Any,
 ) -> None:
@@ -131,7 +153,7 @@ async def handle_text_message(
             config=chat_config,
         )
         if not gate_decision.should_respond:
-            await _react_to_silence(message, chat_config, gate_decision)
+            await _react_to_silence(message, chat_config, gate_decision, abuse_checker)
             return
 
     user = message.from_user

@@ -30,11 +30,23 @@ async def handle_message_reaction(
 ) -> None:
     """Diff old/new reaction state and persist the changed rows.
 
-    `reactions_enabled` gates everything -- the module is off for this chat
-    at all -- while `reactions_history_enabled` gates only the INSERT, so an
-    owner can opt out of behavioral logging without losing R-5's bot-initiated
-    reactions (ADR-0004 Decision 3).
+    `chat_config.enabled` (the whitelist) is checked first and in this handler
+    rather than by `AccessControlMiddleware`, which is registered on
+    `dp.message`/`dp.callback_query`/`dp.edited_message` but not on
+    `dp.message_reaction`. Registering it there would NOT fix this: its
+    `_extract_event_info()` only understands `Message` and `CallbackQuery`
+    (middleware/access_control.py:193-204), so a `MessageReactionUpdated`
+    yields `(None, None, None)` and the middleware early-returns straight into
+    the handler, gating nothing -- a silent pass-through, not a crash.
+
+    `reactions_enabled` gates everything else -- the module is off for this
+    chat at all -- while `reactions_history_enabled` gates only the INSERT, so
+    an owner can opt out of behavioral logging without losing R-5's
+    bot-initiated reactions (ADR-0004 Decision 3).
     """
+    if not chat_config.enabled:
+        return
+
     if not chat_config.reactions_enabled:
         return
 

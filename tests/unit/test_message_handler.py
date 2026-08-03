@@ -91,6 +91,19 @@ class TestReactToSilence:
         defaults.update(overrides)
         return ChatConfig(**defaults)
 
+    @staticmethod
+    def _checker(*, in_cooldown: bool = False) -> AsyncMock:
+        """Anti-abuse checker stub.
+
+        Only `is_in_cooldown` is stubbed on purpose: the R-5 path must never
+        reach for the side-effecting `check()`, and leaving it unstubbed as a
+        plain AsyncMock attribute lets `test_never_calls_side_effecting_check`
+        assert that.
+        """
+        checker = AsyncMock()
+        checker.is_in_cooldown = AsyncMock(return_value=in_cooldown)
+        return checker
+
     @pytest.mark.asyncio
     async def test_sets_reaction_when_enabled_and_emoji_suggested(
         self, make_message, monkeypatch
@@ -107,7 +120,7 @@ class TestReactToSilence:
             cost_usd=Decimal("0"),
             suggested_emoji="🔥",
         )
-        await _react_to_silence(msg, self._config(), decision)
+        await _react_to_silence(msg, self._config(), decision, self._checker())
 
         set_reaction_mock.assert_awaited_once()
         call_kwargs = set_reaction_mock.call_args.kwargs
@@ -125,7 +138,9 @@ class TestReactToSilence:
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
         )
-        await _react_to_silence(msg, self._config(reactions_enabled=False), decision)
+        await _react_to_silence(
+            msg, self._config(reactions_enabled=False), decision, self._checker()
+        )
 
         set_reaction_mock.assert_not_called()
 
@@ -137,7 +152,7 @@ class TestReactToSilence:
         monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
 
         decision = GateDecision(should_respond=False, tier="engagement", reason="no")
-        await _react_to_silence(msg, self._config(), decision)
+        await _react_to_silence(msg, self._config(), decision, self._checker())
 
         set_reaction_mock.assert_not_called()
 
@@ -152,7 +167,7 @@ class TestReactToSilence:
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🥸"
         )
-        await _react_to_silence(msg, self._config(), decision)
+        await _react_to_silence(msg, self._config(), decision, self._checker())
 
         set_reaction_mock.assert_not_called()
 
@@ -166,7 +181,7 @@ class TestReactToSilence:
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
         )
-        await _react_to_silence(msg, self._config(), decision)
+        await _react_to_silence(msg, self._config(), decision, self._checker())
 
         set_reaction_mock.assert_not_called()
 
@@ -182,4 +197,68 @@ class TestReactToSilence:
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
         )
         # Should not raise.
-        await _react_to_silence(msg, self._config(), decision)
+        await _react_to_silence(msg, self._config(), decision, self._checker())
+
+    # ---- anti-abuse gating ----
+
+    @pytest.mark.asyncio
+    async def test_no_reaction_while_user_in_cooldown(self, make_message, monkeypatch) -> None:
+        """R-5 emits a visible bot action from outside TextProcessingPipeline,
+        so it never passes the pipeline's Stage 1 abuse gate. It must respect
+        the same cooldown a text reply would."""
+        msg = make_message()
+        msg.bot = AsyncMock()
+        set_reaction_mock = AsyncMock()
+        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+
+        decision = GateDecision(
+            should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
+        )
+        await _react_to_silence(msg, self._config(), decision, self._checker(in_cooldown=True))
+
+        set_reaction_mock.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cooldown_probed_only_after_cheap_guards(self, make_message, monkeypatch) -> None:
+        """The probe is a DB round-trip; a message the bot was never going to
+        react to must not pay for it."""
+        msg = make_message()
+        msg.bot = AsyncMock()
+        monkeypatch.setattr("src.bot.handlers.message.set_reaction", AsyncMock())
+        checker = self._checker()
+
+        # Module off -> returns before the probe.
+        decision = GateDecision(
+            should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
+        )
+        await _react_to_silence(msg, self._config(reactions_enabled=False), decision, checker)
+        checker.is_in_cooldown.assert_not_awaited()
+
+        # No usable emoji -> also returns before the probe.
+        await _react_to_silence(
+            msg,
+            self._config(),
+            GateDecision(should_respond=False, tier="engagement", reason="no"),
+            checker,
+        )
+        checker.is_in_cooldown.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_never_calls_side_effecting_check(self, make_message, monkeypatch) -> None:
+        """`AntiAbuseChecker.check()` advances spam counters and penalty
+        multipliers (004_anti_abuse.py:370, :449-475). Calling it here would
+        charge the user's abuse budget for a message the bot only *considered*
+        reacting to, and would double-count on any path where the pipeline also
+        runs. The read-only probe is the only permitted call."""
+        msg = make_message()
+        msg.bot = AsyncMock()
+        monkeypatch.setattr("src.bot.handlers.message.set_reaction", AsyncMock(return_value=True))
+        checker = self._checker()
+
+        decision = GateDecision(
+            should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
+        )
+        await _react_to_silence(msg, self._config(), decision, checker)
+
+        checker.is_in_cooldown.assert_awaited_once()
+        checker.check.assert_not_awaited()

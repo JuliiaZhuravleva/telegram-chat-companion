@@ -7,6 +7,12 @@ from decimal import Decimal
 
 import asyncpg
 
+# Mirrors `v_cooldown_seconds` inside the check_anti_abuse() SQL function
+# (alembic/versions/004_anti_abuse.py:259). Duplicated here on purpose so the
+# read-only cooldown probe below answers exactly what the SQL would; a drift
+# guard lives in tests/unit/test_abuse_repository.py.
+COOLDOWN_SECONDS = 10
+
 
 @dataclass
 class AntiAbuseResult:
@@ -99,6 +105,33 @@ class AbuseRepository:
             chat_id,
             user_id,
         )
+
+    async def get_cooldown_remaining_seconds(self, chat_id: int, user_id: int) -> int:
+        """Seconds left in the bot's response cooldown toward this user (0 = none).
+
+        Read-only counterpart to STEP 3 of the ``check_anti_abuse()`` SQL
+        function. It exists because ``check_anti_abuse()`` is **not**
+        side-effect free: the same call advances the short-spam hit counter,
+        compounds ``user_response_penalty.penalty_multiplier`` and bumps
+        jailbreak ``match_count`` (alembic/versions/004_anti_abuse.py:370,
+        :449-475, :322-325). The R-5 reaction path must be able to ask "is the
+        bot supposed to be quiet toward this user right now?" without spending
+        the user's abuse budget merely to decide whether to react.
+        """
+        remaining: int | None = await self._pool.fetchval(
+            """
+            SELECT GREATEST(
+                0,
+                $3::INTEGER - EXTRACT(EPOCH FROM (NOW() - last_response_at))::INTEGER
+            )
+            FROM user_response_cooldown
+            WHERE chat_id = $1 AND user_id = $2
+            """,
+            chat_id,
+            user_id,
+            COOLDOWN_SECONDS,
+        )
+        return remaining or 0
 
     async def search_abuse_embeddings(
         self,

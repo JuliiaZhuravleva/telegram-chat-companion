@@ -50,9 +50,22 @@ def _make_event(
     return event
 
 
-def _config(*, reactions_enabled: bool, reactions_history_enabled: bool = True) -> ChatConfig:
+def _config(
+    *,
+    reactions_enabled: bool,
+    reactions_history_enabled: bool = True,
+    enabled: bool = True,
+) -> ChatConfig:
+    """Build a ChatConfig for a whitelisted chat by default.
+
+    `enabled` defaults to False on ChatConfig itself (default-deny), but every
+    reaction that reaches this handler in production comes from a chat the
+    owner approved, so the tests model that and flip it explicitly to cover the
+    de-whitelisted case.
+    """
     return ChatConfig(
         chat_id=-1001,
+        enabled=enabled,
         reactions_enabled=reactions_enabled,
         reactions_history_enabled=reactions_history_enabled,
     )
@@ -70,6 +83,25 @@ def _make_repo() -> AsyncMock:
 
 
 class TestGating:
+    @pytest.mark.asyncio
+    async def test_dewhitelisted_chat_records_nothing(self) -> None:
+        """The whitelist master switch must stop the behavioural trail too.
+
+        `AccessControlMiddleware` is not registered on `dp.message_reaction`,
+        and registering it would silently gate nothing (its
+        `_extract_event_info` only understands Message/CallbackQuery), so this
+        handler owns the check. Regression guard: removing a chat from the
+        whitelist sets only `enabled=False` and never clears
+        `reactions_enabled`, so without this the bot keeps logging who reacted
+        to what in a chat the owner switched off.
+        """
+        repo = _make_repo()
+        event = _make_event(old=[], new=[_emoji("👍")])
+
+        await handle_message_reaction(event, _config(enabled=False, reactions_enabled=True), repo)
+
+        repo.insert_events.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_module_disabled_skips_everything(self) -> None:
         """reactions_enabled gates everything -- module off for this chat."""

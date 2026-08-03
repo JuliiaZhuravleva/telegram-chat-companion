@@ -139,11 +139,21 @@ async def main() -> None:
     for mw in (chat_config_mw, topic_mw, access_control_mw, message_saver_mw):
         dp.edited_message.middleware(mw)
 
-    # Reactions (ADR-0004, R-1): only needs chat_config (reactions_enabled /
-    # reactions_history_enabled toggles). No whitelist/admin notification flow
-    # here -- AccessControlMiddleware's unauthorized-attempt notifications are
-    # designed around Message/CallbackQuery and out of R-1's scope; the
-    # module's own opt-in toggle (default off) is the gate.
+    # Reactions (ADR-0004, R-1): chat_config only.
+    #
+    # AccessControlMiddleware is deliberately NOT registered here, and adding it
+    # would be a silent no-op rather than a fix: its _extract_event_info() only
+    # matches Message/CallbackQuery (middleware/access_control.py:193-204), so a
+    # MessageReactionUpdated resolves to (None, None, None) and the middleware
+    # early-returns into the handler having gated nothing. The whitelist check
+    # therefore lives in handle_message_reaction() itself as an explicit
+    # `if not chat_config.enabled: return`.
+    #
+    # (The module's own `reactions_enabled` toggle is NOT sufficient as the
+    # whitelist gate: it resolves through the three-layer merge, so a global
+    # bot_config.default_reactions_enabled=true would switch the module on for
+    # every chat including never-approved ones, and de-whitelisting a chat never
+    # clears the per-chat column.)
     dp.message_reaction.middleware(chat_config_mw)
 
     dp.include_router(main_router)
