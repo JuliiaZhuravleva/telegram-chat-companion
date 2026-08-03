@@ -10,9 +10,9 @@ approved_at: '2026-08-03T09:11:12Z'
 approved_by: julia
 specialist_roster_source: ~/.claude/agents/specialist-*.md + <project>/.claude/agents/specialist-*.md
 execution:
-  status: approved
-  started_at: null
-  completed_at: null
+  status: done
+  started_at: '2026-08-03T09:11:51Z'
+  completed_at: '2026-08-03T09:48:19Z'
   current_batch: null
   task_list_id: admin-ux-review-2026-08-02
 items:
@@ -20,71 +20,83 @@ items:
   title: 'Пронумеровать кнопки в списке ожидающих: номер на кнопке == номер пункта в тексте'
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 1.5h
-  confidence: null
+  confidence: 0.95
   consult_session_id: 1b33c07f-48bd-4e55-9930-ec231d472afa
-  specialist_session_id: null
+  specialist_session_id: c9a647e9-a0e9-4fe5-8db5-667d3b177802
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T09:14:53Z'
+    executor: backend-dev
+    note: 'pending_list_keyboard() now takes start_index (0-based offset = page*_PER_PAGE) and renders ''{i} ✅''/''{i} ❌'', matching the body''s enumerate(attempts, start=offset+1) numbering exactly. Also fixed a latent bug surfaced while wiring the call site: offset was only assigned inside the total>0 branch of _render_wl_pending, which would have raised NameError on the empty-list path once the keyboard call started reading it -- hoisted the assignment above the if/else. Scope kept to the pending list only, per A-1; A-2 (rejected + chats lists, shared helper) is a separate dispatched item and intentionally untouched. A-2 can reuse the same start_index parameter pattern.'
+  result:
+    kind: commit
+    ref: eb4aab5
+    verification: 'pytest tests/unit/test_admin_keyboards.py tests/unit/test_admin_handler.py -q: 113 passed; full pytest tests/unit/ -q: 945 passed; ruff check clean; mypy clean'
 - id: A-2
   title: Тот же номерной помощник для «Отклонённых» и списка чатов (один общий helper на три списка)
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - A-1
   estimated_effort: 1h
-  confidence: null
+  confidence: 0.93
   consult_session_id: 1b33c07f-48bd-4e55-9930-ec231d472afa
-  specialist_session_id: null
+  specialist_session_id: 0b2817ba-2bc8-405b-b29d-a481342a23ba
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-03T09:21:44Z'
+    executor: backend-dev
+    note: 'Extracted _numbered_button() as the single shared numbering helper (per A-2 spec: one common numbering helper for all three lists) and routed pending_list_keyboard (refactored, behavior-preserving), rejected_list_keyboard, and chats_list_keyboard through it. Threaded start_index=page*_PER_PAGE into rejected/chats keyboards mirroring A-1''s pending pattern; hoisted the offset computation above the total==0 branch in _render_wl_rejected/_render_wl_chats to avoid the same latent NameError A-1 fixed. Chats-list numbering applied to the Remove button, consistent with the action-button numbering pattern used by the other two lists. Own unit tests added: numbering-matches-body tests for chats and rejected keyboards (mirroring A-1''s pending tests), plus a TestNumberedButtonSharedAcrossLists class that patches admin_kb._numbered_button and asserts all three keyboard builders call it -- covers the plan''s cross-list QA note at the unit level; no separate qa item needed for that specific check. No integration-test gap: pure keyboard-construction logic, no DB/network involved.'
+  result:
+    kind: commit
+    ref: cbaeb0c
+    verification: 'pytest tests/unit/test_admin_keyboards.py tests/unit/test_admin_handler.py -q: 120 passed; full pytest tests/unit/ -q: 952 passed; ruff check src/ clean; mypy src/ clean (113 files)'
 - id: B-1
   title: '«Добавить организатора»: снять ложное обещание @username (срочно) + реальный резолв по истории чата — в один тикет'
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 4-5h
-  confidence: null
+  confidence: 0.85
   consult_session_id: 1b33c07f-48bd-4e55-9930-ec231d472afa
-  specialist_session_id: null
+  specialist_session_id: 15a2222e-7bfe-45ca-8422-4c794abf9cfb
   retry_count: 0
   last_update:
-    ts: null
-    executor: pm-orchestrator
-    note: 'Объединено B-1a+B-1b в один тикет по решению Julia (2026-08-03). Внутри две стадии: (1) срочная копи-правка — снять ложное обещание @username в приглашении + отдельный текст для форварда, скрытого приватностью (forward_origin/MessageOriginHiddenUser); делается ПЕРВОЙ. (2) не срочная — реальный резолв @username по накопленной истории сообщений чата, различать «не знаю username» и «есть, но не в этом чате». Приоритет пункта выставлен P2 по существу основного объёма (резолв — не срочный): весь тикет НЕ поднят в P1 по прямому указанию Julia. Срочность стадии 1 сохранена как ведущая подзадача. Если предпочтёте P1 — переставьте при утверждении.'
-  result: null
+    ts: '2026-08-03T09:31:24Z'
+    executor: backend-dev
+    note: 'Implemented both stages of B-1 in one pass (single ticket per Julia''s decision): (1) switched forward resolution from legacy forward_from (Telegram no longer populates it) to forward_origin, with MessageOriginHiddenUser (forward-privacy-on) now getting dedicated copy instead of falling into generic not-found; (2) implemented real @username resolution via chat-scoped message history (MessageRepository.find_by_username, case-insensitive), distinguishing ''never seen this username'' from ''seen it, just not in this chat'' (username_seen_elsewhere). Did NOT add a DB migration/index for the username lookup -- chat_messages has no index on username, so find_by_username/username_seen_elsewhere are full scans; acceptable for a low-frequency admin action, but flag for B-2''s already-planned schema review (chat_messages(chat_id,user_id) migration decision) to also consider a username index if lookup latency matters at scale. Left _ADD_PROMPT copy unchanged (it already promised exactly what''s now implemented) rather than stripping-then-restoring the @username mention within the same commit; kb-copy-register.md (docs/design, architect-owned per sessions.md) was NOT updated with the two new strings (_ADD_FORWARD_HIDDEN, _ADD_NOT_IN_CHAT) -- recommend a small architect follow-up to lock them into the copy register per that doc''s own gating rule. No integration-test gap requiring qa: the new repo methods are straightforward parameterized SELECTs against the existing chat_messages table (no new schema), covered by mocked-pool unit tests; qa could optionally add a real-Postgres case-insensitivity check if desired but it''s not blocking.'
+  result:
+    kind: commit
+    ref: 14d8a6e
+    verification: 'pytest tests/unit/test_admin_kb_handler.py tests/unit/test_message_repository.py -q: 25 passed; full pytest tests/unit/ -q: 969 passed; ruff check src/ clean; mypy src/ clean (113 files)'
 - id: B-2
   title: 'Пикер участников для выбора организатора: сортировка по числу сообщений, топ-N + пагинация'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 4h
-  confidence: null
+  confidence: 0.9
   consult_session_id: 1b33c07f-48bd-4e55-9930-ec231d472afa
-  specialist_session_id: null
+  specialist_session_id: f11c251f-9fd9-4fe4-a239-ac81e298c869
   retry_count: 0
   last_update:
-    ts: '2026-08-03T09:05:12Z'
-    executor: pm-orchestrator
-    note: 'Взято в текущий этап по решению Julia (2026-08-03) — снят прежний блок. Бывший блокер теперь ПЕРВЫЙ шаг исполнения в объёме пункта: верифицировать по коду источник счётчика сообщений; сортировка требует агрегата GROUP BY COUNT(*) по истории сообщений чата и может потребовать нового индекса/миграции на chat_messages(chat_id,user_id) — решение уровня схемы БД принимает backend-dev (роль architect в проекте не выделена). Если миграция нужна — делается в этом же пункте, оценка ~4h может вырасти. Технически не зависит от резолва @username (B-1 стадия 2). «Интерактивный поиск» (inline-режим Telegram) — вне scope.'
-  result: null
+    ts: '2026-08-03T09:46:29Z'
+    executor: backend-dev
+    note: 'Implemented the participant picker as spec''d: MessageRepository.get_top_active_users() (GROUP BY user_id over chat_messages, excludes bot messages, ORDER BY message_count DESC with user_id ASC tiebreak) backs a new adm_kb_org_list:/adm_kb_org_pick: callback pair; kb_organizer_picker_keyboard renders ''Name (@nick)'' rows, top-5-per-page with pagination, reached via a new ''Show participants'' button on the existing add-organizer prompt. Picking a candidate adds them directly (mirrors org_rm''s single-tap-no-confirm convention) and clears the awaiting_kb_organizer FSM state so a stray later text isn''t misread as a username reply. Schema-review gate (plan''s first step of execution): verified idx_chat_messages_user(chat_id, user_id, created_at DESC) (migration 002) already supports the GROUP BY without a sort -- no migration needed, estimate did not grow. Did not update docs/design/kb-copy-register.md with the 4 new strings -- same gap B-1 flagged for its own new strings; recommend one architect follow-up covering both items'' copy at once. No integration-test gap requiring qa: get_top_active_users is a parameterized aggregate SELECT against the existing chat_messages table (no new schema), covered by mocked-pool unit tests; qa could optionally add a real-Postgres GROUP BY/ranking check but it''s not blocking.'
+  result:
+    kind: commit
+    ref: 9db1a61
+    verification: 'pytest tests/unit/test_admin_kb_handler.py tests/unit/test_admin_kb_keyboards.py tests/unit/test_message_repository.py -q: 52 passed; full pytest tests/unit/ -q: 996 passed; ruff check src/ clean; ruff format --check clean; mypy src/ clean (113 files)'
 budget:
   max_usd_per_item: 6.0
   max_usd_per_plan: 30.0
-  consumed_usd: 0.0
+  consumed_usd: 10.7695
 review_gate:
   why: []
   approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.admin-ux-review-2026-08-02-wt/docs/plans/admin-ux-review-2026-08-02.execution.md --resume
@@ -111,6 +123,20 @@ revision_number: 2
 last_revised_at: '2026-08-03T09:08:08Z'
 last_revised_by: pm-orchestrator
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
