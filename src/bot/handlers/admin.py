@@ -886,7 +886,11 @@ async def _render_wl_chats(
                         chat_id=chat_id,
                         exc_info=True,
                     )
-            entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
+            entry = (
+                f"{i}. {escape(str(title))} <code>{chat_id}</code>"
+                if title
+                else f"{i}. <code>{chat_id}</code>"
+            )
             ctype = chat.get("chat_type", "")
             if ctype:
                 entry += f" <i>[{escape(str(ctype))}]</i>"
@@ -935,7 +939,9 @@ async def handle_wl_remove_ask(
     title = row.get("chat_title") if row else None
     label = escape(str(title)) if title else str(chat_id)
 
-    text = f"{_WL_CONFIRM_TITLE[lang]}\n\n{label} <i>({chat_id})</i>\n\n{_WL_CONFIRM_BODY[lang]}"
+    text = (
+        f"{_WL_CONFIRM_TITLE[lang]}\n\n{label} <code>{chat_id}</code>\n\n{_WL_CONFIRM_BODY[lang]}"
+    )
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
@@ -1050,7 +1056,11 @@ async def _render_wl_pending(
             uname = attempt.get("user_username")
             user_display = f"@{escape(str(uname))}" if uname else (user or "?")
 
-            entry = f"{i}. {escape(str(title))} <i>({chat_id})</i>" if title else f"{i}. {chat_id}"
+            entry = (
+                f"{i}. {escape(str(title))} <code>{chat_id}</code>"
+                if title
+                else f"{i}. <code>{chat_id}</code>"
+            )
             if ctype:
                 entry += f" <i>[{escape(str(ctype))}]</i>"
             entry += f"\n    👤 {user_display}"
@@ -1143,7 +1153,7 @@ async def _render_wl_rejected(
             uname = attempt.get("user_username")
             user_display = f"@{escape(str(uname))}" if uname else (user or "?")
 
-            entry = f"{i}. {chat_link} <i>({chat_id})</i>"
+            entry = f"{i}. {chat_link} <code>{chat_id}</code>"
             if ctype:
                 entry += f" <i>[{escape(str(ctype))}]</i>"
             entry += f"\n    👤 {user_display}"
@@ -1251,7 +1261,7 @@ async def handle_wl_delete_ask(
 
     text = (
         f"{_WL_DELETE_CONFIRM_TITLE[lang]}\n\n"
-        f"{chat_link} <i>({chat_id})</i>\n\n"
+        f"{chat_link} <code>{chat_id}</code>\n\n"
         f"{_WL_DELETE_CONFIRM_BODY[lang]}"
     )
     await callback.answer()

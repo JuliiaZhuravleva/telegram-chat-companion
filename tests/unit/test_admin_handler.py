@@ -412,6 +412,42 @@ class TestWlPending:
         assert "@alice" in text
 
     @pytest.mark.asyncio
+    async def test_chat_id_is_rendered_as_copyable_code(self):
+        """Chat ids must go out wrapped in <code>, never as a bare number.
+
+        Telegram clients auto-detect a bare 9-11 digit run as a phone number and
+        style it as a link that goes nowhere — which reads as a broken link. A
+        <code> entity suppresses that detection and makes the id tap-to-copy.
+        """
+        cb = _make_callback("adm_wl_pending:en:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_pending_attempts_page = AsyncMock(
+            return_value=(
+                [
+                    {
+                        "id": 1,
+                        "chat_id": -1001234567890,
+                        "chat_title": "Test Chat",
+                        "chat_type": "group",
+                        "user_id": 456,
+                        "user_first_name": "Alice",
+                        "user_username": "alice",
+                        "message_text": "hello",
+                        "created_at": None,
+                    }
+                ],
+                1,
+            )
+        )
+
+        await handle_wl_pending(cb, admin_repo, is_admin=True)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert "<code>-1001234567890</code>" in text
+        # the old italic-parenthesised form must not come back
+        assert "<i>(-1001234567890)</i>" not in text
+
+    @pytest.mark.asyncio
     async def test_shows_empty_message(self):
         cb = _make_callback("adm_wl_pending:en:0")
         admin_repo = _make_admin_repo()
