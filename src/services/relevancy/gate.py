@@ -87,7 +87,12 @@ class RelevancyGate:
         # so the LLM sees the conversation as it unfolded (oldest → newest).
         recent = await self._messages.get_recent(chat_id, limit=5)
         history = [dict(r) for r in reversed(recent)]
-        judge = await llm_judge(message_text, history, self._ai)
+        # Ask for the R-5 emoji suggestion only where it can be used: the
+        # instruction plus the 73-emoji list are otherwise dead prompt weight in
+        # every tier-3 check, and reactions are opt-in per chat (default off).
+        judge = await llm_judge(
+            message_text, history, self._ai, want_emoji=config.reactions_enabled
+        )
 
         decision = GateDecision(
             should_respond=judge.should_respond,
