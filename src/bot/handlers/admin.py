@@ -860,11 +860,11 @@ async def _render_wl_chats(
         chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
+    offset = page * _PER_PAGE
     if total == 0:
         text = f"{_WL_CHATS_TITLE[lang]}\n\n{_WL_NO_CHATS[lang]}"
     else:
         lines = [f"{_WL_CHATS_TITLE[lang]} ({total})\n"]
-        offset = page * _PER_PAGE
         for i, chat in enumerate(chats, start=offset + 1):
             chat_id = chat.get("chat_id", "?")
             title = chat.get("chat_title")
@@ -899,7 +899,7 @@ async def _render_wl_chats(
             await msg.edit_text(
                 text,
                 parse_mode="HTML",
-                reply_markup=chats_list_keyboard(lang, chats, page, total_pages),
+                reply_markup=chats_list_keyboard(lang, chats, page, total_pages, offset),
             )
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc):
@@ -1129,11 +1129,11 @@ async def _render_wl_rejected(
         )
         total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
 
+    offset = page * _PER_PAGE
     if total == 0:
         text = f"{_WL_REJECTED_TITLE[lang]}\n\n{_WL_NO_REJECTED[lang]}"
     else:
         lines = [f"{_WL_REJECTED_TITLE[lang]} ({total})\n"]
-        offset = page * _PER_PAGE
         for i, attempt in enumerate(attempts, start=offset + 1):
             chat_id = int(attempt.get("chat_id", 0))
             title = attempt.get("chat_title")
@@ -1165,6 +1165,7 @@ async def _render_wl_rejected(
                     attempts,
                     page,
                     total_pages,
+                    offset,
                 ),
                 disable_web_page_preview=True,
             )
