@@ -14,7 +14,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.handlers.message import should_respond
+from src.bot.handlers.message import extract_reply_context, should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
@@ -175,16 +175,8 @@ async def handle_photo_message(
         user_id = user.id if user else 0
         user_name = (user.first_name if user else None) or "Unknown"
 
-        # Extract reply context
-        reply_author: str | None = None
-        reply_text: str | None = None
-        reply_is_bot = False
-        if message.reply_to_message:
-            rpl = message.reply_to_message
-            if rpl.from_user:
-                reply_author = rpl.from_user.first_name
-                reply_is_bot = rpl.from_user.is_bot
-            reply_text = (rpl.text or rpl.caption or "")[:500]
+        # Extract reply context (full message + manually-highlighted quote, if any)
+        reply_ctx = extract_reply_context(message)
 
         result = await pipeline.process(
             chat_id=message.chat.id,
@@ -193,9 +185,11 @@ async def handle_photo_message(
             message_text=caption,
             trigger_type=trigger_type,
             config=chat_config,
-            reply_author=reply_author,
-            reply_text=reply_text,
-            reply_is_bot=reply_is_bot,
+            reply_author=reply_ctx.author,
+            reply_text=reply_ctx.text,
+            reply_is_bot=reply_ctx.is_bot,
+            reply_quote_text=reply_ctx.quote_text,
+            reply_quote_is_manual=reply_ctx.quote_is_manual,
             image_context=description,
             message_thread_id=message_thread_id,
         )

@@ -27,6 +27,13 @@ from src.services.text.prompt_sanitizer import sanitize_prompt_content
 KB_BUDGET_TOKENS = 300
 MAX_FACT_CHARS = 600
 
+# Reply-quote budget: a manually-highlighted fragment gets its own truncation
+# budget, separate from the 500-char full-message reply truncation in
+# `_reply_section` -- a quote is usually short, and sharing the 500-char cap
+# would either starve the quote or crowd out the full message it's a
+# fragment of (docs/plans/summary-mentions-quotes-2026-08-04.md, section C).
+REPLY_QUOTE_MAX_CHARS = 300
+
 
 @dataclass
 class PromptContext:
@@ -57,6 +64,9 @@ class PromptContext:
     reply_author: str | None = None
     reply_text: str | None = None
     reply_is_bot: bool = False
+    # Manually-highlighted quote fragment (Message.quote, is_manual=True only)
+    reply_quote_text: str | None = None
+    reply_quote_is_manual: bool = False
 
     # Image context (from Vision AI analysis)
     image_context: str | None = None
@@ -108,7 +118,15 @@ def build_system_prompt(ctx: PromptContext) -> str:
 
     # 6. Reply context
     if ctx.reply_text:
-        sections.append(_reply_section(ctx.reply_author, ctx.reply_text, ctx.reply_is_bot))
+        sections.append(
+            _reply_section(
+                ctx.reply_author,
+                ctx.reply_text,
+                ctx.reply_is_bot,
+                ctx.reply_quote_text,
+                ctx.reply_quote_is_manual,
+            )
+        )
 
     # 7. Image context
     if ctx.image_context:
@@ -270,10 +288,32 @@ def _fatigue_section(level: int) -> str:
     )
 
 
-def _reply_section(author: str | None, text: str, is_bot: bool) -> str:
+def _reply_section(
+    author: str | None,
+    text: str,
+    is_bot: bool,
+    quote_text: str | None = None,
+    quote_is_manual: bool = False,
+) -> str:
     safe_author = sanitize_prompt_content(author) if author else "unknown"
     source = "bot's own message" if is_bot else f"message from {safe_author}"
     truncated = sanitize_prompt_content(text[:500])
+
+    # Gate on quote_is_manual (not merely quote_text being present): only a
+    # fragment the user highlighted by hand means "the user is replying to
+    # this specific part" -- a server-attached quote carries no such intent
+    # and must fall back to the plain full-message framing below.
+    if quote_is_manual and quote_text:
+        safe_quote = sanitize_prompt_content(quote_text[:REPLY_QUOTE_MAX_CHARS])
+        return (
+            f"The user is replying to a {source}. "
+            "They specifically highlighted this fragment when replying "
+            "(this is what the reply is actually about):\n"
+            f"> {safe_quote}\n"
+            "For context, here is the full original message:\n"
+            f"> {truncated}"
+        )
+
     return f"The user is replying to a {source}:\n> {truncated}"
 
 

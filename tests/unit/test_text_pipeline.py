@@ -243,6 +243,53 @@ class TestPipelineProcess:
         call_kwargs = mocks["ai_router"].generate_text.call_args
         assert call_kwargs.kwargs["max_tokens"] == 1700  # 2000 - 300
 
+    async def test_reply_quote_passed_to_ai_prompt(self, make_chat_config):
+        """Q-1: reply_quote_text/reply_quote_is_manual must reach the
+        assembled system prompt (handlers -> pipeline -> prompt_builder)."""
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline()
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="what did you mean?",
+            trigger_type=TriggerType.REPLY,
+            config=config,
+            reply_author="Bob",
+            reply_text="I think we should go with option A because of reasons.",
+            reply_quote_text="option A",
+            reply_quote_is_manual=True,
+        )
+
+        assert result.should_respond is True
+        call_kwargs = mocks["ai_router"].generate_text.call_args.kwargs
+        assert "option A" in call_kwargs["system_prompt"]
+        assert "go with option A because of reasons" in call_kwargs["system_prompt"]
+
+    async def test_reply_quote_not_manual_omitted_from_prompt(self, make_chat_config):
+        """A server-attached (non-manual) quote must not surface as a
+        highlighted fragment in the prompt."""
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline()
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="ok",
+            trigger_type=TriggerType.REPLY,
+            config=config,
+            reply_author="Bob",
+            reply_text="full original message",
+            reply_quote_text="server quote",
+            reply_quote_is_manual=False,
+        )
+
+        call_kwargs = mocks["ai_router"].generate_text.call_args.kwargs
+        assert "server quote" not in call_kwargs["system_prompt"]
+        assert "full original message" in call_kwargs["system_prompt"]
+
     async def test_context_passed_to_prompt(self, make_chat_config):
         config = make_chat_config(enabled=True)
         history_row = MagicMock()

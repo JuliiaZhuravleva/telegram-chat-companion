@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import random
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
@@ -22,6 +23,65 @@ from src.services.text.pipeline import TextProcessingPipeline
 
 router = Router(name="messages")
 logger = structlog.get_logger()
+
+# A manually-highlighted quote fragment gets its own truncation budget,
+# independent of the 500-char full-message reply truncation below: the
+# fragment is usually short, and sharing the 500-char cap would either
+# starve the quote or crowd out the full message it's a fragment of.
+_REPLY_QUOTE_MAX_CHARS = 300
+
+
+@dataclass(frozen=True)
+class ReplyContext:
+    """Extracted context about the message being replied to.
+
+    `quote_text` / `quote_is_manual` come from `Message.quote` (aiogram's
+    `TextQuote`) -- the fragment of `reply_to_message` the user highlighted
+    before hitting reply. This is distinct from `text`, which is the replied-
+    to message in full. `quote_is_manual` distinguishes a selection the user
+    made by hand from a quote Telegram's server attaches automatically;
+    "the user is replying to a specific fragment" (the owner's ask) means
+    the former only -- callers must gate on it before treating `quote_text`
+    as the user's intended focus.
+    """
+
+    author: str | None = None
+    text: str | None = None
+    is_bot: bool = False
+    quote_text: str | None = None
+    quote_is_manual: bool = False
+
+
+def extract_reply_context(message: Message) -> ReplyContext:
+    """Extract reply-to-message context, including a manually-selected quote.
+
+    Shared by `handle_text_message` and `handle_photo_message`, which
+    previously duplicated this extraction inline.
+    """
+    if not message.reply_to_message:
+        return ReplyContext()
+
+    rpl = message.reply_to_message
+    author: str | None = None
+    is_bot = False
+    if rpl.from_user:
+        author = rpl.from_user.first_name
+        is_bot = rpl.from_user.is_bot
+    text = (rpl.text or rpl.caption or "")[:500]
+
+    quote_text: str | None = None
+    quote_is_manual = False
+    if message.quote is not None:
+        quote_is_manual = bool(message.quote.is_manual)
+        quote_text = message.quote.text[:_REPLY_QUOTE_MAX_CHARS]
+
+    return ReplyContext(
+        author=author,
+        text=text,
+        is_bot=is_bot,
+        quote_text=quote_text,
+        quote_is_manual=quote_is_manual,
+    )
 
 
 def should_respond(
@@ -160,16 +220,8 @@ async def handle_text_message(
     user_id = user.id if user else 0
     user_name = (user.first_name if user else None) or "Unknown"
 
-    # Extract reply context
-    reply_author: str | None = None
-    reply_text: str | None = None
-    reply_is_bot = False
-    if message.reply_to_message:
-        rpl = message.reply_to_message
-        if rpl.from_user:
-            reply_author = rpl.from_user.first_name
-            reply_is_bot = rpl.from_user.is_bot
-        reply_text = (rpl.text or rpl.caption or "")[:500]
+    # Extract reply context (full message + manually-highlighted quote, if any)
+    reply_ctx = extract_reply_context(message)
 
     logger.info(
         "Processing message",
@@ -186,9 +238,11 @@ async def handle_text_message(
         message_text=message.text or "",
         trigger_type=trigger_type,
         config=chat_config,
-        reply_author=reply_author,
-        reply_text=reply_text,
-        reply_is_bot=reply_is_bot,
+        reply_author=reply_ctx.author,
+        reply_text=reply_ctx.text,
+        reply_is_bot=reply_ctx.is_bot,
+        reply_quote_text=reply_ctx.quote_text,
+        reply_quote_is_manual=reply_ctx.quote_is_manual,
         message_thread_id=message_thread_id,
     )
 

@@ -1,11 +1,16 @@
 """Tests for src.bot.handlers.message — should_respond logic."""
 
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.bot.handlers.message import _react_to_silence, should_respond
+from src.bot.handlers.message import (
+    ReplyContext,
+    _react_to_silence,
+    extract_reply_context,
+    should_respond,
+)
 from src.models.chat_config import ChatConfig
 from src.services.relevancy.gate import GateDecision
 
@@ -262,3 +267,115 @@ class TestReactToSilence:
 
         checker.is_in_cooldown.assert_awaited_once()
         checker.check.assert_not_awaited()
+
+
+class TestExtractReplyContext:
+    """extract_reply_context() — shared reply/quote extraction helper (Q-1).
+
+    Previously duplicated inline in handle_text_message and
+    handle_photo_message; now the single source of truth for both.
+    """
+
+    @staticmethod
+    def _reply_to(text=None, caption=None, first_name="Bob", is_bot=False, has_user=True):
+        rpl = MagicMock()
+        rpl.text = text
+        rpl.caption = caption
+        if has_user:
+            user = MagicMock()
+            user.first_name = first_name
+            user.is_bot = is_bot
+            rpl.from_user = user
+        else:
+            rpl.from_user = None
+        return rpl
+
+    @staticmethod
+    def _quote(text="highlighted bit", is_manual=True):
+        quote = MagicMock()
+        quote.text = text
+        quote.is_manual = is_manual
+        return quote
+
+    def test_no_reply_returns_empty_context(self, make_message):
+        msg = make_message(reply_to_message=None)
+        result = extract_reply_context(msg)
+        assert result == ReplyContext()
+
+    def test_reply_without_quote(self, make_message):
+        msg = make_message(reply_to_message=self._reply_to(text="original message"))
+        msg.quote = None
+        result = extract_reply_context(msg)
+        assert result.author == "Bob"
+        assert result.text == "original message"
+        assert result.is_bot is False
+        assert result.quote_text is None
+        assert result.quote_is_manual is False
+
+    def test_reply_uses_caption_when_no_text(self, make_message):
+        msg = make_message(reply_to_message=self._reply_to(text=None, caption="a photo caption"))
+        msg.quote = None
+        result = extract_reply_context(msg)
+        assert result.text == "a photo caption"
+
+    def test_reply_full_text_truncated_to_500(self, make_message):
+        long_text = "x" * 900
+        msg = make_message(reply_to_message=self._reply_to(text=long_text))
+        msg.quote = None
+        result = extract_reply_context(msg)
+        assert result.text == "x" * 500
+
+    def test_reply_no_from_user(self, make_message):
+        """Anonymous admin/channel posts have from_user=None."""
+        msg = make_message(reply_to_message=self._reply_to(has_user=False, text="hi"))
+        msg.quote = None
+        result = extract_reply_context(msg)
+        assert result.author is None
+        assert result.is_bot is False
+        assert result.text == "hi"
+
+    def test_reply_to_bot_message(self, make_message):
+        msg = make_message(
+            reply_to_message=self._reply_to(text="bot reply", first_name="Bot", is_bot=True)
+        )
+        msg.quote = None
+        result = extract_reply_context(msg)
+        assert result.is_bot is True
+
+    def test_manual_quote_extracted(self, make_message):
+        msg = make_message(reply_to_message=self._reply_to(text="full original message"))
+        msg.quote = self._quote(text="highlighted fragment", is_manual=True)
+        result = extract_reply_context(msg)
+        assert result.quote_text == "highlighted fragment"
+        assert result.quote_is_manual is True
+
+    def test_server_quote_still_extracted_but_flagged_non_manual(self, make_message):
+        """Extraction is unconditional; the is_manual gate lives at render
+        time (defense in depth — mirrors the Q-5 pattern planned for the
+        persisted-quote consume path)."""
+        msg = make_message(reply_to_message=self._reply_to(text="full original message"))
+        msg.quote = self._quote(text="server-attached quote", is_manual=False)
+        result = extract_reply_context(msg)
+        assert result.quote_text == "server-attached quote"
+        assert result.quote_is_manual is False
+
+    def test_quote_is_manual_none_normalizes_to_false(self, make_message):
+        """aiogram types is_manual as bool | None — Telegram may omit it."""
+        msg = make_message(reply_to_message=self._reply_to(text="full"))
+        msg.quote = self._quote(text="frag", is_manual=None)
+        result = extract_reply_context(msg)
+        assert result.quote_is_manual is False
+
+    def test_quote_truncated_to_own_budget(self, make_message):
+        msg = make_message(reply_to_message=self._reply_to(text="full"))
+        msg.quote = self._quote(text="y" * 900, is_manual=True)
+        result = extract_reply_context(msg)
+        assert result.quote_text == "y" * 300
+
+    def test_no_quote_when_message_quote_is_none(self, make_message):
+        """No highlighted fragment at all — Message.quote is None."""
+        msg = make_message(reply_to_message=self._reply_to(text="full"))
+        msg.quote = None
+        result = extract_reply_context(msg)
+        assert result.quote_text is None
+        assert result.quote_is_manual is False
