@@ -109,6 +109,13 @@ class MessageRepository:
 
         When message_thread_id is None (non-forum):
         - Falls back to standard get_recent() behavior with NULL topic_scope
+
+        Each row also carries `quote_text` / `quote_is_manual` (migration 021):
+        the manually-highlighted reply quote persisted for that message, if
+        any. Consumers must gate on `quote_is_manual is True` before treating
+        `quote_text` as the user's deliberate focus -- same rule Q-1 applies
+        on the live (non-historical) path; a server-attached quote carries no
+        such intent.
         """
         if message_thread_id is None:
             # Non-forum: standard query with NULL topic_scope
@@ -116,6 +123,7 @@ class MessageRepository:
                 """
                 SELECT id, chat_id, message_id, user_id, username, first_name,
                        message_type, content, is_bot_message, created_at,
+                       quote_text, quote_is_manual,
                        NULL::text AS topic_scope
                 FROM chat_messages
                 WHERE chat_id = $1
@@ -132,6 +140,7 @@ class MessageRepository:
             """
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    quote_text, quote_is_manual,
                     'current' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id = $2
@@ -139,6 +148,7 @@ class MessageRepository:
             UNION ALL
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    quote_text, quote_is_manual,
                     'other' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id IS DISTINCT FROM $2

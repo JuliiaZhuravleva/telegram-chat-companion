@@ -34,6 +34,15 @@ MAX_FACT_CHARS = 600
 # fragment of (docs/plans/summary-mentions-quotes-2026-08-04.md, section C).
 REPLY_QUOTE_MAX_CHARS = 300
 
+# Historical quote annotation budget (Q-5): a saved manually-highlighted
+# quote (migration 021, `quote_text`/`quote_is_manual`) is rendered as a
+# short inline annotation next to its message in `<chat_history>`/topic
+# blocks, not as its own section like the live reply-quote above. History
+# already carries many messages per prompt, so this gets a tighter budget
+# than REPLY_QUOTE_MAX_CHARS -- enough to convey what was highlighted
+# without letting one annotated row dominate the block.
+HISTORY_QUOTE_MAX_CHARS = 200
+
 
 @dataclass
 class PromptContext:
@@ -226,6 +235,16 @@ def _format_message(msg: dict[str, Any]) -> str:
 
     if is_bot:
         return f"Bot: {content}"
+
+    # Gate on quote_is_manual (not merely quote_text being present), same
+    # rule as the live-reply path in _reply_section: only a fragment the
+    # user highlighted by hand means anything here -- a server-attached
+    # quote (quote_is_manual False/None) is not annotated.
+    quote_text = msg.get("quote_text")
+    if msg.get("quote_is_manual") and quote_text:
+        safe_quote = sanitize_prompt_content(quote_text[:HISTORY_QUOTE_MAX_CHARS])
+        return f'[uid:{user_id}] {name} (highlighted: "{safe_quote}"): {content}'
+
     return f"[uid:{user_id}] {name}: {content}"
 
 

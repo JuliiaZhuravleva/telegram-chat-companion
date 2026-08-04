@@ -2,13 +2,17 @@
 
 Scope: unit coverage for the username-resolution methods added for B-1
 stage 2 (`find_by_username`, `username_seen_elsewhere`), the
-activity-ranking method added for B-2 (`get_top_active_users`), and the
+activity-ranking method added for B-2 (`get_top_active_users`), the
 quote-persistence columns added for Q-3 (`save`'s `quote_text` /
-`quote_is_manual` params, migration 021). The rest of MessageRepository
-already has coverage via its callers' own test suites; integration coverage
-for these methods against a real Postgres schema is qa's to add (chat-scoped
-LOWER() match / GROUP BY aggregation against `chat_messages`; round-trip
-persistence of the quote columns is Q-4's).
+`quote_is_manual` params, migration 021), and the quote-columns projection
+added for Q-5 (`get_recent_with_topic_context`'s `quote_text` /
+`quote_is_manual` in both the non-forum and forum-mode queries). The rest of
+MessageRepository already has coverage via its callers' own test suites;
+integration coverage for these methods against a real Postgres schema is
+qa's to add (chat-scoped LOWER() match / GROUP BY aggregation against
+`chat_messages`; round-trip persistence of the quote columns is Q-4's;
+UNION ALL type-check + injection/gating/truncation regression for the
+Q-5 projection is Q-6's).
 """
 
 from __future__ import annotations
@@ -83,6 +87,69 @@ class TestSaveQuoteColumns:
         call_args = pool.execute.call_args[0]
         assert call_args[-2] == "server-attached quote"
         assert call_args[-1] is False
+
+
+class TestGetRecentWithTopicContext:
+    """quote_text/quote_is_manual projection added for Q-5 (migration 021).
+
+    `get_recent_with_topic_context()` had zero unit coverage before this
+    item. These tests are a thin regression guard (query text actually
+    projects the two new columns; rows carrying them pass through
+    unchanged) -- they cannot verify the UNION ALL type-checks against a
+    real schema or that Postgres accepts the query; that's qa's
+    (Q-6, testcontainers).
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_forum_query_projects_quote_columns(self, repo):
+        repo_, pool = repo
+        pool.fetch.return_value = []
+
+        await repo_.get_recent_with_topic_context(CHAT_ID, None)
+
+        query = pool.fetch.call_args[0][0]
+        assert "quote_text" in query
+        assert "quote_is_manual" in query
+
+    @pytest.mark.asyncio
+    async def test_forum_mode_query_projects_quote_columns_in_both_branches(self, repo):
+        repo_, pool = repo
+        pool.fetch.return_value = []
+
+        await repo_.get_recent_with_topic_context(CHAT_ID, message_thread_id=5)
+
+        query = pool.fetch.call_args[0][0]
+        # Both the 'current' and 'other' SELECT branches of the UNION ALL
+        # must project the columns -- a regression could easily add them
+        # to only one side.
+        assert query.count("quote_text") == 2
+        assert query.count("quote_is_manual") == 2
+
+    @pytest.mark.asyncio
+    async def test_non_forum_rows_carry_quote_fields_through(self, repo):
+        repo_, pool = repo
+        pool.fetch.return_value = [
+            {
+                "id": 1,
+                "chat_id": CHAT_ID,
+                "message_id": 10,
+                "user_id": 1,
+                "username": "alice",
+                "first_name": "Alice",
+                "message_type": "text",
+                "content": "hi",
+                "is_bot_message": False,
+                "created_at": None,
+                "quote_text": "important bit",
+                "quote_is_manual": True,
+                "topic_scope": None,
+            }
+        ]
+
+        result = await repo_.get_recent_with_topic_context(CHAT_ID, None)
+
+        assert result[0]["quote_text"] == "important bit"
+        assert result[0]["quote_is_manual"] is True
 
 
 class TestFindByUsername:
