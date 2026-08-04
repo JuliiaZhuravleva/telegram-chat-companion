@@ -406,3 +406,74 @@ class TestSummaryEmojiInstruction:
 
         prompt = ai_router.generate_text.call_args.kwargs["prompt"]
         assert "фиксированного" not in prompt
+
+
+class TestSummaryMentionTokenAndCodeInteraction:
+    """E-2 live quality run (2026-08-04): calling the real SummaryService.generate()
+    pipeline against real gemini-3-flash-preview and gpt-5-nano (both cheap-tier
+    defaults, config/default.yml) surfaced two interactions between the M-1
+    mention-token mechanism and markdown_to_html()/model output that a fully
+    mocked suite can't see, because the mock always echoes the token in the
+    exact shape the test author expects.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.xfail(
+        reason=(
+            "KNOWN GAP, live-observed 2026-08-04: gpt-5-nano (default fallback "
+            "model, forced temperature=1.0) sometimes echoes the requested "
+            "'@@u0@@' token as a malformed single-@ '@u0' variant instead. "
+            "_MENTION_TOKEN_RE only matches the double-@ form, so this variant "
+            "is neither resolved into a mention NOR caught by the "
+            "'hallucinated index -> generic label' fallback -- it leaks the raw "
+            "'@u0'-looking text straight into the delivered summary. Not a "
+            "security hole (model output, not attacker-controlled first_name), "
+            "but a real markup-quality defect on the cheap tier that E-2 was "
+            "scoped to check via live run. Tracked with strict xfail so a fix "
+            "(e.g. a tolerant token regex, or a stricter prompt/regeneration "
+            "guard) must remove this marker rather than silently leave it stale."
+        ),
+        strict=True,
+    )
+    async def test_single_at_token_variant_from_live_gpt5_nano_does_not_leak(
+        self, summary_service, ai_router, message_repo
+    ):
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=42, first_name="Alice", username="alice")
+        ]
+        # Exact shape observed live (E-2, 2026-08-04, gpt-5-nano, ru): the model
+        # was told to reuse "@@u0@@" verbatim and instead wrote "@u0".
+        ai_router.generate_text.return_value = _make_text_result("Автор: @u0.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "@u0" not in result
+
+    @pytest.mark.asyncio
+    async def test_backtick_wrapped_token_resolves_inside_code_tag(
+        self, summary_service, ai_router, message_repo
+    ):
+        """Live-observed (E-2, 2026-08-04, gemini-3-flash-preview, en run): the
+        model sometimes wraps its own token echo in backticks (inline code),
+        e.g. `` `@@u0@@` ``. markdown_to_html() converts that to
+        ``<code>@@u0@@</code>`` *before* _resolve_mentions() runs, and
+        resolution still matches the token text inside the <code> tag,
+        producing ``<code><a href="...">Name</a></code>`` -- an <a> nested
+        inside a <code> element.
+
+        This pins CURRENT behavior (it does not assert whether this is
+        correct) -- whether Telegram's HTML parser accepts an anchor nested
+        inside <code>, or rejects the whole sendMessage call with a "can't
+        parse entities" error, is NOT verified here (would require an actual
+        Bot API call / live Telegram smoke test, out of this item's budget).
+        Flagged in the E-2 verdict as a follow-up for backend-dev/architect to
+        verify against a real sendMessage call before relying on it.
+        """
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=1, first_name="Alice", username="alice")
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Автор: `@@u0@@`.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert '<code><a href="tg://user?id=1">Alice</a></code>' in result
