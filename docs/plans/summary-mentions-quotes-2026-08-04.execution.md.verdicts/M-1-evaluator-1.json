@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T07:48:46Z",
+  "role": "evaluator",
+  "item_id": "M-1",
+  "verdict": "PASS",
+  "evidence": "Diff (c1f977a) implements opaque @@uN@@ placeholder tokens assigned per human author from DB rows (get_for_summary already returns user_id/is_bot_message), model prompt instructs echoing tokens verbatim, and _resolve_mentions() runs strictly after markdown_to_html() (confirmed formatter.py escapes <,>,& as literal step 1) so the <a href=tg://user?id=..> anchor built from html.escape()'d first_name survives untouched; bot messages and user_id=NULL never get a token, matching plan and owner decision (all participants, no toggle). Independently re-ran pytest tests/unit/test_summary.py (12 passed), ruff and mypy on touched files (clean); no other call sites depend on generate()'s internals so blast radius is contained.",
+  "regression_risk": "low",
+  "notes": "Unknown/hallucinated token index degrades to a generic localized label rather than a plain name, per plan's 'not broken markup' requirement — reasonable since an opaque unmapped index carries no name to fall back to. Broader adversarial mention-name pass (RTL override, tg:// scheme tricks, very long names) is explicitly deferred to M-2 per specialist's note, which is consistent with the roster split (backend-dev unit tests vs qa security pass)."
+}

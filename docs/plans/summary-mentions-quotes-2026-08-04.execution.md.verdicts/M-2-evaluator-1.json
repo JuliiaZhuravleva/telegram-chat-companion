@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T07:54:52Z",
+  "role": "evaluator",
+  "item_id": "M-2",
+  "verdict": "PASS",
+  "evidence": "Reviewed commit 507b068 diff (test-only, 7 new adversarial tests in TestSummaryMentionsAdversarial); read src/services/modules/summary.py::_resolve_mentions and confirmed the tests' claims are accurate (html.escape applied before insertion, href built from trusted user_id column not model output, re.sub is single-pass non-recursive so a name equal to a literal @@uN@@ token can't forge a second anchor). Reproduced independently: pytest tests/unit/test_summary.py -q = 19 passed, ruff check clean, mypy src/services/modules/summary.py clean.",
+  "regression_risk": "low",
+  "notes": "Coverage is thorough (forged href, quote breakout, scheme lookalike, RTL/bidi, long name, token-collision, NUL bytes). Item correctly scoped to tests only per M-1's own note that the escape-before-insert design already closes these shapes; no source change was needed."
+}

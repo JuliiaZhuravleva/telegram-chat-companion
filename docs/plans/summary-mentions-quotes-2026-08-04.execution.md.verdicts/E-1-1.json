@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T08:22:44Z",
+  "role": "specialist",
+  "item_id": "E-1",
+  "verdict": "PASS",
+  "cost_usd": 0.96,
+  "notes": "Added a system-prompt instruction (ru+en) in SummaryService.generate() telling the model to place relevant emoji freely for visual structure, per owner decision [E-1]=B (free placement, model's own discretion, no fixed skeleton/set). Scope kept to the prompt-instruction change only, as titled -- did not touch formatter.py or add a fixed emoji vocabulary. 3 new unit tests (TestSummaryEmojiInstruction) pin: instruction present in both language branches, says 'free'/'no fixed' rather than dictating a skeleton, and the instruction text doesn't leak into the conversation payload. Full unit suite, ruff, mypy all green. Routing hint for qa (E-2, already planned next): my tests only assert the system_prompt text -- they cannot and do not assert anything about actual model output or the emoji x markdown_to_html() interaction ('- fire topic' -> bullet topic, heading conversion) noted in the source plan; that plus a live cheap-model quality run is E-2's full scope as titled.",
+  "result": {
+    "kind": "commit",
+    "ref": "869b9c5",
+    "verification": "pytest tests/unit/test_summary.py -v: 22 passed; pytest tests/unit/ -q: 1224 passed; ruff check src/ tests/unit/: All checks passed; mypy src/: Success no issues in 121 files"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

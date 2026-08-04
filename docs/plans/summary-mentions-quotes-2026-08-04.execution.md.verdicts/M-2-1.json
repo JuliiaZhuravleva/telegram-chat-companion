@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T07:53:46Z",
+  "role": "specialist",
+  "item_id": "M-2",
+  "verdict": "PASS",
+  "cost_usd": 1.16,
+  "notes": "Extended tests/unit/test_summary.py (TestSummaryMentionsAdversarial, 7 new tests) with the broader adversarial pass M-1 flagged as needed: (1) forged tg://user?id=<victim> href via crafted first_name -- the actual XSS/impersonation-relevant case, sanity-checked by hand-rolling an unescaped variant of _resolve_mentions() and confirming it DOES leak a second forged anchor with the victim id, so this test is a real regression guard, not vacuous; (2) quote-breakout attempt; (3) javascript: scheme lookalike (href always built from trusted user_id, unaffected); (4) RTL/bidi override chars -- structural (anchor count) guard only, noted as inherent Telegram-wide visual-spoofing class out of scope; (5) pathologically long (~40KB) hostile name -- no crash, stays escaped; (6) name equal to literal @@u1@@ token text -- confirms re.sub single-pass (non-recursive) substitution can't be abused to forge a second anchor from an inserted name; (7) embedded NUL/control bytes -- no crash. All 7 pass against current M-1 code unmodified. Verification: pytest tests/unit/test_summary.py -v = 19 passed (12 pre-existing + 7 new); pytest tests/unit/ -q = 1193 passed (matches 1186 baseline + 7); ruff check = clean; mypy src/ = clean (test-only change, no src/ touched). Committed 507b068 (pre-commit hooks incl. gitleaks passed). No source-code changes needed -- M-1's escape-before-insert design already closes every shape tried.",
+  "result": {
+    "kind": "commit",
+    "ref": "507b068",
+    "verification": "pytest tests/unit/test_summary.py -v (19 passed) + pytest tests/unit/ -q (1193 passed) + ruff check + mypy src/, all green; forged-href test additionally validated against a deliberately unescaped stand-in implementation to confirm it is not a vacuous assertion"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

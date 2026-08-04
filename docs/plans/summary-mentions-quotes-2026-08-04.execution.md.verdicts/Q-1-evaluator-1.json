@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T08:05:04Z",
+  "role": "evaluator",
+  "item_id": "Q-1",
+  "verdict": "PASS",
+  "evidence": "git show f558f51: message.quote wired through extract_reply_context() (message.py) -> handle_photo_message (media.py, now deduped) -> pipeline.process() -> PromptContext -> _reply_section(), gated on quote.is_manual, own 300-char budget, routed through sanitize_prompt_content(); ran pytest tests/unit/test_prompt_builder.py test_message_handler.py test_media_handler.py test_text_pipeline.py = 118 passed, ruff+mypy clean on touched files.",
+  "regression_risk": "low",
+  "notes": "Minor: REPLY_QUOTE_MAX_CHARS duplicated as private _REPLY_QUOTE_MAX_CHARS in message.py and public REPLY_QUOTE_MAX_CHARS in prompt_builder.py, both 300 -- harmless double-truncation, not a defect. Q-1's own sanitization test covers basic injection; broader adversarial pass correctly deferred to Q-2 per plan structure."
+}
