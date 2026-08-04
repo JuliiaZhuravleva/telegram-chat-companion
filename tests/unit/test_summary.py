@@ -366,3 +366,43 @@ class TestSummaryMentionsAdversarial:
 
         assert result.count("<a href=") == 1
         assert '<a href="tg://user?id=8">' in result
+
+
+class TestSummaryEmojiInstruction:
+    """System prompt instructs the model to use emoji freely (E-1).
+
+    Owner decision [E-1]=B: free placement, model's own discretion, no fixed
+    skeleton of blocks/emoji. This only pins that the instruction is present
+    in both language branches and says "free" rather than dictating a fixed
+    set — it does not (and cannot) assert anything about model output, since
+    ``generate_text`` is mocked. Interaction with markdown_to_html() (e.g.
+    ``- 🔥 topic`` → ``• 🔥 topic``) is qa-owned (E-2).
+    """
+
+    @pytest.mark.asyncio
+    async def test_ru_system_prompt_instructs_free_emoji_use(self, summary_service, ai_router):
+        await summary_service.generate(chat_id=-1, language="ru")
+
+        system_prompt = ai_router.generate_text.call_args.kwargs["system_prompt"]
+        assert "emoji" in system_prompt
+        # Free placement, not a dictated fixed skeleton/set (owner decision [E-1]=B).
+        assert "без фиксированного" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_en_system_prompt_instructs_free_emoji_use(self, summary_service, ai_router):
+        await summary_service.generate(chat_id=-1, language="en")
+
+        system_prompt = ai_router.generate_text.call_args.kwargs["system_prompt"]
+        assert "emoji" in system_prompt
+        assert "no fixed" in system_prompt
+
+    @pytest.mark.asyncio
+    async def test_emoji_instruction_does_not_leak_into_prompt_content(
+        self, summary_service, ai_router
+    ):
+        """The instruction lives in system_prompt only — not duplicated into the
+        conversation payload sent as ``prompt``."""
+        await summary_service.generate(chat_id=-1, language="ru")
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        assert "фиксированного" not in prompt

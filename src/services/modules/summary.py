@@ -119,6 +119,10 @@ class SummaryService:
             system_prompt = (
                 "Ты — ассистент, создающий краткие саммари чатов. "
                 "Выдели основные темы, ключевых участников и важные моменты. "
+                "Используй уместные emoji для визуальной разметки текста по смыслу — "
+                "расставляй их свободно там, где это помогает читать саммари "
+                "(например, рядом с темами, именами или ключевыми выводами), "
+                "без фиксированного набора или шаблона: выбирай emoji и их место сам. "
                 "Участники обозначены в переписке токенами вида @@u0@@, @@u1@@ вместо имён — "
                 "если упоминаешь конкретного участника в саммари, используй его токен ровно "
                 "в таком виде, как он дан (не переводи, не сокращай, не выдумывай новые токены "
@@ -131,6 +135,10 @@ class SummaryService:
             system_prompt = (
                 "You are an assistant that creates concise chat summaries. "
                 "Highlight main topics, key participants, and important moments. "
+                "Use relevant emoji to visually structure the text by meaning — place them "
+                "freely wherever it helps readability (e.g. next to topics, names, or key "
+                "takeaways), with no fixed set or template: choose the emoji and their "
+                "placement yourself. "
                 "Participants are labeled in the conversation with tokens like @@u0@@, "
                 "@@u1@@ instead of names — when you refer to a specific participant in the "
                 "summary, reuse their exact token as given (do not translate, abbreviate, "
