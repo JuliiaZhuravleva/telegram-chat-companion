@@ -5,12 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.bot.handlers.message import (
-    ReplyContext,
-    _react_to_silence,
-    extract_reply_context,
-    should_respond,
-)
+from src.bot.handlers.message import _react_to_silence
+from src.bot.utils import ReplyContext, extract_reply_context, should_respond
 from src.models.chat_config import ChatConfig
 from src.services.relevancy.gate import GateDecision
 

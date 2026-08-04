@@ -17,7 +17,7 @@ from typing import Any
 
 from src.models.enums import ResponseType
 from src.services.text.adaptive_length import compute_length_instruction
-from src.services.text.prompt_sanitizer import sanitize_prompt_content
+from src.services.text.prompt_sanitizer import sanitize_history_field, sanitize_prompt_content
 
 # --- KB (Knowledge Base) budget constants (ADR-0003 Part 2, addendum to ADR-0001) ---
 # Budgeted independently of history/RAG (additive, per Julia's decision #3) --
@@ -27,9 +27,15 @@ from src.services.text.prompt_sanitizer import sanitize_prompt_content
 KB_BUDGET_TOKENS = 300
 MAX_FACT_CHARS = 600
 
-# Reply-quote budget: a manually-highlighted fragment gets its own truncation
-# budget, separate from the 500-char full-message reply truncation in
-# `_reply_section` -- a quote is usually short, and sharing the 500-char cap
+# Reply-context budgets. These live here, with the other prompt budgets,
+# because truncation is a rendering concern -- storage keeps the text whole
+# (see MessageSaverMiddleware). `src/bot/utils.py` imports them rather than
+# repeating the numbers, so a change lands in one place instead of silently
+# disagreeing across two modules.
+REPLY_TEXT_MAX_CHARS = 500
+
+# A manually-highlighted fragment gets its own budget, separate from the
+# full-message one above -- a quote is usually short, and sharing one cap
 # would either starve the quote or crowd out the full message it's a
 # fragment of (docs/plans/summary-mentions-quotes-2026-08-04.md, section C).
 REPLY_QUOTE_MAX_CHARS = 300
@@ -228,9 +234,15 @@ def build_user_prompt(ctx: PromptContext) -> str:
 
 def _format_message(msg: dict[str, Any]) -> str:
     """Format a single message for the prompt."""
+    # Every interpolated field here is user-controlled and lands in a
+    # line-oriented block, so all of them go through sanitize_history_field()
+    # -- otherwise any one of them can forge an extra `[uid:N] Name: ...` row
+    # and put words in another user's mouth. `content` and `name` carried that
+    # hole long before the quote annotation was added; see the sanitizer's
+    # docstring.
     user_id = msg.get("user_id", "?")
-    name = sanitize_prompt_content(msg.get("username") or msg.get("first_name") or str(user_id))
-    content = sanitize_prompt_content(msg.get("content", ""))
+    name = sanitize_history_field(msg.get("username") or msg.get("first_name") or str(user_id))
+    content = sanitize_history_field(msg.get("content", ""))
     is_bot = msg.get("is_bot_message", False)
 
     if is_bot:
@@ -242,7 +254,7 @@ def _format_message(msg: dict[str, Any]) -> str:
     # quote (quote_is_manual False/None) is not annotated.
     quote_text = msg.get("quote_text")
     if msg.get("quote_is_manual") and quote_text:
-        safe_quote = sanitize_prompt_content(quote_text[:HISTORY_QUOTE_MAX_CHARS])
+        safe_quote = sanitize_history_field(quote_text[:HISTORY_QUOTE_MAX_CHARS])
         return f'[uid:{user_id}] {name} (highlighted: "{safe_quote}"): {content}'
 
     return f"[uid:{user_id}] {name}: {content}"
@@ -316,7 +328,7 @@ def _reply_section(
 ) -> str:
     safe_author = sanitize_prompt_content(author) if author else "unknown"
     source = "bot's own message" if is_bot else f"message from {safe_author}"
-    truncated = sanitize_prompt_content(text[:500])
+    truncated = sanitize_prompt_content(text[:REPLY_TEXT_MAX_CHARS])
 
     # Gate on quote_is_manual (not merely quote_text being present): only a
     # fragment the user highlighted by hand means "the user is replying to

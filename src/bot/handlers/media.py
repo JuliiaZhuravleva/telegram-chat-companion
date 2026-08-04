@@ -14,7 +14,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.handlers.message import extract_reply_context, should_respond
+from src.bot.utils import extract_reply_context, should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
