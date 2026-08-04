@@ -1,12 +1,14 @@
 """Tests for MessageRepository with a mocked asyncpg pool.
 
 Scope: unit coverage for the username-resolution methods added for B-1
-stage 2 (`find_by_username`, `username_seen_elsewhere`), plus the
-activity-ranking method added for B-2 (`get_top_active_users`). The rest of
-MessageRepository already has coverage via its callers' own test suites;
-integration coverage for these methods against a real Postgres schema is
-qa's to add (chat-scoped LOWER() match / GROUP BY aggregation against
-`chat_messages`).
+stage 2 (`find_by_username`, `username_seen_elsewhere`), the
+activity-ranking method added for B-2 (`get_top_active_users`), and the
+quote-persistence columns added for Q-3 (`save`'s `quote_text` /
+`quote_is_manual` params, migration 021). The rest of MessageRepository
+already has coverage via its callers' own test suites; integration coverage
+for these methods against a real Postgres schema is qa's to add (chat-scoped
+LOWER() match / GROUP BY aggregation against `chat_messages`; round-trip
+persistence of the quote columns is Q-4's).
 """
 
 from __future__ import annotations
@@ -25,6 +27,62 @@ def repo():
     """MessageRepository with mocked pool."""
     pool = AsyncMock()
     return MessageRepository(pool), pool
+
+
+class TestSaveQuoteColumns:
+    """`save()`'s quote_text/quote_is_manual params (Q-3, migration 021)."""
+
+    @pytest.mark.asyncio
+    async def test_passes_quote_fields_through_to_insert(self, repo):
+        repo_, pool = repo
+
+        await repo_.save(
+            CHAT_ID,
+            message_id=1,
+            message_type="text",
+            content="reply",
+            quote_text="highlighted fragment",
+            quote_is_manual=True,
+        )
+
+        pool.execute.assert_awaited_once()
+        call_args = pool.execute.call_args[0]
+        # Last two positional params, matching $16/$17 in the INSERT.
+        assert call_args[-2] == "highlighted fragment"
+        assert call_args[-1] is True
+
+    @pytest.mark.asyncio
+    async def test_defaults_quote_fields_to_none_when_no_quote(self, repo):
+        repo_, pool = repo
+
+        await repo_.save(CHAT_ID, message_id=2, message_type="text", content="plain message")
+
+        call_args = pool.execute.call_args[0]
+        assert call_args[-2] is None
+        assert call_args[-1] is None
+
+    @pytest.mark.asyncio
+    async def test_non_manual_quote_persists_false_not_none(self, repo):
+        """A quote that exists but wasn't hand-selected: text is set, flag is False.
+
+        Distinct from "no quote at all" (both NULL) -- Q-5's consumer gates on
+        `quote_is_manual is True`, so this must not collapse into the same
+        NULL as the no-quote case.
+        """
+        repo_, pool = repo
+
+        await repo_.save(
+            CHAT_ID,
+            message_id=3,
+            message_type="text",
+            content="reply",
+            quote_text="server-attached quote",
+            quote_is_manual=False,
+        )
+
+        call_args = pool.execute.call_args[0]
+        assert call_args[-2] == "server-attached quote"
+        assert call_args[-1] is False
 
 
 class TestFindByUsername:

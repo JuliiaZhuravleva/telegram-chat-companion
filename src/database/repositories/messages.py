@@ -32,6 +32,8 @@ class MessageRepository:
         sticker_set_name: str | None = None,
         sticker_emoji: str | None = None,
         message_thread_id: int | None = None,
+        quote_text: str | None = None,
+        quote_is_manual: bool | None = None,
     ) -> None:
         """Save a chat message."""
         await self._pool.execute(
@@ -40,8 +42,9 @@ class MessageRepository:
                 chat_id, message_id, user_id, username, first_name,
                 message_type, content, raw_data, reply_to_message_id,
                 is_bot_message, sticker_file_id, sticker_file_unique_id,
-                sticker_set_name, sticker_emoji, message_thread_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
+                sticker_set_name, sticker_emoji, message_thread_id,
+                quote_text, quote_is_manual
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (chat_id, message_id) DO UPDATE
             SET content = EXCLUDED.content,
                 edited_at = NOW(),
@@ -65,6 +68,8 @@ class MessageRepository:
             sticker_set_name,
             sticker_emoji,
             message_thread_id,
+            quote_text,
+            quote_is_manual,
         )
 
     async def get_recent(
