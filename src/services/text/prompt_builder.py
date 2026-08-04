@@ -17,7 +17,7 @@ from typing import Any
 
 from src.models.enums import ResponseType
 from src.services.text.adaptive_length import compute_length_instruction
-from src.services.text.prompt_sanitizer import sanitize_prompt_content
+from src.services.text.prompt_sanitizer import sanitize_history_field, sanitize_prompt_content
 
 # --- KB (Knowledge Base) budget constants (ADR-0003 Part 2, addendum to ADR-0001) ---
 # Budgeted independently of history/RAG (additive, per Julia's decision #3) --
@@ -26,6 +26,28 @@ from src.services.text.prompt_sanitizer import sanitize_prompt_content
 # own trim independently rather than silently absorbing that pre-existing gap.
 KB_BUDGET_TOKENS = 300
 MAX_FACT_CHARS = 600
+
+# Reply-context budgets. These live here, with the other prompt budgets,
+# because truncation is a rendering concern -- storage keeps the text whole
+# (see MessageSaverMiddleware). `src/bot/utils.py` imports them rather than
+# repeating the numbers, so a change lands in one place instead of silently
+# disagreeing across two modules.
+REPLY_TEXT_MAX_CHARS = 500
+
+# A manually-highlighted fragment gets its own budget, separate from the
+# full-message one above -- a quote is usually short, and sharing one cap
+# would either starve the quote or crowd out the full message it's a
+# fragment of (docs/plans/summary-mentions-quotes-2026-08-04.md, section C).
+REPLY_QUOTE_MAX_CHARS = 300
+
+# Historical quote annotation budget (Q-5): a saved manually-highlighted
+# quote (migration 021, `quote_text`/`quote_is_manual`) is rendered as a
+# short inline annotation next to its message in `<chat_history>`/topic
+# blocks, not as its own section like the live reply-quote above. History
+# already carries many messages per prompt, so this gets a tighter budget
+# than REPLY_QUOTE_MAX_CHARS -- enough to convey what was highlighted
+# without letting one annotated row dominate the block.
+HISTORY_QUOTE_MAX_CHARS = 200
 
 
 @dataclass
@@ -57,6 +79,9 @@ class PromptContext:
     reply_author: str | None = None
     reply_text: str | None = None
     reply_is_bot: bool = False
+    # Manually-highlighted quote fragment (Message.quote, is_manual=True only)
+    reply_quote_text: str | None = None
+    reply_quote_is_manual: bool = False
 
     # Image context (from Vision AI analysis)
     image_context: str | None = None
@@ -108,7 +133,15 @@ def build_system_prompt(ctx: PromptContext) -> str:
 
     # 6. Reply context
     if ctx.reply_text:
-        sections.append(_reply_section(ctx.reply_author, ctx.reply_text, ctx.reply_is_bot))
+        sections.append(
+            _reply_section(
+                ctx.reply_author,
+                ctx.reply_text,
+                ctx.reply_is_bot,
+                ctx.reply_quote_text,
+                ctx.reply_quote_is_manual,
+            )
+        )
 
     # 7. Image context
     if ctx.image_context:
@@ -201,13 +234,29 @@ def build_user_prompt(ctx: PromptContext) -> str:
 
 def _format_message(msg: dict[str, Any]) -> str:
     """Format a single message for the prompt."""
+    # Every interpolated field here is user-controlled and lands in a
+    # line-oriented block, so all of them go through sanitize_history_field()
+    # -- otherwise any one of them can forge an extra `[uid:N] Name: ...` row
+    # and put words in another user's mouth. `content` and `name` carried that
+    # hole long before the quote annotation was added; see the sanitizer's
+    # docstring.
     user_id = msg.get("user_id", "?")
-    name = sanitize_prompt_content(msg.get("username") or msg.get("first_name") or str(user_id))
-    content = sanitize_prompt_content(msg.get("content", ""))
+    name = sanitize_history_field(msg.get("username") or msg.get("first_name") or str(user_id))
+    content = sanitize_history_field(msg.get("content", ""))
     is_bot = msg.get("is_bot_message", False)
 
     if is_bot:
         return f"Bot: {content}"
+
+    # Gate on quote_is_manual (not merely quote_text being present), same
+    # rule as the live-reply path in _reply_section: only a fragment the
+    # user highlighted by hand means anything here -- a server-attached
+    # quote (quote_is_manual False/None) is not annotated.
+    quote_text = msg.get("quote_text")
+    if msg.get("quote_is_manual") and quote_text:
+        safe_quote = sanitize_history_field(quote_text[:HISTORY_QUOTE_MAX_CHARS])
+        return f'[uid:{user_id}] {name} (highlighted: "{safe_quote}"): {content}'
+
     return f"[uid:{user_id}] {name}: {content}"
 
 
@@ -270,10 +319,32 @@ def _fatigue_section(level: int) -> str:
     )
 
 
-def _reply_section(author: str | None, text: str, is_bot: bool) -> str:
+def _reply_section(
+    author: str | None,
+    text: str,
+    is_bot: bool,
+    quote_text: str | None = None,
+    quote_is_manual: bool = False,
+) -> str:
     safe_author = sanitize_prompt_content(author) if author else "unknown"
     source = "bot's own message" if is_bot else f"message from {safe_author}"
-    truncated = sanitize_prompt_content(text[:500])
+    truncated = sanitize_prompt_content(text[:REPLY_TEXT_MAX_CHARS])
+
+    # Gate on quote_is_manual (not merely quote_text being present): only a
+    # fragment the user highlighted by hand means "the user is replying to
+    # this specific part" -- a server-attached quote carries no such intent
+    # and must fall back to the plain full-message framing below.
+    if quote_is_manual and quote_text:
+        safe_quote = sanitize_prompt_content(quote_text[:REPLY_QUOTE_MAX_CHARS])
+        return (
+            f"The user is replying to a {source}. "
+            "They specifically highlighted this fragment when replying "
+            "(this is what the reply is actually about):\n"
+            f"> {safe_quote}\n"
+            "For context, here is the full original message:\n"
+            f"> {truncated}"
+        )
+
     return f"The user is replying to a {source}:\n> {truncated}"
 
 

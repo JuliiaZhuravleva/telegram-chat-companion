@@ -111,6 +111,8 @@ class TextProcessingPipeline:
         reply_author: str | None = None,
         reply_text: str | None = None,
         reply_is_bot: bool = False,
+        reply_quote_text: str | None = None,
+        reply_quote_is_manual: bool = False,
         image_context: str | None = None,
         message_thread_id: int | None = None,
     ) -> PipelineResult:
@@ -199,6 +201,8 @@ class TextProcessingPipeline:
             reply_author=reply_author,
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
+            reply_quote_text=reply_quote_text,
+            reply_quote_is_manual=reply_quote_is_manual,
             image_context=image_context,
             link_context=link_context_str,
             sticker_candidates=sticker_candidates_str,

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T08:51:12Z",
+  "role": "evaluator",
+  "item_id": "Q-4",
+  "verdict": "PASS",
+  "evidence": "Commit a5bac99 adds only tests/integration/test_migration_021_quote_persistence.py (380 lines, no source changes); independently re-ran pytest tests/integration/test_migration_021_quote_persistence.py tests/integration/test_alembic_online_upgrade.py -v --no-cov against real testcontainers Postgres: 14/14 passed. File covers both item requirements: schema shape assertions, a real MessageSaverMiddleware->MessageRepository->Postgres round trip (manual/server-attached/no-quote/untruncated-long-text cases), an ON-CONFLICT-does-not-wipe-quote regression guard, and two independent confirmations (filesystem-glob + live online upgrade to 021) that the online-upgrade guard covers migration 021.",
+  "regression_risk": "low",
+  "notes": "ruff clean; standalone mypy on the test file flags one 'unused type: ignore[arg-type]' on MessageRepository(db_conn), but that is a pre-existing repo-wide pattern (identical comment in test_admin_repository.py, test_chat_settings_repository.py, test_sticker_repository.py, test_migration_018_message_reactions.py) and mypy per CLAUDE.md/pyproject convention is only run on src/, not tests/ -- not a regression introduced here, no action needed."
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T08:36:42Z",
+  "role": "evaluator",
+  "item_id": "E-2",
+  "verdict": "PASS",
+  "evidence": "Verified commit 2dc67a7: test_formatter.py::TestEmojiMarkdownInteraction (13 tests) pins exactly the double-bullet and heading-conversion risks named in the source plan (section B); test_summary.py adds 2 live-run-derived regression tests, one strict xfail confirmed genuinely failing when forced via --runxfail (not vacuous). Full suite reproduces claimed 1238 passed/1 xfailed, ruff clean on touched files, diff touches only tests/unit/** (no src/), respecting QA role boundary; unresolved gpt-5-nano token-leak defect correctly flagged as a backend-dev follow-up rather than silently fixed or hidden.",
+  "regression_risk": "low",
+  "notes": "Live-run findings (malformed single-@ token leak from gpt-5-nano; backtick-wrapped token producing <a> nested in <code> from gemini-3-flash-preview) are real and well-documented but currently only tracked inline in the envelope note -- dispatcher should ensure a follow-up item is queued for backend-dev, since this project has no _tech-debt.md to catch it otherwise."
+}

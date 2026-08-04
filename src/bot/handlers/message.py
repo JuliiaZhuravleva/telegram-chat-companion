@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import random
-import re
 from typing import Any
 
 import structlog
@@ -11,6 +9,7 @@ from aiogram import F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.utils import extract_reply_context, should_respond
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.abuse.checker import AntiAbuseChecker
@@ -22,47 +21,6 @@ from src.services.text.pipeline import TextProcessingPipeline
 
 router = Router(name="messages")
 logger = structlog.get_logger()
-
-
-def should_respond(
-    message: Message,
-    config: ChatConfig,
-    bot_id: int | None = None,
-) -> tuple[bool, TriggerType]:
-    """Determine if the bot should respond to this message.
-
-    Returns:
-        Tuple of (should_respond, trigger_type).
-    """
-    text = (message.text or message.caption or "").strip()
-    text_lower = text.lower()
-
-    # Check for trigger words (word-boundary matching)
-    for trigger in config.trigger_words:
-        pattern = rf"(?:^|\s){re.escape(trigger.lower())}"
-        if re.search(pattern, text_lower):
-            return True, TriggerType.TRIGGER
-
-    # Check if this is a reply to the bot's message
-    if message.reply_to_message:
-        reply_from = message.reply_to_message.from_user
-        reply_from_id = reply_from.id if reply_from else None
-        is_match = bot_id is not None and reply_from_id == bot_id
-        logger.debug(
-            "Reply trigger evaluation",
-            chat_id=message.chat.id,
-            reply_from_id=reply_from_id,
-            bot_id=bot_id,
-            is_match=is_match,
-        )
-        if is_match:
-            return True, TriggerType.REPLY
-
-    # Random response chance
-    if random.random() < config.random_response_chance:
-        return True, TriggerType.RANDOM
-
-    return False, TriggerType.NONE
 
 
 async def _react_to_silence(
@@ -160,16 +118,8 @@ async def handle_text_message(
     user_id = user.id if user else 0
     user_name = (user.first_name if user else None) or "Unknown"
 
-    # Extract reply context
-    reply_author: str | None = None
-    reply_text: str | None = None
-    reply_is_bot = False
-    if message.reply_to_message:
-        rpl = message.reply_to_message
-        if rpl.from_user:
-            reply_author = rpl.from_user.first_name
-            reply_is_bot = rpl.from_user.is_bot
-        reply_text = (rpl.text or rpl.caption or "")[:500]
+    # Extract reply context (full message + manually-highlighted quote, if any)
+    reply_ctx = extract_reply_context(message)
 
     logger.info(
         "Processing message",
@@ -186,9 +136,11 @@ async def handle_text_message(
         message_text=message.text or "",
         trigger_type=trigger_type,
         config=chat_config,
-        reply_author=reply_author,
-        reply_text=reply_text,
-        reply_is_bot=reply_is_bot,
+        reply_author=reply_ctx.author,
+        reply_text=reply_ctx.text,
+        reply_is_bot=reply_ctx.is_bot,
+        reply_quote_text=reply_ctx.quote_text,
+        reply_quote_is_manual=reply_ctx.quote_is_manual,
         message_thread_id=message_thread_id,
     )
 
