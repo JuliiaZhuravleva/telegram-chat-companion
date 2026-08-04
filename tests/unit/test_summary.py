@@ -231,3 +231,138 @@ class TestSummaryMentions:
         # Chronological order (oldest first) assigns user 5 the first token.
         assert prompt.count("@@u0@@") == 2
         assert prompt.count("@@u1@@") == 1
+
+
+class TestSummaryMentionsAdversarial:
+    """Broader adversarial pass on first_name (M-2), extending M-1's base HTML-injection test.
+
+    first_name is fully attacker-controlled (any Telegram user sets their own). The only
+    contract that must hold is: whatever the name contains, it can never (a) escape the
+    ``<a>`` element it's rendered into, (b) forge a *different* ``href`` than the
+    ``tg://user?id={real_user_id}`` the code itself builds from a trusted DB column, and
+    (c) get re-interpreted as a second ``@@uN@@`` token during resolution.
+    """
+
+    @pytest.mark.asyncio
+    async def test_name_cannot_forge_a_fake_mention_anchor(
+        self, summary_service, ai_router, message_repo
+    ):
+        """A name containing a hand-built ``<a href="tg://user?id=<victim>">`` must not
+        survive as real markup — that would let an attacker impersonate a mention to a
+        user_id of their choosing (phishing / spoofed victim link)."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(
+                user_id=7, first_name='</a><a href="tg://user?id=999">Admin', username=None
+            )
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert 'href="tg://user?id=999"' not in result
+        assert result.count("<a href=") == 1
+        assert '<a href="tg://user?id=7">' in result
+
+    @pytest.mark.asyncio
+    async def test_name_cannot_break_out_via_quote_characters(
+        self, summary_service, ai_router, message_repo
+    ):
+        """Quotes in the name must not terminate the href attribute early — even though the
+        name is rendered as element *text*, not as an attribute value, this pins that fact."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=3, first_name='"><script>alert(1)</script>', username=None)
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "<script>" not in result
+        assert result.count("<a href=") == 1
+        assert '<a href="tg://user?id=3">' in result
+
+    @pytest.mark.asyncio
+    async def test_name_scheme_lookalike_does_not_change_the_href(
+        self, summary_service, ai_router, message_repo
+    ):
+        """A name that merely *looks* like a URL/scheme has no effect on the href — it's
+        rendered as inert text, and the href always comes from the trusted user_id column."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=13, first_name="javascript:alert(document.cookie)")
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert '<a href="tg://user?id=13">javascript:alert(document.cookie)</a>' in result
+
+    @pytest.mark.asyncio
+    async def test_rtl_override_characters_do_not_break_anchor_structure(
+        self, summary_service, ai_router, message_repo
+    ):
+        """Bidi control chars (U+202E etc.) are a known *visual*-spoofing vector but must not
+        also break the HTML structure we emit — exactly one well-formed anchor either way."""
+        spoofed_name = "Alice‮⁦>a/<⁩"  # RLO + isolates around fake closing tag
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=21, first_name=spoofed_name, username=None)
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert result.count("<a href=") == 1
+        assert result.count("</a>") == 1
+        assert '<a href="tg://user?id=21">' in result
+
+    @pytest.mark.asyncio
+    async def test_extremely_long_name_does_not_crash_and_stays_escaped(
+        self, summary_service, ai_router, message_repo
+    ):
+        """No length limit is enforced at this layer — pin that a pathologically long,
+        HTML-hostile name is still fully escaped and doesn't raise."""
+        long_name = "<script>" * 5000  # ~40KB, all HTML-hostile
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=55, first_name=long_name, username=None)
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "<script>" not in result
+        assert result.count("<a href=") == 1
+
+    @pytest.mark.asyncio
+    async def test_name_equal_to_another_participants_token_is_not_re_resolved(
+        self, summary_service, ai_router, message_repo
+    ):
+        """A name that is itself literal ``@@u1@@`` text must not be re-substituted into a
+        second anchor — resolution is a single non-recursive pass over the model's output,
+        and the inserted name text must never be re-scanned for tokens."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=1, first_name="@@u1@@", username=None, content="hi"),
+            _make_message_row(user_id=2, first_name="Bob", username=None, content="hey"),
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писали @@u0@@ и @@u1@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        # Exactly two real anchors (one per genuine participant) — the literal "@@u1@@"
+        # text injected via user 0's name must not spawn a third, forged anchor.
+        assert result.count("<a href=") == 2
+        assert '<a href="tg://user?id=1">@@u1@@</a>' in result
+        assert '<a href="tg://user?id=2">Bob</a>' in result
+
+    @pytest.mark.asyncio
+    async def test_name_with_null_and_control_bytes_does_not_crash(
+        self, summary_service, ai_router, message_repo
+    ):
+        """Defensive: a name with embedded control characters must not raise, even though a
+        real NUL byte can't reach us via Postgres in practice (text columns reject it)."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=8, first_name="Al\x00ice\x07", username=None)
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert result.count("<a href=") == 1
+        assert '<a href="tg://user?id=8">' in result
