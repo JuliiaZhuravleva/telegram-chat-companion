@@ -23,6 +23,7 @@ def _make_text_result(text: str = "Summary text") -> TextGenerationResult:
 
 def _make_message_row(**overrides):
     row = {
+        "user_id": 111,
         "username": "alice",
         "first_name": "Alice",
         "content": "Hello there",
@@ -104,3 +105,129 @@ class TestSummaryLogUsage:
         ai_router.generate_text.assert_not_awaited()
         ai_router.log_usage.assert_not_awaited()
         assert result  # returns an explanatory message
+
+
+class TestSummaryMentions:
+    """Placeholder-token mention resolution (M-1).
+
+    The model never sees a real name or id — only an opaque ``@@uN@@`` token
+    built from DB rows. Resolution into a safe ``<a href="tg://user?id=...">``
+    anchor happens after markdown_to_html(), from data the model never touched.
+    """
+
+    @pytest.mark.asyncio
+    async def test_conversation_uses_placeholder_not_real_name(
+        self, summary_service, ai_router, message_repo
+    ):
+        """The prompt sent to the model must carry the token, never the real name."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=111, first_name="Alice", username="alice")
+        ]
+
+        await summary_service.generate(chat_id=-1, language="ru")
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        assert "@@u0@@" in prompt
+        assert "Alice" not in prompt
+        assert "alice" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_valid_token_resolved_to_inline_mention(
+        self, summary_service, ai_router, message_repo
+    ):
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=42, first_name="Alice", username="alice")
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Главный участник: @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert '<a href="tg://user?id=42">Alice</a>' in result
+        assert "@@u0@@" not in result
+
+    @pytest.mark.asyncio
+    async def test_first_name_html_injection_is_escaped_in_mention(
+        self, summary_service, ai_router, message_repo
+    ):
+        """first_name is attacker-controlled — must be html-escaped inside the anchor."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=7, first_name="</a><b>pwn", username=None)
+        ]
+        ai_router.generate_text.return_value = _make_text_result("Писал @@u0@@.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "</a><b>" not in result  # raw tag never reaches the output
+        assert "&lt;/a&gt;&lt;b&gt;pwn" in result
+        assert result.count("<a href=") == 1  # only our own anchor tag is real HTML
+
+    @pytest.mark.asyncio
+    async def test_bot_messages_never_get_a_mention_token(
+        self, summary_service, ai_router, message_repo
+    ):
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=1, is_bot_message=True, first_name="Bot"),
+        ]
+
+        await summary_service.generate(chat_id=-1, language="ru")
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        assert "@@u0@@" not in prompt
+        assert "] Bot:" in prompt
+
+    @pytest.mark.asyncio
+    async def test_unknown_token_degrades_to_generic_label(
+        self, summary_service, ai_router, message_repo
+    ):
+        """A hallucinated index must never leak the placeholder or break markup."""
+        message_repo.get_for_summary.return_value = [_make_message_row(user_id=1)]
+        ai_router.generate_text.return_value = _make_text_result("Спросил @@u7@@ про билд.")
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "@@u7@@" not in result
+        assert "участник" in result
+        assert "<a href=" not in result
+
+    @pytest.mark.asyncio
+    async def test_unknown_token_english_fallback(self, summary_service, ai_router, message_repo):
+        message_repo.get_for_summary.return_value = [_make_message_row(user_id=1)]
+        ai_router.generate_text.return_value = _make_text_result("Asked by @@u7@@ about it.")
+
+        result = await summary_service.generate(chat_id=-1, language="en")
+
+        assert "@@u7@@" not in result
+        assert "participant" in result
+
+    @pytest.mark.asyncio
+    async def test_anonymous_message_no_user_id_gets_plain_name_not_token(
+        self, summary_service, ai_router, message_repo
+    ):
+        """Messages with no user_id (anonymous admin / channel post) can't be mentioned."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=None, first_name="Admin")
+        ]
+
+        await summary_service.generate(chat_id=-1, language="ru")
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        assert "@@u0@@" not in prompt
+        assert "] Admin:" in prompt
+
+    @pytest.mark.asyncio
+    async def test_same_user_multiple_messages_reuses_same_token(
+        self, summary_service, ai_router, message_repo
+    ):
+        """rows arrive newest-first (matches get_for_summary's ORDER BY ... DESC)."""
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=9, content="third"),  # newest
+            _make_message_row(user_id=5, content="second"),
+            _make_message_row(user_id=5, content="first"),  # oldest
+        ]
+
+        await summary_service.generate(chat_id=-1, language="ru")
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        # Chronological order (oldest first) assigns user 5 the first token.
+        assert prompt.count("@@u0@@") == 2
+        assert prompt.count("@@u1@@") == 1
