@@ -418,36 +418,43 @@ class TestSummaryMentionTokenAndCodeInteraction:
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(
-        reason=(
-            "KNOWN GAP, live-observed 2026-08-04: gpt-5-nano (default fallback "
-            "model, forced temperature=1.0) sometimes echoes the requested "
-            "'@@u0@@' token as a malformed single-@ '@u0' variant instead. "
-            "_MENTION_TOKEN_RE only matches the double-@ form, so this variant "
-            "is neither resolved into a mention NOR caught by the "
-            "'hallucinated index -> generic label' fallback -- it leaks the raw "
-            "'@u0'-looking text straight into the delivered summary. Not a "
-            "security hole (model output, not attacker-controlled first_name), "
-            "but a real markup-quality defect on the cheap tier that E-2 was "
-            "scoped to check via live run. Tracked with strict xfail so a fix "
-            "(e.g. a tolerant token regex, or a stricter prompt/regeneration "
-            "guard) must remove this marker rather than silently leave it stale."
-        ),
-        strict=True,
-    )
     async def test_single_at_token_variant_from_live_gpt5_nano_does_not_leak(
         self, summary_service, ai_router, message_repo
     ):
+        """Live-observed (E-2, 2026-08-04, gpt-5-nano, ru): told to reuse
+        "@@u0@@" verbatim, the model wrote "@u0". The loose pattern repairs it
+        into a real mention instead of leaking the raw token as visible text.
+        """
         message_repo.get_for_summary.return_value = [
             _make_message_row(user_id=42, first_name="Alice", username="alice")
         ]
-        # Exact shape observed live (E-2, 2026-08-04, gpt-5-nano, ru): the model
-        # was told to reuse "@@u0@@" verbatim and instead wrote "@u0".
         ai_router.generate_text.return_value = _make_text_result("Автор: @u0.")
 
         result = await summary_service.generate(chat_id=-1, language="ru")
 
         assert "@u0" not in result
+        assert '<a href="tg://user?id=42">Alice</a>' in result
+
+    @pytest.mark.asyncio
+    async def test_loose_token_with_unknown_index_is_left_untouched(
+        self, summary_service, ai_router, message_repo
+    ):
+        """The repair must not fire on prose that merely looks like a token —
+        an index nobody owns is far likelier to be ordinary text, so it is left
+        exactly as written rather than replaced with the generic fallback.
+        """
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=42, first_name="Alice", username="alice")
+        ]
+        ai_router.generate_text.return_value = _make_text_result(
+            "Обсуждали ветку @u77 и адрес bug@u3.example."
+        )
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "@u77" in result
+        assert "bug@u3.example" in result
+        assert "участник" not in result
 
     @pytest.mark.asyncio
     async def test_backtick_wrapped_token_resolves_inside_code_tag(
@@ -461,13 +468,12 @@ class TestSummaryMentionTokenAndCodeInteraction:
         producing ``<code><a href="...">Name</a></code>`` -- an <a> nested
         inside a <code> element.
 
-        This pins CURRENT behavior (it does not assert whether this is
-        correct) -- whether Telegram's HTML parser accepts an anchor nested
-        inside <code>, or rejects the whole sendMessage call with a "can't
-        parse entities" error, is NOT verified here (would require an actual
-        Bot API call / live Telegram smoke test, out of this item's budget).
-        Flagged in the E-2 verdict as a follow-up for backend-dev/architect to
-        verify against a real sendMessage call before relying on it.
+        The E-2 follow-up has since been resolved against a real sendMessage
+        (2026-08-04): Telegram ACCEPTS that markup with HTTP 200 but returns the
+        message carrying only the `code` entity -- the text_mention is silently
+        dropped, so the mention renders as dead monospace text. The wrapper is
+        therefore removed when it holds nothing but the token, keeping the
+        mention clickable.
         """
         message_repo.get_for_summary.return_value = [
             _make_message_row(user_id=1, first_name="Alice", username="alice")
@@ -476,4 +482,48 @@ class TestSummaryMentionTokenAndCodeInteraction:
 
         result = await summary_service.generate(chat_id=-1, language="ru")
 
-        assert '<code><a href="tg://user?id=1">Alice</a></code>' in result
+        assert '<a href="tg://user?id=1">Alice</a>' in result
+        assert "<code>" not in result
+
+    @pytest.mark.asyncio
+    async def test_token_inside_a_larger_code_block_degrades_to_plain_name(
+        self, summary_service, ai_router, message_repo
+    ):
+        """A token surrounded by other content inside a fenced block cannot be
+        unwrapped without mangling the block, and Telegram discards an anchor
+        placed there. It resolves to the bare (escaped) name instead, so we
+        never ship markup that is known to be thrown away.
+        """
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=1, first_name="Alice", username="alice")
+        ]
+        ai_router.generate_text.return_value = _make_text_result(
+            "Итог:\n```\n@@u0@@ согласился\n```"
+        )
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "<pre>" in result
+        assert "Alice согласился" in result
+        assert "<a href=" not in result
+        assert "@@u0@@" not in result
+
+    @pytest.mark.asyncio
+    async def test_attacker_name_stays_escaped_when_it_lands_inside_code(
+        self, summary_service, ai_router, message_repo
+    ):
+        """The plain-name branch is a second insertion point for an
+        attacker-controlled first_name, so it must carry the same escaping as
+        the anchor branch.
+        """
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(user_id=1, first_name="</code><b>pwn", username=None)
+        ]
+        ai_router.generate_text.return_value = _make_text_result(
+            "Итог:\n```\n@@u0@@ согласился\n```"
+        )
+
+        result = await summary_service.generate(chat_id=-1, language="ru")
+
+        assert "</code><b>pwn" not in result
+        assert "&lt;/code&gt;&lt;b&gt;pwn" in result

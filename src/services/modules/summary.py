@@ -19,6 +19,20 @@ logger = structlog.get_logger(__name__)
 # Opaque per-message-author placeholder the model is instructed to echo back
 # instead of a real name (see _resolve_mentions()).
 _MENTION_TOKEN_RE = re.compile(r"@@u(\d+)@@")
+# gpt-5-nano echoes that token as a single-@ "@u0" often enough to matter (live
+# run, E-2 2026-08-04). Repaired only when the index is a real participant, so
+# ordinary prose that happens to read like "@u0" is left alone rather than
+# silently turned into a mention.
+_LOOSE_MENTION_TOKEN_RE = re.compile(r"(?<![\w@])@u(\d+)(?![\w@])")
+# Telegram DROPS nested entities inside code/pre: the Bot API states that bold,
+# italic, underline, strikethrough and spoiler entities "can contain and can be
+# part of any other entities, except pre and code". Confirmed against a real
+# sendMessage (2026-08-04): `<code><a href="tg://user?id=…">Name</a></code>` is
+# accepted with HTTP 200 but comes back carrying only the `code` entity — the
+# text_mention is gone, so the name renders as dead monospace text with no
+# error anywhere. An anchor must therefore never be emitted inside code/pre.
+_CODE_WRAPPED_TOKEN_RE = re.compile(r"<(code|pre)>(@@u\d+@@)</\1>")
+_CODE_REGION_RE = re.compile(r"<(code|pre)>.*?</\1>", re.DOTALL)
 _UNKNOWN_MENTION_FALLBACK = {"ru": "участник", "en": "participant"}
 
 
@@ -39,17 +53,54 @@ def _resolve_mentions(
     An index the model hallucinated (it cannot invent a *valid* one, since
     tokens are opaque) degrades to a generic label rather than leaking the
     internal placeholder syntax or emitting partial markup.
+
+    Two model quirks, both observed on the cheap default tier during E-2's live
+    run, are repaired here rather than left to leak:
+
+    * A token wrapped in backticks arrives as ``<code>@@uN@@</code>``. When the
+      element holds nothing else, the code styling is model noise, so the
+      wrapper is dropped and the mention stays clickable.
+    * A token *inside* a larger code block cannot be unwrapped without mangling
+      the block, and an anchor there is silently discarded by Telegram (see
+      ``_CODE_REGION_RE``). It resolves to the plain name instead — same
+      rendering, minus markup that is known to be thrown away.
     """
     fallback = _UNKNOWN_MENTION_FALLBACK.get(language, _UNKNOWN_MENTION_FALLBACK["en"])
 
-    def _replace(match: re.Match[str]) -> str:
-        entry = participants.get(int(match.group(1)))
+    def _resolve(idx: str, *, linked: bool) -> str | None:
+        entry = participants.get(int(idx))
         if entry is None:
-            return fallback
+            return None
         user_id, escaped_name = entry
+        if not linked:
+            return escaped_name
         return f'<a href="tg://user?id={user_id}">{escaped_name}</a>'
 
-    return _MENTION_TOKEN_RE.sub(_replace, text)
+    def _resolve_region(chunk: str, *, linked: bool) -> str:
+        def _strict(match: re.Match[str]) -> str:
+            # A hallucinated index still must not leak the placeholder syntax.
+            return _resolve(match.group(1), linked=linked) or fallback
+
+        def _loose(match: re.Match[str]) -> str:
+            # Unknown index: this is far likelier to be ordinary text than a
+            # mangled token, so leave it exactly as written.
+            return _resolve(match.group(1), linked=linked) or match.group(0)
+
+        # Strict first: it consumes every "@@uN@@" before the loose pattern
+        # could see the inner "@uN" of one.
+        chunk = _MENTION_TOKEN_RE.sub(_strict, chunk)
+        return _LOOSE_MENTION_TOKEN_RE.sub(_loose, chunk)
+
+    text = _CODE_WRAPPED_TOKEN_RE.sub(r"\2", text)
+
+    out: list[str] = []
+    pos = 0
+    for region in _CODE_REGION_RE.finditer(text):
+        out.append(_resolve_region(text[pos : region.start()], linked=True))
+        out.append(_resolve_region(region.group(0), linked=False))
+        pos = region.end()
+    out.append(_resolve_region(text[pos:], linked=True))
+    return "".join(out)
 
 
 class SummaryService:
