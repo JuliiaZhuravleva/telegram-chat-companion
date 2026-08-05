@@ -111,6 +111,12 @@ maintenance:
   # does not reuse chat_messages_days or response_log_days.
   reactions_days: 30
 
+  # Observability logs (migration 022): decision_log records respond/silence
+  # decisions, retrieval_log records what RAG/KB returned per turn. Same
+  # window as response_log — operational analytics, not history.
+  decision_log_days: 90
+  retrieval_log_days: 90
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:

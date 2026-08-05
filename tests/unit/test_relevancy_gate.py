@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -399,3 +400,86 @@ class TestRelevancyGateSuggestedEmoji:
         assert decision.tier == "fast_rules"
         assert decision.suggested_emoji is None
         ai.generate_text.assert_not_called()
+
+
+class TestRelevancyGateDecisionPersistence:
+    """Decisions must land in decision_log (migration 022) — stdout dies with
+    the container on every deploy, so the DB row is the durable record."""
+
+    @pytest.mark.asyncio
+    async def test_tier1_reject_persists_silent_decision(self) -> None:
+        observability = AsyncMock()
+        gate = RelevancyGate(
+            ai_router=_make_ai_router(),
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+            observability_repo=observability,
+        )
+        decision = await gate.evaluate(
+            chat_id=-100,
+            message_text="ok",
+            config=_make_config(),
+            message_id=555,
+            user_id=42,
+        )
+        assert decision.should_respond is False
+
+        # the write is fire-and-forget — let the scheduled task run
+        await asyncio.sleep(0)
+
+        observability.log_decision.assert_awaited_once()
+        call = observability.log_decision.await_args
+        assert call.args == (-100,)
+        assert call.kwargs["stage"] == "relevancy_gate"
+        assert call.kwargs["decision"] == "silent"
+        assert call.kwargs["tier"] == "fast_rules"
+        assert call.kwargs["message_id"] == 555
+        assert call.kwargs["user_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_tier3_yes_persists_respond_decision(self) -> None:
+        observability = AsyncMock()
+        gate = RelevancyGate(
+            ai_router=_make_ai_router("YES"),
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+            observability_repo=observability,
+        )
+        decision = await gate.evaluate(
+            chat_id=-100,
+            message_text="Кто знает хороший рецепт пасты?",
+            config=_make_config(),
+        )
+        assert decision.should_respond is True
+
+        await asyncio.sleep(0)
+
+        observability.log_decision.assert_awaited_once()
+        call = observability.log_decision.await_args
+        assert call.kwargs["decision"] == "respond"
+        assert call.kwargs["tier"] == "llm_judge"
+
+    @pytest.mark.asyncio
+    async def test_persistence_failure_does_not_break_the_gate(self) -> None:
+        observability = AsyncMock()
+        observability.log_decision = AsyncMock(side_effect=RuntimeError("db down"))
+        gate = RelevancyGate(
+            ai_router=_make_ai_router(),
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+            observability_repo=observability,
+        )
+        decision = await gate.evaluate(chat_id=-100, message_text="ok", config=_make_config())
+        assert decision.tier == "fast_rules"
+        # scheduled task must swallow the failure, not surface it anywhere
+        await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_no_observability_repo_is_a_noop(self) -> None:
+        gate = RelevancyGate(
+            ai_router=_make_ai_router(),
+            message_repo=_make_message_repo(),
+            response_log_repo=_make_response_log(),
+        )
+        decision = await gate.evaluate(chat_id=-100, message_text="ok", config=_make_config())
+        assert decision.should_respond is False

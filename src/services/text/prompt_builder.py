@@ -364,12 +364,28 @@ def _sticker_section() -> str:
     )
 
 
+def _memory_date(mem: dict[str, Any]) -> str | None:
+    """ISO date of a memory row, if it carries one."""
+    created = mem.get("created_at")
+    if created is None:
+        return None
+    if hasattr(created, "date"):
+        return created.date().isoformat()  # type: ignore[no-any-return]
+    return str(created)[:10]
+
+
 def _rag_section(memories: list[dict[str, Any]]) -> str:
-    lines = ["Relevant context from memory:"]
+    # The date is load-bearing (TD-016): retrieval has no recency ranking, so
+    # a months-old memory can top the list on wording alone. Without its date
+    # the model cannot qualify "when" and confabulates recency instead.
+    lines = ["Relevant context from memory (each item dated — respect the dates):"]
     for mem in memories:
         content = sanitize_prompt_content(mem.get("content", ""))
         similarity = mem.get("similarity")
-        if similarity is not None:
+        date_str = _memory_date(mem)
+        if similarity is not None and date_str is not None:
+            lines.append(f"- ({similarity:.0%}, {date_str}) {content}")
+        elif similarity is not None:
             lines.append(f"- ({similarity:.0%}) {content}")
         else:
             lines.append(f"- {content}")

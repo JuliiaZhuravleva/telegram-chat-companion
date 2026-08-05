@@ -26,10 +26,24 @@
 # orphan the running stack while appearing to work.
 name: companion
 
+# Bounded, durable-ish container logs. Docker's default json-file driver here
+# had NO size limit and, worse, each release recreates the containers, so the
+# previous container's stdout died with it — silence/suppression log lines
+# were unrecoverable after every deploy. This keeps ~50MB of recent stdout per
+# service across the container's lifetime. (The durable record of decisions
+# and retrievals is the DB — decision_log/retrieval_log, migration 022; this
+# block is for everything else stdout carries.)
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    logging: *default-logging
 
     environment:
       - POSTGRES_USER=${POSTGRES_USER:?Set POSTGRES_USER in the env map}
@@ -67,6 +81,7 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    logging: *default-logging
 
     depends_on:
       postgres:
@@ -121,6 +136,7 @@ services:
       context: .
       dockerfile: docker/backup/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
 
     depends_on:
       postgres:

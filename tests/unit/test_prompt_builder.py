@@ -208,6 +208,28 @@ class TestBuildSystemPrompt:
         assert "User likes Python" in result
         assert "85%" in result
 
+    def test_rag_memory_date_rendered(self):
+        """TD-016 cheap fix: the model can only qualify recency if it sees the
+        memory's date — `- (81%, 2026-02-19) …`, not just the similarity."""
+        from datetime import UTC, datetime
+
+        ctx = PromptContext(
+            rag_memories=[
+                {
+                    "content": "Q: что нового?\nA: собираемся в поход",
+                    "similarity": 0.81,
+                    "created_at": datetime(2026, 2, 19, 12, 30, tzinfo=UTC),
+                }
+            ]
+        )
+        result = build_system_prompt(ctx)
+        assert "(81%, 2026-02-19)" in result
+
+    def test_rag_memory_without_date_keeps_similarity_only_format(self):
+        ctx = PromptContext(rag_memories=[{"content": "no date here", "similarity": 0.9}])
+        result = build_system_prompt(ctx)
+        assert "(90%) no date here" in result
+
     def test_kb_facts_included(self):
         ctx = PromptContext(
             kb_facts=[{"fact_text": "мероприятие: дата 2026-08-01", "salience": 0.9}]
