@@ -56,3 +56,10 @@ class ChatConfig:
 
     # Knowledge Base (opt-in per chat, ADR-0003)
     kb_enabled: bool = False
+
+    # Reactions (opt-in per chat, ADR-0004). reactions_enabled is the master
+    # module toggle (gates everything, including R-5's bot-initiated
+    # reactions); reactions_history_enabled gates only the message_reactions
+    # INSERT, so an owner can keep the feature without behavioral logging.
+    reactions_enabled: bool = False
+    reactions_history_enabled: bool = True

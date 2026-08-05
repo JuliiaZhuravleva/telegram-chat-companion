@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T08:19:57Z",
+  "role": "evaluator",
+  "item_id": "M-3",
+  "verdict": "PASS",
+  "evidence": "Read ADR-0005 in full and cross-checked every cited file:line claim (summary.py:21-52,111,162-163; formatter.py:27-28; responder.py:88-96,98-115; pipeline.py:236-241,246; message.py:271-278) against actual source — all accurate. ADR directly answers the item's question (why mention-resolution order is reverse of STICKER marker), follows existing ADR-0001..0004 numbering/format, and git status confirms only docs/** was touched (no src/ changes for a docs-only P2 item).",
+  "regression_risk": "low",
+  "notes": ""
+}

@@ -1,9 +1,28 @@
+# Dev stack. Pinned so the project name does not follow the directory: a plain
+# `docker compose up` from a git worktree would otherwise start a SECOND project
+# with its own empty database volume, and two repos that both keep a compose
+# file in a same-named folder would collapse into one project, where `up -d` in
+# either deletes the other's containers.
+#
+# This is the local name already in use — pinning it changes nothing today.
+# Production uses `companion`; see docker-compose.prod.yml.
+name: telegram-chat-companion
+
+# Bounded container logs. Without this Docker's json-file driver grows without
+# limit; with it, ~50MB of recent stdout survives per service for debugging.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   # PostgreSQL with pgvector
   postgres:
     image: pgvector/pgvector:pg16
     container_name: companion-postgres
     restart: unless-stopped
+    logging: *default-logging
 
     environment:
       - POSTGRES_USER=${POSTGRES_USER:-bot_user}
@@ -31,6 +50,7 @@ services:
     build: .
     container_name: companion-bot
     restart: unless-stopped
+    logging: *default-logging
 
     depends_on:
       postgres:
@@ -63,6 +83,7 @@ services:
       context: .
       dockerfile: docker/backup/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
 
     depends_on:
       postgres:

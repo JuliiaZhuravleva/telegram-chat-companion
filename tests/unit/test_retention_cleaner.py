@@ -56,7 +56,17 @@ class TestWindows:
         assert windows["chat_messages"] == timedelta(days=365)
         assert windows["response_log"] == timedelta(days=90)
         assert windows["abuse_blocked_log"] == timedelta(days=30)
+        assert windows["message_reactions"] == timedelta(days=30)
+        assert windows["decision_log"] == timedelta(days=90)
+        assert windows["retrieval_log"] == timedelta(days=90)
         assert "unauthorized_attempts" not in windows
+
+    def test_message_reactions_window_can_be_disabled(self) -> None:
+        """message_reactions is a short, separate window (ADR-0004) -- must
+        still be independently disableable like every other retention table."""
+        windows = _make_cleaner(reactions_days=None)._windows()
+        assert "message_reactions" not in windows
+        assert "chat_messages" in windows
 
     def test_none_window_disables_that_table(self) -> None:
         """Operators must be able to opt out of deleting a specific table."""
@@ -71,6 +81,9 @@ class TestWindows:
             response_log_days=None,
             unauthorized_attempts_days=None,
             abuse_blocked_log_days=None,
+            reactions_days=None,
+            decision_log_days=None,
+            retrieval_log_days=None,
         )._windows()
         assert windows == {}
 

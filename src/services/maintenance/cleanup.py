@@ -103,6 +103,19 @@ class RetentionCleaner:
                 if config.abuse_blocked_log_days is not None
                 else None
             ),
+            "message_reactions": (
+                timedelta(days=config.reactions_days) if config.reactions_days is not None else None
+            ),
+            "decision_log": (
+                timedelta(days=config.decision_log_days)
+                if config.decision_log_days is not None
+                else None
+            ),
+            "retrieval_log": (
+                timedelta(days=config.retrieval_log_days)
+                if config.retrieval_log_days is not None
+                else None
+            ),
         }
         return {table: window for table, window in raw.items() if window is not None}
 

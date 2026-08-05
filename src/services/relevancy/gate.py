@@ -17,12 +17,14 @@ from decimal import Decimal
 import structlog
 
 from src.database.repositories.messages import MessageRepository
+from src.database.repositories.observability import ObservabilityRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.models.chat_config import ChatConfig
 from src.services.ai.router import AIRouter
 from src.services.relevancy.engagement import compute_engagement
 from src.services.relevancy.fast_rules import check_fast_rules
 from src.services.relevancy.llm_judge import llm_judge
+from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
 
@@ -35,6 +37,10 @@ class GateDecision:
     tier: str  # "fast_rules" | "engagement" | "llm_judge" | "disabled"
     reason: str
     cost_usd: Decimal = Decimal("0")
+    # Tier-3 reaction piggyback (R-5, ADR-0004 Decision 4): the emoji
+    # `llm_judge` suggests when it says NO, at zero extra token cost. Only
+    # ever set when tier == "llm_judge"; None on every other tier.
+    suggested_emoji: str | None = None
 
 
 class RelevancyGate:
@@ -45,10 +51,17 @@ class RelevancyGate:
         ai_router: AIRouter,
         message_repo: MessageRepository,
         response_log_repo: ResponseLogRepository,
+        observability_repo: ObservabilityRepository | None = None,
     ) -> None:
         self._ai = ai_router
         self._messages = message_repo
         self._response_log = response_log_repo
+        self._observability = observability_repo
+        if observability_repo is None:
+            # DI always wires the repo; absence means a hand-built instance.
+            # Without this line, "nobody is recording decisions" is
+            # indistinguishable from "no decisions happened".
+            logger.debug("RelevancyGate: decision persistence disabled (no repository)")
 
     async def evaluate(
         self,
@@ -56,6 +69,8 @@ class RelevancyGate:
         chat_id: int,
         message_text: str,
         config: ChatConfig,
+        message_id: int | None = None,
+        user_id: int | None = None,
     ) -> GateDecision:
         """Run three-tier relevancy check.
 
@@ -68,14 +83,14 @@ class RelevancyGate:
         fast = check_fast_rules(message_text)
         if not fast.should_pass:
             decision = GateDecision(False, "fast_rules", fast.reason)
-            self._log_decision(chat_id, decision)
+            self._log_decision(chat_id, decision, message_id=message_id, user_id=user_id)
             return decision
 
         # --- Tier 2: Engagement signals (1 SQL query) ---
         engagement = await compute_engagement(chat_id, self._messages)
         if not engagement.should_pass:
             decision = GateDecision(False, "engagement", engagement.reason)
-            self._log_decision(chat_id, decision)
+            self._log_decision(chat_id, decision, message_id=message_id, user_id=user_id)
             return decision
 
         # --- Tier 3: LLM judge (cheapest model) ---
@@ -83,13 +98,19 @@ class RelevancyGate:
         # so the LLM sees the conversation as it unfolded (oldest → newest).
         recent = await self._messages.get_recent(chat_id, limit=5)
         history = [dict(r) for r in reversed(recent)]
-        judge = await llm_judge(message_text, history, self._ai)
+        # Ask for the R-5 emoji suggestion only where it can be used: the
+        # instruction plus the 73-emoji list are otherwise dead prompt weight in
+        # every tier-3 check, and reactions are opt-in per chat (default off).
+        judge = await llm_judge(
+            message_text, history, self._ai, want_emoji=config.reactions_enabled
+        )
 
         decision = GateDecision(
             should_respond=judge.should_respond,
             tier="llm_judge",
             reason=judge.reasoning,
             cost_usd=judge.cost_usd,
+            suggested_emoji=judge.suggested_emoji,
         )
 
         # Log LLM cost to response_log for cost tracking
@@ -103,10 +124,17 @@ class RelevancyGate:
                 cost_usd=judge.cost_usd,
             )
 
-        self._log_decision(chat_id, decision)
+        self._log_decision(chat_id, decision, message_id=message_id, user_id=user_id)
         return decision
 
-    def _log_decision(self, chat_id: int, decision: GateDecision) -> None:
+    def _log_decision(
+        self,
+        chat_id: int,
+        decision: GateDecision,
+        *,
+        message_id: int | None = None,
+        user_id: int | None = None,
+    ) -> None:
         logger.info(
             "relevancy_gate_decision",
             chat_id=chat_id,
@@ -114,6 +142,42 @@ class RelevancyGate:
             tier=decision.tier,
             reason=decision.reason,
         )
+        # Durable copy (migration 022): stdout dies with the container on every
+        # deploy, so the DB row is the record. Fire-and-forget — a persistence
+        # failure must never delay or break the gate itself.
+        if self._observability is not None:
+            fire_and_forget(
+                self._safe_persist_decision(
+                    chat_id, decision, message_id=message_id, user_id=user_id
+                )
+            )
+
+    async def _safe_persist_decision(
+        self,
+        chat_id: int,
+        decision: GateDecision,
+        *,
+        message_id: int | None = None,
+        user_id: int | None = None,
+    ) -> None:
+        if self._observability is None:
+            return
+        try:
+            await self._observability.log_decision(
+                chat_id,
+                stage="relevancy_gate",
+                decision="respond" if decision.should_respond else "silent",
+                tier=decision.tier,
+                reason=decision.reason,
+                message_id=message_id,
+                user_id=user_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist gate decision",
+                chat_id=chat_id,
+                error=str(exc),
+            )
 
     async def _safe_log_usage(
         self,
@@ -135,5 +199,13 @@ class RelevancyGate:
                 tokens_output=tokens_output,
                 cost_usd=cost_usd,
             )
-        except Exception:
-            logger.warning("Failed to log relevancy check usage", chat_id=chat_id)
+        except Exception as exc:
+            # Silently losing these rows makes SpendLimitService under-report
+            # tier-3 spend indefinitely, so the cause has to be recoverable
+            # from the log alone.
+            logger.warning(
+                "Failed to log relevancy check usage",
+                chat_id=chat_id,
+                error=str(exc),
+                exc_info=True,
+            )

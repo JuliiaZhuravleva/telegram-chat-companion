@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T18:02:23Z",
+  "role": "evaluator",
+  "item_id": "QA-1",
+  "verdict": "PASS",
+  "evidence": "Reproduced all claimed suites: 11 real-Postgres integration tests for migration 018 (table shape/indexes/no-FK/real INSERT via ReactionRepository) all pass; allowed_updates auto-registration test passes with a negative control; alembic revision-list fix verified correct (016/017/018 are real migrations, previously missing) and the per-revision online-upgrade test passes; ruff clean on touched files; commit 1e3bda6 touches only tests/ and docs/ (no src/ scope creep).",
+  "regression_risk": "low",
+  "notes": "Fixture hygiene: no real Telegram user/chat ids found; the one long numeric literal is a custom_emoji_id (not personal data) so it doesn't violate the item's intent. Live admin-rights probe and ALLOWED_REACTION_EMOJI spot-check are correctly deferred to the manual qa-live-checklist.md since they need a real bot/token, not automatable in CI."
+}

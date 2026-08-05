@@ -38,6 +38,22 @@ def _swap_db(url: str, dbname: str) -> str:
     return f"{base}/{dbname}"
 
 
+def _all_revisions() -> list[str]:
+    """Every revision id on disk, in application order.
+
+    Derived from the filesystem rather than hardcoded: a hand-maintained list
+    silently stops covering new migrations, and this one already went stale once
+    (016/017/018 were missing, so 018 was never walked one revision at a time).
+    A list that cannot go stale is the point of the test.
+    """
+    revisions = sorted(
+        path.name.split("_", 1)[0]
+        for path in (PROJECT_ROOT / "alembic" / "versions").glob("[0-9]*.py")
+    )
+    assert revisions, "no migrations discovered — the glob stopped matching"
+    return revisions
+
+
 def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[str]:
     """Invoke alembic the way the container entrypoint does: online, via subprocess."""
     return subprocess.run(
@@ -112,10 +128,7 @@ class TestOnlineUpgrade:
         """Belt-and-braces companion to the run above: walk the chain one revision
         at a time so a failure names the offending revision instead of just
         'head'."""
-        revisions = [
-            "001", "002", "003", "004", "005", "006", "007",
-            "008", "009", "010", "011", "012", "014", "015",
-        ]  # fmt: skip
+        revisions = _all_revisions()
         for revision in revisions:
             result = _run_alembic(empty_database, "upgrade", revision)
             assert result.returncode == 0, (

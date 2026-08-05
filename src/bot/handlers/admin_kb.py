@@ -36,12 +36,11 @@ from src.bot.keyboards.admin_kb import (
     kb_organizers_keyboard,
 )
 from src.bot.states.admin import AdminStates
-from src.bot.utils import resolve_display_name, safe_edit_text
+from src.bot.utils import check_admin_direct, resolve_display_name, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
-from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -135,14 +134,6 @@ def _extract_username(text: str | None) -> str | None:
 
 def _is_private(callback: CallbackQuery) -> bool:
     return isinstance(callback.message, Message) and callback.message.chat.type == "private"
-
-
-async def _check_admin_direct(bot_config_repo: BotConfigRepository, user_id: int | None) -> bool:
-    """Check bot-admin status directly (mirrors admin_sticker.py's helper)."""
-    if user_id is None:
-        return False
-    admin_ids_raw = await bot_config_repo.get("admin_ids")
-    return user_id in parse_admin_ids(admin_ids_raw)
 
 
 def _parse_organizer_ids(raw: Any) -> list[int]:
@@ -270,7 +261,7 @@ async def handle_kb_picker(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -297,7 +288,7 @@ async def handle_kb_menu(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -325,7 +316,7 @@ async def handle_kb_toggle(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -363,7 +354,7 @@ async def handle_kb_organizers(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -392,7 +383,7 @@ async def handle_kb_organizer_remove(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -427,7 +418,7 @@ async def handle_kb_organizer_add_prompt(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -463,7 +454,7 @@ async def handle_kb_organizer_list(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -499,7 +490,7 @@ async def handle_kb_organizer_pick(
     if not _is_private(callback):
         await callback.answer()
         return
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, callback.from_user.id if callback.from_user else None
     ):
         await callback.answer(_NOT_ADMIN["en"], show_alert=True)
@@ -547,7 +538,7 @@ async def handle_kb_organizer_add_reply(
       already seen post in this chat; distinguishes "never seen this
       username anywhere" from "seen it, just not in this chat".
     """
-    if not await _check_admin_direct(
+    if not await check_admin_direct(
         bot_config_repo, message.from_user.id if message.from_user else None
     ):
         return

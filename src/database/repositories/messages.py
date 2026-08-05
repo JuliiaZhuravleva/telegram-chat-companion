@@ -32,6 +32,8 @@ class MessageRepository:
         sticker_set_name: str | None = None,
         sticker_emoji: str | None = None,
         message_thread_id: int | None = None,
+        quote_text: str | None = None,
+        quote_is_manual: bool | None = None,
     ) -> None:
         """Save a chat message."""
         await self._pool.execute(
@@ -40,8 +42,9 @@ class MessageRepository:
                 chat_id, message_id, user_id, username, first_name,
                 message_type, content, raw_data, reply_to_message_id,
                 is_bot_message, sticker_file_id, sticker_file_unique_id,
-                sticker_set_name, sticker_emoji, message_thread_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
+                sticker_set_name, sticker_emoji, message_thread_id,
+                quote_text, quote_is_manual
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (chat_id, message_id) DO UPDATE
             SET content = EXCLUDED.content,
                 edited_at = NOW(),
@@ -65,6 +68,8 @@ class MessageRepository:
             sticker_set_name,
             sticker_emoji,
             message_thread_id,
+            quote_text,
+            quote_is_manual,
         )
 
     async def get_recent(
@@ -104,6 +109,13 @@ class MessageRepository:
 
         When message_thread_id is None (non-forum):
         - Falls back to standard get_recent() behavior with NULL topic_scope
+
+        Each row also carries `quote_text` / `quote_is_manual` (migration 021):
+        the manually-highlighted reply quote persisted for that message, if
+        any. Consumers must gate on `quote_is_manual is True` before treating
+        `quote_text` as the user's deliberate focus -- same rule Q-1 applies
+        on the live (non-historical) path; a server-attached quote carries no
+        such intent.
         """
         if message_thread_id is None:
             # Non-forum: standard query with NULL topic_scope
@@ -111,6 +123,7 @@ class MessageRepository:
                 """
                 SELECT id, chat_id, message_id, user_id, username, first_name,
                        message_type, content, is_bot_message, created_at,
+                       quote_text, quote_is_manual,
                        NULL::text AS topic_scope
                 FROM chat_messages
                 WHERE chat_id = $1
@@ -127,6 +140,7 @@ class MessageRepository:
             """
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    quote_text, quote_is_manual,
                     'current' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id = $2
@@ -134,6 +148,7 @@ class MessageRepository:
             UNION ALL
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    quote_text, quote_is_manual,
                     'other' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id IS DISTINCT FROM $2

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-04T08:23:27Z",
+  "role": "evaluator",
+  "item_id": "E-1",
+  "verdict": "PASS",
+  "evidence": "Commit 869b9c5 adds only the ru+en system-prompt emoji instruction to SummaryService.generate() (free placement, no fixed skeleton, matches owner decision [E-1]=B), scope correctly excludes formatter.py interaction (deferred to E-2 per note); ran pytest tests/unit/test_summary.py -q locally = 22 passed (matches claim), 3 new TestSummaryEmojiInstruction tests verified individually, ruff check clean on touched files.",
+  "regression_risk": "low",
+  "notes": ""
+}

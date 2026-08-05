@@ -142,6 +142,32 @@ async def test_voice_handler_disabled():
 
 
 @pytest.mark.asyncio
+async def test_voice_handler_transcription_returns_none():
+    from src.bot.handlers.media import handle_voice_message
+
+    message = _make_message()
+    voice = MagicMock()
+    voice.file_id = "voice-file-id"
+    message.voice = voice
+    message.video_note = None
+
+    chat_config = _make_chat_config()
+    bot = _make_bot()
+
+    voice_service = MagicMock()
+    voice_service.transcribe = AsyncMock(return_value=None)
+
+    with patch(
+        "src.bot.handlers.media.download_telegram_file",
+        new_callable=AsyncMock,
+        return_value=b"fake-audio",
+    ):
+        await handle_voice_message(message, chat_config, voice_service, bot)
+
+    message.reply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_voice_handler_forwards_message_thread_id_to_typing_indicator():
     """Regression guard for I-9 (forum topic routing) after the I-6 refactor
     to the shared typing_indicator helper.
@@ -180,32 +206,6 @@ async def test_voice_handler_forwards_message_thread_id_to_typing_indicator():
         await handle_voice_message(message, chat_config, voice_service, bot, message_thread_id=777)
 
     mock_indicator.assert_called_once_with(bot, message.chat.id, 777)
-
-
-@pytest.mark.asyncio
-async def test_voice_handler_transcription_returns_none():
-    from src.bot.handlers.media import handle_voice_message
-
-    message = _make_message()
-    voice = MagicMock()
-    voice.file_id = "voice-file-id"
-    message.voice = voice
-    message.video_note = None
-
-    chat_config = _make_chat_config()
-    bot = _make_bot()
-
-    voice_service = MagicMock()
-    voice_service.transcribe = AsyncMock(return_value=None)
-
-    with patch(
-        "src.bot.handlers.media.download_telegram_file",
-        new_callable=AsyncMock,
-        return_value=b"fake-audio",
-    ):
-        await handle_voice_message(message, chat_config, voice_service, bot)
-
-    message.reply.assert_not_awaited()
 
 
 # ── Photo handler tests ──────────────────────────────────────────────
@@ -299,6 +299,64 @@ async def test_photo_handler_analysis_fails():
         )
 
     message_repo.save.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_photo_handler_with_caption_forwards_reply_quote_to_pipeline():
+    """Q-1: handle_photo_message's caption branch must use the shared
+    extract_reply_context() helper and forward reply_quote_text /
+    reply_quote_is_manual to pipeline.process() -- previously this branch
+    duplicated the reply-extraction block inline and had no quote support."""
+    from src.bot.handlers.media import handle_photo_message
+
+    reply_to = MagicMock()
+    reply_to.text = "full original message with detail"
+    reply_to.caption = None
+    reply_user = MagicMock()
+    reply_user.first_name = "Bob"
+    reply_user.is_bot = False
+    reply_to.from_user = reply_user
+
+    quote = MagicMock()
+    quote.text = "detail"
+    quote.is_manual = True
+
+    message = _make_message(caption="check this out bot")
+    message.reply_to_message = reply_to
+    message.quote = quote
+    photo = MagicMock()
+    photo.file_id = "photo-file-id"
+    message.photo = [photo]
+
+    chat_config = _make_chat_config(trigger_words=["bot"], random_response_chance=0.0)
+    bot = _make_bot()
+
+    image_service = MagicMock()
+    image_service.analyze = AsyncMock(return_value="A cat on a table")
+
+    pipeline_result = MagicMock()
+    pipeline_result.should_respond = False  # short-circuit right after the call we're asserting
+    pipeline = MagicMock()
+    pipeline.process = AsyncMock(return_value=pipeline_result)
+
+    message_repo = MagicMock()
+    sticker_responder = MagicMock()
+
+    with patch(
+        "src.bot.handlers.media.download_telegram_file",
+        new_callable=AsyncMock,
+        return_value=b"fake-image",
+    ):
+        await handle_photo_message(
+            message, chat_config, image_service, pipeline, sticker_responder, message_repo, bot
+        )
+
+    pipeline.process.assert_awaited_once()
+    call_kwargs = pipeline.process.call_args.kwargs
+    assert call_kwargs["reply_author"] == "Bob"
+    assert call_kwargs["reply_text"] == "full original message with detail"
+    assert call_kwargs["reply_quote_text"] == "detail"
+    assert call_kwargs["reply_quote_is_manual"] is True
 
 
 # ── Photo handler: typing-indicator wiring (I-3) ───────────────────────

@@ -136,6 +136,18 @@ class MaintenanceSettings(BaseSettings):
 
     abuse_blocked_log_days: int | None = 30
 
+    # Short, separate window (ADR-0004 Decision 3): message_reactions is a
+    # behavioral trail ("who reacted to what"), more sensitive than message
+    # text, so it does NOT reuse chat_messages_days (365, RAG continuity) or
+    # response_log_days (90, cost analytics). Same order as
+    # abuse_blocked_log_days, the other "short, sensitive, recent-signal" table.
+    reactions_days: int | None = 30
+
+    # Observability logs (migration 022): operational analytics, not history —
+    # same window as response_log, whose role they extend.
+    decision_log_days: int | None = 90
+    retrieval_log_days: int | None = 90
+
 
 class Settings(BaseSettings):
     """Main application settings."""
@@ -152,6 +164,15 @@ class Settings(BaseSettings):
 
     # Optional API keys (from environment)
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    # Organization-level Admin key (sk-admin-…), NOT the regular API key above.
+    # Only used for the /v1/organization/* billing endpoints — an admin key is
+    # rejected on /v1/chat/completions, so the two are never interchangeable.
+    openai_admin_api_key: str | None = Field(default=None, alias="OPENAI_ADMIN_API_KEY")
+    # Project the admin key should report on (proj_…). Required alongside the
+    # admin key: the costs endpoint answers organization-wide unless filtered,
+    # and an org-wide figure compared against this bot's own log is not a
+    # reconciliation, just a difference.
+    openai_project_id: str | None = Field(default=None, alias="OPENAI_PROJECT_ID")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     grok_api_key: str | None = Field(default=None, alias="GROK_API_KEY")
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")

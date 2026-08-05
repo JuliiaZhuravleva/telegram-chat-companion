@@ -1,0 +1,17 @@
+{"ts":"2026-08-03T17:12:04Z","event":"execute_plan_start","item":"","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T17:12:05Z","event":"dispatch","item":"ADR-0004","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T17:17:33Z","event":"specialist_verdict","item":"ADR-0004","verdict":"PASS","cost_usd":1.3703133}
+{"ts":"2026-08-03T17:19:56Z","event":"evaluator","item":"ADR-0004","verdict":"PASS","cost_usd":0.8501537999999998}
+{"ts":"2026-08-03T17:19:58Z","event":"dispatch","item":"R-1","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T17:32:04Z","event":"specialist_verdict","item":"R-1","verdict":"PASS","cost_usd":5.992226399999998}
+{"ts":"2026-08-03T17:33:27Z","event":"evaluator","item":"R-1","verdict":"PASS","cost_usd":0.5068443000000001}
+{"ts":"2026-08-03T17:33:28Z","event":"dispatch","item":"R-5","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T17:41:37Z","event":"specialist_verdict","item":"R-5","verdict":"PASS","cost_usd":3.0878235000000003}
+{"ts":"2026-08-03T17:42:45Z","event":"evaluator","item":"R-5","verdict":"PASS","cost_usd":0.39426720000000004}
+{"ts":"2026-08-03T17:42:46Z","event":"dispatch","item":"R-D1","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T17:52:48Z","event":"specialist_verdict","item":"R-D1","verdict":"PASS","cost_usd":4.225625999999999}
+{"ts":"2026-08-03T17:53:59Z","event":"evaluator","item":"R-D1","verdict":"PASS","cost_usd":0.4001505}
+{"ts":"2026-08-03T17:54:00Z","event":"dispatch","item":"QA-1","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T17:59:32Z","event":"specialist_verdict","item":"QA-1","verdict":"PASS","cost_usd":1.997625}
+{"ts":"2026-08-03T18:02:31Z","event":"evaluator","item":"QA-1","verdict":"PASS","cost_usd":0.6120540000000001}
+{"ts":"2026-08-03T18:02:32Z","event":"finalize","item":"","verdict":"partial","cost_usd":0}

@@ -143,3 +143,102 @@ class TestMarkdownToHtml:
         assert "• " in result
         assert "<b>Алиса</b>" in result
         assert "<i>Боря</i>" in result
+
+
+class TestEmojiMarkdownInteraction:
+    """E-2: emoji x markdown_to_html interaction, per the source plan's flagged
+    risk (section B) -- ``- item`` becomes ``• item``, so a model line like
+    ``- 🔥 тема`` becomes ``• 🔥 тема`` (bullet char immediately followed by an
+    emoji "marker"). Verified against real strings, not reasoned about --
+    including live-observed shapes from a real cheap-model run (E-2, gpt-5-nano
+    / gemini-3-flash-preview, 2026-08-04)."""
+
+    # -- Lists: the exact "double marker" case named in the source plan --
+
+    def test_list_item_with_leading_emoji_gets_single_bullet_prefix(self):
+        """The dash->bullet conversion must not duplicate or mangle the emoji:
+        exactly one '• ' prefix, emoji preserved immediately after it."""
+        assert markdown_to_html("- 🔥 тема") == "• 🔥 тема"
+
+    def test_list_item_leading_emoji_english(self):
+        assert markdown_to_html("- 🔥 hot topic") == "• 🔥 hot topic"
+
+    def test_multiple_emoji_list_items_each_get_exactly_one_bullet(self):
+        text = "- 🗣 темы\n- 👥 участники\n- ✅ решения\n- ❓ вопросы"
+        result = markdown_to_html(text)
+        for line in ("🗣 темы", "👥 участники", "✅ решения", "❓ вопросы"):
+            assert f"• {line}" in result
+        # No line ends up with a doubled '• •' or a stray leading '-'.
+        assert "• •" not in result
+        assert "\n- " not in result and not result.startswith("- ")
+
+    def test_emoji_after_bullet_with_bold_content(self):
+        """Realistic AI shape: '- ✅ **Решено**: детали'."""
+        result = markdown_to_html("- ✅ **Решено**: детали")
+        assert result == "• ✅ <b>Решено</b>: детали"
+
+    def test_asterisk_list_marker_with_emoji_not_mistaken_for_bold(self):
+        """A '*' list marker (not '-') followed by emoji must still resolve as
+        a list item, not accidentally get swallowed by the italic/bold regexes."""
+        result = markdown_to_html("* 🔥 тема")
+        assert result == "• 🔥 тема"
+        assert "<i>" not in result
+        assert "<b>" not in result
+
+    # -- Headings: emoji inside a heading survives conversion --
+
+    def test_heading_with_leading_emoji(self):
+        assert markdown_to_html("## 🗣 Обсуждение") == "▎<b>🗣 Обсуждение</b>"
+
+    def test_heading_with_trailing_emoji(self):
+        assert markdown_to_html("## Обсуждение 🗣") == "▎<b>Обсуждение 🗣</b>"
+
+    def test_h1_heading_with_emoji_english(self):
+        assert markdown_to_html("# 🚀 Deploy plan") == "▎<b>🚀 Deploy plan</b>"
+
+    # -- Emoji survive HTML-escaping (they are not '<', '>', '&') --
+
+    def test_emoji_not_altered_by_html_escaping(self):
+        # Deliberately includes a multi-codepoint (ZWJ) emoji alongside a
+        # simple one, to confirm the escaper only touches <, >, & and leaves
+        # every other codepoint (including combining sequences) untouched.
+        text = "Готово ✅ и семья 👨‍👩‍👧 обсуждают & решают > вопрос"
+        result = markdown_to_html(text)
+        assert "✅" in result
+        assert "👨‍👩‍👧" in result
+        assert "&amp;" in result
+        assert "&gt;" in result
+
+    # -- Italic/bold boundary regexes don't misfire next to emoji --
+
+    def test_italic_underscore_adjacent_to_emoji(self):
+        assert markdown_to_html("_🔥 emphasis_") == "<i>🔥 emphasis</i>"
+
+    def test_italic_asterisk_adjacent_to_emoji(self):
+        assert markdown_to_html("*🔥 emphasis*") == "<i>🔥 emphasis</i>"
+
+    def test_bold_adjacent_to_emoji(self):
+        assert markdown_to_html("**🔥 важно**") == "<b>🔥 важно</b>"
+
+    # -- Combined realistic AI output block (mirrors live-observed shape) --
+
+    def test_realistic_multi_block_summary_with_emoji(self):
+        text = (
+            "▎placeholder\n"
+            "## 🗣 Темы\n"
+            "- 🔥 Конфликт по срокам\n"
+            "- ✅ Договорились о дате\n\n"
+            "## 👥 Участники\n"
+            "- **Алиса** — организатор\n"
+            "- *Боря* — исполнитель"
+        )
+        result = markdown_to_html(text)
+        assert "▎<b>🗣 Темы</b>" in result
+        assert "• 🔥 Конфликт по срокам" in result
+        assert "• ✅ Договорились о дате" in result
+        assert "▎<b>👥 Участники</b>" in result
+        assert "• <b>Алиса</b> — организатор" in result
+        assert "• <i>Боря</i> — исполнитель" in result
+        # No raw markdown syntax survives anywhere in the block.
+        assert "\n- " not in result
+        assert "\n## " not in result

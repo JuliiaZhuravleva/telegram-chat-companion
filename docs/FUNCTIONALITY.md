@@ -232,7 +232,15 @@ Intervals are passed as `datetime.timedelta` (not strings) because asyncpg rejec
   gemini-embedding-001: $0.0000 (3x)
 ```
 
-Extra button `🔍 Сверить (OpenAI)` cross-checks internal calculations against the OpenAI billing API (requires a valid `OPENAI_API_KEY`). Useful for verifying cost accounting.
+Extra button `🔍 Сверить (OpenAI)` cross-checks internal calculations against the OpenAI billing API. It needs **two** settings, and reports which one is missing rather than calling the API without them:
+
+- `OPENAI_ADMIN_API_KEY` — an organization **Admin** key. A different key from `OPENAI_API_KEY` and not a substitute for it: `/v1/organization/*` rejects a project key, and an admin key is rejected on `/v1/chat/completions`.
+- `OPENAI_PROJECT_ID` — the project to report on. The costs endpoint answers organization-wide unless filtered, and an org-wide total compared against this bot's own log is not a reconciliation.
+
+Two things to know when reading the delta:
+
+- OpenAI's smallest bucket is a full day (`bucket_width` accepts only `1d`), so the figure it returns covers a longer span than the `1ч` button implies. Our own side is measured over the span the returned buckets actually cover — including zero-spend days, which arrive with an empty `results` list but still widen the window — and that window is printed in the message.
+- The project filter is verified, not trusted. The request also sends `group_by=project_id`, so each row names its project; a foreign project in the response means the filter was ignored, and the check is aborted rather than reporting an org-wide total as a project one. If OpenAI returns no per-project breakdown at all, the message says the scoping is unconfirmed.
 
 ### 3.8 Health
 
