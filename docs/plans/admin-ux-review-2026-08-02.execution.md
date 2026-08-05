@@ -99,8 +99,8 @@ budget:
   consumed_usd: 10.7695
 review_gate:
   why: []
-  approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.admin-ux-review-2026-08-02-wt/docs/plans/admin-ux-review-2026-08-02.execution.md --resume
-  reject_action: /plan-fixes internal/backlog/video-review/admin-ux-review-2026-08-02.md --revise /Users/julia/my-projects/telegram-chat-companion.admin-ux-review-2026-08-02-wt/docs/plans/admin-ux-review-2026-08-02.execution.md
+  approve_action: /execute-plan <projects>/telegram-chat-companion.admin-ux-review-2026-08-02-wt/docs/plans/admin-ux-review-2026-08-02.execution.md --resume
+  reject_action: /plan-fixes internal/backlog/video-review/admin-ux-review-2026-08-02.md --revise <projects>/telegram-chat-companion.admin-ux-review-2026-08-02-wt/docs/plans/admin-ux-review-2026-08-02.execution.md
 safe_to_replay_from: null
 clarifying_questions: []
 human_feedback:

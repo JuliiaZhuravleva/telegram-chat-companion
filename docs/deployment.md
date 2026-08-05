@@ -116,6 +116,20 @@ the copy really landed (table count, current revision, exact row counts of the l
 an empty copy would otherwise "pass" any migration), and runs the real migration there. A failure
 stops the deploy with production untouched.
 
+**"Read-only against production" is a property of the harness, not of the commands.** Read that
+sentence as a claim about code that has to be maintained, because it has already been false once.
+On 2026-08-06 the rehearsal's step for reaching the live database ran a plain `compose up -d` to
+make sure production's database was awake — rendered, necessarily, from the compose file of the
+commit *under test*. That commit had changed a service definition, so compose judged the running
+container out of date and **recreated production's database from a commit that had not passed a
+single gate**. Nothing was lost and no migration ran, but the guarantee this section describes was
+not true for that cycle. It is now enforced by `--no-recreate` on the live stack (the throwaway
+stack keeps plain `up -d`; it *must* be built from the new file).
+
+The general lesson outlives the specific bug: a step is read-only because something makes it so.
+When a command in this pipeline is described as safe against production, look for what enforces
+it before believing the description.
+
 **Neither gate catches runtime behaviour.** A change that passes tests, migrates cleanly and then
 misbehaves against real traffic will deploy. The bot's container healthcheck and the post-deploy
 check will report it; nothing reverts it.

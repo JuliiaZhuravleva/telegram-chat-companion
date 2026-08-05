@@ -120,8 +120,8 @@ budget:
   consumed_usd: 5.1458
 review_gate:
   why: []
-  approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion/docs/plans/sticker-status-ux-2026-06-09.execution.md --resume
-  reject_action: /plan-fixes docs/plans/sticker-status-ux-2026-06-09.md --revise /Users/julia/my-projects/telegram-chat-companion/docs/plans/sticker-status-ux-2026-06-09.execution.md
+  approve_action: /execute-plan <projects>/telegram-chat-companion/docs/plans/sticker-status-ux-2026-06-09.execution.md --resume
+  reject_action: /plan-fixes docs/plans/sticker-status-ux-2026-06-09.md --revise <projects>/telegram-chat-companion/docs/plans/sticker-status-ux-2026-06-09.execution.md
 safe_to_replay_from: null
 clarifying_questions: []
 ---

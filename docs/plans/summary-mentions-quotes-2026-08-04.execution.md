@@ -240,8 +240,8 @@ budget:
   consumed_usd: 25.4895
 review_gate:
   why: []
-  approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.summary-mentions-quotes-2026-08-04-wt/docs/plans/summary-mentions-quotes-2026-08-04.execution.md --resume
-  reject_action: /plan-fixes docs/plans/summary-mentions-quotes-2026-08-04.md --revise /Users/julia/my-projects/telegram-chat-companion.summary-mentions-quotes-2026-08-04-wt/docs/plans/summary-mentions-quotes-2026-08-04.execution.md
+  approve_action: /execute-plan <projects>/telegram-chat-companion.summary-mentions-quotes-2026-08-04-wt/docs/plans/summary-mentions-quotes-2026-08-04.execution.md --resume
+  reject_action: /plan-fixes docs/plans/summary-mentions-quotes-2026-08-04.md --revise <projects>/telegram-chat-companion.summary-mentions-quotes-2026-08-04-wt/docs/plans/summary-mentions-quotes-2026-08-04.execution.md
 safe_to_replay_from: null
 clarifying_questions: []
 human_feedback:

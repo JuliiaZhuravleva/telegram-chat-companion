@@ -235,8 +235,8 @@ budget:
 review_gate:
   why:
   - 'budget cap reached: consumed $17.9684 of $20.0'
-  approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.knowledge-base-research-2026-07-23-wt/docs/plans/knowledge-base-research-2026-07-23.execution.md --resume
-  reject_action: /plan-fixes docs/plans/knowledge-base-research-2026-07-23.md --revise /Users/julia/my-projects/telegram-chat-companion.knowledge-base-research-2026-07-23-wt/docs/plans/knowledge-base-research-2026-07-23.execution.md
+  approve_action: /execute-plan <projects>/telegram-chat-companion.knowledge-base-research-2026-07-23-wt/docs/plans/knowledge-base-research-2026-07-23.execution.md --resume
+  reject_action: /plan-fixes docs/plans/knowledge-base-research-2026-07-23.md --revise <projects>/telegram-chat-companion.knowledge-base-research-2026-07-23-wt/docs/plans/knowledge-base-research-2026-07-23.execution.md
 safe_to_replay_from: null
 clarifying_questions: []
 ---
