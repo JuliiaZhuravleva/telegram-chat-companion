@@ -29,6 +29,16 @@ PR and the production bot.
 Practical consequence: prefer merging when you can watch, and treat "approve" and "deploy" as the
 same act rather than two.
 
+**`main` is protected by a ruleset** (active since 2026-08-04): a pull request is required, the
+four checks below must pass, and force-push and deletion are blocked. That is what makes "the merge
+is the deliberate act" a property of the platform rather than a habit of whoever holds push access
+— worth stating explicitly, because for the first days of this pipeline it was only the habit, and
+every guarantee on this page still begins one step later, at *"a commit appeared on `main`"*.
+
+One consequence to keep in view: the ruleset pins the four check names too, so renaming a CI job is
+a **three**-place change — the workflow, the harness config on the host, and the ruleset's required
+contexts. Rename one of the three and you either stall the deployer or block every merge.
+
 ---
 
 ## The contract this repository must keep
@@ -44,6 +54,25 @@ same act rather than two.
 | `${COMPANION_DATA_DIR}` remains the single parametrized data root | Every persistent bind mount must live under it. The harness refuses to deploy a compose file that bind-mounts a host path outside the project and its data root, and the rehearsal repoints this one variable to give the throwaway database its own disk. |
 | No service asks for host-level privileges | `privileged`, `cap_add`, `devices`, `device_cgroup_rules`, `security_opt`, and `network_mode`/`pid`/`ipc`/`userns_mode` set to `host` each reach past the container without a single bind-mount line, so the deployer rejects a compose that renders any of them — and rejects just as hard when it cannot parse the rendered layout at all, because an unattended deploy is exactly where "someone will read the compose first" stops being true. `cap_drop` is fine; that is hardening. Neither compose file uses a rejected key today. |
 | `alembic upgrade head` stays idempotent | It runs twice on a deploy: once in a one-off container (so a bad migration aborts cleanly instead of crash-looping the bot), then again from the image `CMD`. |
+
+---
+
+## A new setting does not arrive with the merge
+
+The container's environment is rendered on the host from a mapping the harness owns; this
+repository never carries the values. So adding a variable to `config/.env.example` and merging it
+changes nothing in production. A merged feature that depends on a new variable **deploys green and
+stays dark** — reporting its missing setting — until someone adds one line to that mapping on the
+host and re-runs the release.
+
+That is the intended trade (no secrets in the repository), but it makes any new setting a two-part
+change: the code here, and one line the operator applies. Say so in the pull request description —
+the deploy gives no hint, and neither does a green checkmark.
+
+Observed 2026-08-04: PR #17 added the admin panel's cost-verification button, merged, and deployed
+cleanly. The button reported the missing setting until `OPENAI_ADMIN_API_KEY` and
+`OPENAI_PROJECT_ID` were added to the host mapping and the release was re-run. Nothing was broken
+in between — which is the point, and also why it is easy to miss.
 
 ---
 
