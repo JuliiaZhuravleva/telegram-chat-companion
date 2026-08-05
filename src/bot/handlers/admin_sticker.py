@@ -14,14 +14,17 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka import AsyncContainer
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_sticker import (
+    _status_badge,
+    sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
-    sticker_menu_keyboard,
+    sticker_reanalyze_retry_keyboard,
     sticker_set_detail_keyboard,
     sticker_sets_keyboard,
 )
@@ -151,33 +154,6 @@ async def handle_admin_sticker_reply(
             "AI не смог объединить описание. Заметка сохранена. "
             "Попробуй ещё раз или используй Re-analyze.",
         )
-
-
-# ── Sticker menu ────────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("adm_stk:"))
-async def handle_sticker_menu(
-    callback: CallbackQuery,
-    **kwargs: Any,
-) -> None:
-    """Sticker management main menu."""
-    if not _is_private(callback):
-        await callback.answer()
-        return
-    if not await _check_admin(kwargs, callback.from_user.id if callback.from_user else None):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-
-    text = "Управление стикерами" if lang == "ru" else "Sticker Management"
-    keyboard = sticker_menu_keyboard(lang)
-
-    if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
 
 
 # ── Set list ─────────────────────────────────────────────────────────────
@@ -342,6 +318,35 @@ async def handle_sticker_back(
 # ── Sticker detail ──────────────────────────────────────────────────────
 
 
+def _build_detail_text(sticker: dict[str, Any], file_unique_id: str, lang: str) -> str:
+    """Build the HTML detail body for a single sticker.
+
+    Shared by the detail view and the post-clear re-render so both render the
+    sticker identically — including the ⏳ not-analyzed badge when the visual
+    description is absent.
+    """
+    lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
+    if sticker["visual_description"]:
+        lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
+    else:
+        lines.append(f"<b>{html_lib.escape(_status_badge(sticker, lang, short=False))}</b>")
+    if sticker["emotion"]:
+        lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
+    if sticker["character_or_meme"]:
+        lines.append(f"<b>Персонаж:</b> {html_lib.escape(sticker['character_or_meme'])}")
+    if sticker["suggested_contexts"]:
+        contexts = ", ".join(html_lib.escape(c) for c in sticker["suggested_contexts"])
+        lines.append(f"<b>Контексты:</b> {contexts}")
+    lines.append(f"<b>Использований:</b> {sticker['total_uses']} (бот: {sticker['bot_uses']})")
+    lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
+    lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
+    lines.append(f"<b>Video:</b> {sticker['is_video']}")
+    if sticker.get("admin_notes"):
+        lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
+    lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
+    return "\n".join(lines)
+
+
 @router.callback_query(F.data.startswith("adm_stk_view:"))
 async def handle_sticker_detail(
     callback: CallbackQuery,
@@ -371,27 +376,7 @@ async def handle_sticker_detail(
         await callback.answer("Sticker not found", show_alert=True)
         return
 
-    lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
-    if sticker["visual_description"]:
-        lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
-    if sticker["emotion"]:
-        lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
-    if sticker["character_or_meme"]:
-        lines.append(f"<b>Персонаж:</b> {html_lib.escape(sticker['character_or_meme'])}")
-    if sticker["suggested_contexts"]:
-        contexts = ", ".join(html_lib.escape(c) for c in sticker["suggested_contexts"])
-        lines.append(f"<b>Контексты:</b> {contexts}")
-    lines.append(f"<b>Использований:</b> {sticker['total_uses']} (бот: {sticker['bot_uses']})")
-    lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
-    lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
-    lines.append(f"<b>Video:</b> {sticker['is_video']}")
-    if sticker["analysis_failed"]:
-        lines.append("<b>⚠️ Анализ провалился</b>")
-    if sticker.get("admin_notes"):
-        lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
-    lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
-
-    text = "\n".join(lines)
+    text = _build_detail_text(sticker, file_unique_id, lang)
 
     if isinstance(callback.message, Message):
         # Clean up previous sticker message (if any) to prevent orphans
@@ -439,16 +424,15 @@ async def handle_sticker_detail(
     await callback.answer()
 
 
-# ── Re-analyze ──────────────────────────────────────────────────────────
+# ── Clear analysis (confirm + commit) ───────────────────────────────────
 
 
-@router.callback_query(F.data.startswith("adm_stk_reanalyze:"))
-async def handle_reanalyze(
+@router.callback_query(F.data.startswith("adm_stk_clr_ask:"))
+async def handle_clear_ask(
     callback: CallbackQuery,
-    sticker_repo: FromDishka[StickerRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
 ) -> None:
-    """Clear sticker analysis to force re-analysis on next encounter."""
+    """Show confirm dialog before clearing sticker analysis."""
     if not _is_private(callback):
         await callback.answer()
         return
@@ -466,11 +450,163 @@ async def handle_reanalyze(
         await callback.answer("Missing sticker ID", show_alert=True)
         return
 
-    await sticker_repo.clear_for_reanalysis(file_unique_id)
-
-    msg = (
-        "Анализ сброшен. Стикер будет переанализирован при следующем использовании."
+    text = (
+        "Очистить анализ? Описание, эмоция, персонаж и контексты будут сброшены. "
+        "Ручные заметки и статистика использований сохранятся."
         if lang == "ru"
-        else "Analysis cleared. Sticker will be re-analyzed on next use."
+        else "Clear analysis? Description, emotion, character and contexts will be reset. "
+        "Admin notes and usage counters are preserved."
     )
+    keyboard = sticker_clear_confirm_keyboard(file_unique_id, lang=lang)
+
+    if isinstance(callback.message, Message):
+        with contextlib.suppress(Exception):
+            await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm_stk_clr:"))
+async def handle_clear(
+    callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Clear all vision-generated fields for a sticker."""
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    await sticker_repo.clear_analysis(file_unique_id)
+
+    # Re-render the detail in place so the admin lands back on the (now
+    # ⏳ not-analyzed) sticker detail instead of being stranded on the confirm
+    # prompt. Matches the edit-in-place idiom used by handle_run_analysis.
+    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
+    if sticker and isinstance(callback.message, Message):
+        text = _build_detail_text(sticker, file_unique_id, lang)
+        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker["set_name"])
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+
+    msg = "Анализ очищен" if lang == "ru" else "Analysis cleared"
     await callback.answer(msg, show_alert=True)
+
+
+# ── Localized failure-reason copy ───────────────────────────────────────
+
+_REANALYZE_REASON_COPY: dict[str, dict[str, str]] = {
+    "download": {"ru": "Ошибка загрузки", "en": "Download error"},
+    "vision": {"ru": "Ошибка API", "en": "API error"},
+    "content_filter": {"ru": "Контент заблокирован", "en": "Content blocked"},
+    "empty": {"ru": "Пустой ответ", "en": "Empty response"},
+}
+
+
+# ── Run analysis now ────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("adm_stk_reanalyze:"))
+async def handle_run_analysis(
+    callback: CallbackQuery,
+    sticker_service: FromDishka[StickerLearningService],
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Run vision analysis on a sticker right now (admin action).
+
+    Lifecycle (edit-in-place):
+    1. Edit message → ⏳ Анализирую… (hide buttons) before blocking vision call.
+    2. Call reanalyze().
+    3. Edit message → ✅ Анализ обновлён + new description + restored buttons,
+       OR ⚠️ Ошибка анализа: <reason> + Retry button.
+
+    Edge-cases:
+    - If the ⏳ edit fails (e.g. network glitch), log and continue — still emit result.
+    - TelegramBadRequest "message is not modified" on any status edit is suppressed.
+    - Double-tap: first tap removes the buttons; second tap hits an unmodified message
+      (suppressed) or arrives after the analysis has already finished.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    if not (isinstance(callback.message, Message) and callback.message.bot):
+        await callback.answer("Bot unavailable", show_alert=True)
+        return
+
+    # Dismiss the callback spinner immediately
+    await callback.answer()
+
+    # ── ⏳ in-progress edit: hide buttons so the admin knows work is underway ──
+    in_progress_text = "⏳ Анализирую…" if lang == "ru" else "⏳ Analyzing…"
+    try:
+        await callback.message.edit_text(
+            in_progress_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    except TelegramBadRequest as exc:
+        # "message is not modified" = double-tap; another network issue = log + continue
+        logger.warning(
+            "handle_run_analysis: in-progress edit failed, continuing analysis",
+            file_unique_id=file_unique_id,
+            error=str(exc),
+        )
+
+    # ── Blocking vision call ─────────────────────────────────────────────────
+    result = await sticker_service.reanalyze(callback.message.bot, file_unique_id)
+
+    # ── Build result text + keyboard ─────────────────────────────────────────
+    if result.ok:
+        # Fetch the updated sticker record to show its new description
+        updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
+        desc_part = ""
+        set_name: str | None = None
+        if updated:
+            set_name = str(updated["set_name"]) if updated.get("set_name") else None
+            raw_desc = updated.get("visual_description")
+            if raw_desc:
+                desc_part = f"\n<b>Описание:</b> {html_lib.escape(str(raw_desc))}"
+        result_text = (
+            f"✅ Анализ обновлён{desc_part}" if lang == "ru" else f"✅ Analysis updated{desc_part}"
+        )
+        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=set_name)
+    else:
+        reason_key = result.reason or "empty"
+        reason_copy = _REANALYZE_REASON_COPY.get(reason_key, _REANALYZE_REASON_COPY["empty"])
+        reason_label = reason_copy.get(lang, reason_copy["ru"])
+        result_text = (
+            f"⚠️ Ошибка анализа: {reason_label}"
+            if lang == "ru"
+            else f"⚠️ Analysis error: {reason_label}"
+        )
+        keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
+
+    # ── Edit message with result (suppress "not modified" on double-tap) ─────
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)

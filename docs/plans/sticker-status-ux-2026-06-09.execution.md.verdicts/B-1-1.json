@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-06-09T17:10:47Z",
+  "role": "specialist",
+  "item_id": "B-1",
+  "verdict": "PASS",
+  "cost_usd": 0.41,
+  "notes": "Added TestGetStickersInSet (8 tests) and TestClearAnalysisSetListView (2 tests) to tests/integration/test_sticker_repository.py. Covers all three status transitions via get_stickers_in_set(): not-analyzed (visual_description NULL + analysis_failed=False), analyzed (description present), failed (analysis_failed=True). Also covers: set isolation, pagination (limit/offset), clear→not-analyzed round-trip, and analyze→completed transition. TestClearAnalysisSetListView adds 2 tests extending the existing clear_analysis coverage to use get_stickers_in_set() as the verification query rather than get_by_file_unique_id().",
+  "result": {
+    "kind": "commit",
+    "ref": "30ca804",
+    "verification": "pytest tests/integration/test_sticker_repository.py -v — 27 passed (10 new + 17 existing); pytest tests/unit/ -q — 902 passed; ruff check src/ — all checks passed"
+  },
+  "confidence": 0.99,
+  "clarification_request": null,
+  "session_id": null
+}

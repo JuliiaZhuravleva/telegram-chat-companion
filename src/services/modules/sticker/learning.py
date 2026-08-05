@@ -10,7 +10,7 @@ import asyncio
 import html as html_lib
 import json
 import re
-from typing import Any
+from typing import Any, Literal
 
 import structlog
 from aiogram import Bot, types
@@ -19,6 +19,7 @@ from src.database.repositories.stickers import StickerRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.modules.sticker.models import (
+    ReanalyzeResult,
     StickerLearningResult,
     StickerRenderError,
     StickerSearchResult,
@@ -60,6 +61,7 @@ class StickerLearningService:
         sticker: types.Sticker,
         image_data: bytes,
         preceding_messages: list[str] | None = None,
+        force_reanalyze: bool = False,
     ) -> StickerLearningResult:
         """Learn a new sticker or update usage of existing one.
 
@@ -67,6 +69,8 @@ class StickerLearningService:
             sticker: Telegram Sticker object.
             image_data: Raw file bytes (.webp/.tgs/.webm).
             preceding_messages: Last few chat messages for usage context.
+            force_reanalyze: Skip the "already exists" shortcut and run vision
+                analysis even if the sticker is in DB (used by admin re-analyze).
 
         Returns:
             StickerLearningResult with learning outcome.
@@ -75,7 +79,7 @@ class StickerLearningService:
 
         # Check if sticker already exists
         existing = await self._repo.get_by_file_unique_id(file_unique_id)
-        if existing:
+        if existing and not force_reanalyze:
             await self._repo.increment_usage(file_unique_id)
             # Accumulate usage context from preceding messages
             if preceding_messages:
@@ -122,6 +126,7 @@ class StickerLearningService:
                     is_new=True,
                     file_unique_id=file_unique_id,
                     analysis_failed=True,
+                    failure_reason="vision",
                 )
 
         # Get pack context (other stickers from same set)
@@ -155,6 +160,8 @@ class StickerLearningService:
         vision_result_text: str = ""
         vision_model: str | None = None
         analysis_duration_ms: int | None = None
+        # Tracks why vision failed; set in the except block below.
+        _vision_error_reason: Literal["vision", "content_filter"] | None = None
 
         import time
 
@@ -171,11 +178,14 @@ class StickerLearningService:
             vision_result_text = vision_result.text
             vision_model = vision_result.model
             parsed = self._parse_vision_response(vision_result.text)
-        except AIProviderError:
+        except AIProviderError as exc:
             analysis_duration_ms = int((time.perf_counter() - start_time) * 1000)
             logger.exception(
                 "Vision API failed for sticker",
                 file_unique_id=file_unique_id,
+            )
+            _vision_error_reason = (
+                "content_filter" if "PROHIBITED_CONTENT" in str(exc) else "vision"
             )
 
         visual = parsed.get("visual")
@@ -184,6 +194,13 @@ class StickerLearningService:
         tags = parsed.get("tags") or []
         character = parsed.get("character")
         analysis_failed = not bool(visual)
+        # Determine structured failure reason: API error/content_filter from exception,
+        # or 'empty' when the API returned successfully but produced no usable result.
+        _failure_reason: Literal["vision", "content_filter", "empty"] | None
+        if analysis_failed:
+            _failure_reason = _vision_error_reason if _vision_error_reason is not None else "empty"
+        else:
+            _failure_reason = None
 
         # Auto-add format tag
         if sticker_type == "animated" and "animated" not in tags:
@@ -281,8 +298,64 @@ class StickerLearningService:
             emotion=emotion,
             character_or_meme=character,
             analysis_failed=analysis_failed,
+            failure_reason=_failure_reason,
             collage_png=vision_image if sticker_type != "static" else None,
         )
+
+    # ── Admin re-analyze ─────────────────────────────────────────────
+
+    async def reanalyze(self, bot: Bot, file_unique_id: str) -> ReanalyzeResult:
+        """Re-run vision analysis for an existing sticker (admin action).
+
+        Downloads the sticker from Telegram, clears prior analysis fields,
+        and runs the full vision pipeline again.
+
+        Returns:
+            ReanalyzeResult with ``ok=True`` on success (visual_description populated)
+            or ``ok=False`` with a structured ``reason`` on any failure.
+        """
+        existing = await self._repo.get_by_file_unique_id(file_unique_id)
+        if not existing:
+            logger.warning("reanalyze: sticker not found", file_unique_id=file_unique_id)
+            return ReanalyzeResult(ok=False, reason="download")
+
+        # Download sticker bytes from Telegram
+        try:
+            file = await bot.get_file(existing["file_id"])
+            if not file.file_path:
+                return ReanalyzeResult(ok=False, reason="download")
+            buf = await bot.download_file(file.file_path)
+            if buf is None:
+                return ReanalyzeResult(ok=False, reason="download")
+            image_data = buf.read()
+        except Exception:
+            logger.exception("reanalyze: failed to download sticker", file_unique_id=file_unique_id)
+            return ReanalyzeResult(ok=False, reason="download")
+
+        # Clear old analysis so learn() sees a clean slate for this record
+        await self._repo.clear_analysis(file_unique_id)
+
+        # Reconstruct a minimal Sticker object for the analysis pipeline
+        sticker = types.Sticker(
+            file_id=existing["file_id"],
+            file_unique_id=file_unique_id,
+            type="regular",
+            width=512,
+            height=512,
+            is_animated=bool(existing["is_animated"]),
+            is_video=bool(existing["is_video"]),
+            set_name=existing["set_name"],
+            emoji=existing["emoji"],
+        )
+
+        result = await self.learn(
+            sticker=sticker,
+            image_data=image_data,
+            force_reanalyze=True,
+        )
+        if result.analysis_failed:
+            return ReanalyzeResult(ok=False, reason=result.failure_reason or "empty")
+        return ReanalyzeResult(ok=True, visual_description=result.visual_description)
 
     # ── Search ───────────────────────────────────────────────────────
 

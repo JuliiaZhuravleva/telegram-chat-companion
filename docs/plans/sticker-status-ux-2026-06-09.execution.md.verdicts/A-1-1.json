@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-06-09T16:48:14Z",
+  "role": "specialist",
+  "item_id": "A-1",
+  "verdict": "PASS",
+  "cost_usd": 0.9,
+  "notes": "Extracted _status_badge(sticker, lang, *, short: bool) -> str into keyboards/admin_sticker.py. Updated sticker_set_detail_keyboard (short=True replaces [FAILED]/ожидает анализа) and handle_sticker_detail (short=False replaces separate ⏳/⚠️ lines). Removed redundant analysis_failed check from detail view — _status_badge prioritizes failed state in the else branch. 874 unit tests pass, ruff+mypy clean. Regression tests added for [FAILED] and ожидает анализа labels no longer appearing. qa integration coverage for status derivation via get_stickers_in_set() is B-1 (already in plan).",
+  "result": {
+    "kind": "commit",
+    "ref": "f804fe8",
+    "verification": "pytest tests/unit/test_admin_sticker_handler.py -v — 58 passed; pytest tests/unit/ -q — 874 passed, 0 failures; ruff check src/ — all checks passed; mypy src/ — no issues found in 103 source files"
+  },
+  "confidence": 0.98,
+  "clarification_request": null,
+  "session_id": null
+}

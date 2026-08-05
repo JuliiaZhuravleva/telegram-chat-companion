@@ -67,7 +67,22 @@ class StickerRepository:
             ON CONFLICT (file_unique_id) DO UPDATE
             SET file_id = EXCLUDED.file_id,
                 total_uses = sticker_knowledge.total_uses + 1,
-                last_used_at = NOW()
+                last_used_at = NOW(),
+                visual_description = EXCLUDED.visual_description,
+                original_vision_description = COALESCE(
+                    EXCLUDED.original_vision_description,
+                    sticker_knowledge.original_vision_description
+                ),
+                emotion = EXCLUDED.emotion,
+                suggested_contexts = EXCLUDED.suggested_contexts,
+                style_tags = EXCLUDED.style_tags,
+                character_or_meme = EXCLUDED.character_or_meme,
+                analysis_failed = EXCLUDED.analysis_failed,
+                analyzed_at = CASE
+                    WHEN EXCLUDED.visual_description IS NOT NULL THEN NOW()
+                    ELSE NULL
+                END,
+                updated_at = NOW()
             RETURNING id
             """,
             file_unique_id,
@@ -285,13 +300,17 @@ class StickerRepository:
             note,
         )
 
-    async def clear_for_reanalysis(self, file_unique_id: str) -> None:
-        """Clear analysis fields to force re-analysis on next encounter."""
+    async def clear_analysis(self, file_unique_id: str) -> None:
+        """Clear all vision-generated fields (description, embedding, emotion, character,
+        contexts, timestamp, failure flag). Preserves admin_notes and usage counters."""
         await self._pool.execute(
             """
             UPDATE sticker_knowledge
             SET visual_description = NULL,
                 description_embedding = NULL,
+                emotion = NULL,
+                character_or_meme = NULL,
+                suggested_contexts = NULL,
                 analysis_failed = false,
                 analyzed_at = NULL,
                 updated_at = NOW()

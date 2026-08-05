@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-06-09T16:49:28Z",
+  "role": "evaluator",
+  "item_id": "A-1",
+  "verdict": "PASS",
+  "evidence": "Commit f804fe8 introduces _status_badge(sticker, lang, *, short: bool)->str in keyboards/admin_sticker.py; used with short=True in sticker_set_detail_keyboard (replacing [FAILED]/ожидает анализа) and short=False in handle_sticker_detail (replacing separate ⏳/⚠️ lines); all three emoji-state branches cover ru/en; 58 unit tests pass including regression checks for the old labels.",
+  "regression_risk": "low",
+  "notes": "No issues. The analysis_failed check removal from detail view is correct — _status_badge handles it in the else branch. The helper is correctly placed in keyboards/ and re-exported to handlers/. Tests cover priority, missing-key, truncation, and regression cases."
+}
