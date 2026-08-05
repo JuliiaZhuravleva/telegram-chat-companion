@@ -242,8 +242,8 @@ budget:
   consumed_usd: 19.4371
 review_gate:
   why: []
-  approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.reactions-2026-08-03-wt/docs/plans/reactions-2026-08-03.execution.md --resume
-  reject_action: /plan-fixes docs/plans/reactions-2026-08-03.md --revise /Users/julia/my-projects/telegram-chat-companion.reactions-2026-08-03-wt/docs/plans/reactions-2026-08-03.execution.md
+  approve_action: /execute-plan <projects>/telegram-chat-companion.reactions-2026-08-03-wt/docs/plans/reactions-2026-08-03.execution.md --resume
+  reject_action: /plan-fixes docs/plans/reactions-2026-08-03.md --revise <projects>/telegram-chat-companion.reactions-2026-08-03-wt/docs/plans/reactions-2026-08-03.execution.md
 safe_to_replay_from: null
 clarifying_questions: []
 human_feedback:
