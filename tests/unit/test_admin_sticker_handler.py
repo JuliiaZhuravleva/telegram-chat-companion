@@ -5,15 +5,26 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from src.bot.handlers.admin_sticker import (
     _extract_file_unique_id_from_reply,
     handle_admin_sticker_reply,
+    handle_clear,
+    handle_clear_ask,
+    handle_run_analysis,
     handle_sticker_back,
     handle_sticker_detail,
 )
-from src.bot.keyboards.admin_sticker import sticker_detail_keyboard
+from src.bot.keyboards.admin_sticker import (
+    _status_badge,
+    sticker_clear_confirm_keyboard,
+    sticker_detail_keyboard,
+    sticker_reanalyze_retry_keyboard,
+    sticker_set_detail_keyboard,
+)
+from src.services.modules.sticker.models import ReanalyzeResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -359,6 +370,7 @@ def _make_callback(
 
     bot = MagicMock()
     bot.delete_message = AsyncMock()
+    bot.send_message = AsyncMock()
     msg.bot = bot
 
     cb.message = msg
@@ -525,3 +537,685 @@ class TestStickerDetailKeyboard:
         kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru")
         back_btn = kb.inline_keyboard[-1][0]
         assert back_btn.callback_data == "adm_stk_sets:ru:0"
+
+    def test_has_clear_and_reanalyze_buttons(self) -> None:
+        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        # Run-now button actually triggers analysis
+        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
+        # Clear button routes through confirm step (adm_stk_clr_ask:)
+        assert "adm_stk_clr_ask:ru:AgADvh4AAlkbCFI" in callbacks
+
+    def test_clear_confirm_keyboard_has_yes_and_cancel(self) -> None:
+        kb = sticker_clear_confirm_keyboard("AgADvh4AAlkbCFI", lang="ru")
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "adm_stk_clr:ru:AgADvh4AAlkbCFI" in callbacks
+        # Cancel returns to sticker detail (no destructive action on cancel)
+        assert "adm_stk_view:ru:AgADvh4AAlkbCFI" in callbacks
+
+    def test_reanalyze_retry_keyboard_ru(self) -> None:
+        kb = sticker_reanalyze_retry_keyboard("AgADvh4AAlkbCFI", lang="ru")
+        assert len(kb.inline_keyboard) == 1
+        btn = kb.inline_keyboard[0][0]
+        assert "Повторить" in btn.text
+        assert btn.callback_data == "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI"
+
+    def test_reanalyze_retry_keyboard_en(self) -> None:
+        kb = sticker_reanalyze_retry_keyboard("AgADvh4AAlkbCFI", lang="en")
+        btn = kb.inline_keyboard[0][0]
+        assert "Retry" in btn.text
+        assert btn.callback_data == "adm_stk_reanalyze:en:AgADvh4AAlkbCFI"
+
+
+# ---------------------------------------------------------------------------
+# handle_clear_ask — shows confirm dialog, does NOT clear
+# ---------------------------------------------------------------------------
+
+
+class TestHandleClearAsk:
+    @pytest.mark.asyncio()
+    async def test_shows_confirm_does_not_clear(self) -> None:
+        cb = _make_callback("adm_stk_clr_ask:ru:AgADvh4AAlkbCFI")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_clear_ask(cb, bot_config_repo)
+
+        cb.message.edit_text.assert_awaited_once()
+        text_arg = cb.message.edit_text.call_args[0][0]
+        # Confirm text mentions both what's cleared AND what's preserved
+        assert "описание" in text_arg.lower() or "описания" in text_arg.lower()
+        assert "заметки" in text_arg.lower() or "заметк" in text_arg.lower()
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized(self) -> None:
+        cb = _make_callback("adm_stk_clr_ask:ru:AgADvh4AAlkbCFI", user_id=99999)
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_clear_ask(cb, bot_config_repo)
+
+        cb.message.edit_text.assert_not_awaited()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+
+# ---------------------------------------------------------------------------
+# handle_clear — calls repo.clear_analysis (broad scope)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleClear:
+    @pytest.mark.asyncio()
+    async def test_clears_analysis(self) -> None:
+        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.clear_analysis = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_clear(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.clear_analysis.assert_awaited_once_with("AgADvh4AAlkbCFI")
+        # Re-renders the detail in place rather than leaving the confirm prompt.
+        cb.message.edit_text.assert_awaited_once()
+        cb.answer.assert_awaited_once()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio()
+    async def test_rerenders_not_analyzed_detail_after_clear(self) -> None:
+        # After clearing, the repo returns the sticker with visual fields nulled;
+        # handle_clear must edit the message back to the detail view showing the
+        # ⏳ not-analyzed badge (regression: it used to stay on the confirm prompt).
+        cleared = {
+            **_SAMPLE_STICKER,
+            "visual_description": None,
+            "emotion": None,
+            "character_or_meme": None,
+            "suggested_contexts": None,
+        }
+        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo(sticker=cleared)
+        sticker_repo.clear_analysis = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_clear(cb, sticker_repo, bot_config_repo)
+
+        cb.message.edit_text.assert_awaited_once()
+        text_arg = cb.message.edit_text.call_args[0][0]
+        assert "не выполнен" in text_arg
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        buttons = [b.text for row in kb.inline_keyboard for b in row]
+        assert any("Запустить заново" in b for b in buttons)
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_clear(self) -> None:
+        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI", user_id=99999)
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.clear_analysis = AsyncMock()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_clear(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.clear_analysis.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# handle_run_analysis — edit-in-place lifecycle (A-2)
+# ---------------------------------------------------------------------------
+
+
+def _make_sticker_service_success(
+    desc: str = "happy cat",
+) -> MagicMock:
+    """Sticker service mock returning a successful ReanalyzeResult."""
+    svc = MagicMock()
+    svc.reanalyze = AsyncMock(return_value=ReanalyzeResult(ok=True, visual_description=desc))
+    return svc
+
+
+def _make_sticker_service_failure(
+    reason: str = "vision",
+) -> MagicMock:
+    """Sticker service mock returning a failed ReanalyzeResult with the given reason."""
+    svc = MagicMock()
+    svc.reanalyze = AsyncMock(
+        return_value=ReanalyzeResult(ok=False, reason=reason)  # type: ignore[arg-type]
+    )
+    return svc
+
+
+class TestHandleRunAnalysis:
+    # ── helpers ────────────────────────────────────────────────────────
+
+    def _make_repo_with_desc(self, desc: str = "happy cat") -> MagicMock:
+        """Sticker repo that returns a sticker with a description (post-analysis)."""
+        repo = MagicMock()
+        repo.get_by_file_unique_id = AsyncMock(
+            return_value={**_SAMPLE_STICKER, "visual_description": desc}
+        )
+        return repo
+
+    # ── success path ───────────────────────────────────────────────────
+
+    @pytest.mark.asyncio()
+    async def test_success_edits_message_in_place_ru(self) -> None:
+        """Success: message is edited (not sent) with ✅ and description (ru)."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_success("happy cat")
+        sticker_repo = self._make_repo_with_desc("happy cat")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        # Must edit in-place — no new message
+        cb.message.bot.send_message.assert_not_awaited()
+        assert cb.message.edit_text.await_count >= 1
+
+    @pytest.mark.asyncio()
+    async def test_success_result_text_contains_checkmark_ru(self) -> None:
+        """Success result text contains ✅ in Russian."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_success()
+        sticker_repo = self._make_repo_with_desc()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        # Last edit_text call = the result message
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "✅" in result_text
+        assert "Анализ обновлён" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_success_result_text_contains_checkmark_en(self) -> None:
+        """Success result text contains ✅ in English."""
+        cb = _make_callback("adm_stk_reanalyze:en:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_success()
+        sticker_repo = self._make_repo_with_desc()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "✅" in result_text
+        assert "Analysis updated" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_success_result_html_escapes_description(self) -> None:
+        """Description with HTML chars is escaped before insertion."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_success("<b>evil</b>")
+        sticker_repo = self._make_repo_with_desc("<b>evil</b>")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "<b>evil</b>" not in result_text
+        assert "&lt;b&gt;evil&lt;/b&gt;" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_success_restores_full_keyboard(self) -> None:
+        """On success the sticker detail keyboard (with re-analyze + clear) is restored."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_success()
+        sticker_repo = self._make_repo_with_desc()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_kwargs = cb.message.edit_text.call_args_list[-1][1]
+        keyboard = result_kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+        assert any("adm_stk_reanalyze" in c for c in callbacks)
+        assert any("adm_stk_clr_ask" in c for c in callbacks)
+
+    # ── in-progress ⏳ edit ────────────────────────────────────────────
+
+    @pytest.mark.asyncio()
+    async def test_shows_in_progress_edit_before_analysis(self) -> None:
+        """⏳ edit happens as the FIRST edit_text call, before reanalyze is awaited."""
+        edit_calls: list[str] = []
+        reanalyze_called_after: list[int] = []
+
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+
+        async def _mock_reanalyze(_bot: object, _fuid: str) -> ReanalyzeResult:
+            reanalyze_called_after.append(len(edit_calls))
+            return ReanalyzeResult(ok=True, visual_description="cat")
+
+        async def _mock_edit_text(text: str, **_kwargs: object) -> None:
+            edit_calls.append(text)
+
+        cb.message.edit_text = AsyncMock(side_effect=_mock_edit_text)
+
+        sticker_service = MagicMock()
+        sticker_service.reanalyze = AsyncMock(side_effect=_mock_reanalyze)
+        sticker_repo = self._make_repo_with_desc("cat")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        # ⏳ edit came before reanalyze
+        assert reanalyze_called_after[0] == 1
+        assert "⏳" in edit_calls[0]
+
+    @pytest.mark.asyncio()
+    async def test_in_progress_edit_hides_buttons(self) -> None:
+        """⏳ edit uses empty keyboard to disable buttons."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_success()
+        sticker_repo = self._make_repo_with_desc()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        first_call = cb.message.edit_text.call_args_list[0]
+        keyboard = first_call[1]["reply_markup"]
+        assert keyboard.inline_keyboard == []
+
+    @pytest.mark.asyncio()
+    async def test_analysis_continues_when_in_progress_edit_fails(self) -> None:
+        """If the ⏳ edit raises TelegramBadRequest, analysis still runs and result is shown."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+
+        call_count = 0
+
+        async def _edit_text_side_effect(_text: str, **_kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Simulate in-progress edit failing (double-tap / network)
+                raise TelegramBadRequest(
+                    method="editMessageText", message="message is not modified"
+                )
+
+        cb.message.edit_text = AsyncMock(side_effect=_edit_text_side_effect)
+
+        sticker_service = _make_sticker_service_success()
+        sticker_repo = self._make_repo_with_desc()
+        bot_config_repo = _make_bot_config_repo()
+
+        # Should not raise; analysis must still run and result edit must be attempted
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        sticker_service.reanalyze.assert_awaited_once()
+        assert call_count == 2  # ⏳ attempt + ✅ result
+
+    # ── failure paths ──────────────────────────────────────────────────
+
+    @pytest.mark.asyncio()
+    async def test_failure_download_shows_reason_ru(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_failure("download")
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "⚠️" in result_text
+        assert "Ошибка загрузки" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_failure_vision_shows_reason_ru(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_failure("vision")
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "⚠️" in result_text
+        assert "Ошибка API" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_failure_content_filter_shows_reason_ru(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_failure("content_filter")
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "⚠️" in result_text
+        assert "Контент заблокирован" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_failure_empty_shows_reason_ru(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_failure("empty")
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "⚠️" in result_text
+        assert "Пустой ответ" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_failure_shows_reasons_in_english(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:en:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_failure("download")
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "Download error" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_failure_shows_retry_button(self) -> None:
+        """Failure result keyboard contains the Retry button pointing to adm_stk_reanalyze."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+        sticker_service = _make_sticker_service_failure("vision")
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        result_kwargs = cb.message.edit_text.call_args_list[-1][1]
+        keyboard = result_kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+        assert any("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in c for c in callbacks)
+
+    # ── double-tap guard ───────────────────────────────────────────────
+
+    @pytest.mark.asyncio()
+    async def test_result_edit_not_modified_is_suppressed(self) -> None:
+        """TelegramBadRequest 'message is not modified' on result edit is silently suppressed."""
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
+
+        call_count = 0
+
+        async def _edit_text_side_effect(text: str, **_kwargs: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if "✅" in text or "⚠️" in text:
+                # Result edit raises "not modified" (double-tap: already showed result)
+                raise TelegramBadRequest(
+                    method="editMessageText", message="message is not modified"
+                )
+
+        cb.message.edit_text = AsyncMock(side_effect=_edit_text_side_effect)
+        sticker_service = _make_sticker_service_success()
+        sticker_repo = self._make_repo_with_desc()
+        bot_config_repo = _make_bot_config_repo()
+
+        # Must not raise
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+        assert call_count == 2  # both edits attempted, second suppressed
+
+    # ── not authorized ─────────────────────────────────────────────────
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_run(self) -> None:
+        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI", user_id=99999)
+        sticker_service = MagicMock()
+        sticker_service.reanalyze = AsyncMock()
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        sticker_service.reanalyze.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _status_badge — unified status vocabulary helper
+# ---------------------------------------------------------------------------
+
+
+class TestStatusBadgeHelper:
+    """Tests for the unified _status_badge helper (A-1)."""
+
+    # ── ⏳ not-analyzed ─────────────────────────────────────────────────
+
+    def test_not_analyzed_short_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert "⏳" in badge
+        assert "Не выполнен" in badge
+
+    def test_not_analyzed_short_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "en", short=True)
+        assert "⏳" in badge
+        assert "Not analyzed" in badge
+
+    def test_not_analyzed_long_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=False)
+        assert "⏳" in badge
+        assert "Визуальный анализ не выполнен" in badge
+
+    def test_not_analyzed_long_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
+        badge = _status_badge(sticker, "en", short=False)
+        assert "⏳" in badge
+        assert "Visual analysis" in badge
+
+    # ── ⚠️ failed ─────────────────────────────────────────────────────
+
+    def test_failed_short_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert "⚠️" in badge
+        assert "Ошибка" in badge
+
+    def test_failed_short_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "en", short=True)
+        assert "⚠️" in badge
+        assert "Failed" in badge
+
+    def test_failed_long_ru(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "ru", short=False)
+        assert "⚠️" in badge
+        assert "Анализ провалился" in badge
+
+    def test_failed_long_en(self) -> None:
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge = _status_badge(sticker, "en", short=False)
+        assert "⚠️" in badge
+        assert "Analysis failed" in badge
+
+    # ── ✅ analyzed ───────────────────────────────────────────────────
+
+    def test_analyzed_short_truncates_at_25_chars(self) -> None:
+        long_desc = "a" * 30
+        sticker: dict[str, object] = {"visual_description": long_desc, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert badge == "a" * 25
+
+    def test_analyzed_short_no_truncation_under_25(self) -> None:
+        sticker: dict[str, object] = {"visual_description": "short", "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=True)
+        assert badge == "short"
+
+    def test_analyzed_long_returns_full_description(self) -> None:
+        desc = "a happy cat with a big smile"
+        sticker: dict[str, object] = {"visual_description": desc, "analysis_failed": False}
+        badge = _status_badge(sticker, "ru", short=False)
+        assert badge == desc
+
+    # ── priority: failed takes precedence over not-analyzed ──────────
+
+    def test_failed_takes_priority_over_not_analyzed(self) -> None:
+        """analysis_failed=True + visual_description=None → ⚠️ (not ⏳)."""
+        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
+        badge_long = _status_badge(sticker, "ru", short=False)
+        assert "⚠️" in badge_long
+        assert "⏳" not in badge_long
+
+    # ── missing keys are treated as falsy ────────────────────────────
+
+    def test_missing_keys_treated_as_not_analyzed(self) -> None:
+        badge = _status_badge({}, "ru", short=True)
+        assert "⏳" in badge
+
+
+# ---------------------------------------------------------------------------
+# sticker_set_detail_keyboard — now uses _status_badge vocabulary
+# ---------------------------------------------------------------------------
+
+_STICKERS_FOR_KB: list[dict[str, object]] = [
+    {
+        "file_unique_id": "analyzed_id",
+        "emoji": "😀",
+        "total_uses": 5,
+        "analysis_failed": False,
+        "visual_description": "a happy cat face with big eyes",
+    },
+    {
+        "file_unique_id": "pending_id",
+        "emoji": "😢",
+        "total_uses": 3,
+        "analysis_failed": False,
+        "visual_description": None,
+    },
+    {
+        "file_unique_id": "failed_id",
+        "emoji": "😠",
+        "total_uses": 1,
+        "analysis_failed": True,
+        "visual_description": None,
+    },
+]
+
+
+class TestStickerSetDetailKeyboardStatusBadge:
+    """Keyboard uses _status_badge — one vocabulary for ✅/⏳/⚠️ (A-1)."""
+
+    def _labels(self, lang: str) -> list[str]:
+        kb = sticker_set_detail_keyboard(
+            _STICKERS_FOR_KB,
+            set_name="test_set",
+            lang=lang,
+            page=0,
+            total=3,
+        )
+        return [btn.text for row in kb.inline_keyboard for btn in row]
+
+    def test_analyzed_shows_truncated_description_ru(self) -> None:
+        labels = self._labels("ru")
+        assert any("a happy cat face with big" in label for label in labels)
+
+    def test_not_analyzed_shows_pending_badge_ru(self) -> None:
+        labels = self._labels("ru")
+        assert any("⏳" in label and "Не выполнен" in label for label in labels)
+
+    def test_not_analyzed_shows_pending_badge_en(self) -> None:
+        labels = self._labels("en")
+        assert any("⏳" in label and "Not analyzed" in label for label in labels)
+
+    def test_failed_shows_warning_badge_ru(self) -> None:
+        labels = self._labels("ru")
+        assert any("⚠️" in label and "Ошибка" in label for label in labels)
+
+    def test_failed_shows_warning_badge_en(self) -> None:
+        labels = self._labels("en")
+        assert any("⚠️" in label and "Failed" in label for label in labels)
+
+    def test_old_failed_bracket_label_not_present(self) -> None:
+        """Regression: [FAILED] label must no longer appear."""
+        for lang in ("ru", "en"):
+            labels = self._labels(lang)
+            assert not any("[FAILED]" in label for label in labels)
+
+    def test_old_awaits_label_not_present(self) -> None:
+        """Regression: 'ожидает анализа' must no longer appear (replaced by ⏳ badge)."""
+        labels = self._labels("ru")
+        assert not any("ожидает анализа" in label for label in labels)
+
+
+# ---------------------------------------------------------------------------
+# handle_sticker_detail — status badge used for ⏳ / ⚠️ display (A-1)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStickerDetailStatusBadge:
+    """Detail view uses _status_badge for the not-analyzed and failed cases."""
+
+    @pytest.mark.asyncio()
+    async def test_not_analyzed_shows_pending_badge_ru(self) -> None:
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": False}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⏳" in text
+        assert "Визуальный анализ не выполнен" in text
+
+    @pytest.mark.asyncio()
+    async def test_not_analyzed_shows_pending_badge_en(self) -> None:
+        cb = _make_callback("adm_stk_view:en:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": False}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⏳" in text
+        assert "Visual analysis" in text
+
+    @pytest.mark.asyncio()
+    async def test_failed_shows_warning_badge_ru(self) -> None:
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⚠️" in text
+        assert "Анализ провалился" in text
+
+    @pytest.mark.asyncio()
+    async def test_failed_shows_warning_badge_en(self) -> None:
+        cb = _make_callback("adm_stk_view:en:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⚠️" in text
+        assert "Analysis failed" in text
+
+    @pytest.mark.asyncio()
+    async def test_failed_does_not_also_show_pending_badge(self) -> None:
+        """Regression: failed state must show only ⚠️, not both ⚠️ and ⏳."""
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "⏳" not in text
+
+    @pytest.mark.asyncio()
+    async def test_analyzed_shows_description_not_badge(self) -> None:
+        """Analyzed sticker: description shown inline, no ⏳ or ⚠️."""
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        # _SAMPLE_STICKER has visual_description="happy cat"
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "Описание" in text
+        assert "happy cat" in text
+        assert "⏳" not in text
+        assert "⚠️" not in text

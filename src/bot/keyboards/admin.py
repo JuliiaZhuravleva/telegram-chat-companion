@@ -64,7 +64,7 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(
                     text=_t("stickers", lang),
-                    callback_data=f"adm_stk:{lang}:0",
+                    callback_data=f"adm_stk_sets:{lang}:0",
                 ),
                 InlineKeyboardButton(
                     text=_t("defaults", lang),

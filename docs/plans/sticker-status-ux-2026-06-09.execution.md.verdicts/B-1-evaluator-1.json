@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-06-09T17:11:44Z",
+  "role": "evaluator",
+  "item_id": "B-1",
+  "verdict": "PASS",
+  "evidence": "Commit 30ca804 adds 10 integration tests (TestGetStickersInSet x8, TestClearAnalysisSetListView x2) covering all three required status transitions (not-analyzed, analyzed, failed) plus pagination, set isolation, and clear→not-analyzed via real PostgreSQL testcontainers; pytest tests/integration/test_sticker_repository.py passes 27/27.",
+  "regression_risk": "low",
+  "notes": ""
+}

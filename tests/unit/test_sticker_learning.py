@@ -12,7 +12,7 @@ from src.services.ai.base import (
     VisionResult,
 )
 from src.services.modules.sticker.learning import StickerLearningService
-from src.services.modules.sticker.models import StickerRenderError
+from src.services.modules.sticker.models import ReanalyzeResult, StickerRenderError
 from src.services.modules.sticker.renderer import RenderedSticker
 
 
@@ -521,3 +521,224 @@ class TestLogUsageOnMerge:
         assert result is None
         sticker_service._ai.generate_text.assert_not_awaited()
         sticker_service._ai.log_usage.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# reanalyze() → ReanalyzeResult (A-2)
+# ---------------------------------------------------------------------------
+
+
+def _make_existing_sticker_record(
+    file_id: str = "file-123",
+    file_unique_id: str = "unique-123",
+    set_name: str = "test_set",
+    emoji: str = "😀",
+    is_animated: bool = False,
+    is_video: bool = False,
+) -> dict:
+    return {
+        "file_id": file_id,
+        "file_unique_id": file_unique_id,
+        "set_name": set_name,
+        "emoji": emoji,
+        "is_animated": is_animated,
+        "is_video": is_video,
+    }
+
+
+def _make_bot_mock(
+    file_path: str | None = "stickers/file.webp",
+    buf_data: bytes = b"fake-bytes",
+) -> MagicMock:
+    bot = MagicMock()
+    file_obj = MagicMock()
+    file_obj.file_path = file_path
+
+    buf = MagicMock()
+    buf.read = MagicMock(return_value=buf_data)
+
+    bot.get_file = AsyncMock(return_value=file_obj)
+    bot.download_file = AsyncMock(return_value=buf)
+    return bot
+
+
+class TestReanalyze:
+    """Tests for StickerLearningService.reanalyze() — new ReanalyzeResult return type."""
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_success_returns_ok_result(self, sticker_service):
+        """reanalyze() returns ok=True when analysis succeeds."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        sticker_service._repo.clear_analysis = AsyncMock()
+        bot = _make_bot_mock()
+
+        result = await sticker_service.reanalyze(bot, "unique-123")
+
+        assert isinstance(result, ReanalyzeResult)
+        assert result.ok is True
+        assert result.reason is None
+        assert result.visual_description == "A happy cat"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_sticker_not_found_returns_download_reason(self, sticker_service):
+        """If the sticker record is missing, returns ok=False reason='download'."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(return_value=None)
+        bot = _make_bot_mock()
+
+        result = await sticker_service.reanalyze(bot, "missing-uid")
+
+        assert result.ok is False
+        assert result.reason == "download"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_download_error_returns_download_reason(self, sticker_service):
+        """Telegram download failure returns ok=False reason='download'."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        bot = _make_bot_mock()
+        bot.get_file = AsyncMock(side_effect=Exception("network error"))
+
+        result = await sticker_service.reanalyze(bot, "unique-123")
+
+        assert result.ok is False
+        assert result.reason == "download"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_missing_file_path_returns_download_reason(self, sticker_service):
+        """file_path=None on the file object → ok=False reason='download'."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        bot = _make_bot_mock(file_path=None)
+
+        result = await sticker_service.reanalyze(bot, "unique-123")
+
+        assert result.ok is False
+        assert result.reason == "download"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_vision_api_failure_returns_vision_reason(self, sticker_service):
+        """AIProviderError (non-content-filter) → ok=False reason='vision'."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        sticker_service._repo.clear_analysis = AsyncMock()
+        sticker_service._ai.analyze_image = AsyncMock(
+            side_effect=AIProviderError("Vision API down", provider="gemini")
+        )
+        bot = _make_bot_mock()
+
+        result = await sticker_service.reanalyze(bot, "unique-123")
+
+        assert result.ok is False
+        assert result.reason == "vision"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_content_filter_returns_content_filter_reason(self, sticker_service):
+        """AIProviderError with PROHIBITED_CONTENT → ok=False reason='content_filter'."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        sticker_service._repo.clear_analysis = AsyncMock()
+        sticker_service._ai.analyze_image = AsyncMock(
+            side_effect=AIProviderError("PROHIBITED_CONTENT blocked", provider="gemini")
+        )
+        bot = _make_bot_mock()
+
+        result = await sticker_service.reanalyze(bot, "unique-123")
+
+        assert result.ok is False
+        assert result.reason == "content_filter"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_empty_vision_response_returns_empty_reason(self, sticker_service):
+        """Empty/unparseable vision response → ok=False reason='empty'."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        sticker_service._repo.clear_analysis = AsyncMock()
+        sticker_service._ai.analyze_image = AsyncMock(
+            return_value=VisionResult(text="{}", model="gemini-3-flash", provider="gemini")
+        )
+        bot = _make_bot_mock()
+
+        result = await sticker_service.reanalyze(bot, "unique-123")
+
+        assert result.ok is False
+        assert result.reason == "empty"
+
+    @pytest.mark.asyncio
+    async def test_reanalyze_clears_analysis_before_learn(self, sticker_service):
+        """clear_analysis() is called before the new learn() run."""
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            return_value=_make_existing_sticker_record()
+        )
+        sticker_service._repo.clear_analysis = AsyncMock()
+        bot = _make_bot_mock()
+
+        await sticker_service.reanalyze(bot, "unique-123")
+
+        sticker_service._repo.clear_analysis.assert_awaited_once_with("unique-123")
+
+
+class TestLearnFailureReason:
+    """Unit tests for failure_reason propagation in StickerLearningResult (A-2)."""
+
+    @pytest.mark.asyncio
+    async def test_learn_vision_error_sets_vision_reason(self, sticker_service):
+        """AIProviderError from vision → StickerLearningResult.failure_reason == 'vision'."""
+        sticker_service._ai.analyze_image = AsyncMock(
+            side_effect=AIProviderError("Vision API down", provider="gemini")
+        )
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=b"fake")
+
+        assert result.analysis_failed is True
+        assert result.failure_reason == "vision"
+
+    @pytest.mark.asyncio
+    async def test_learn_content_filter_sets_content_filter_reason(self, sticker_service):
+        """PROHIBITED_CONTENT AIProviderError → failure_reason == 'content_filter'."""
+        sticker_service._ai.analyze_image = AsyncMock(
+            side_effect=AIProviderError("PROHIBITED_CONTENT blocked", provider="gemini")
+        )
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=b"fake")
+
+        assert result.analysis_failed is True
+        assert result.failure_reason == "content_filter"
+
+    @pytest.mark.asyncio
+    async def test_learn_empty_vision_response_sets_empty_reason(self, sticker_service):
+        """Empty/no-visual JSON response → failure_reason == 'empty'."""
+        sticker_service._ai.analyze_image = AsyncMock(
+            return_value=VisionResult(text="{}", model="gemini-3-flash", provider="gemini")
+        )
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=b"fake")
+
+        assert result.analysis_failed is True
+        assert result.failure_reason == "empty"
+
+    @pytest.mark.asyncio
+    async def test_learn_success_sets_no_failure_reason(self, sticker_service):
+        """Successful analysis → failure_reason is None."""
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=b"fake")
+
+        assert result.analysis_failed is False
+        assert result.failure_reason is None
+
+    @pytest.mark.asyncio
+    @patch("src.services.modules.sticker.learning.render_tgs", new_callable=AsyncMock)
+    async def test_learn_render_failure_sets_vision_reason(self, mock_render_tgs, sticker_service):
+        """StickerRenderError on animated sticker → failure_reason == 'vision'."""
+        mock_render_tgs.side_effect = StickerRenderError("render failed")
+        sticker = _make_sticker(is_animated=True)
+        result = await sticker_service.learn(sticker=sticker, image_data=b"fake-tgs")
+
+        assert result.analysis_failed is True
+        assert result.failure_reason == "vision"
