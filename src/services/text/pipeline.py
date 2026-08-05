@@ -22,6 +22,7 @@ import structlog
 
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.messages import MessageRepository
+from src.database.repositories.observability import ObservabilityRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.models.chat_config import ChatConfig
 from src.models.enums import ResponseType, TriggerType
@@ -39,9 +40,19 @@ from src.services.text.prompt_builder import (
     build_system_prompt,
     build_user_prompt,
     compute_max_tokens,
+    trim_facts_to_budget,
 )
+from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
+
+
+def _round_sim(similarity: Any) -> float | None:
+    """Similarity as a compact JSON-safe float (4 places), or None."""
+    if similarity is None:
+        return None
+    return round(float(similarity), 4)
+
 
 # Base max tokens for text generation
 _BASE_MAX_TOKENS = 2000
@@ -50,6 +61,10 @@ _BASE_MAX_TOKENS = 2000
 # fits roughly 4-5 short facts; over-fetching just gets trimmed downstream by
 # trim_facts_to_budget(), so this is a DB round-trip cost cap, not a budget).
 _KB_SEARCH_LIMIT = 5
+
+# retrieval_log stores a short head of each retrieved item, not the full text —
+# enough to recognize the memory in analysis without bloating JSONB rows.
+_RETRIEVAL_HEAD_CHARS = 120
 
 
 @dataclass
@@ -89,6 +104,7 @@ class TextProcessingPipeline:
         link_service: LinkExtractorService | None = None,
         sticker_service: StickerResponderService | None = None,
         knowledge_repo: KnowledgeRepository | None = None,
+        observability_repo: ObservabilityRepository | None = None,
     ) -> None:
         self._ai = ai_router
         self._abuse = abuse_checker
@@ -98,6 +114,12 @@ class TextProcessingPipeline:
         self._links = link_service
         self._sticker = sticker_service
         self._knowledge = knowledge_repo
+        self._observability = observability_repo
+        if observability_repo is None:
+            # DI always wires the repo; absence means a hand-built instance.
+            # Without this line, "nobody is recording decisions/retrievals"
+            # is indistinguishable from "nothing happened".
+            logger.debug("Pipeline: observability persistence disabled (no repository)")
 
     async def process(
         self,
@@ -115,6 +137,7 @@ class TextProcessingPipeline:
         reply_quote_is_manual: bool = False,
         image_context: str | None = None,
         message_thread_id: int | None = None,
+        message_id: int | None = None,
     ) -> PipelineResult:
         """Run the full pipeline and return the result."""
         # --- Stage 1: Anti-abuse check ---
@@ -128,12 +151,24 @@ class TextProcessingPipeline:
 
         response_type = ResponseType(abuse_result.response_type)
 
-        # Blocked dispositions
+        # Blocked dispositions. Fire-and-forget like every other observability
+        # writer: these paths spike during abuse bursts, exactly when the DB
+        # is most likely to be slow — an INSERT must not delay the return.
         if response_type == ResponseType.BLACKLISTED:
+            fire_and_forget(
+                self._safe_log_silence(
+                    chat_id=chat_id, user_id=user_id, message_id=message_id, tier="blacklist"
+                )
+            )
             return PipelineResult(should_respond=False, response_type=response_type)
         # Direct replies to the bot bypass cooldown — the user is explicitly
         # continuing a conversation, not spamming.
         if response_type == ResponseType.COOLDOWN and trigger_type != TriggerType.REPLY:
+            fire_and_forget(
+                self._safe_log_silence(
+                    chat_id=chat_id, user_id=user_id, message_id=message_id, tier="cooldown"
+                )
+            )
             return PipelineResult(should_respond=False, response_type=response_type)
 
         # --- Stage 2: Gather context in parallel ---
@@ -146,13 +181,13 @@ class TextProcessingPipeline:
         )
         lengths_task = self._messages.get_recent_lengths(chat_id)
 
-        rag_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        rag_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
         if config.rag_enabled and self._rag:
-            rag_task = asyncio.ensure_future(self._rag.search(chat_id, message_text))
+            rag_task = asyncio.ensure_future(self._timed_rag_search(chat_id, message_text))
 
-        kb_task: asyncio.Task[list[dict[str, Any]]] | None = None
+        kb_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
         if config.kb_enabled and self._knowledge:
-            kb_task = asyncio.ensure_future(self._safe_get_kb_facts(chat_id, message_text))
+            kb_task = asyncio.ensure_future(self._timed_kb_facts(chat_id, message_text))
 
         link_task: asyncio.Task[str | None] | None = None
         if config.link_comments_enabled and self._links:
@@ -165,12 +200,16 @@ class TextProcessingPipeline:
         recent_msgs, message_lengths = await asyncio.gather(recent_msgs_task, lengths_task)
 
         rag_memories: list[dict[str, Any]] = []
+        rag_ms: int | None = None
+        rag_error: str | None = None
         if rag_task:
-            rag_memories = await rag_task
+            rag_memories, rag_ms, rag_error = await rag_task
 
         kb_facts: list[dict[str, Any]] = []
+        kb_ms: int | None = None
+        kb_error: str | None = None
         if kb_task:
-            kb_facts = await kb_task
+            kb_facts, kb_ms, kb_error = await kb_task
 
         link_context_str: str | None = None
         if link_task:
@@ -179,6 +218,40 @@ class TextProcessingPipeline:
         sticker_candidates_str: str | None = None
         if sticker_task:
             sticker_candidates_str = await sticker_task
+
+        # Durable retrieval observability (migration 022): persist what each
+        # active source returned and what of it survives budget trimming.
+        # Fire-and-forget, and ALL payload construction happens inside the
+        # guarded task — nothing here may add latency or break the reply.
+        if self._observability is not None and rag_task is not None and self._rag is not None:
+            fire_and_forget(
+                self._safe_log_retrieval(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    source="rag_memory",
+                    query_text=message_text,
+                    params={
+                        "min_similarity": self._rag.min_similarity,
+                        "max_results": self._rag.max_results,
+                    },
+                    raw=rag_memories,
+                    duration_ms=rag_ms,
+                    error=rag_error,
+                )
+            )
+        if self._observability is not None and kb_task is not None:
+            fire_and_forget(
+                self._safe_log_retrieval(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    source="kb",
+                    query_text=message_text,
+                    params={"limit": _KB_SEARCH_LIMIT},
+                    raw=kb_facts,
+                    duration_ms=kb_ms,
+                    error=kb_error,
+                )
+            )
 
         # Convert Record rows to dicts for prompt builder
         history = [dict(r) for r in reversed(recent_msgs)]
@@ -225,6 +298,11 @@ class TextProcessingPipeline:
             )
         except AIProviderError:
             logger.exception("All AI providers failed", chat_id=chat_id)
+            fire_and_forget(
+                self._safe_log_silence(
+                    chat_id=chat_id, user_id=user_id, message_id=message_id, tier="provider_error"
+                )
+            )
             return PipelineResult(should_respond=False)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -346,6 +424,157 @@ class TextProcessingPipeline:
             return base + 0.1
         return base
 
+    async def _timed_rag_search(
+        self, chat_id: int, message_text: str
+    ) -> tuple[list[dict[str, Any]], int, str | None]:
+        """RAG search plus wall-clock ms and failure detail for retrieval_log.
+
+        Pre-022 a repository/DB error here propagated and killed the whole
+        reply. Now it degrades to "no memories" and lands in
+        retrieval_log.error — a retrieval outage must be visible, not fatal,
+        and without the error field a broken source is byte-identical to a
+        healthy source that matched nothing.
+        """
+        start = time.monotonic()
+        memories: list[dict[str, Any]] = []
+        error: str | None = None
+        try:
+            memories = await self._rag.search(chat_id, message_text) if self._rag else []
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            logger.warning("RAG search failed", chat_id=chat_id, error=str(exc), exc_info=True)
+        return memories, int((time.monotonic() - start) * 1000), error
+
+    async def _timed_kb_facts(
+        self, chat_id: int, message_text: str
+    ) -> tuple[list[dict[str, Any]], int, str | None]:
+        """KB fact search plus wall-clock ms and failure detail for retrieval_log.
+
+        `AIRouter.generate_embedding()` self-logs cost (router-level
+        `ensure_future(self._log_usage(...))`) so no separate `log_usage`
+        call is needed here (cross-cutting constraint applies to
+        `generate_text`, which does not self-log -- embeddings already do).
+        """
+        start = time.monotonic()
+        facts: list[dict[str, Any]] = []
+        error: str | None = None
+        if self._knowledge is not None:
+            try:
+                embedding_result = await self._ai.generate_embedding(message_text)
+            except Exception as exc:
+                error = f"embedding: {type(exc).__name__}: {exc}"
+                logger.warning("KB embedding generation failed", chat_id=chat_id, error=str(exc))
+            else:
+                try:
+                    facts = await self._knowledge.search_by_similarity(
+                        chat_id, embedding_result.embedding, limit=_KB_SEARCH_LIMIT
+                    )
+                except Exception as exc:
+                    error = f"search: {type(exc).__name__}: {exc}"
+                    logger.warning("KB fact search failed", chat_id=chat_id, error=str(exc))
+        return facts, int((time.monotonic() - start) * 1000), error
+
+    async def _safe_log_silence(
+        self,
+        *,
+        chat_id: int,
+        user_id: int | None,
+        message_id: int | None,
+        tier: str,
+        reason: str | None = None,
+    ) -> None:
+        """Persist a pipeline suppression to decision_log (never raises)."""
+        if self._observability is None:
+            return
+        try:
+            await self._observability.log_decision(
+                chat_id,
+                stage="pipeline",
+                decision="silent",
+                tier=tier,
+                reason=reason,
+                message_id=message_id,
+                # Handlers use 0 as the "no sender" sentinel; the gate writes
+                # NULL for the same case. Store NULL so GROUP BY user_id never
+                # invents a phantom user 0.
+                user_id=user_id or None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to log silence decision",
+                chat_id=chat_id,
+                tier=tier,
+                error=str(exc),
+                exc_info=True,
+            )
+
+    async def _safe_log_retrieval(
+        self,
+        *,
+        chat_id: int,
+        message_id: int | None,
+        source: str,
+        query_text: str,
+        params: dict[str, Any],
+        raw: list[dict[str, Any]],
+        duration_ms: int | None,
+        error: str | None = None,
+    ) -> None:
+        """Persist one retrieval pass to retrieval_log (never raises).
+
+        Payload construction happens HERE, inside the guard — a malformed
+        retrieval row must break the log write, never the reply.
+        """
+        if self._observability is None:
+            return
+        try:
+            if source == "kb":
+                # Same pure trim the renderer applies (agreement pinned by
+                # test_kb_retrieval_logs_budget_trim_as_not_injected), so
+                # `injected` states what actually reaches the prompt.
+                kept_ids = {fact.get("id") for fact in trim_facts_to_budget(raw)}
+                items = [
+                    {
+                        "id": fact.get("id"),
+                        "sim": _round_sim(fact.get("similarity")),
+                        "injected": fact.get("id") in kept_ids,
+                        "head": (fact.get("fact_text") or "")[:_RETRIEVAL_HEAD_CHARS],
+                    }
+                    for fact in raw
+                ]
+            else:
+                items = [
+                    {
+                        "id": mem.get("id"),
+                        "sim": _round_sim(mem.get("similarity")),
+                        # RAG has no budget trim yet (TD-007 / ADR-0006
+                        # pending): everything returned reaches the prompt.
+                        "injected": True,
+                        "head": (mem.get("content") or "")[:_RETRIEVAL_HEAD_CHARS],
+                    }
+                    for mem in raw
+                ]
+            await self._observability.log_retrieval(
+                chat_id,
+                source=source,
+                query_text=query_text,
+                params=params,
+                results=items,
+                n_results=len(items),
+                n_injected=sum(1 for item in items if item.get("injected")),
+                duration_ms=duration_ms,
+                message_id=message_id,
+                error=error,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to log retrieval",
+                chat_id=chat_id,
+                source=source,
+                error=str(exc),
+                exc_info=True,
+            )
+
     async def _safe_get_sticker_candidates(self, message_text: str) -> str | None:
         """Get sticker candidates for prompt injection (non-blocking on failure)."""
         if not self._sticker:
@@ -358,29 +587,6 @@ class TextProcessingPipeline:
         except Exception:
             logger.warning("Sticker candidate search failed")
             return None
-
-    async def _safe_get_kb_facts(self, chat_id: int, message_text: str) -> list[dict[str, Any]]:
-        """Retrieve KB facts relevant to the current message (non-blocking on failure).
-
-        `AIRouter.generate_embedding()` self-logs cost (router-level
-        `ensure_future(self._log_usage(...))`) so no separate `log_usage`
-        call is needed here (cross-cutting constraint applies to
-        `generate_text`, which does not self-log -- embeddings already do).
-        """
-        if not self._knowledge:
-            return []
-        try:
-            embedding_result = await self._ai.generate_embedding(message_text)
-        except Exception:
-            logger.warning("KB embedding generation failed", chat_id=chat_id)
-            return []
-        try:
-            return await self._knowledge.search_by_similarity(
-                chat_id, embedding_result.embedding, limit=_KB_SEARCH_LIMIT
-            )
-        except Exception:
-            logger.warning("KB fact search failed", chat_id=chat_id)
-            return []
 
     async def _safe_extract_links(self, text: str) -> str | None:
         """Extract link context (non-blocking on failure)."""

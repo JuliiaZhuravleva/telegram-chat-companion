@@ -143,6 +143,11 @@ class MaintenanceSettings(BaseSettings):
     # abuse_blocked_log_days, the other "short, sensitive, recent-signal" table.
     reactions_days: int | None = 30
 
+    # Observability logs (migration 022): operational analytics, not history —
+    # same window as response_log, whose role they extend.
+    decision_log_days: int | None = 90
+    retrieval_log_days: int | None = 90
+
 
 class Settings(BaseSettings):
     """Main application settings."""

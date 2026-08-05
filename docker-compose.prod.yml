@@ -26,10 +26,23 @@
 # orphan the running stack while appearing to work.
 name: companion
 
+# Bounds each container's log to ~50MB (Docker's json-file default has NO
+# size limit). This does NOT survive a release: json-file logs live under the
+# container's directory and are deleted when the deploy recreates it. The
+# durable record of decisions and retrievals is the DB
+# (decision_log/retrieval_log, migration 022); this block only stops a chatty
+# container from eating the disk between releases.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
 services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    logging: *default-logging
 
     environment:
       - POSTGRES_USER=${POSTGRES_USER:?Set POSTGRES_USER in the env map}
@@ -67,6 +80,7 @@ services:
   bot:
     build: .
     restart: unless-stopped
+    logging: *default-logging
 
     depends_on:
       postgres:
@@ -121,6 +135,7 @@ services:
       context: .
       dockerfile: docker/backup/Dockerfile
     restart: unless-stopped
+    logging: *default-logging
 
     depends_on:
       postgres:
