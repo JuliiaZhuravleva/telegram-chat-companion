@@ -69,6 +69,20 @@ cp config/.env.example .env
 docker compose up -d
 ```
 
+### Backups
+
+A `backup` service ships with both compose files: a nightly `pg_dump`, encrypted
+to an [age](https://age-encryption.org/) public key before it leaves the host and
+uploaded with [rclone](https://rclone.org/) (Google Drive by default). It stays
+off until `BACKUP_ENABLED=true` is set, and it is opt-in on the dev compose
+(`--profile backup`).
+
+`scripts/restore-db.sh` is the other half — it verifies the archive, refuses to
+overwrite a database that already has tables, and checks the restored row counts
+against the backup's manifest.
+
+See [docs/backups.md](docs/backups.md) for the one-time key and rclone setup.
+
 ## Architecture
 
 ```
@@ -97,11 +111,15 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 ### Commands
 - `/help` — dynamic feature list based on enabled modules
 - `/summary` — AI-generated chat summary
+- `/remember` — save a fact from a replied-to message into the chat's knowledge base
+- `/kb` — browse the facts remembered for this chat
 
 ### Optional Modules
+- **Knowledge base** — per-chat facts the bot remembers and reuses as context; curated by chat organizers from the admin panel
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually
+- **Reactions** — records who added or removed which reaction, and can answer with a reaction instead of words when it decides not to speak. Opt-in per chat, with a separate switch for the history; **requires the bot to be a chat administrator**, as Telegram sends no reaction updates otherwise — the admin panel shows that status live
 - **Link comments** — extract and comment on YouTube/TikTok links
 - **Custom rules** — keyword triggers, spam detection, regex matching
 
@@ -143,6 +161,8 @@ pre-commit install           # Set up git hooks
 - [Architecture Overview](docs/architecture.md)
 - [Setup Guide](docs/setup.md)
 - [Configuration Reference](docs/configuration.md)
+- [Deployment](docs/deployment.md) — **merging to `main` deploys to production**: the gates, what this repo must keep true, and the failure modes
+- [Database Backups](docs/backups.md) — nightly encrypted dumps, off-host upload, restore and rehearsal
 - [Functionality Overview](docs/FUNCTIONALITY.md) — full feature catalogue with live-QA observations and improvement recommendations
 
 ## Contributing

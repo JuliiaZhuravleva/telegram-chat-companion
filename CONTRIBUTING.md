@@ -78,6 +78,13 @@ pytest tests/ -v --cov=src --cov-report=term-missing
 4. Ensure all checks pass (`ruff`, `mypy`, `pytest`)
 5. Write a clear PR description
 
+> **Merging to `main` deploys to production**, unattended, within minutes — see
+> [docs/deployment.md](docs/deployment.md). Green checks and a clean migration rehearsal are the
+> only guard between a merged PR and the running bot, so the merge *is* the release decision.
+> Two things that matter when changing infrastructure: the deployer waits on the CI jobs **by
+> name** (a renamed job stalls deploys rather than failing them), and migrations are forward-only
+> — there is no automatic rollback.
+
 ## Architecture Decisions
 
 Major architectural decisions live as ADR notes inside the codebase (see the "Architectural Decisions" section near the top of each relevant module). When proposing architectural changes, please open an issue first.

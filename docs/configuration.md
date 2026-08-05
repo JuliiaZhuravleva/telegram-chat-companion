@@ -14,6 +14,8 @@ Configuration is loaded from three sources (later wins):
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
 | `GEMINI_API_KEY` | No | Google Gemini API key |
 | `OPENAI_API_KEY` | No | OpenAI API key |
+| `OPENAI_ADMIN_API_KEY` | No | OpenAI **organization Admin** key, used only by the admin panel's cost-verification button. Not interchangeable with `OPENAI_API_KEY`: the `/v1/organization/*` billing endpoints reject a project key, and an admin key is rejected on `/v1/chat/completions`. Create at [admin keys](https://platform.openai.com/settings/organization/admin-keys) (organization owners only). Requires `OPENAI_PROJECT_ID` |
+| `OPENAI_PROJECT_ID` | No | Project (`proj_…`) the cost verification reports on. Required together with `OPENAI_ADMIN_API_KEY` — without it the costs endpoint answers organization-wide. Find it under [projects](https://platform.openai.com/settings/organization/projects) |
 | `GROK_API_KEY` | No | xAI Grok API key |
 | `DEEPSEEK_API_KEY` | No | DeepSeek API key |
 

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T09:15:38Z",
+  "role": "evaluator",
+  "item_id": "A-1",
+  "verdict": "PASS",
+  "evidence": "git show eb4aab5: pending_list_keyboard() now takes start_index and renders f'{i} ✅'/f'{i} ❌', wired from the same offset=page*_PER_PAGE used for body enumeration in _render_wl_pending; independently reran pytest tests/unit/test_admin_keyboards.py tests/unit/test_admin_handler.py -q -> 113 passed (matches claim), ruff clean on both touched files; new test_button_number_matches_body_numbering_on_third_page covers exactly the 3rd-page case the item's acceptance criteria specify. Scope correctly confined to pending list only (no touches to rejected/chats_list keyboards, which is A-2's job).",
+  "regression_risk": "low",
+  "notes": ""
+}

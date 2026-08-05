@@ -65,6 +65,20 @@ class MessageSaverMiddleware(BaseMiddleware):
         else:
             msg_type = "text"
 
+        # `message.quote` (aiogram's TextQuote) is the fragment the user
+        # manually highlighted on `reply_to_message` before hitting reply --
+        # same field Q-1 reads on the live path (`extract_reply_context()` in
+        # `src/bot/handlers/message.py`). Persisted as-is (untruncated): the
+        # 300-char prompt-budget cap is a rendering concern applied where the
+        # text is consumed, not at storage time. `is_manual` is an Optional
+        # bool in aiogram's model (unset means "not manual"); normalize to a
+        # concrete bool so a NULL in the DB unambiguously means "no quote".
+        quote_text: str | None = None
+        quote_is_manual: bool | None = None
+        if message.quote is not None:
+            quote_text = message.quote.text
+            quote_is_manual = bool(message.quote.is_manual)
+
         await msg_repo.save(
             chat_id=message.chat.id,
             message_id=message.message_id,
@@ -82,4 +96,6 @@ class MessageSaverMiddleware(BaseMiddleware):
             sticker_set_name=(message.sticker.set_name if message.sticker else None),
             sticker_emoji=message.sticker.emoji if message.sticker else None,
             message_thread_id=message_thread_id,
+            quote_text=quote_text,
+            quote_is_manual=quote_is_manual,
         )

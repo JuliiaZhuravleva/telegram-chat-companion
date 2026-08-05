@@ -151,6 +151,9 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "rules_mode",
         "link_comments_enabled",
         "relevancy_gate_enabled",
+        "kb_enabled",
+        "reactions_enabled",
+        "reactions_history_enabled",
     }
 )
 
@@ -159,7 +162,7 @@ def _coerce(key: str, value: Any) -> Any:
     """Normalize DB values to match ChatConfig field types."""
     if key == "trigger_words":
         # DB stores TEXT[] (list), ChatConfig expects tuple
-        if isinstance(value, (list, tuple)):
+        if isinstance(value, list | tuple):
             return tuple(value)
         return (value,)
     return value

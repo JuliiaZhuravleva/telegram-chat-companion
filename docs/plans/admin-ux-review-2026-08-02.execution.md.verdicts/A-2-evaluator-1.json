@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T09:22:46Z",
+  "role": "evaluator",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "evidence": "Verified commit cbaeb0c: extracted _numbered_button() shared helper used by pending_list_keyboard, rejected_list_keyboard, chats_list_keyboard; start_index threaded into both remaining call sites in handlers/admin.py mirroring A-1's pattern, and the same latent NameError (offset defined only in total>0 branch) was fixed for both _render_wl_rejected and _render_wl_chats. Ran pytest tests/unit/test_admin_keyboards.py tests/unit/test_admin_handler.py -q independently: 120 passed (matches claim); ruff and mypy clean on both touched source files. Added tests include the cross-list 'all three lists call the same helper' check the plan asked for (TestNumberedButtonSharedAcrossLists) plus body-numbering-match tests for chats/rejected on a 3rd page, mirroring A-1's pending test.",
+  "regression_risk": "low",
+  "notes": ""
+}

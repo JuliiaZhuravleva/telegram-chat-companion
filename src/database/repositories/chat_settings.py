@@ -28,8 +28,17 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "save_messages",
         "rules_enabled",
         "rules_mode",
+        "sticker_reply_to_sticker_enabled",
+        "sticker_reply_to_sticker_chance",
+        "image_comment_sticker_enabled",
+        "image_comment_sticker_chance",
         "link_comments_enabled",
+        "relevancy_gate_enabled",
+        "kb_enabled",
+        "kb_organizer_ids",
         "last_activity_at",
+        "reactions_enabled",
+        "reactions_history_enabled",
     }
 )
 

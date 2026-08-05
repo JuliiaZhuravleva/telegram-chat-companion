@@ -91,3 +91,22 @@ class TestChatConfigMiddleware:
         await middleware(handler, event, data)
 
         handler.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_injects_chat_config_for_message_reaction_event(self):
+        """R-1: message_reaction handler needs chat_config (reactions_enabled /
+        reactions_history_enabled) too."""
+        from aiogram.types import MessageReactionUpdated
+
+        config = ChatConfig(chat_id=-1001, reactions_enabled=True)
+        middleware = _make_middleware()
+        handler = AsyncMock()
+        event = MagicMock(spec=MessageReactionUpdated)
+        event.chat = MagicMock()
+        event.chat.id = -1001
+        data, _ = _make_data(config)
+
+        await middleware(handler, event, data)
+
+        assert data["chat_config"] is config
+        handler.assert_awaited_once_with(event, data)

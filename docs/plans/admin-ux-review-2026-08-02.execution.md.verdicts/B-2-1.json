@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T09:46:19Z",
+  "role": "specialist",
+  "item_id": "B-2",
+  "verdict": "PASS",
+  "cost_usd": 2.92,
+  "notes": "Implemented the participant picker as spec'd: MessageRepository.get_top_active_users() (GROUP BY user_id over chat_messages, excludes bot messages, ORDER BY message_count DESC with user_id ASC tiebreak) backs a new adm_kb_org_list:/adm_kb_org_pick: callback pair; kb_organizer_picker_keyboard renders 'Name (@nick)' rows, top-5-per-page with pagination, reached via a new 'Show participants' button on the existing add-organizer prompt. Picking a candidate adds them directly (mirrors org_rm's single-tap-no-confirm convention) and clears the awaiting_kb_organizer FSM state so a stray later text isn't misread as a username reply. Schema-review gate (plan's first step of execution): verified idx_chat_messages_user(chat_id, user_id, created_at DESC) (migration 002) already supports the GROUP BY without a sort -- no migration needed, estimate did not grow. Did not update docs/design/kb-copy-register.md with the 4 new strings -- same gap B-1 flagged for its own new strings; recommend one architect follow-up covering both items' copy at once. No integration-test gap requiring qa: get_top_active_users is a parameterized aggregate SELECT against the existing chat_messages table (no new schema), covered by mocked-pool unit tests; qa could optionally add a real-Postgres GROUP BY/ranking check but it's not blocking.",
+  "result": {
+    "kind": "commit",
+    "ref": "9db1a61",
+    "verification": "pytest tests/unit/test_admin_kb_handler.py tests/unit/test_admin_kb_keyboards.py tests/unit/test_message_repository.py -q: 52 passed; full pytest tests/unit/ -q: 996 passed; ruff check src/ clean; ruff format --check clean; mypy src/ clean (113 files)"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

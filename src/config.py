@@ -99,6 +99,51 @@ class ModuleConfig(BaseSettings):
     requires: list[str] = Field(default_factory=list)
 
 
+class MaintenanceSettings(BaseSettings):
+    """Data retention windows for the periodic cleanup task.
+
+    Mirrors the reference bot's ``periodic_cleanup()`` (see
+    internal/n8n-reference/data/data-lifecycle.md).  Any window set to ``None``
+    disables cleanup for that table, so an operator can always opt out of
+    deleting a specific kind of data.
+    """
+
+    enabled: bool = True
+    interval_seconds: int = 3600  # hourly; user_activity has a 1-hour window
+
+    # Ephemeral: rebuilt continuously, only used for spam/velocity windows.
+    user_activity_hours: int | None = 1
+
+    # Deliberately longer than the reference bot's 30 days: the n8n migration
+    # carries ~36k historical messages over and they must survive the first
+    # cleanup pass.  Raise further before migrating if older history matters.
+    chat_messages_days: int | None = 365
+
+    # Backs /costs analytics (a Python-only feature the reference bot lacked),
+    # so kept far longer than n8n's 7-day debug-log window.
+    response_log_days: int | None = 90
+
+    # NOT pruned, deliberately — unlike the reference bot, this table is not a
+    # log here, it is state.  `AdminRepository.has_rejected_attempt()` asks it
+    # "was this chat ever rejected?" with no time bound, and
+    # `AccessControlMiddleware` short-circuits on the answer.  A rejected row IS
+    # the ban record, so ageing it out silently un-bans the chat: the bot starts
+    # notifying the admin about it again, having lost the evidence that someone
+    # already decided.  n8n could prune at 30 days because it recorded the
+    # decision in chat_settings.chat_status instead.  Volume is a non-issue —
+    # the live migration carried 147 rows for ~6 months of production.
+    unauthorized_attempts_days: int | None = None
+
+    abuse_blocked_log_days: int | None = 30
+
+    # Short, separate window (ADR-0004 Decision 3): message_reactions is a
+    # behavioral trail ("who reacted to what"), more sensitive than message
+    # text, so it does NOT reuse chat_messages_days (365, RAG continuity) or
+    # response_log_days (90, cost analytics). Same order as
+    # abuse_blocked_log_days, the other "short, sensitive, recent-signal" table.
+    reactions_days: int | None = 30
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -114,6 +159,15 @@ class Settings(BaseSettings):
 
     # Optional API keys (from environment)
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    # Organization-level Admin key (sk-admin-…), NOT the regular API key above.
+    # Only used for the /v1/organization/* billing endpoints — an admin key is
+    # rejected on /v1/chat/completions, so the two are never interchangeable.
+    openai_admin_api_key: str | None = Field(default=None, alias="OPENAI_ADMIN_API_KEY")
+    # Project the admin key should report on (proj_…). Required alongside the
+    # admin key: the costs endpoint answers organization-wide unless filtered,
+    # and an org-wide figure compared against this bot's own log is not a
+    # reconciliation, just a difference.
+    openai_project_id: str | None = Field(default=None, alias="OPENAI_PROJECT_ID")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     grok_api_key: str | None = Field(default=None, alias="GROK_API_KEY")
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
@@ -124,6 +178,7 @@ class Settings(BaseSettings):
     bot: BotSettings = Field(default_factory=BotSettings)
     rag: RAGSettings = Field(default_factory=RAGSettings)
     ai: AISettings = Field(default_factory=AISettings)
+    maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
     modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:

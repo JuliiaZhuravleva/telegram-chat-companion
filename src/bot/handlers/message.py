@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import random
-import re
 from typing import Any
 
 import structlog
@@ -11,55 +9,76 @@ from aiogram import F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.utils import extract_reply_context, should_respond
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
+from src.services.abuse.checker import AntiAbuseChecker
 from src.services.costs.spend_limit import SpendLimitService
-from src.services.relevancy.gate import RelevancyGate
+from src.services.modules.reactions.responder import set_reaction
+from src.services.modules.reactions.selector import ReactionSelector
+from src.services.relevancy.gate import GateDecision, RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
 
 router = Router(name="messages")
 logger = structlog.get_logger()
 
 
-def should_respond(
+async def _react_to_silence(
     message: Message,
     config: ChatConfig,
-    bot_id: int | None = None,
-) -> tuple[bool, TriggerType]:
-    """Determine if the bot should respond to this message.
+    gate_decision: GateDecision,
+    abuse_checker: AntiAbuseChecker,
+) -> None:
+    """R-5: tier-3 silence -> optionally react instead of a text reply.
 
-    Returns:
-        Tuple of (should_respond, trigger_type).
+    `gate_decision.suggested_emoji` is only ever populated on the tier-3
+    `llm_judge` path (ADR-0004 Decision 4) -- every other tier leaves it
+    `None`, so this is a no-op there. Gated on `reactions_enabled` only,
+    never `reactions_history_enabled` (Decision 3): R-5 needs no history at
+    all, `llm_judge` decides live, per-call.
+
+    Anti-abuse: this path returns before `TextProcessingPipeline.process()`,
+    so the pipeline's Stage 1 abuse gate never runs for it. Setting a reaction
+    is an outbound, user-visible action, so it must respect the same "be quiet
+    toward this user" signal a text reply would. The cooldown is probed
+    read-only and *after* the cheap guards, so a message the bot was never
+    going to react to costs no query at all.
     """
-    text = (message.text or message.caption or "").strip()
-    text_lower = text.lower()
+    if not config.reactions_enabled or message.bot is None:
+        return
 
-    # Check for trigger words (word-boundary matching)
-    for trigger in config.trigger_words:
-        pattern = rf"(?:^|\s){re.escape(trigger.lower())}"
-        if re.search(pattern, text_lower):
-            return True, TriggerType.TRIGGER
+    emoji = ReactionSelector.select(gate_decision.suggested_emoji)
+    if emoji is None:
+        return
 
-    # Check if this is a reply to the bot's message
-    if message.reply_to_message:
-        reply_from = message.reply_to_message.from_user
-        reply_from_id = reply_from.id if reply_from else None
-        is_match = bot_id is not None and reply_from_id == bot_id
+    user = message.from_user
+    if user is not None and await abuse_checker.is_in_cooldown(message.chat.id, user.id):
         logger.debug(
-            "Reply trigger evaluation",
+            "Skipping silence reaction: user in cooldown",
             chat_id=message.chat.id,
-            reply_from_id=reply_from_id,
-            bot_id=bot_id,
-            is_match=is_match,
+            user_id=user.id,
         )
-        if is_match:
-            return True, TriggerType.REPLY
+        return
 
-    # Random response chance
-    if random.random() < config.random_response_chance:
-        return True, TriggerType.RANDOM
-
-    return False, TriggerType.NONE
+    try:
+        await set_reaction(
+            message.bot,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            emoji=emoji,
+        )
+    except Exception as exc:
+        # `set_reaction` swallows TelegramAPIError; this is a last-resort net
+        # for anything else (e.g. a programming error after a signature change)
+        # so a suppressed text reply never turns into an unhandled crash.
+        logger.warning(
+            "Failed to set reaction on silence",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
 
 
 @router.message(F.text)
@@ -69,6 +88,7 @@ async def handle_text_message(
     pipeline: FromDishka[TextProcessingPipeline],
     relevancy_gate: FromDishka[RelevancyGate],
     spend_limit_svc: FromDishka[SpendLimitService],
+    abuse_checker: FromDishka[AntiAbuseChecker],
     message_thread_id: int | None = None,
     **kwargs: Any,
 ) -> None:
@@ -91,22 +111,15 @@ async def handle_text_message(
             config=chat_config,
         )
         if not gate_decision.should_respond:
+            await _react_to_silence(message, chat_config, gate_decision, abuse_checker)
             return
 
     user = message.from_user
     user_id = user.id if user else 0
     user_name = (user.first_name if user else None) or "Unknown"
 
-    # Extract reply context
-    reply_author: str | None = None
-    reply_text: str | None = None
-    reply_is_bot = False
-    if message.reply_to_message:
-        rpl = message.reply_to_message
-        if rpl.from_user:
-            reply_author = rpl.from_user.first_name
-            reply_is_bot = rpl.from_user.is_bot
-        reply_text = (rpl.text or rpl.caption or "")[:500]
+    # Extract reply context (full message + manually-highlighted quote, if any)
+    reply_ctx = extract_reply_context(message)
 
     logger.info(
         "Processing message",
@@ -123,9 +136,11 @@ async def handle_text_message(
         message_text=message.text or "",
         trigger_type=trigger_type,
         config=chat_config,
-        reply_author=reply_author,
-        reply_text=reply_text,
-        reply_is_bot=reply_is_bot,
+        reply_author=reply_ctx.author,
+        reply_text=reply_ctx.text,
+        reply_is_bot=reply_ctx.is_bot,
+        reply_quote_text=reply_ctx.quote_text,
+        reply_quote_is_manual=reply_ctx.quote_is_manual,
         message_thread_id=message_thread_id,
     )
 

@@ -77,8 +77,8 @@ class AbuseNotificationService:
 
         text = (
             f"⚠️ Jailbreak attempt\n"
-            f"Chat: {chat_id}\n"
-            f"User: {escape(username) if username else user_id}\n"
+            f"Chat: <code>{chat_id}</code>\n"
+            f"User: {escape(username) if username else f'<code>{user_id}</code>'}\n"
             f"Pattern: {escape(pattern_description) if pattern_description else 'unknown'}\n"
             f"Severity: {severity or 'N/A'}"
         )
@@ -112,8 +112,8 @@ class AbuseNotificationService:
 
         text = (
             f"🚫 Blacklist triggered\n"
-            f"Chat: {chat_id}\n"
-            f"User: {escape(username) if username else user_id}\n"
+            f"Chat: <code>{chat_id}</code>\n"
+            f"User: {escape(username) if username else f'<code>{user_id}</code>'}\n"
             f"Content: {escape(content[:50])}\n"
             f"Timeout: {timeout_hours:.1f}h"
         )
@@ -252,7 +252,7 @@ class AbuseNotificationService:
 
         text = (
             f"🔄 AI fallback activated\n"
-            f"Chat: {chat_id}\n"
+            f"Chat: <code>{chat_id}</code>\n"
             f"Primary: {primary_provider} (failed)\n"
             f"Fallback: {fallback_provider}\n"
             f"Error: {error[:100]}"

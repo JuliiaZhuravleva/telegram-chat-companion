@@ -141,6 +141,43 @@ class TestChatSettingsRepository:
             await repo_.set_field(123, "bad_column", "value")
 
     @pytest.mark.asyncio
+    async def test_set_field_kb_enabled(self, repo):
+        """kb_enabled (A3: chat_facts KB opt-in toggle) is writable."""
+        repo_, pool = repo
+        await repo_.set_field(123, "kb_enabled", True)
+        pool.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_kb_enabled(self, repo):
+        repo_, pool = repo
+        await repo_.upsert(123, kb_enabled=True)
+        pool.execute.assert_awaited_once()
+        sql = pool.execute.call_args[0][0]
+        assert "kb_enabled" in sql
+
+    @pytest.mark.asyncio
+    async def test_set_field_reactions_enabled(self, repo):
+        """reactions_enabled (R-1, ADR-0004) is writable."""
+        repo_, pool = repo
+        await repo_.set_field(123, "reactions_enabled", True)
+        pool.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_set_field_reactions_history_enabled(self, repo):
+        repo_, pool = repo
+        await repo_.set_field(123, "reactions_history_enabled", False)
+        pool.execute.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_upsert_reactions_columns(self, repo):
+        repo_, pool = repo
+        await repo_.upsert(123, reactions_enabled=True, reactions_history_enabled=False)
+        pool.execute.assert_awaited_once()
+        sql = pool.execute.call_args[0][0]
+        assert "reactions_enabled" in sql
+        assert "reactions_history_enabled" in sql
+
+    @pytest.mark.asyncio
     async def test_list_enabled(self, repo):
         repo_, pool = repo
         pool.fetch.return_value = [

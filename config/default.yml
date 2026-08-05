@@ -81,6 +81,36 @@ rag:
   # Memory importance scoring
   default_importance: 0.5
 
+# Data retention for the periodic cleanup task.
+# Set any window to null to never delete that table.
+maintenance:
+  enabled: true
+  interval_seconds: 3600
+
+  # Ephemeral — only feeds spam/velocity windows.
+  user_activity_hours: 1
+
+  # Longer than the reference n8n bot's 30 days on purpose: the migration
+  # carries ~36k historical messages over and they must survive the first pass.
+  chat_messages_days: 365
+
+  # Backs /costs analytics, so kept longer than a debug log would be.
+  response_log_days: 90
+
+  # null on purpose — this table is state, not a log. has_rejected_attempt()
+  # queries it with no time bound and the access middleware short-circuits on
+  # the answer, so a rejected row IS the ban record; ageing it out silently
+  # un-bans the chat. The live migration carried 147 rows for ~6 months, so
+  # there is nothing to reclaim here anyway.
+  unauthorized_attempts_days: null
+
+  abuse_blocked_log_days: 30
+
+  # Short, separate window (ADR-0004): message_reactions is a behavioral
+  # trail ("who reacted to what"), more sensitive than message text, so it
+  # does not reuse chat_messages_days or response_log_days.
+  reactions_days: 30
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:
@@ -127,6 +157,14 @@ modules:
 
   link_comments:
     enabled: false
+
+  knowledge_base:
+    enabled: false  # Disabled by default (opt-in per chat, ADR-0003)
+    requires:
+      - "embeddings"
+
+  reactions:
+    enabled: false  # Disabled by default (opt-in per chat, ADR-0004)
 
   admin_panel:
     enabled: true

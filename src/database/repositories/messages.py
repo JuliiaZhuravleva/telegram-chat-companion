@@ -32,6 +32,8 @@ class MessageRepository:
         sticker_set_name: str | None = None,
         sticker_emoji: str | None = None,
         message_thread_id: int | None = None,
+        quote_text: str | None = None,
+        quote_is_manual: bool | None = None,
     ) -> None:
         """Save a chat message."""
         await self._pool.execute(
@@ -40,8 +42,9 @@ class MessageRepository:
                 chat_id, message_id, user_id, username, first_name,
                 message_type, content, raw_data, reply_to_message_id,
                 is_bot_message, sticker_file_id, sticker_file_unique_id,
-                sticker_set_name, sticker_emoji, message_thread_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15)
+                sticker_set_name, sticker_emoji, message_thread_id,
+                quote_text, quote_is_manual
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (chat_id, message_id) DO UPDATE
             SET content = EXCLUDED.content,
                 edited_at = NOW(),
@@ -65,6 +68,8 @@ class MessageRepository:
             sticker_set_name,
             sticker_emoji,
             message_thread_id,
+            quote_text,
+            quote_is_manual,
         )
 
     async def get_recent(
@@ -104,6 +109,13 @@ class MessageRepository:
 
         When message_thread_id is None (non-forum):
         - Falls back to standard get_recent() behavior with NULL topic_scope
+
+        Each row also carries `quote_text` / `quote_is_manual` (migration 021):
+        the manually-highlighted reply quote persisted for that message, if
+        any. Consumers must gate on `quote_is_manual is True` before treating
+        `quote_text` as the user's deliberate focus -- same rule Q-1 applies
+        on the live (non-historical) path; a server-attached quote carries no
+        such intent.
         """
         if message_thread_id is None:
             # Non-forum: standard query with NULL topic_scope
@@ -111,6 +123,7 @@ class MessageRepository:
                 """
                 SELECT id, chat_id, message_id, user_id, username, first_name,
                        message_type, content, is_bot_message, created_at,
+                       quote_text, quote_is_manual,
                        NULL::text AS topic_scope
                 FROM chat_messages
                 WHERE chat_id = $1
@@ -127,6 +140,7 @@ class MessageRepository:
             """
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    quote_text, quote_is_manual,
                     'current' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id = $2
@@ -134,6 +148,7 @@ class MessageRepository:
             UNION ALL
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    quote_text, quote_is_manual,
                     'other' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id IS DISTINCT FROM $2
@@ -241,6 +256,103 @@ class MessageRepository:
                 "consecutive_bot_at_end": 0,
             }
         return dict(row)
+
+    async def find_by_username(self, chat_id: int, username: str) -> asyncpg.Record | None:
+        """Find the most recent user_id seen posting under `username` in this chat.
+
+        Case-insensitive (Telegram usernames are case-insensitive). Used to
+        resolve a plain ``@username`` reply into a concrete user id when
+        adding a KB organizer (B-1 stage 2) — the Bot API has no
+        username-to-user lookup, so this chat-scoped message history is the
+        only available index. Returns ``None`` if this chat's history has no
+        record of that username (caller should then check
+        ``username_seen_elsewhere`` to phrase the right not-found copy).
+        """
+        return await self._pool.fetchrow(
+            """
+            SELECT user_id, first_name
+            FROM chat_messages
+            WHERE chat_id = $1
+              AND user_id IS NOT NULL
+              AND username IS NOT NULL
+              AND LOWER(username) = LOWER($2)
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            chat_id,
+            username,
+        )
+
+    async def username_seen_elsewhere(self, chat_id: int, username: str) -> bool:
+        """Check whether `username` has posted in a chat other than `chat_id`.
+
+        Lets the organizer-add flow distinguish "don't know this username at
+        all" from "know them, but not in this chat" (B-1 stage 2).
+        """
+        row = await self._pool.fetchrow(
+            """
+            SELECT 1
+            FROM chat_messages
+            WHERE chat_id != $1
+              AND user_id IS NOT NULL
+              AND username IS NOT NULL
+              AND LOWER(username) = LOWER($2)
+            LIMIT 1
+            """,
+            chat_id,
+            username,
+        )
+        return row is not None
+
+    async def get_top_active_users(
+        self, chat_id: int, page: int, per_page: int = 5
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated distinct posters in a chat, ranked by message count desc.
+
+        Powers the KB organizer picker (B-2): lets an admin pick a candidate
+        from chat participants instead of guessing a forward/@username.
+        Excludes bot messages and rows with no `user_id` (e.g. service
+        messages). `username`/`first_name` reflect that user's most recent
+        message in this chat -- same chat-scoped-history constraint as
+        `find_by_username` (no live Bot API lookup here). The existing
+        `idx_chat_messages_user(chat_id, user_id, created_at DESC)` serves the
+        per-chat grouping; the final `ORDER BY message_count DESC` still sorts,
+        because it orders by an aggregate no index can precompute -- acceptable
+        for a low-frequency admin action. `user_id ASC` is a stable tiebreaker
+        so page contents don't reshuffle across requests when counts are equal.
+        Note the count and the page are two separate statements, so under
+        concurrent writes `total` may disagree slightly with the rows returned;
+        harmless for a picker, worth knowing before reusing this elsewhere.
+        Returns (candidates, total_distinct_posters).
+        """
+        total = (
+            await self._pool.fetchval(
+                """
+                SELECT COUNT(DISTINCT user_id)
+                FROM chat_messages
+                WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+                """,
+                chat_id,
+            )
+            or 0
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT user_id,
+                   (array_agg(username ORDER BY created_at DESC))[1] AS username,
+                   (array_agg(first_name ORDER BY created_at DESC))[1] AS first_name,
+                   COUNT(*)::int AS message_count
+            FROM chat_messages
+            WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+            GROUP BY user_id
+            ORDER BY message_count DESC, user_id ASC
+            LIMIT $2 OFFSET $3
+            """,
+            chat_id,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
 
     async def get_for_summary(
         self,

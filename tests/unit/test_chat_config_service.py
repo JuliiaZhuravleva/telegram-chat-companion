@@ -145,6 +145,59 @@ class TestMerge:
         assert config.abuse_filter_enabled is True
         assert config.sticker_response_chance == 0.3
 
+    def test_kb_enabled_defaults_false(self):
+        """kb_enabled (A3, ADR-0003) is opt-in per chat -- defaults to False."""
+        service, _, _ = _make_service()
+        config = service._merge(chat_id=1, global_overrides={}, chat_row=None)
+        assert config.kb_enabled is False
+
+    def test_kb_enabled_from_chat_row(self):
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={},
+            chat_row={"kb_enabled": True},
+        )
+        assert config.kb_enabled is True
+
+    def test_kb_enabled_from_global_overrides(self):
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={"kb_enabled": True},
+            chat_row=None,
+        )
+        assert config.kb_enabled is True
+
+    def test_reactions_enabled_defaults_false(self):
+        """reactions_enabled (R-1, ADR-0004) is the master module toggle,
+        opt-in per chat -- defaults to False like kb_enabled."""
+        service, _, _ = _make_service()
+        config = service._merge(chat_id=1, global_overrides={}, chat_row=None)
+        assert config.reactions_enabled is False
+        assert config.reactions_history_enabled is True  # dataclass default
+
+    def test_reactions_enabled_from_chat_row(self):
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={},
+            chat_row={"reactions_enabled": True},
+        )
+        assert config.reactions_enabled is True
+
+    def test_reactions_history_enabled_can_be_disabled_independently(self):
+        """reactions_history_enabled gates only the INSERT -- must be settable
+        without touching reactions_enabled (ADR-0004 Decision 3)."""
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={},
+            chat_row={"reactions_enabled": True, "reactions_history_enabled": False},
+        )
+        assert config.reactions_enabled is True
+        assert config.reactions_history_enabled is False
+
 
 # ---------------------------------------------------------------------------
 # get_config() tests — caching behavior

@@ -445,3 +445,105 @@ class TestClearAnalysisSetListView:
         rows = await repo.get_stickers_in_set("clrv_set_fail")
         assert rows[0]["analysis_failed"] is False
         assert rows[0]["visual_description"] is None
+
+
+# ---------------------------------------------------------------------------
+# Admin notifications (migration 016 regression)
+# ---------------------------------------------------------------------------
+
+
+class TestAdminNotifications:
+    """save_notification / get_notification_by_reply / get_latest_sticker_msg.
+
+    Regression for the 2026-08-02 prod incident: these methods hit
+    admin_sticker_notifications, which existed only in hand-patched dev
+    databases until migration 016 — on a fresh `alembic upgrade head` schema
+    every call raised UndefinedTableError. Running them against the migrated
+    testcontainer proves the migration creates everything the repository needs.
+    """
+
+    @pytest.mark.asyncio
+    async def test_save_returns_integer_id(self, repo: StickerRepository) -> None:
+        notif_id = await repo.save_notification(
+            file_unique_id="notif-001",
+            admin_id=111,
+            message_id=1001,
+            sticker_msg_id=1000,
+            chat_id=111,
+        )
+        assert isinstance(notif_id, int)
+        assert notif_id > 0
+
+    @pytest.mark.asyncio
+    async def test_reply_lookup_matches_sticker_msg_id(self, repo: StickerRepository) -> None:
+        """Admin replies to the sticker message itself."""
+        await repo.save_notification(
+            file_unique_id="notif-002",
+            admin_id=111,
+            message_id=2002,
+            sticker_msg_id=2001,
+            chat_id=111,
+        )
+        row = await repo.get_notification_by_reply(chat_id=111, reply_to_message_id=2001)
+        assert row is not None
+        assert row["file_unique_id"] == "notif-002"
+
+    @pytest.mark.asyncio
+    async def test_reply_lookup_matches_message_id(self, repo: StickerRepository) -> None:
+        """Admin replies to the description message instead of the sticker."""
+        await repo.save_notification(
+            file_unique_id="notif-003",
+            admin_id=111,
+            message_id=3002,
+            sticker_msg_id=3001,
+            chat_id=111,
+        )
+        row = await repo.get_notification_by_reply(chat_id=111, reply_to_message_id=3002)
+        assert row is not None
+        assert row["file_unique_id"] == "notif-003"
+
+    @pytest.mark.asyncio
+    async def test_reply_lookup_unknown_returns_none(self, repo: StickerRepository) -> None:
+        row = await repo.get_notification_by_reply(chat_id=111, reply_to_message_id=99999)
+        assert row is None
+
+    @pytest.mark.asyncio
+    async def test_latest_sticker_msg_returns_newest(
+        self, repo: StickerRepository, db_conn: asyncpg.Connection
+    ) -> None:
+        old_id = await repo.save_notification(
+            file_unique_id="notif-004",
+            admin_id=222,
+            message_id=4002,
+            sticker_msg_id=4001,
+            chat_id=222,
+        )
+        # NOW() is transaction-stable, so backdate the first row explicitly
+        # to make the ORDER BY created_at DESC deterministic.
+        await db_conn.execute(
+            "UPDATE admin_sticker_notifications"
+            " SET created_at = created_at - interval '1 minute' WHERE id = $1",
+            old_id,
+        )
+        await repo.save_notification(
+            file_unique_id="notif-005",
+            admin_id=222,
+            message_id=5002,
+            sticker_msg_id=5001,
+            chat_id=222,
+        )
+        assert await repo.get_latest_sticker_msg(admin_id=222, chat_id=222) == 5001
+
+    @pytest.mark.asyncio
+    async def test_latest_sticker_msg_ignores_zero_and_other_admins(
+        self, repo: StickerRepository
+    ) -> None:
+        await repo.save_notification(
+            file_unique_id="notif-006",
+            admin_id=333,
+            message_id=6002,
+            sticker_msg_id=0,  # filtered out by sticker_msg_id > 0
+            chat_id=333,
+        )
+        assert await repo.get_latest_sticker_msg(admin_id=333, chat_id=333) is None
+        assert await repo.get_latest_sticker_msg(admin_id=444, chat_id=444) is None

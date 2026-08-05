@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-07-24T15:43:27Z",
+  "role": "evaluator",
+  "item_id": "A4",
+  "verdict": "NEEDS_WORK",
+  "evidence": "Reviewed commit 9fbd4d8 diff + ran pytest tests/unit/test_commands_kb.py tests/unit/test_admin_kb_handler.py (16 passed, matches claim). admin_kb.py's adm_kb_*, adm_kb_menu, adm_kb_toggle, adm_kb_orgs, adm_kb_org_rm, adm_kb_org_add callbacks are all correctly registered and wired to real handlers with working pagination for the chat-picker and organizer list. However the public /kb view command (both DM and group handlers in commands.py) renders kb_view_keyboard() with next/prev buttons whenever total_pages > 1, but grep across src/bot/handlers/*.py shows NO @router.callback_query handler for the 'kb_view:' callback_data prefix -- only 'noop' and the adm_kb_* prefixes are handled. Also handle_kb_view_dm/handle_kb_view_group always slice facts[:PAGE_SIZE] for page 0 with no page-fetch logic for page>0. Net effect: tapping the pagination buttons on /kb view does nothing (dead callback, perpetual Telegram spinner) once a chat has more facts than one page holds -- this contradicts the item title's explicit 'pagination' claim for /kb view and isn't disclosed in the specialist's routing-hints/gaps list (which only flagged the admin FSM add-organizer flow, Telegram API fallback, and null-embedding path as qa gaps).",
+  "regression_risk": "medium",
+  "notes": "Add a callback_query handler for 'kb_view:{lang}:{page}' in commands.py (or a new module) that re-fetches/re-slices knowledge_repo.get_active_facts() at the requested page and re-renders the same DM/group formatting, mirroring how adm_kb_orgs: already re-slices for pagination. Alternatively, if true pagination is out of Phase-1 scope, don't render the nav buttons at all (cap the view or add a 'N more, use admin panel' note) rather than shipping dead buttons. Add a unit test exercising the kb_view: callback path once the handler exists."
+}
