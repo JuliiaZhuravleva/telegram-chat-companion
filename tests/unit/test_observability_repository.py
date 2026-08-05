@@ -66,7 +66,7 @@ class TestLogRetrieval:
             n_results=1,
             n_injected=1,
             duration_ms=123,
-            trigger_message_id=42,
+            message_id=42,
         )
         sql = pool.execute.await_args.args[0]
         args = pool.execute.await_args.args
@@ -75,7 +75,7 @@ class TestLogRetrieval:
         # JSONB payloads must arrive as JSON strings, not Python reprs
         assert json.loads(args[5]) == {"min_similarity": 0.7, "max_results": 5}
         assert json.loads(args[6]) == items
-        assert args[7:] == (1, 1, 123)
+        assert args[7:] == (1, 1, 123, None)
 
     @pytest.mark.asyncio
     async def test_none_payloads_stay_null(self) -> None:
@@ -84,4 +84,12 @@ class TestLogRetrieval:
         args = pool.execute.await_args.args
         assert args[5] is None  # params
         assert args[6] is None  # results
-        assert args[7:] == (0, 0, None)
+        assert args[7:] == (0, 0, None, None)
+
+    @pytest.mark.asyncio
+    async def test_error_is_persisted(self) -> None:
+        """A failed retrieval pass must be distinguishable from an empty one."""
+        repo, pool = _make_repo()
+        await repo.log_retrieval(-1, source="rag_memory", error="TimeoutError: pool exhausted")
+        args = pool.execute.await_args.args
+        assert args[10] == "TimeoutError: pool exhausted"

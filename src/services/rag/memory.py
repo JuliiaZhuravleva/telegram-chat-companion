@@ -52,7 +52,8 @@ class RAGMemoryService:
     ) -> list[dict[str, Any]]:
         """Search memories relevant to a query.
 
-        Returns list of dicts with keys: content, similarity, metadata.
+        Returns list of dicts with keys: id, content, similarity, metadata,
+        created_at.
         """
         try:
             embedding_result = await self._ai_router.generate_embedding(query)

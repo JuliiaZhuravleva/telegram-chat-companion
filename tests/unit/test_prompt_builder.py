@@ -230,6 +230,36 @@ class TestBuildSystemPrompt:
         result = build_system_prompt(ctx)
         assert "(90%) no date here" in result
 
+    def test_rag_memory_date_rendered_in_display_timezone(self):
+        """A late-UTC-evening memory belongs to the NEXT local day (UTC+4):
+        rendering the raw UTC date would date it one day early — an
+        off-by-one on exactly the recency question the date answers."""
+        from datetime import UTC, datetime
+
+        ctx = PromptContext(
+            rag_memories=[
+                {
+                    "content": "ночной разговор",
+                    "similarity": 0.8,
+                    "created_at": datetime(2026, 2, 19, 22, 30, tzinfo=UTC),
+                }
+            ]
+        )
+        result = build_system_prompt(ctx)
+        assert "(80%, 2026-02-20) ночной разговор" in result
+
+    def test_rag_memory_date_without_similarity_still_rendered(self):
+        """The date must not be dropped just because similarity is absent."""
+        from datetime import UTC, datetime
+
+        ctx = PromptContext(
+            rag_memories=[
+                {"content": "только дата", "created_at": datetime(2026, 3, 1, 12, 0, tzinfo=UTC)}
+            ]
+        )
+        result = build_system_prompt(ctx)
+        assert "(2026-03-01) только дата" in result
+
     def test_kb_facts_included(self):
         ctx = PromptContext(
             kb_facts=[{"fact_text": "мероприятие: дата 2026-08-01", "salience": 0.9}]

@@ -13,7 +13,9 @@ Builds a multi-section system prompt from:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from src.models.enums import ResponseType
 from src.services.text.adaptive_length import compute_length_instruction
@@ -364,13 +366,23 @@ def _sticker_section() -> str:
     )
 
 
+# Memories are stored TIMESTAMPTZ; asyncpg decodes them as UTC. Rendering the
+# UTC calendar date shifts evening messages to "yesterday" for the UTC+4 chats
+# this bot lives in — an off-by-one on exactly the recency question the date
+# exists to answer (TD-016). No per-chat timezone exists in config; a fixed
+# display zone is strictly better than silent UTC until one does.
+_MEMORY_DATE_TZ = ZoneInfo("Asia/Tbilisi")
+
+
 def _memory_date(mem: dict[str, Any]) -> str | None:
-    """ISO date of a memory row, if it carries one."""
+    """ISO date of a memory row in display timezone, if the row carries one."""
     created = mem.get("created_at")
     if created is None:
         return None
-    if hasattr(created, "date"):
-        return created.date().isoformat()  # type: ignore[no-any-return]
+    if isinstance(created, datetime):
+        if created.tzinfo is not None:
+            created = created.astimezone(_MEMORY_DATE_TZ)
+        return created.date().isoformat()
     return str(created)[:10]
 
 
@@ -378,17 +390,20 @@ def _rag_section(memories: list[dict[str, Any]]) -> str:
     # The date is load-bearing (TD-016): retrieval has no recency ranking, so
     # a months-old memory can top the list on wording alone. Without its date
     # the model cannot qualify "when" and confabulates recency instead.
-    lines = ["Relevant context from memory (each item dated — respect the dates):"]
+    # Undated rows are reachable (chat_memory.created_at is nullable), so the
+    # header must not promise a date on every item.
+    lines = ["Relevant context from memory (when an item shows a date, respect it):"]
     for mem in memories:
         content = sanitize_prompt_content(mem.get("content", ""))
+        meta: list[str] = []
         similarity = mem.get("similarity")
+        if similarity is not None:
+            meta.append(f"{similarity:.0%}")
         date_str = _memory_date(mem)
-        if similarity is not None and date_str is not None:
-            lines.append(f"- ({similarity:.0%}, {date_str}) {content}")
-        elif similarity is not None:
-            lines.append(f"- ({similarity:.0%}) {content}")
-        else:
-            lines.append(f"- {content}")
+        if date_str is not None:
+            meta.append(date_str)
+        prefix = f"({', '.join(meta)}) " if meta else ""
+        lines.append(f"- {prefix}{content}")
     return "\n".join(lines)
 
 

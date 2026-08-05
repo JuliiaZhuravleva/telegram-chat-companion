@@ -61,18 +61,19 @@ class ObservabilityRepository:
         n_results: int = 0,
         n_injected: int = 0,
         duration_ms: int | None = None,
-        trigger_message_id: int | None = None,
+        message_id: int | None = None,
+        error: str | None = None,
     ) -> None:
         """Record one retrieval pass (one row per source per pipeline turn)."""
         await self._pool.execute(
             """
             INSERT INTO retrieval_log
-                (chat_id, trigger_message_id, source, query_text,
-                 params, results, n_results, n_injected, duration_ms)
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9)
+                (chat_id, message_id, source, query_text,
+                 params, results, n_results, n_injected, duration_ms, error)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10)
             """,
             chat_id,
-            trigger_message_id,
+            message_id,
             source,
             query_text,
             None if params is None else json.dumps(params),
@@ -80,4 +81,5 @@ class ObservabilityRepository:
             n_results,
             n_injected,
             duration_ms,
+            error,
         )

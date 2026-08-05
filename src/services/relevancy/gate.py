@@ -11,7 +11,6 @@ bypass the gate entirely.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -25,6 +24,7 @@ from src.services.ai.router import AIRouter
 from src.services.relevancy.engagement import compute_engagement
 from src.services.relevancy.fast_rules import check_fast_rules
 from src.services.relevancy.llm_judge import llm_judge
+from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
 
@@ -57,6 +57,11 @@ class RelevancyGate:
         self._messages = message_repo
         self._response_log = response_log_repo
         self._observability = observability_repo
+        if observability_repo is None:
+            # DI always wires the repo; absence means a hand-built instance.
+            # Without this line, "nobody is recording decisions" is
+            # indistinguishable from "no decisions happened".
+            logger.debug("RelevancyGate: decision persistence disabled (no repository)")
 
     async def evaluate(
         self,
@@ -141,7 +146,7 @@ class RelevancyGate:
         # deploy, so the DB row is the record. Fire-and-forget — a persistence
         # failure must never delay or break the gate itself.
         if self._observability is not None:
-            asyncio.ensure_future(
+            fire_and_forget(
                 self._safe_persist_decision(
                     chat_id, decision, message_id=message_id, user_id=user_id
                 )

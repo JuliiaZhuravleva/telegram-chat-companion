@@ -34,6 +34,15 @@ retrieval rework in later slices is calibrated against these distributions).
   reached the prompt after budget trimming.
 - `duration_ms` — embed+search wall clock combined (they are not separable
   at the RAG service boundary today).
+- `error` — non-NULL when the retrieval pass itself failed (embedding or
+  search); without it a broken source is byte-identical to a healthy source
+  that matched nothing, which is the one question this table must answer.
+- `message_id` — the incoming message that triggered the turn; same name and
+  meaning as decision_log.message_id.
+
+`user_id` convention (both tables): NULL means "no sender" (channel or
+anonymous-admin posts). Writers normalize the pipeline's historical 0
+sentinel to NULL so GROUP BY user_id never invents a phantom user 0.
 
 Both tables are pruned by RetentionCleaner (90 days, same window as
 response_log — these are operational analytics, not history). The database
@@ -76,7 +85,7 @@ def upgrade() -> None:
         CREATE TABLE IF NOT EXISTS retrieval_log (
             id BIGSERIAL PRIMARY KEY,
             chat_id BIGINT NOT NULL,
-            trigger_message_id BIGINT,
+            message_id BIGINT,
             source TEXT NOT NULL,
             query_text TEXT,
             params JSONB,
@@ -84,6 +93,7 @@ def upgrade() -> None:
             n_results SMALLINT NOT NULL DEFAULT 0,
             n_injected SMALLINT NOT NULL DEFAULT 0,
             duration_ms INTEGER,
+            error TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
