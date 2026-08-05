@@ -375,6 +375,20 @@ class TestDryRun:
 # ---------------------------------------------------------------------------
 
 
+def _vector_values(value: Any) -> list[float]:
+    """Decoded vector column → plain floats, across pgvector-python versions.
+
+    pgvector < 0.4 decodes to an iterable (numpy array); 0.4+ returns a
+    ``Vector`` object that is NOT iterable and exposes ``to_list()`` instead.
+    The dependency is unpinned (``pgvector>=0.2.0``, TD-037), so the assertion
+    must accept both or this suite breaks on a fresh install with no repo change
+    (observed 2026-08-05: 0.5.0 → ``TypeError: 'Vector' object is not iterable``).
+    """
+    if hasattr(value, "to_list"):
+        return [float(v) for v in value.to_list()]
+    return [float(v) for v in value]
+
+
 class TestEmbeddingsSurvive:
     @pytest.mark.asyncio
     async def test_chat_memory_embedding_round_trips_exactly(
@@ -388,7 +402,7 @@ class TestEmbeddingsSurvive:
             row = await target.fetchrow("SELECT content, embedding FROM chat_memory")
             assert row is not None
             assert row["content"] == "Julia likes pelmeni"
-            assert [round(float(v), 4) for v in row["embedding"]] == _EMBEDDING
+            assert [round(v, 4) for v in _vector_values(row["embedding"])] == _EMBEDDING
         finally:
             await target.close()
 
@@ -405,7 +419,9 @@ class TestEmbeddingsSurvive:
                 "SELECT description_embedding, total_uses FROM sticker_knowledge"
             )
             assert row is not None
-            assert [round(float(v), 4) for v in row["description_embedding"]] == _EMBEDDING
+            assert [round(v, 4) for v in _vector_values(row["description_embedding"])] == (
+                _EMBEDDING
+            )
             assert row["total_uses"] == 7
         finally:
             await target.close()

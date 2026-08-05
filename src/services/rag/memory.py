@@ -32,6 +32,16 @@ class RAGMemoryService:
         self._min_similarity = min_similarity
         self._max_results = max_results
 
+    @property
+    def min_similarity(self) -> float:
+        """Effective similarity floor (read by retrieval_log params)."""
+        return self._min_similarity
+
+    @property
+    def max_results(self) -> int:
+        """Effective result cap (read by retrieval_log params)."""
+        return self._max_results
+
     async def search(
         self,
         chat_id: int,
@@ -42,7 +52,8 @@ class RAGMemoryService:
     ) -> list[dict[str, Any]]:
         """Search memories relevant to a query.
 
-        Returns list of dicts with keys: content, similarity, metadata.
+        Returns list of dicts with keys: id, content, similarity, metadata,
+        created_at.
         """
         try:
             embedding_result = await self._ai_router.generate_embedding(query)
@@ -59,6 +70,7 @@ class RAGMemoryService:
 
         return [
             {
+                "id": row["id"],
                 "content": row["content"],
                 "similarity": float(row["similarity"]),
                 "metadata": row["metadata"],

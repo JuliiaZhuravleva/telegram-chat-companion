@@ -192,6 +192,7 @@ async def handle_photo_message(
             reply_quote_is_manual=reply_ctx.quote_is_manual,
             image_context=description,
             message_thread_id=message_thread_id,
+            message_id=message.message_id,
         )
 
         if not result.should_respond or not result.html_text:

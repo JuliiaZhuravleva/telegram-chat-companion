@@ -23,6 +23,7 @@ from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
+from src.database.repositories.observability import ObservabilityRepository
 from src.database.repositories.reactions import ReactionRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.database.repositories.rules import RulesRepository
@@ -115,6 +116,10 @@ class RepositoryProvider(Provider):
     def reaction_repo(self, pool: asyncpg.Pool) -> ReactionRepository:
         return ReactionRepository(pool)
 
+    @provide
+    def observability_repo(self, pool: asyncpg.Pool) -> ObservabilityRepository:
+        return ObservabilityRepository(pool)
+
 
 class ServiceProvider(Provider):
     """Application services — one instance per request."""
@@ -190,6 +195,7 @@ class ServiceProvider(Provider):
         link_service: LinkExtractorService,
         sticker_service: StickerResponderService,
         knowledge_repo: KnowledgeRepository,
+        observability_repo: ObservabilityRepository,
     ) -> TextProcessingPipeline:
         return TextProcessingPipeline(
             ai_router=ai_router,
@@ -200,6 +206,7 @@ class ServiceProvider(Provider):
             link_service=link_service,
             sticker_service=sticker_service,
             knowledge_repo=knowledge_repo,
+            observability_repo=observability_repo,
         )
 
     @provide
@@ -239,8 +246,9 @@ class ServiceProvider(Provider):
         ai_router: AIRouter,
         message_repo: MessageRepository,
         response_log_repo: ResponseLogRepository,
+        observability_repo: ObservabilityRepository,
     ) -> RelevancyGate:
-        return RelevancyGate(ai_router, message_repo, response_log_repo)
+        return RelevancyGate(ai_router, message_repo, response_log_repo, observability_repo)
 
     @provide
     def spend_limit_service(

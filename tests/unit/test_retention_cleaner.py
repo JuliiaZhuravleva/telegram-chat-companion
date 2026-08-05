@@ -57,6 +57,8 @@ class TestWindows:
         assert windows["response_log"] == timedelta(days=90)
         assert windows["abuse_blocked_log"] == timedelta(days=30)
         assert windows["message_reactions"] == timedelta(days=30)
+        assert windows["decision_log"] == timedelta(days=90)
+        assert windows["retrieval_log"] == timedelta(days=90)
         assert "unauthorized_attempts" not in windows
 
     def test_message_reactions_window_can_be_disabled(self) -> None:
@@ -80,6 +82,8 @@ class TestWindows:
             unauthorized_attempts_days=None,
             abuse_blocked_log_days=None,
             reactions_days=None,
+            decision_log_days=None,
+            retrieval_log_days=None,
         )._windows()
         assert windows == {}
 

@@ -109,6 +109,8 @@ async def handle_text_message(
             chat_id=message.chat.id,
             message_text=message.text or "",
             config=chat_config,
+            message_id=message.message_id,
+            user_id=message.from_user.id if message.from_user else None,
         )
         if not gate_decision.should_respond:
             await _react_to_silence(message, chat_config, gate_decision, abuse_checker)
@@ -142,6 +144,7 @@ async def handle_text_message(
         reply_quote_text=reply_ctx.quote_text,
         reply_quote_is_manual=reply_ctx.quote_is_manual,
         message_thread_id=message_thread_id,
+        message_id=message.message_id,
     )
 
     if not result.should_respond or not result.html_text:
