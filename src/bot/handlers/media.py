@@ -2,15 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import random
 import time
 from typing import Any
 
 import structlog
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatAction
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
@@ -24,9 +21,9 @@ from src.models.enums import TriggerType
 from src.services.modules.image import ImageAnalysisService
 from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.voice import VoiceTranscriptionService
-from src.services.text.pipeline import TextProcessingPipeline
+from src.services.text.pipeline import PipelineResult, TextProcessingPipeline
 from src.utils import parse_admin_ids
-from src.utils.telegram import TelegramFileError, download_telegram_file
+from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
 router = Router(name="media")
 logger = structlog.get_logger(__name__)
@@ -72,31 +69,20 @@ async def handle_voice_message(
         )
         return
 
-    # Send typing action in parallel with transcription (route to correct topic)
+    # Keep "typing" alive for the whole transcription (route to correct topic)
     user = message.from_user
     user_name = (user.first_name if user else None) or "Unknown"
     message_type = "voice" if is_voice else "video_note"
 
-    typing_task = asyncio.create_task(
-        bot.send_chat_action(
-            message.chat.id,
-            ChatAction.TYPING,
-            message_thread_id=message_thread_id,
+    async with typing_indicator(bot, message.chat.id, message_thread_id):
+        result = await voice_service.transcribe(
+            audio_data=audio_data,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            user_first_name=user_name,
+            message_type=message_type,
+            language=chat_config.language,
         )
-    )
-
-    result = await voice_service.transcribe(
-        audio_data=audio_data,
-        chat_id=message.chat.id,
-        message_id=message.message_id,
-        user_first_name=user_name,
-        message_type=message_type,
-        language=chat_config.language,
-    )
-
-    # Ensure typing task completes (ignore errors)
-    with contextlib.suppress(Exception):
-        await typing_task
 
     if result is None:
         return
@@ -130,6 +116,7 @@ async def handle_photo_message(
 
     # Select highest resolution (last in array)
     photo = message.photo[-1]
+    caption = message.caption
 
     # Download image
     try:
@@ -142,28 +129,75 @@ async def handle_photo_message(
         )
         return
 
-    # Analyze image
-    description = await image_service.analyze(image_data)
-
-    logger.info(
-        "Photo analysis result",
-        chat_id=message.chat.id,
-        has_description=description is not None,
-        has_caption=bool(message.caption),
-    )
-
-    if description is None:
-        return
-
-    caption = message.caption
-
+    # Decide the response intent BEFORE the analysis so the indicator can be
+    # scoped honestly: should_respond() reads the caption, not the vision
+    # description, so it does not need the analysis to have run.
+    respond = False
+    trigger_type = TriggerType.NONE
     if caption:
-        # photo_with_text: decide whether to respond via text pipeline
         bot_id: int | None = kwargs.get("bot_id")
         if bot_id is None:
             bot_id = (await bot.me()).id
         respond, trigger_type = should_respond(message, chat_config, bot_id)
 
+    # Show "typing" only when a reply is actually coming AND it was asked for.
+    # A captioned photo is NOT a guarantee of a reply: should_respond() can
+    # decline, and the pipeline can still suppress afterwards. RANDOM triggers
+    # are excluded per owner decision Q1 — same rule as the text path in
+    # handlers/message.py; unprompted replies get no indicator.
+    # "typing" (not "upload_photo") is the honest action: the reply is text,
+    # the bot never uploads an image of its own.
+    result: PipelineResult | None = None
+    async with typing_indicator(
+        bot,
+        message.chat.id,
+        message_thread_id,
+        enabled=respond and trigger_type != TriggerType.RANDOM,
+    ):
+        # Analyze image
+        description = await image_service.analyze(image_data)
+
+        logger.info(
+            "Photo analysis result",
+            chat_id=message.chat.id,
+            has_description=description is not None,
+            has_caption=bool(caption),
+        )
+
+        if description is None:
+            return
+
+        # `and caption` is redundant at runtime (respond implies a caption) but
+        # narrows it to str for the type checker.
+        if respond and caption:
+            user = message.from_user
+            user_id = user.id if user else 0
+            user_name = (user.first_name if user else None) or "Unknown"
+
+            # Extract reply context (full message + manually-highlighted quote, if any)
+            reply_ctx = extract_reply_context(message)
+
+            result = await pipeline.process(
+                chat_id=message.chat.id,
+                user_id=user_id,
+                user_name=user_name,
+                message_text=caption,
+                trigger_type=trigger_type,
+                config=chat_config,
+                reply_author=reply_ctx.author,
+                reply_text=reply_ctx.text,
+                reply_is_bot=reply_ctx.is_bot,
+                reply_quote_text=reply_ctx.quote_text,
+                reply_quote_is_manual=reply_ctx.quote_is_manual,
+                image_context=description,
+                message_thread_id=message_thread_id,
+                message_id=message.message_id,
+            )
+
+    # Indicator is off from here on: the reply is sent and its bookkeeping runs
+    # outside the block, so "typing" never lingers after the reply is visible
+    # (post_send generates an embedding — a network call).
+    if caption:
         if not respond:
             # Still save the description to message history
             await _update_message_content(
@@ -171,31 +205,7 @@ async def handle_photo_message(
             )
             return
 
-        user = message.from_user
-        user_id = user.id if user else 0
-        user_name = (user.first_name if user else None) or "Unknown"
-
-        # Extract reply context (full message + manually-highlighted quote, if any)
-        reply_ctx = extract_reply_context(message)
-
-        result = await pipeline.process(
-            chat_id=message.chat.id,
-            user_id=user_id,
-            user_name=user_name,
-            message_text=caption,
-            trigger_type=trigger_type,
-            config=chat_config,
-            reply_author=reply_ctx.author,
-            reply_text=reply_ctx.text,
-            reply_is_bot=reply_ctx.is_bot,
-            reply_quote_text=reply_ctx.quote_text,
-            reply_quote_is_manual=reply_ctx.quote_is_manual,
-            image_context=description,
-            message_thread_id=message_thread_id,
-            message_id=message.message_id,
-        )
-
-        if not result.should_respond or not result.html_text:
+        if result is None or not result.should_respond or not result.html_text:
             return
 
         reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None

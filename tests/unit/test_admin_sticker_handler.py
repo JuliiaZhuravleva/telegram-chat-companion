@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
@@ -63,6 +63,13 @@ def _make_message(
     reply = _make_reply_message(text=reply_text, caption=reply_caption)
     msg.reply_to_message = reply
     return msg
+
+
+def _make_bot() -> MagicMock:
+    """Mock aiogram Bot for typing_indicator wiring (I-5)."""
+    bot = MagicMock()
+    bot.send_chat_action = AsyncMock()
+    return bot
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +135,7 @@ class TestHandleAdminStickerReply:
         sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
         msg = _make_message(text="better description")
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         sticker_service.merge_admin_description.assert_awaited_once_with(
             "AgADvh4AAlkbCFI", "better description"
@@ -146,7 +153,7 @@ class TestHandleAdminStickerReply:
             reply_text="🆔 FallbackID123\nОписание: old",
         )
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         sticker_service.merge_admin_description.assert_awaited_once_with(
             "FallbackID123", "better description"
@@ -163,7 +170,7 @@ class TestHandleAdminStickerReply:
             reply_caption="🆔 CaptionID456",
         )
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         sticker_service.merge_admin_description.assert_awaited_once_with(
             "CaptionID456", "better description"
@@ -179,7 +186,7 @@ class TestHandleAdminStickerReply:
             reply_text="No ID here",
         )
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         sticker_service.merge_admin_description.assert_not_awaited()
         msg.reply.assert_not_awaited()
@@ -192,7 +199,7 @@ class TestHandleAdminStickerReply:
         sticker_service.merge_admin_description.return_value = None
         msg = _make_message(text="better description")
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         msg.reply.assert_awaited_once()
         assert "re-analyze" in msg.reply.call_args[0][0].lower()
@@ -205,7 +212,7 @@ class TestHandleAdminStickerReply:
         sticker_service.merge_admin_description.side_effect = ValueError("content_filter")
         msg = _make_message(text="better description")
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         msg.reply.assert_awaited_once()
         assert "переформулировать" in msg.reply.call_args[0][0].lower()
@@ -223,9 +230,95 @@ class TestHandleAdminStickerReply:
         sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
         msg = _make_message(text="   ")
 
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service)
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
 
         sticker_service.merge_admin_description.assert_not_awaited()
+
+
+class TestHandleAdminStickerReplyTypingIndicator:
+    """Regression guard: the merge_admin_description() LLM call must run
+    under the shared typing_indicator helper (I-5).
+    """
+
+    @pytest.fixture()
+    def sticker_repo(self) -> MagicMock:
+        repo = MagicMock()
+        repo.get_notification_by_reply = AsyncMock(
+            return_value={"file_unique_id": "AgADvh4AAlkbCFI"}
+        )
+        return repo
+
+    @pytest.fixture()
+    def sticker_service(self) -> MagicMock:
+        svc = MagicMock()
+        svc.merge_admin_description = AsyncMock(return_value="Updated desc")
+        return svc
+
+    @pytest.mark.asyncio()
+    async def test_wraps_merge_call(
+        self, sticker_repo: MagicMock, sticker_service: MagicMock
+    ) -> None:
+        msg = _make_message(text="better description")
+        bot = _make_bot()
+
+        with patch("src.bot.handlers.admin_sticker.typing_indicator") as mock_indicator:
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, bot)
+
+        mock_indicator.assert_called_once_with(bot, msg.chat.id, None)
+        sticker_service.merge_admin_description.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_forwards_message_thread_id(
+        self, sticker_repo: MagicMock, sticker_service: MagicMock
+    ) -> None:
+        msg = _make_message(text="better description")
+        bot = _make_bot()
+
+        with patch("src.bot.handlers.admin_sticker.typing_indicator") as mock_indicator:
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_admin_sticker_reply(
+                msg, sticker_repo, sticker_service, bot, message_thread_id=777
+            )
+
+        mock_indicator.assert_called_once_with(bot, msg.chat.id, 777)
+
+    @pytest.mark.asyncio()
+    async def test_no_indicator_when_no_file_unique_id(
+        self, sticker_repo: MagicMock, sticker_service: MagicMock
+    ) -> None:
+        """Guard-clause rejection (no id found) never reaches the merge
+        call -- the indicator must not fire."""
+        sticker_repo.get_notification_by_reply.return_value = None
+        msg = _make_message(text="better description", reply_text="No ID here")
+        bot = _make_bot()
+
+        with patch("src.bot.handlers.admin_sticker.typing_indicator") as mock_indicator:
+            await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, bot)
+
+        mock_indicator.assert_not_called()
+
+    @pytest.mark.asyncio()
+    async def test_indicator_stops_even_if_merge_raises(
+        self, sticker_repo: MagicMock, sticker_service: MagicMock
+    ) -> None:
+        """The real typing_indicator (ChatActionSender) guarantees the
+        action stops on exception; here we assert a generic exception from
+        inside the async-with block still reaches the handler's own
+        ``except Exception`` fallback (i.e. we don't accidentally swallow
+        or short-circuit it earlier by wrapping the call)."""
+        sticker_service.merge_admin_description.side_effect = RuntimeError("boom")
+        msg = _make_message(text="better description")
+        bot = _make_bot()
+
+        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, bot)
+
+        msg.reply.assert_awaited_once()
+        assert "не смог объединить" in msg.reply.call_args[0][0].lower()
 
 
 # ---------------------------------------------------------------------------

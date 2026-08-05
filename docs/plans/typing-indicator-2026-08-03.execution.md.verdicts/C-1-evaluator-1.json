@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-03T13:02:12Z",
+  "role": "evaluator",
+  "item_id": "C-1",
+  "verdict": "PASS",
+  "evidence": "ADR-0004 accurately documents the as-built typing_indicator() helper in src/utils/telegram.py (required message_thread_id, action param defaulting to typing, enabled=True guard-yield seam) and its 4 real call sites (media.py voice/photo, message.py, commands.py, admin_sticker.py) with correct enabled predicates verified by grep; the rejected middleware alternative is argued with concrete Q1/Q2 reasoning (predicate computed post-routing inside handlers) rather than generic boilerplate.",
+  "regression_risk": "low",
+  "notes": ""
+}

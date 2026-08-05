@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka import AsyncContainer
@@ -33,6 +33,7 @@ from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
 from src.utils import parse_admin_ids
+from src.utils.telegram import typing_indicator
 
 logger = structlog.get_logger(__name__)
 
@@ -98,6 +99,8 @@ async def handle_admin_sticker_reply(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],
     sticker_service: FromDishka[StickerLearningService],
+    bot: Bot,
+    message_thread_id: int | None = None,
 ) -> None:
     """Admin replies to sticker notification → merge description."""
     if not message.reply_to_message or not message.text:
@@ -131,7 +134,8 @@ async def handle_admin_sticker_reply(
 
     # Merge description via AI (fallback: save note directly)
     try:
-        new_desc = await sticker_service.merge_admin_description(file_unique_id, admin_text)
+        async with typing_indicator(bot, message.chat.id, message_thread_id):
+            new_desc = await sticker_service.merge_admin_description(file_unique_id, admin_text)
     except ValueError as e:
         if str(e) == "content_filter":
             await message.reply(

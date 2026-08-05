@@ -1,0 +1,17 @@
+{"ts":"2026-08-03T12:36:10Z","event":"execute_plan_start","item":"","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T12:36:10Z","event":"dispatch","item":"I-6","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T12:42:41Z","event":"specialist_verdict","item":"I-6","verdict":"PASS","cost_usd":1.8496083000000005}
+{"ts":"2026-08-03T12:43:38Z","event":"evaluator","item":"I-6","verdict":"PASS","cost_usd":0.3316632000000001}
+{"ts":"2026-08-03T12:43:39Z","event":"dispatch","item":"I-2","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T12:46:56Z","event":"specialist_verdict","item":"I-2","verdict":"PASS","cost_usd":1.0237122}
+{"ts":"2026-08-03T12:47:50Z","event":"evaluator","item":"I-2","verdict":"PASS","cost_usd":0.30399509999999996}
+{"ts":"2026-08-03T12:47:51Z","event":"dispatch","item":"I-3","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T12:52:20Z","event":"specialist_verdict","item":"I-3","verdict":"PASS","cost_usd":1.3069458}
+{"ts":"2026-08-03T12:53:38Z","event":"evaluator","item":"I-3","verdict":"PASS","cost_usd":0.32351850000000004}
+{"ts":"2026-08-03T12:53:40Z","event":"dispatch","item":"I-5","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T12:58:27Z","event":"specialist_verdict","item":"I-5","verdict":"PASS","cost_usd":1.6933319999999998}
+{"ts":"2026-08-03T12:59:16Z","event":"evaluator","item":"I-5","verdict":"PASS","cost_usd":0.295707}
+{"ts":"2026-08-03T12:59:18Z","event":"dispatch","item":"C-1","verdict":"","cost_usd":0}
+{"ts":"2026-08-03T13:01:39Z","event":"specialist_verdict","item":"C-1","verdict":"PASS","cost_usd":0.6399656999999999}
+{"ts":"2026-08-03T13:02:17Z","event":"evaluator","item":"C-1","verdict":"PASS","cost_usd":0.2855628}
+{"ts":"2026-08-03T13:02:18Z","event":"finalize","item":"","verdict":"partial","cost_usd":0}

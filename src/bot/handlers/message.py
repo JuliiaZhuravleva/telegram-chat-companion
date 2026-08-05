@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
@@ -18,6 +18,7 @@ from src.services.modules.reactions.responder import set_reaction
 from src.services.modules.reactions.selector import ReactionSelector
 from src.services.relevancy.gate import GateDecision, RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
+from src.utils.telegram import typing_indicator
 
 router = Router(name="messages")
 logger = structlog.get_logger()
@@ -89,13 +90,14 @@ async def handle_text_message(
     relevancy_gate: FromDishka[RelevancyGate],
     spend_limit_svc: FromDishka[SpendLimitService],
     abuse_checker: FromDishka[AntiAbuseChecker],
+    bot: Bot,
     message_thread_id: int | None = None,
     **kwargs: Any,
 ) -> None:
     """Handle incoming text messages through the AI pipeline."""
     bot_id: int | None = kwargs.get("bot_id")
     if bot_id is None:
-        bot_info = await message.bot.me() if message.bot else None
+        bot_info = await bot.me()
         bot_id = bot_info.id if bot_info else None
 
     should_reply, trigger_type = should_respond(message, chat_config, bot_id)
@@ -131,21 +133,33 @@ async def handle_text_message(
         message_thread_id=message_thread_id,
     )
 
-    result = await pipeline.process(
-        chat_id=message.chat.id,
-        user_id=user_id,
-        user_name=user_name,
-        message_text=message.text or "",
-        trigger_type=trigger_type,
-        config=chat_config,
-        reply_author=reply_ctx.author,
-        reply_text=reply_ctx.text,
-        reply_is_bot=reply_ctx.is_bot,
-        reply_quote_text=reply_ctx.quote_text,
-        reply_quote_is_manual=reply_ctx.quote_is_manual,
-        message_thread_id=message_thread_id,
-        message_id=message.message_id,
-    )
+    # "Typing" indicator: shown for mention/trigger/reply, NOT for unsolicited
+    # random replies — even after the relevancy gate approves a RANDOM trigger,
+    # pipeline.process() can still suppress the reply (blacklist/cooldown/abuse
+    # checks), and announcing a reply that never arrives would be a lie (Q1).
+    # Intrusiveness of "typing" before an unrequested reply is the other half
+    # of the owner's rationale.
+    async with typing_indicator(
+        bot,
+        message.chat.id,
+        message_thread_id,
+        enabled=trigger_type != TriggerType.RANDOM,
+    ):
+        result = await pipeline.process(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            user_name=user_name,
+            message_text=message.text or "",
+            trigger_type=trigger_type,
+            config=chat_config,
+            reply_author=reply_ctx.author,
+            reply_text=reply_ctx.text,
+            reply_is_bot=reply_ctx.is_bot,
+            reply_quote_text=reply_ctx.quote_text,
+            reply_quote_is_manual=reply_ctx.quote_is_manual,
+            message_thread_id=message_thread_id,
+            message_id=message.message_id,
+        )
 
     if not result.should_respond or not result.html_text:
         logger.info(

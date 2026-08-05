@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram.types import Message
@@ -81,6 +81,12 @@ def _make_ai_router() -> MagicMock:
     return router
 
 
+def _make_bot() -> MagicMock:
+    bot = MagicMock()
+    bot.send_chat_action = AsyncMock()
+    return bot
+
+
 class TestHandleRemember:
     @pytest.mark.asyncio
     async def test_no_reply_to_message(self) -> None:
@@ -94,6 +100,7 @@ class TestHandleRemember:
             _make_bot_config_repo(),
             _make_chat_settings_repo(),
             _make_ai_router(),
+            _make_bot(),
         )
 
         msg.reply.assert_awaited_once()
@@ -111,6 +118,7 @@ class TestHandleRemember:
             _make_bot_config_repo(),
             _make_chat_settings_repo(),
             _make_ai_router(),
+            _make_bot(),
         )
 
         msg.reply.assert_awaited_once()
@@ -128,6 +136,7 @@ class TestHandleRemember:
             _make_bot_config_repo(),
             _make_chat_settings_repo(),
             _make_ai_router(),
+            _make_bot(),
         )
 
         msg.reply.assert_awaited_once()
@@ -145,6 +154,7 @@ class TestHandleRemember:
             _make_bot_config_repo(),
             _make_chat_settings_repo(),
             _make_ai_router(),
+            _make_bot(),
         )
 
         msg.reply.assert_awaited_once()
@@ -167,6 +177,7 @@ class TestHandleRemember:
             _make_bot_config_repo(),
             _make_chat_settings_repo(),
             _make_ai_router(),
+            _make_bot(),
         )
 
         knowledge_repo.upsert_fact.assert_awaited_once()
@@ -195,10 +206,125 @@ class TestHandleRemember:
             _make_bot_config_repo(),
             _make_chat_settings_repo(organizer_ids=[]),
             _make_ai_router(),
+            _make_bot(),
         )
 
         call_kwargs = knowledge_repo.upsert_fact.call_args.kwargs
         assert call_kwargs["authority_level"] == 4
+
+
+class TestHandleRememberTypingIndicator:
+    """Regression guard: the embedding call in handle_remember must run under
+    the shared typing_indicator helper (I-5), and message_thread_id — new on
+    this handler as of I-5 — must reach it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wraps_embedding_generation(self) -> None:
+        msg = _make_message(
+            text="/remember место: кафе Луна",
+            user_id=ORGANIZER_ID,
+            reply_to_message=MagicMock(message_id=5),
+        )
+        cfg = _make_chat_config()
+        knowledge_repo = _make_knowledge_repo()
+        bot = _make_bot()
+
+        with patch("src.bot.handlers.commands.typing_indicator") as mock_indicator:
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_remember(
+                msg,
+                cfg,
+                knowledge_repo,
+                _make_bot_config_repo(),
+                _make_chat_settings_repo(),
+                _make_ai_router(),
+                bot,
+            )
+
+        mock_indicator.assert_called_once_with(bot, msg.chat.id, None)
+        knowledge_repo.upsert_fact.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_forwards_message_thread_id(self) -> None:
+        msg = _make_message(
+            text="/remember место: кафе Луна",
+            user_id=ORGANIZER_ID,
+            reply_to_message=MagicMock(message_id=5),
+        )
+        cfg = _make_chat_config()
+        bot = _make_bot()
+
+        with patch("src.bot.handlers.commands.typing_indicator") as mock_indicator:
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_remember(
+                msg,
+                cfg,
+                _make_knowledge_repo(),
+                _make_bot_config_repo(),
+                _make_chat_settings_repo(),
+                _make_ai_router(),
+                bot,
+                message_thread_id=777,
+            )
+
+        mock_indicator.assert_called_once_with(bot, msg.chat.id, 777)
+
+    @pytest.mark.asyncio
+    async def test_no_indicator_on_early_return(self) -> None:
+        """Malformed input never reaches the embedding call -- the indicator
+        must not fire for guard-clause rejections."""
+        msg = _make_message(text="/remember justtext", reply_to_message=MagicMock(message_id=5))
+        cfg = _make_chat_config()
+        bot = _make_bot()
+
+        with patch("src.bot.handlers.commands.typing_indicator") as mock_indicator:
+            await handle_remember(
+                msg,
+                cfg,
+                _make_knowledge_repo(),
+                _make_bot_config_repo(),
+                _make_chat_settings_repo(),
+                _make_ai_router(),
+                bot,
+            )
+
+        mock_indicator.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_still_saves_fact_without_embedding(self) -> None:
+        """The embedding call is wrapped in a try/except that already
+        tolerates provider failures (fact saved with embedding=None); the
+        typing_indicator context manager must not interfere with that path.
+        """
+        msg = _make_message(
+            text="/remember место: кафе Луна",
+            user_id=ORGANIZER_ID,
+            reply_to_message=MagicMock(message_id=5),
+        )
+        cfg = _make_chat_config()
+        knowledge_repo = _make_knowledge_repo()
+        bot = _make_bot()
+        ai_router = MagicMock()
+        ai_router.generate_embedding = AsyncMock(side_effect=RuntimeError("boom"))
+
+        await handle_remember(
+            msg,
+            cfg,
+            knowledge_repo,
+            _make_bot_config_repo(),
+            _make_chat_settings_repo(),
+            ai_router,
+            bot,
+        )
+
+        knowledge_repo.upsert_fact.assert_awaited_once()
+        assert knowledge_repo.upsert_fact.call_args.kwargs["embedding"] is None
+        msg.reply.assert_awaited_once()
 
 
 class TestHandleKbView:

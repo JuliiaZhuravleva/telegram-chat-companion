@@ -4,7 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import TranscriptionResult
+from src.services.text.pipeline import PipelineResult
 
 
 def _make_message(
@@ -165,6 +167,47 @@ async def test_voice_handler_transcription_returns_none():
     message.reply.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_voice_handler_forwards_message_thread_id_to_typing_indicator():
+    """Regression guard for I-9 (forum topic routing) after the I-6 refactor
+    to the shared typing_indicator helper.
+    """
+    from src.bot.handlers.media import handle_voice_message
+
+    message = _make_message()
+    voice = MagicMock()
+    voice.file_id = "voice-file-id"
+    message.voice = voice
+    message.video_note = None
+
+    chat_config = _make_chat_config()
+    bot = _make_bot()
+
+    voice_service = MagicMock()
+    voice_service.transcribe = AsyncMock(
+        return_value=TranscriptionResult(
+            text="Hello world",
+            model="whisper-1",
+            provider="openai",
+        )
+    )
+
+    with (
+        patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new_callable=AsyncMock,
+            return_value=b"fake-audio",
+        ),
+        patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+    ):
+        mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+        mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await handle_voice_message(message, chat_config, voice_service, bot, message_thread_id=777)
+
+    mock_indicator.assert_called_once_with(bot, message.chat.id, 777)
+
+
 # ── Photo handler tests ──────────────────────────────────────────────
 
 
@@ -314,6 +357,283 @@ async def test_photo_handler_with_caption_forwards_reply_quote_to_pipeline():
     assert call_kwargs["reply_text"] == "full original message with detail"
     assert call_kwargs["reply_quote_text"] == "detail"
     assert call_kwargs["reply_quote_is_manual"] is True
+
+
+# ── Photo handler: typing-indicator wiring (I-3) ───────────────────────
+
+
+def _make_photo_deps(
+    *,
+    caption: str | None,
+    thread_id: int | None = None,
+    random_reply: bool = False,
+):
+    """Common mocks for handle_photo_message indicator tests.
+
+    ``random_reply=False`` (default) makes the caption match a trigger word, so
+    should_respond() returns TriggerType.TRIGGER — an explicitly requested
+    reply. ``random_reply=True`` forces the unprompted RANDOM branch instead,
+    which per owner decision Q1 must NOT show the indicator.
+    """
+    message = _make_message(caption=caption)
+    photo = MagicMock()
+    photo.file_id = "photo-file-id"
+    message.photo = [photo]
+
+    if random_reply:
+        chat_config = _make_chat_config(trigger_words=(), random_response_chance=1.0)
+    else:
+        chat_config = _make_chat_config(trigger_words=("look",), random_response_chance=0.0)
+    bot = _make_bot()
+
+    image_service = MagicMock()
+    image_service.analyze = AsyncMock(return_value="A cat on a table")
+
+    pipeline = MagicMock()
+    pipeline.process = AsyncMock(
+        return_value=PipelineResult(
+            should_respond=True,
+            html_text="Nice cat!",
+            trigger_type=TriggerType.TRIGGER,
+            response_type=ResponseType.NORMAL,
+        )
+    )
+    pipeline.post_send = AsyncMock()
+
+    message_repo = MagicMock()
+    message_repo.save = AsyncMock()
+
+    sticker_responder = MagicMock()
+    sticker_responder.get_sticker_candidates = AsyncMock(return_value=[])
+
+    return {
+        "message": message,
+        "chat_config": chat_config,
+        "bot": bot,
+        "image_service": image_service,
+        "pipeline": pipeline,
+        "message_repo": message_repo,
+        "sticker_responder": sticker_responder,
+        "message_thread_id": thread_id,
+    }
+
+
+class TestHandlePhotoMessageTypingIndicator:
+    """Regression guard: image_service.analyze() and, for captioned photos,
+    the follow-on pipeline.process() text generation must run under the
+    shared typing_indicator helper. Photos without a caption may produce no
+    response at all, so per owner decision (Q2) they get no indicator.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wraps_analysis_and_pipeline_for_caption(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this")
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, None, enabled=True
+        )
+        deps["image_service"].analyze.assert_awaited_once()
+        deps["pipeline"].process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_indicator_without_caption(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption=None)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, None, enabled=False
+        )
+        deps["image_service"].analyze.assert_awaited_once()
+        deps["pipeline"].process.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_forwards_message_thread_id(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this", thread_id=777)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+                message_thread_id=777,
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, 777, enabled=True
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_indicator_for_random_reply_to_captioned_photo(self):
+        """Owner decision Q1: unprompted RANDOM replies get no indicator.
+
+        The text path (handlers/message.py) has always honoured this; the photo
+        path decided `enabled` from the caption alone, before the trigger type
+        was known, so a random reply to a captioned photo still announced
+        itself. Guards against that divergence returning.
+        """
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this", random_reply=True)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        mock_indicator.assert_called_once_with(
+            deps["bot"], deps["message"].chat.id, None, enabled=False
+        )
+        # The reply itself still happens — only the indicator is suppressed.
+        deps["pipeline"].process.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_indicator_closes_before_reply_is_sent(self):
+        """The indicator must not still be running once the reply is visible.
+
+        post_send() generates an embedding (a network call), so leaving it
+        inside the block made "typing" linger after the answer had landed.
+        """
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this")
+        order: list[str] = []
+
+        def _record_answer(*_args, **_kwargs):
+            order.append("answer")
+            return MagicMock(message_id=42)
+
+        def _record_post_send(*_args, **_kwargs):
+            order.append("post_send")
+
+        def _record_indicator_off(*_args):
+            order.append("indicator_off")
+            return False
+
+        deps["message"].answer = AsyncMock(side_effect=_record_answer)
+        deps["pipeline"].post_send = AsyncMock(side_effect=_record_post_send)
+
+        with (
+            patch(
+                "src.bot.handlers.media.download_telegram_file",
+                new_callable=AsyncMock,
+                return_value=b"fake-image",
+            ),
+            patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
+        ):
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(side_effect=_record_indicator_off)
+
+            await handle_photo_message(
+                deps["message"],
+                deps["chat_config"],
+                deps["image_service"],
+                deps["pipeline"],
+                deps["sticker_responder"],
+                deps["message_repo"],
+                deps["bot"],
+            )
+
+        assert order == ["indicator_off", "answer", "post_send"], order
+
+    @pytest.mark.asyncio
+    async def test_indicator_stops_even_if_analysis_raises(self):
+        from src.bot.handlers.media import handle_photo_message
+
+        deps = _make_photo_deps(caption="look at this")
+        deps["image_service"].analyze = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new_callable=AsyncMock,
+            return_value=b"fake-image",
+        ):
+            with pytest.raises(RuntimeError):
+                await handle_photo_message(
+                    deps["message"],
+                    deps["chat_config"],
+                    deps["image_service"],
+                    deps["pipeline"],
+                    deps["sticker_responder"],
+                    deps["message_repo"],
+                    deps["bot"],
+                )
 
 
 # ── Sticker handler tests ────────────────────────────────────────────
