@@ -29,16 +29,15 @@ PR and the production bot.
 Practical consequence: prefer merging when you can watch, and treat "approve" and "deploy" as the
 same act rather than two.
 
-**`main` itself is not protected yet.** Nothing on GitHub currently requires a pull request, a
-review, or passing checks to move `main`, and force-push is open. Every guarantee on this page
-begins one step later — at *"a commit appeared on `main`"* — and says nothing about how it got
-there. A ruleset requiring a PR plus the four checks is prepared but not applied; until it is,
-"the merge is the deliberate act" is a habit of the people with push access, not a rule the
-platform enforces.
+**`main` is protected by a ruleset** (active since 2026-08-04): a pull request is required, the
+four checks below must pass, and force-push and deletion are blocked. That is what makes "the merge
+is the deliberate act" a property of the platform rather than a habit of whoever holds push access
+— worth stating explicitly, because for the first days of this pipeline it was only the habit, and
+every guarantee on this page still begins one step later, at *"a commit appeared on `main`"*.
 
-Note also that applying that ruleset makes a CI job rename a **three**-place change: the workflow,
-the harness config on the host, and the ruleset's required contexts. Renaming one of the three
-either stalls the deployer or blocks every merge.
+One consequence to keep in view: the ruleset pins the four check names too, so renaming a CI job is
+a **three**-place change — the workflow, the harness config on the host, and the ruleset's required
+contexts. Rename one of the three and you either stall the deployer or block every merge.
 
 ---
 
