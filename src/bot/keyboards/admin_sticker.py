@@ -208,6 +208,27 @@ def sticker_detail_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def sticker_dm_check_keyboard(
+    file_unique_id: str,
+    *,
+    lang: str,
+) -> InlineKeyboardMarkup:
+    """Single "analyze" button shown when an admin's DM-checked sticker (B-1)
+    isn't in the catalog yet. Analysis only runs on this explicit tap
+    (ADR-0003) — the DM sticker check itself never learns silently.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔍 Проанализировать" if lang == "ru" else "🔍 Analyze",
+                    callback_data=f"adm_stk_dmchk:{lang}:{file_unique_id}",
+                ),
+            ],
+        ]
+    )
+
+
 def sticker_reanalyze_retry_keyboard(
     file_unique_id: str,
     *,

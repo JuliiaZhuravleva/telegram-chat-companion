@@ -3,6 +3,10 @@
 Handles:
 - Admin reply to sticker notification → merge description
 - Sticker wizard callbacks (adm_stk_*) → browse sets, view stickers, re-analyze
+- Admin sends a sticker directly in DM (B-1) → catalog check: known → show
+  description, unknown → "Проанализировать" button. Registered here (not in
+  handlers/media.py) so router order (handlers/__init__.py) makes it run
+  before media.py's silent auto-learn for the admin's own DM.
 """
 
 from __future__ import annotations
@@ -24,16 +28,18 @@ from src.bot.keyboards.admin_sticker import (
     _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
+    sticker_dm_check_keyboard,
     sticker_reanalyze_retry_keyboard,
     sticker_set_detail_keyboard,
     sticker_sets_keyboard,
 )
 from src.bot.utils import check_admin_direct
+from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
 from src.utils import parse_admin_ids
-from src.utils.telegram import typing_indicator
+from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
 logger = structlog.get_logger(__name__)
 
@@ -612,5 +618,186 @@ async def handle_run_analysis(
         keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
 
     # ── Edit message with result (suppress "not modified" on double-tap) ─────
+    with contextlib.suppress(TelegramBadRequest):
+        await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)
+
+
+# ── DM sticker check (admin sends a sticker directly, no command) ───────
+
+
+@router.message(F.sticker, F.chat.type == "private", IsAdmin())
+async def handle_admin_sticker_check(
+    message: Message,
+    sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Admin sends a sticker directly in DM (no command) → catalog check (B-1).
+
+    Registered on the admin_sticker router, which handlers/__init__.py wires
+    in BEFORE the media router — so this consumes the update first and
+    handlers/media.py's silent auto-learn (handle_sticker_message) never
+    fires for an admin's own DM check. Known sticker → the existing detail
+    view (same renderer as the sets browser). Unknown → an explicit
+    "🔍 Проанализировать" button; analysis only runs on that tap, never
+    silently (ADR-0003 — analysis stays a visible, synchronous admin action).
+    """
+    sticker = message.sticker
+    if sticker is None:
+        return
+
+    lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
+
+    existing = await sticker_repo.get_by_file_unique_id(sticker.file_unique_id)
+    if existing:
+        text = _build_detail_text(existing, sticker.file_unique_id, lang)
+        keyboard = sticker_detail_keyboard(
+            sticker.file_unique_id, lang=lang, set_name=existing["set_name"]
+        )
+        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+        return
+
+    text = (
+        "Такого стикера ещё нет в базе."
+        if lang == "ru"
+        else "This sticker isn't in the catalog yet."
+    )
+    # Reply (not answer): handle_admin_sticker_dm_analyze() below reads the
+    # sticker back off callback.message.reply_to_message on the button tap —
+    # no extra cache or DB row needed to carry file_id/set_name/emoji across
+    # the tap (nothing to persist per ADR-0003's transient-UI-state stance).
+    await message.reply(
+        text, reply_markup=sticker_dm_check_keyboard(sticker.file_unique_id, lang=lang)
+    )
+
+
+@router.callback_query(F.data.startswith("adm_stk_dmchk:"))
+async def handle_admin_sticker_dm_analyze(
+    callback: CallbackQuery,
+    sticker_service: FromDishka[StickerLearningService],
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Run vision analysis for a sticker checked via DM that wasn't known yet.
+
+    Mirrors handle_run_analysis()'s edit-in-place lifecycle (ADR-0003), but
+    there is no existing sticker_knowledge row to re-analyze: the Sticker
+    object (file_id, emoji, set_name, ...) comes from the message this
+    prompt replied to, not from a DB lookup.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not (isinstance(callback.message, Message) and callback.message.bot):
+        await callback.answer("Bot unavailable", show_alert=True)
+        return
+
+    reply_msg = callback.message.reply_to_message
+    sticker = reply_msg.sticker if reply_msg else None
+    if sticker is None or sticker.file_unique_id != file_unique_id:
+        await callback.answer(
+            "Стикер недоступен, пришли его ещё раз"
+            if lang == "ru"
+            else "Sticker unavailable, please resend it",
+            show_alert=True,
+        )
+        return
+
+    # Dismiss the callback spinner immediately
+    await callback.answer()
+
+    # ── ⏳ in-progress edit: hide buttons so the admin knows work is underway ──
+    in_progress_text = "⏳ Анализирую…" if lang == "ru" else "⏳ Analyzing…"
+    try:
+        await callback.message.edit_text(
+            in_progress_text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+        )
+    except TelegramBadRequest as exc:
+        logger.warning(
+            "handle_admin_sticker_dm_analyze: in-progress edit failed, continuing analysis",
+            file_unique_id=file_unique_id,
+            error=str(exc),
+        )
+
+    # ── Download + learn ──────────────────────────────────────────────────
+    try:
+        image_data = await download_telegram_file(callback.message.bot, sticker.file_id)
+    except TelegramFileError:
+        logger.warning(
+            "handle_admin_sticker_dm_analyze: download failed",
+            file_unique_id=file_unique_id,
+        )
+        reason_copy = _REANALYZE_REASON_COPY["download"]
+        result_text = (
+            f"⚠️ Ошибка анализа: {reason_copy['ru']}"
+            if lang == "ru"
+            else f"⚠️ Analysis error: {reason_copy['en']}"
+        )
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.edit_text(
+                result_text,
+                parse_mode="HTML",
+                reply_markup=sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang),
+            )
+        return
+
+    learning_result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+
+    # Best-effort sticker-set registration so the admin panel's "browse by
+    # set" stays consistent for manually-checked stickers too — parity with
+    # the automatic group-chat learn path (handlers/media.py). notify_admins
+    # and sticker-to-sticker reply are intentionally skipped here: the admin
+    # is already looking at the synchronous result, and there is no chat
+    # context to reply into.
+    if sticker.set_name:
+        try:
+            existing_set = await sticker_repo.get_sticker_set(sticker.set_name)
+            if not existing_set:
+                tg_set = await callback.message.bot.get_sticker_set(sticker.set_name)
+                await sticker_repo.upsert_sticker_set(
+                    set_name=tg_set.name,
+                    set_title=tg_set.title,
+                    total_count=len(tg_set.stickers),
+                    thumbnail_file_id=(tg_set.thumbnail.file_id if tg_set.thumbnail else None),
+                    is_animated=any(s.is_animated for s in tg_set.stickers[:1]),
+                    is_video=any(s.is_video for s in tg_set.stickers[:1]),
+                )
+        except Exception:
+            logger.warning(
+                "handle_admin_sticker_dm_analyze: set registration failed",
+                set_name=sticker.set_name,
+            )
+
+    # ── Build result text + keyboard (mirrors handle_run_analysis) ─────────
+    if learning_result.analysis_failed:
+        reason_key = learning_result.failure_reason or "empty"
+        reason_copy = _REANALYZE_REASON_COPY.get(reason_key, _REANALYZE_REASON_COPY["empty"])
+        reason_label = reason_copy.get(lang, reason_copy["ru"])
+        result_text = (
+            f"⚠️ Ошибка анализа: {reason_label}"
+            if lang == "ru"
+            else f"⚠️ Analysis error: {reason_label}"
+        )
+        keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
+    else:
+        updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
+        result_text = (
+            _build_detail_text(updated, file_unique_id, lang)
+            if updated
+            else ("✅ Анализ завершён" if lang == "ru" else "✅ Analysis complete")
+        )
+        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker.set_name)
+
     with contextlib.suppress(TelegramBadRequest):
         await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)
