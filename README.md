@@ -123,6 +123,20 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 - **Link comments** — extract and comment on YouTube/TikTok links
 - **Custom rules** — keyword triggers, spam detection, regex matching
 
+### Admin panel
+
+`/admin` in a direct message opens the bot's control panel (bot admins only):
+
+- **Chat settings** — one grouped panel per whitelisted chat covering every per-chat
+  option: behaviour, modules, stickers, rules, plus links into the knowledge-base and
+  reactions sub-panels. Options a chat has not overridden are marked *inherited*, so it
+  is always clear whether a value is the chat's own or comes from the global layer.
+  Approving a new chat offers a direct link into its settings.
+- **Global settings** — the values applied to every chat that has no value of its own,
+  existing chats included; a chat's own setting always wins.
+- Whitelist, custom rules, sticker management, usage statistics, spend, health and
+  notification controls.
+
 ## Configuration
 
 ```yaml
