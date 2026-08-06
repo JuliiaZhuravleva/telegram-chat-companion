@@ -32,6 +32,14 @@ class AnimationMotion:
         avg_motion: Average motion score (0.0 to 1.0)
         peak_motion_time: Timestamp of highest motion intensity
         motion_scores: Per-frame motion scores (normalized 0-1)
+        is_oscillating: True when the motion-score sequence reverses
+            direction repeatedly (e.g. a head shaking side to side) rather
+            than following a single smooth rise/fall to one peak. See
+            ``MotionAnalyzer._detect_oscillation``. Renderer/prompt code
+            uses this to (C-1): substitute a motion-trail ghost frame for
+            the keyframe closest to the peak, and add a vision-prompt hint
+            — both no-ops when False, so non-oscillating stickers keep the
+            exact prior collage/prompt (current route preserved).
     """
 
     duration: float
@@ -40,6 +48,7 @@ class AnimationMotion:
     avg_motion: float
     peak_motion_time: float
     motion_scores: list[float]
+    is_oscillating: bool = False
 
 
 class MotionAnalyzer:
@@ -119,6 +128,7 @@ class MotionAnalyzer:
             avg_motion=avg_motion,
             peak_motion_time=peak_time,
             motion_scores=motion_scores,
+            is_oscillating=self._detect_oscillation(motion_scores),
         )
 
     async def analyze_tgs_frames(
@@ -178,7 +188,57 @@ class MotionAnalyzer:
             avg_motion=avg_motion,
             peak_motion_time=peak_time,
             motion_scores=motion_scores,
+            is_oscillating=self._detect_oscillation(motion_scores),
         )
+
+    def _detect_oscillation(
+        self,
+        motion_scores: list[float],
+        *,
+        min_reversals: int = 3,
+        min_delta: float = 0.15,
+    ) -> bool:
+        """Detect rapid back-and-forth motion (shaking/wobbling) via direction reversals.
+
+        A single deliberate gesture (e.g. a punch) produces motion scores that
+        rise smoothly to one peak and fall back — at most one reversal. A
+        shake/wobble (e.g. a cat rapidly turning its head side to side)
+        produces several significant rises and falls in quick succession.
+        Counts direction reversals in ``motion_scores``, ignoring changes
+        smaller than ``min_delta`` so sensor/encoding noise on an otherwise
+        flat or smoothly-ramping signal doesn't get miscounted as motion —
+        that noise floor is what keeps a single-peak gesture (and a static
+        near-zero signal) classified as non-oscillating.
+
+        Args:
+            motion_scores: Per-frame motion scores (normalized 0-1).
+            min_reversals: Minimum number of significant direction reversals
+                required to classify the sequence as oscillating.
+            min_delta: Minimum score change (0-1) to count as a genuine
+                directional move rather than noise.
+
+        Returns:
+            True if the sequence reverses direction at least ``min_reversals``
+            times with each reversal exceeding ``min_delta``.
+        """
+        if len(motion_scores) < 3:
+            return False
+
+        reversals = 0
+        direction = 0  # -1 falling, 0 unknown (no significant move yet), +1 rising
+        last_extreme = motion_scores[0]
+
+        for score in motion_scores[1:]:
+            delta = score - last_extreme
+            if abs(delta) < min_delta:
+                continue
+            new_direction = 1 if delta > 0 else -1
+            if direction != 0 and new_direction != direction:
+                reversals += 1
+            direction = new_direction
+            last_extreme = score
+
+        return reversals >= min_reversals
 
     def _parse_scdet_output(self, stderr: str) -> list[float]:
         """Parse motion scores from ffmpeg scdet filter output.

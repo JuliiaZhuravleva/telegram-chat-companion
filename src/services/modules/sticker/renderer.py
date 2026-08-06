@@ -114,6 +114,7 @@ def _composite_collage(
     frames: list[Image.Image],
     label: str,
     motion: AnimationMotion | None = None,
+    trail_frame_index: int | None = None,
 ) -> bytes:
     """Arrange frames in a 3x2 grid with labels, return PNG bytes.
 
@@ -121,6 +122,10 @@ def _composite_collage(
         frames: List of frames to arrange
         label: Title label for collage
         motion: Optional motion analysis data for enhanced labels
+        trail_frame_index: Position (0-based) of a frame that was replaced
+            with a motion-trail ghost composite (C-1) — its label gets a
+            " ШЛЕЙФ" suffix so Vision doesn't mistake the ghosting for a
+            corrupted frame.
 
     Returns:
         PNG bytes of the composited collage
@@ -174,6 +179,9 @@ def _composite_collage(
             "Frame 5",
             "Frame 6 (end)",
         ]
+
+    if trail_frame_index is not None and 0 <= trail_frame_index < len(frame_labels):
+        frame_labels[trail_frame_index] += " ШЛЕЙФ"
 
     try:
         small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
@@ -271,6 +279,7 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
             avg_motion=avg_motion,
             peak_motion_time=peak_time,
             motion_scores=motion_scores,
+            is_oscillating=analyzer._detect_oscillation(motion_scores),
         )
     except Exception as exc:
         logger.warning("Motion analysis failed, using fallback", error=str(exc))
@@ -288,7 +297,25 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
             logger.warning("Failed to render TGS keyframe", frame_num=frame_num, error=str(exc))
             frames.append(Image.new("RGBA", default_size))
 
-    collage_png = _composite_collage(frames, "ANIMATED STICKER", motion=motion)
+    # Motion-trail substitution (C-1): when the oscillation heuristic flags
+    # rapid back-and-forth movement (e.g. a head shaking side to side), swap
+    # the keyframe closest to the motion peak for a ghosted trail composite
+    # (_create_motion_trail_frame) built from the frames already sampled for
+    # motion analysis above — zero extra rlottie render cost, same reuse
+    # idiom as hash_frame below. Non-oscillating stickers are unaffected
+    # (current route preserved).
+    trail_frame_pos: int | None = None
+    if motion.is_oscillating and motion.motion_scores and sampled_frames:
+        peak_idx = motion.motion_scores.index(max(motion.motion_scores))
+        sampled_peak_idx = min(peak_idx // sampling, len(sampled_frames) - 1)
+        trail_frame_pos = min(
+            range(len(keyframe_indices)), key=lambda i: abs(keyframe_indices[i] - peak_idx)
+        )
+        frames[trail_frame_pos] = _create_motion_trail_frame(sampled_frames, sampled_peak_idx)
+
+    collage_png = _composite_collage(
+        frames, "ANIMATED STICKER", motion=motion, trail_frame_index=trail_frame_pos
+    )
 
     # Dedup hash frame (ADR-0007 Decision 2): reuse sampled_frames[0], which
     # is anim.render_pillow_frame(frame_num=0) since the sampling loop above
@@ -386,7 +413,35 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
         if not frames:
             raise StickerRenderError("No frames extracted from WebM")
 
-        collage_png = _composite_collage(frames, "VIDEO STICKER", motion=motion)
+        # Motion-trail substitution (C-1): mirrors the TGS branch above, but
+        # WebM has no cheap pre-rendered frame list to reuse, so the trail's
+        # source frames are extracted on demand (only when oscillation is
+        # detected) via the same ffmpeg helper the keyframe loop already
+        # uses. Non-oscillating stickers are unaffected (current route
+        # preserved), and any ffmpeg failure here fails open — no trail
+        # substitution, not a render error.
+        trail_frame_pos: int | None = None
+        if motion.is_oscillating and motion.motion_scores:
+            peak_idx = motion.motion_scores.index(max(motion.motion_scores))
+            peak_time = (peak_idx / total_frames) * duration if total_frames > 0 else 0.0
+            trail_sources = await _extract_trail_frames(
+                input_path,
+                tmp_dir,
+                peak_time=peak_time,
+                duration=duration,
+                total_frames=total_frames,
+            )
+            if trail_sources:
+                trail_frame_pos = min(
+                    range(len(keyframe_indices)), key=lambda i: abs(keyframe_indices[i] - peak_idx)
+                )
+                frames[trail_frame_pos] = _create_motion_trail_frame(
+                    trail_sources, len(trail_sources) - 1
+                )
+
+        collage_png = _composite_collage(
+            frames, "VIDEO STICKER", motion=motion, trail_frame_index=trail_frame_pos
+        )
         return RenderedSticker(
             collage_png=collage_png,
             duration=duration,
@@ -454,6 +509,43 @@ async def _extract_hash_anchor_frame(input_path: Path, tmp_dir: str) -> bytes:
     buf = io.BytesIO()
     Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE)).save(buf, format="PNG")
     return buf.getvalue()
+
+
+async def _extract_trail_frames(
+    input_path: Path,
+    tmp_dir: str,
+    *,
+    peak_time: float,
+    duration: float,
+    total_frames: int,
+    trail_length: int = 3,
+) -> list[Image.Image]:
+    """Extract ``trail_length`` frames leading up to (and including) the motion
+    peak, as source material for ``_create_motion_trail_frame`` (C-1).
+
+    Spacing mirrors the TGS motion-analysis stride (every 3rd native frame),
+    so the WebM and TGS trail composites span a comparable slice of real
+    time. Only called when ``AnimationMotion.is_oscillating`` is True, so
+    this extra ffmpeg cost is paid only for stickers that actually benefit.
+
+    Returns:
+        Up to ``trail_length`` RGBA frames, oldest first. Empty list if
+        ffmpeg fails to produce any of them — caller must fail open (skip
+        the trail substitution), same convention as the rest of this
+        module's ffmpeg extraction helpers.
+    """
+    frame_duration = duration / total_frames if total_frames > 0 else 1 / 30
+    step = max(frame_duration * 3, 0.05)
+    timestamps = [max(0.0, peak_time - step * (trail_length - 1 - i)) for i in range(trail_length)]
+
+    frames: list[Image.Image] = []
+    for i, ts in enumerate(timestamps):
+        frame_path = Path(tmp_dir) / f"trail_{i}.png"
+        await _ffmpeg_extract_frame(input_path, frame_path, ts)
+        if frame_path.exists():
+            frames.append(Image.open(frame_path).convert("RGBA"))
+
+    return frames
 
 
 async def _probe_video(path: str) -> tuple[int, float]:

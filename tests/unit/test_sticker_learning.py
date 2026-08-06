@@ -16,6 +16,7 @@ from src.services.ai.base import (
 from src.services.modules.sticker.dedup import compute_image_hash
 from src.services.modules.sticker.learning import StickerLearningService
 from src.services.modules.sticker.models import ReanalyzeResult, StickerRenderError
+from src.services.modules.sticker.motion import AnimationMotion
 from src.services.modules.sticker.renderer import RenderedSticker
 
 
@@ -463,6 +464,71 @@ class TestBuildVisionPrompt:
         )
         assert "Another happy cat" in prompt
         assert "Sad cat" in prompt
+
+    @staticmethod
+    def _timing_with_motion(*, is_oscillating: bool) -> RenderedSticker:
+        motion = AnimationMotion(
+            duration=1.0,
+            keyframe_indices=[0, 5, 10, 15, 20, 29],
+            keyframe_times=[0.0, 0.17, 0.33, 0.5, 0.67, 1.0],
+            avg_motion=0.5,
+            peak_motion_time=0.33,
+            motion_scores=[0.1, 0.9, 0.1, 0.9, 0.1, 0.9],
+            is_oscillating=is_oscillating,
+        )
+        return RenderedSticker(
+            collage_png=b"fake-png",
+            duration=1.0,
+            frame_times=motion.keyframe_times,
+            motion=motion,
+        )
+
+    def test_oscillation_hint_included_when_motion_is_oscillating_animated(self):
+        sticker = _make_sticker(is_animated=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="animated",
+            timing=self._timing_with_motion(is_oscillating=True),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" in prompt
+        assert "ШЛЕЙФ" in prompt
+
+    def test_oscillation_hint_omitted_when_motion_not_oscillating_animated(self):
+        sticker = _make_sticker(is_animated=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="animated",
+            timing=self._timing_with_motion(is_oscillating=False),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" not in prompt
+        assert "ШЛЕЙФ" not in prompt
+
+    def test_oscillation_hint_included_when_motion_is_oscillating_video(self):
+        sticker = _make_sticker(is_video=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="video",
+            timing=self._timing_with_motion(is_oscillating=True),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" in prompt
+        assert "ШЛЕЙФ" in prompt
+
+    def test_oscillation_hint_omitted_when_motion_not_oscillating_video(self):
+        sticker = _make_sticker(is_video=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="video",
+            timing=self._timing_with_motion(is_oscillating=False),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" not in prompt
+        assert "ШЛЕЙФ" not in prompt
+
+    def test_no_oscillation_hint_without_timing(self):
+        """Static stickers (no timing/motion at all) never get the hint —
+        current route for static stickers stays untouched."""
+        sticker = _make_sticker()
+        prompt = StickerLearningService._build_vision_prompt(sticker, sticker_type="static")
+        assert "ОСЦИЛЛЯЦИЯ" not in prompt
 
 
 class TestLogUsageOnMerge:

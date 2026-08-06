@@ -14,16 +14,20 @@ import io
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from PIL import Image
 
 from src.services.modules.sticker.dedup import compute_image_hash, hamming_distance
+from src.services.modules.sticker.motion import MotionAnalyzer
 from src.services.modules.sticker.renderer import (
     _FRAME_SIZE,
+    _create_motion_trail_frame,
     _extract_hash_anchor_frame,
     _ffmpeg_extract_frame,
     render_tgs,
+    render_webm,
 )
 
 _HAS_FFMPEG = shutil.which("ffmpeg") is not None
@@ -195,3 +199,201 @@ class TestWebmHashAnchorFrame:
         # Must still be hashable — dedup's fail-open contract is "skip the
         # match", not "crash ingestion".
         compute_image_hash(anchor)
+
+
+class TestCreateMotionTrailFrame:
+    """Pure-function tests for the ghosting composite (C-1's ready-made helper,
+    now wired up). Real PIL compositing, no mocking — small and deterministic."""
+
+    @staticmethod
+    def _moving_square_frames() -> list[Image.Image]:
+        """3 frames on a transparent 30x10 canvas, each with an opaque 10x10
+        colored square at a DIFFERENT x-position — simulates a character
+        moving across frames, which is exactly where the ghosting effect is
+        visible (transparent regions of the top/most-recent frame let older,
+        partial-alpha frames show through)."""
+        size = (30, 10)
+
+        def _square(x_start: int, color: tuple[int, int, int]) -> Image.Image:
+            frame = Image.new("RGBA", size, (0, 0, 0, 0))
+            for x in range(x_start, x_start + 10):
+                for y in range(10):
+                    frame.putpixel((x, y), (*color, 255))
+            return frame
+
+        red = _square(0, (255, 0, 0))
+        green = _square(10, (0, 255, 0))
+        blue = _square(20, (0, 0, 255))
+        return [red, green, blue]
+
+    def test_ghosting_visible_through_transparent_regions(self):
+        """At the oldest frame's own position (fully transparent in the two
+        later frames), the ghost trail must still show a faded red — proving
+        the earlier frames actually contribute, not just the top layer."""
+        frames = self._moving_square_frames()
+        result = _create_motion_trail_frame(frames, center_idx=2, trail_length=3)
+
+        assert result.mode == "RGBA"
+        assert result.size == (30, 10)
+
+        # Oldest frame's square (fully transparent in frames 1 and 2) —
+        # ghosted red should be visible but not full-alpha/full-intensity.
+        r, g, b, a = result.getpixel((5, 5))
+        assert r > 0 and g == 0 and b == 0
+        assert 0 < a < 255
+
+        # Middle frame's square — stronger ghost than the oldest (later
+        # frame = higher alpha weight = (i+1)/trail_length).
+        r2, g2, b2, a2 = result.getpixel((15, 5))
+        assert g2 > 0
+        assert a2 > a
+
+        # Most recent (center) frame's own square — fully opaque, its own color.
+        assert result.getpixel((25, 5)) == (0, 0, 255, 255)
+
+        # Region with no content in ANY source frame stays fully transparent.
+        assert result.getpixel((0, 9)) is not None  # sanity: pixel access works
+        empty = Image.new("RGBA", (30, 10), (0, 0, 0, 0))
+        empty_frames = [empty, empty, empty]
+        empty_result = _create_motion_trail_frame(empty_frames, center_idx=2, trail_length=3)
+        assert empty_result.getpixel((5, 5))[3] == 0
+
+    def test_returns_first_frame_unchanged_when_center_idx_out_of_bounds(self):
+        frame = Image.new("RGBA", (4, 4), (10, 20, 30, 255))
+        result = _create_motion_trail_frame([frame], center_idx=5, trail_length=3)
+        assert result is frame
+
+        result_negative = _create_motion_trail_frame([frame], center_idx=-1, trail_length=3)
+        assert result_negative is frame
+
+    def test_returns_blank_frame_when_no_frames_available(self):
+        result = _create_motion_trail_frame([], center_idx=0, trail_length=3)
+        assert result.mode == "RGBA"
+        assert result.size == (_FRAME_SIZE, _FRAME_SIZE)
+        assert result.getpixel((0, 0)) == (0, 0, 0, 0)
+
+    def test_single_available_frame_composites_only_itself(self):
+        """center_idx=0 with only 1 frame in the list: trail positions that
+        would reach into negative indices are skipped, leaving just the
+        center frame's own (fully opaque) content."""
+        only_frame = Image.new("RGBA", (4, 4), (100, 150, 200, 255))
+        result = _create_motion_trail_frame([only_frame], center_idx=0, trail_length=3)
+        assert result.getpixel((0, 0)) == (100, 150, 200, 255)
+
+
+class TestTgsMotionTrailSubstitution:
+    """Call-site test (C-1): proves the oscillation branch in _render_tgs_sync
+    actually invokes `_create_motion_trail_frame` when triggered, and does NOT
+    when it isn't — asserting the wiring, not just the helper's own correctness
+    (a correct-but-uncalled helper would pass every test above and still be dead
+    code, as it was before this item)."""
+
+    @pytest.mark.asyncio
+    async def test_trail_frame_substituted_when_oscillating(self):
+        with (
+            patch.object(MotionAnalyzer, "_detect_oscillation", return_value=True),
+            patch(
+                "src.services.modules.sticker.renderer._create_motion_trail_frame",
+                wraps=_create_motion_trail_frame,
+            ) as mock_trail,
+        ):
+            result = await render_tgs(_minimal_tgs_bytes())
+
+        assert result.motion is not None
+        assert result.motion.is_oscillating is True
+        mock_trail.assert_called_once()
+        # First positional arg is the sampled-frames list used for motion
+        # analysis (reused, not re-rendered) — never empty for a real animation.
+        call_args = mock_trail.call_args
+        assert len(call_args[0][0]) > 0
+
+    @pytest.mark.asyncio
+    async def test_trail_frame_not_substituted_when_not_oscillating(self):
+        with (
+            patch.object(MotionAnalyzer, "_detect_oscillation", return_value=False),
+            patch(
+                "src.services.modules.sticker.renderer._create_motion_trail_frame",
+                wraps=_create_motion_trail_frame,
+            ) as mock_trail,
+        ):
+            result = await render_tgs(_minimal_tgs_bytes())
+
+        assert result.motion is not None
+        assert result.motion.is_oscillating is False
+        mock_trail.assert_not_called()
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg not available in PATH")
+class TestWebmMotionTrailSubstitution:
+    """WebM counterpart of TestTgsMotionTrailSubstitution — same call-site proof,
+    against the real ffmpeg pipeline (renderer.py has no cheap pre-rendered frame
+    list for WebM, so this also exercises the on-demand `_extract_trail_frames`
+    helper end to end)."""
+
+    @staticmethod
+    def _build_solid_webm(tmp_path: Path) -> Path:
+        """A trivial 1s solid-color .webm — motion content doesn't matter here,
+        only that oscillation detection is forced via mocking."""
+        img = Image.new("RGBA", (64, 64), (200, 50, 50, 255))
+        img_path = tmp_path / "solid.png"
+        img.save(img_path)
+        webm_path = tmp_path / "solid.webm"
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loop",
+                "1",
+                "-t",
+                "1",
+                "-i",
+                str(img_path),
+                "-vf",
+                "fps=10,format=yuv420p",
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-cpu-used",
+                "8",
+                str(webm_path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        return webm_path
+
+    @pytest.mark.asyncio
+    async def test_trail_frame_substituted_when_oscillating(self, tmp_path):
+        webm_path = self._build_solid_webm(tmp_path)
+
+        with (
+            patch.object(MotionAnalyzer, "_detect_oscillation", return_value=True),
+            patch(
+                "src.services.modules.sticker.renderer._create_motion_trail_frame",
+                wraps=_create_motion_trail_frame,
+            ) as mock_trail,
+        ):
+            result = await render_webm(webm_path.read_bytes())
+
+        assert result.motion is not None
+        assert result.motion.is_oscillating is True
+        mock_trail.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_trail_frame_not_substituted_when_not_oscillating(self, tmp_path):
+        webm_path = self._build_solid_webm(tmp_path)
+
+        with (
+            patch.object(MotionAnalyzer, "_detect_oscillation", return_value=False),
+            patch(
+                "src.services.modules.sticker.renderer._create_motion_trail_frame",
+                wraps=_create_motion_trail_frame,
+            ) as mock_trail,
+        ):
+            result = await render_webm(webm_path.read_bytes())
+
+        assert result.motion is not None
+        assert result.motion.is_oscillating is False
+        mock_trail.assert_not_called()

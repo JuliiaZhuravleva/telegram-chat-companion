@@ -884,6 +884,26 @@ class StickerLearningService:
 
                     lines.append(label)
 
+                # Oscillation hint (C-1): the motion heuristic in motion.py
+                # flags rapid direction-reversal (shaking/wobbling, e.g. a
+                # head turning side to side) that a single peak keyframe
+                # fails to convey — nudge Vision to read it as repeated
+                # quick movement, and explain the ghosted trail frame among
+                # the 6 above (renderer.py's _create_motion_trail_frame)
+                # so it isn't mistaken for a corrupted image.
+                if motion.is_oscillating:
+                    lines.append(
+                        "⚠️ ОБНАРУЖЕНА ОСЦИЛЛЯЦИЯ: движение резко меняет направление "
+                        "туда-сюда (вероятно тряска / мотание головой / дрожание), "
+                        "а не единое плавное движение к одной точке."
+                    )
+                    lines.append(
+                        "Один из кадров выше — это «ШЛЕЙФ» (наложение нескольких "
+                        "последних кадров с затуханием прозрачности): это осознанная "
+                        "визуализация тряски, а не повреждённое изображение — "
+                        "используй его, чтобы понять характер и направление движения."
+                    )
+
                 lines.append("")
             else:
                 # Fallback for timing without motion
@@ -940,6 +960,26 @@ class StickerLearningService:
                         label = f"  • t={time:.1f}с (движение={motion_score:.2f})"
 
                     lines.append(label)
+
+                # Oscillation hint (C-1): the motion heuristic in motion.py
+                # flags rapid direction-reversal (shaking/wobbling, e.g. a
+                # head turning side to side) that a single peak keyframe
+                # fails to convey — nudge Vision to read it as repeated
+                # quick movement, and explain the ghosted trail frame among
+                # the 6 above (renderer.py's _create_motion_trail_frame)
+                # so it isn't mistaken for a corrupted image.
+                if motion.is_oscillating:
+                    lines.append(
+                        "⚠️ ОБНАРУЖЕНА ОСЦИЛЛЯЦИЯ: движение резко меняет направление "
+                        "туда-сюда (вероятно тряска / мотание головой / дрожание), "
+                        "а не единое плавное движение к одной точке."
+                    )
+                    lines.append(
+                        "Один из кадров выше — это «ШЛЕЙФ» (наложение нескольких "
+                        "последних кадров с затуханием прозрачности): это осознанная "
+                        "визуализация тряски, а не повреждённое изображение — "
+                        "используй его, чтобы понять характер и направление движения."
+                    )
 
                 lines.append("")
             else:

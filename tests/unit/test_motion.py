@@ -215,3 +215,53 @@ def test_interpolate_empty_inputs(analyzer: MotionAnalyzer) -> None:
     """Empty sampled inputs return all-zeros of the requested length."""
     result = analyzer._interpolate_motion_scores([], [], total_frames=5)
     assert result == [0.0] * 5
+
+
+# --- _detect_oscillation (C-1) ---
+
+
+def test_detect_oscillation_shaking_motion(analyzer: MotionAnalyzer) -> None:
+    """Rapid back-and-forth (e.g. a head shaking side to side) is oscillating."""
+    scores = [0.1, 0.9, 0.1, 0.9, 0.1, 0.9, 0.1]
+    assert analyzer._detect_oscillation(scores) is True
+
+
+def test_detect_oscillation_single_smooth_gesture(analyzer: MotionAnalyzer) -> None:
+    """A single deliberate gesture (rise to one peak, then fall) is NOT oscillating —
+    at most one direction reversal."""
+    scores = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 0.8, 0.6, 0.4, 0.2, 0.0]
+    assert analyzer._detect_oscillation(scores) is False
+
+
+def test_detect_oscillation_monotonic_rise(analyzer: MotionAnalyzer) -> None:
+    """A monotonic rise (no reversals at all) is NOT oscillating."""
+    scores = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    assert analyzer._detect_oscillation(scores) is False
+
+
+def test_detect_oscillation_flat_near_zero(analyzer: MotionAnalyzer) -> None:
+    """A near-static sticker (no significant motion at all) is NOT oscillating."""
+    scores = [0.0, 0.01, 0.0, 0.02, 0.01, 0.0]
+    assert analyzer._detect_oscillation(scores) is False
+
+
+def test_detect_oscillation_noise_below_min_delta_ignored(analyzer: MotionAnalyzer) -> None:
+    """Small fluctuations below min_delta must NOT count as reversals — proves the
+    noise floor actually gates classification, not just presence of any wiggle."""
+    # Tiny up/down jitter on top of a flat baseline, all deltas < default min_delta=0.15
+    scores = [0.5, 0.55, 0.5, 0.53, 0.48, 0.52, 0.49]
+    assert analyzer._detect_oscillation(scores) is False
+
+
+def test_detect_oscillation_respects_min_reversals_param(analyzer: MotionAnalyzer) -> None:
+    """A sequence with exactly 2 significant reversals is below the default
+    min_reversals=3 threshold, but crosses a lowered threshold."""
+    scores = [0.1, 0.9, 0.1, 0.9]  # rise, fall, rise = 2 reversals
+    assert analyzer._detect_oscillation(scores) is False
+    assert analyzer._detect_oscillation(scores, min_reversals=2) is True
+
+
+def test_detect_oscillation_too_short_sequence(analyzer: MotionAnalyzer) -> None:
+    """Fewer than 3 samples can't establish a reversal — always False."""
+    assert analyzer._detect_oscillation([0.0, 1.0]) is False
+    assert analyzer._detect_oscillation([]) is False
