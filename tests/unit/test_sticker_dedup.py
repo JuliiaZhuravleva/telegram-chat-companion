@@ -100,6 +100,78 @@ class TestComputeImageHash:
             compute_image_hash(b"not an image")
 
 
+class TestAdversarialFalsePositiveBoundary:
+    """QA addition (A-3): the false-positive control above
+    (``test_clearly_different_pictures_exceed_threshold``) uses two pictures
+    that differ in both palette AND silhouette (solid red vs. blue
+    checkerboard) — an easy case. ADR-0007's own Consequences section names
+    the *sharpest* realistic risk explicitly: "two genuinely different
+    animated stickers from the same pack that happen to share a similar
+    idle/starting pose." This class exercises that harder, more realistic
+    near-miss: two pictures sharing the same background/silhouette/eye
+    layout, differing only in the mouth (a plausible same-pack "different
+    expression" pair) — and a control demonstrating dHash is overwhelmingly
+    a luminance-*gradient* hash with very little sensitivity to color (a
+    same-shape pair that differs only in fill color lands well inside the
+    dedup threshold, which is a real, ADR-undocumented blind spot worth
+    flagging, not merely an assumption)."""
+
+    @staticmethod
+    def _face(mouth: str, eye_color: tuple[int, int, int, int] = (20, 20, 20, 255)) -> bytes:
+        img = Image.new("RGBA", (64, 64), (250, 220, 170, 255))
+        for x in range(8, 56):
+            for y in range(8, 56):
+                img.putpixel((x, y), (240, 200, 140, 255))
+        for x in range(20, 26):
+            for y in range(24, 30):
+                img.putpixel((x, y), eye_color)
+        for x in range(38, 44):
+            for y in range(24, 30):
+                img.putpixel((x, y), eye_color)
+        if mouth == "smile":
+            for x in range(22, 42):
+                for y in range(40, 44):
+                    img.putpixel((x, y), (150, 30, 30, 255))
+        else:  # "shock": a taller, narrower open mouth — different pose
+            for x in range(26, 38):
+                for y in range(38, 50):
+                    img.putpixel((x, y), (60, 20, 20, 255))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_same_pack_different_expression_exceeds_threshold(self):
+        """Same head/eyes/background, different mouth shape (stand-in for two
+        distinct stickers from one pack sharing a similar idle pose) must
+        NOT be treated as duplicates."""
+        smile = self._face("smile")
+        shock = self._face("shock")
+        distance = hamming_distance(compute_image_hash(smile), compute_image_hash(shock))
+        assert distance > DEDUP_HAMMING_THRESHOLD
+
+    def test_same_silhouette_different_fill_color_stays_within_threshold(self):
+        """Known blind spot, empirically confirmed (not assumed): dHash
+        compares relative brightness between *neighboring* pixels only, so
+        two images with the identical shape/silhouette but very different
+        overall fill color hash almost identically after grayscale
+        conversion — color carries very little weight (measured: 2 of 64
+        bits differ here, well inside DEDUP_HAMMING_THRESHOLD=4, for two
+        fills as different as saturated red vs. saturated blue).
+
+        Flag: a same-silhouette, different-color sticker VARIANT (a real,
+        plausible same-pack pattern — e.g. a character recolored per
+        emotion/team) risks being wrongly merged by the current threshold.
+        Not a regression to fix here (ADR-0007 Decision 1 chose dHash
+        deliberately, and Decision 3's threshold is a considered trade-off),
+        but this is a concrete, measured false-positive risk, not a
+        theoretical one — worth carrying into any future threshold/algorithm
+        revisit (ADR-0007 Decision 5's revisit trigger)."""
+        red = _png_bytes(fill=(200, 30, 30, 255))
+        blue = _png_bytes(fill=(20, 20, 220, 255))
+        distance = hamming_distance(compute_image_hash(red), compute_image_hash(blue))
+        assert distance <= DEDUP_HAMMING_THRESHOLD
+
+
 class TestHammingDistance:
     def test_identical_hashes_zero_distance(self):
         assert hamming_distance("0000000000000000", "0000000000000000") == 0
