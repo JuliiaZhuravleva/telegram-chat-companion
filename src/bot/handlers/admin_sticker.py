@@ -19,6 +19,7 @@ from typing import Any
 import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import StateFilter
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka import AsyncContainer
 from dishka.integrations.aiogram import FromDishka
@@ -100,7 +101,11 @@ def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
 # ── Admin reply to sticker notification ──────────────────────────────────
 
 
-@router.message(F.reply_to_message, F.text, F.chat.type == "private", IsAdmin())
+# StateFilter(None): this router precedes every FSM-owning router, so while
+# an FSM dialog is active (e.g. the tolerance prompt, which the admin may
+# answer as a *reply*) this handler must yield instead of swallowing the
+# input as a description correction (2026-08-07 review).
+@router.message(F.reply_to_message, F.text, F.chat.type == "private", IsAdmin(), StateFilter(None))
 async def handle_admin_sticker_reply(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],

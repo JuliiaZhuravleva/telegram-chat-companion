@@ -23,14 +23,35 @@ from PIL import Image
 # transparent-padding-color-difference → 0, random-noise control → 26).
 DEDUP_HAMMING_THRESHOLD = 4
 
+# Information-free dHash values: every neighbor comparison tied the same way.
+# Produced by any uniform frame — the renderer's blank-RGBA fallback, a
+# fade-in animation's empty t=0 anchor, a plain solid fill, even a smooth
+# monotone gradient (all measured popcount 0). Two such frames are distance 0
+# apart, so treating them as matchable would merge unrelated stickers and
+# hand one of them the other's description and explicitness_score
+# (2026-08-07 review, CRITICAL). All-ones is the symmetric case.
+_DEGENERATE_HASHES = frozenset({"0" * 16, "f" * 16})
 
-def compute_image_hash(image_bytes: bytes) -> str:
+
+def is_degenerate_hash(image_hash: str) -> bool:
+    """True for hashes that carry zero information (see _DEGENERATE_HASHES)."""
+    return image_hash in _DEGENERATE_HASHES
+
+
+def compute_image_hash(image_bytes: bytes) -> str | None:
     """64-bit difference hash (dHash), hex-encoded, Pillow-only.
 
     Robust to Telegram's WEBP re-encoding / minor recompression artifacts.
     NOT robust to crops, rotations, or mirrored art — by design (ADR-0007
     Decision 1): those fall through to a normal, slightly wasteful, but
     still-correct Vision call.
+
+    Returns:
+        The hex hash, or ``None`` when the image is information-free
+        (uniform / blank / smooth gradient — a degenerate all-equal
+        comparison pattern). ``None`` means "no usable hash": callers skip
+        the dedup check AND must not store the value as a future match
+        target — the same fail-open posture as the exception case below.
 
     Raises:
         Whatever Pillow raises on unparseable image bytes (e.g.
@@ -55,7 +76,8 @@ def compute_image_hash(image_bytes: bytes) -> str:
         for row in range(8)
         for col in range(8)
     )
-    return f"{int(bits, 2):016x}"
+    image_hash = f"{int(bits, 2):016x}"
+    return None if is_degenerate_hash(image_hash) else image_hash
 
 
 def hamming_distance(hash_a: str, hash_b: str) -> int:
@@ -90,8 +112,16 @@ def find_duplicate(
     flatten to a single root, so "how many duplicates does canonical X
     have" stays a single-hop query.
     """
+    # Defense in depth: compute_image_hash() already returns None for
+    # degenerate hashes, but a caller bypassing it — or a candidate row
+    # written before the guard existed — must still never produce a match.
+    if is_degenerate_hash(target_hash):
+        return None
+
     best: tuple[int, datetime, str, str | None] | None = None
     for file_unique_id, image_hash, created_at, duplicate_of in candidates:
+        if is_degenerate_hash(image_hash):
+            continue
         distance = hamming_distance(target_hash, image_hash)
         if distance > DEDUP_HAMMING_THRESHOLD:
             continue

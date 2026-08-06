@@ -11,6 +11,9 @@ Handles:
   ``tolerance_level`` (ADR-0008 Decision 10). Independent of F-1's still-
   deferred generic non-BOOL editing; reuses
   ``AdminStates.awaiting_setting_value`` (grep-verified unused elsewhere).
+- ``adm_pnl_tolcancel:*`` — escape hatch for that FSM flow: clears the
+  state and re-renders the panel (2026-08-07 review — commands also pass
+  through the input handler via ``~F.text.startswith("/")``).
 
 ``render_chat_panel`` is a pure ``(text, keyboard)`` function, parameterized
 by ``chat_id`` alone -- no ``CallbackQuery``/permission check inside, so a
@@ -35,7 +38,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.keyboards.admin_chat_panel import chat_panel_keyboard, chat_panel_picker_keyboard
+from src.bot.keyboards.admin_chat_panel import (
+    chat_panel_keyboard,
+    chat_panel_picker_keyboard,
+    tolerance_cancel_keyboard,
+)
 from src.bot.settings_fields import FieldType, field_by_code
 from src.bot.states.admin import AdminStates
 from src.bot.utils import check_admin_direct, safe_edit_text
@@ -72,6 +79,7 @@ _TOLERANCE_INVALID = {
     "ru": "Нужно число от 0.0 до 1.0. Попробуйте ещё раз.",
     "en": "Enter a number between 0.0 and 1.0. Try again.",
 }
+_TOLERANCE_CANCELLED = {"ru": "Ввод отменён.", "en": "Input cancelled."}
 _TOLERANCE_SAVED = {
     "ru": "Уровень приличия установлен: {value}",
     "en": "Tolerance level set to {value}",
@@ -344,10 +352,17 @@ async def handle_chat_panel_tolerance_prompt(
 
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer(_TOLERANCE_PROMPT[lang])
+        await callback.message.answer(
+            _TOLERANCE_PROMPT[lang],
+            reply_markup=tolerance_cancel_keyboard(lang, chat_id),
+        )
 
 
-@router.message(AdminStates.awaiting_setting_value, F.chat.type == "private")
+@router.message(
+    AdminStates.awaiting_setting_value,
+    F.chat.type == "private",
+    ~F.text.startswith("/"),
+)
 async def handle_chat_panel_tolerance_input(
     message: Message,
     state: FSMContext,
@@ -360,6 +375,12 @@ async def handle_chat_panel_tolerance_input(
     Reject-not-clamp, same posture as Decision 4's Vision-score validation:
     non-numeric or out-of-``[0.0, 1.0]`` input re-prompts (state stays set)
     instead of silently no-opping or clamping into range.
+
+    Escape hatches (2026-08-07 review — this router precedes
+    ``commands_router``, so without them the state ate every admin command
+    until a valid float arrived): commands pass through untouched via the
+    ``~F.text.startswith("/")`` filter, and the prompt carries a cancel
+    button (``adm_pnl_tolcancel:*``) that clears the state.
     """
     data = await state.get_data()
     chat_id = data.get("tol_chat_id")
@@ -378,10 +399,14 @@ async def handle_chat_panel_tolerance_input(
     try:
         value = float(raw)
     except ValueError:
-        await message.reply(_TOLERANCE_INVALID[lang])
+        await message.reply(
+            _TOLERANCE_INVALID[lang], reply_markup=tolerance_cancel_keyboard(lang, chat_id)
+        )
         return
     if not 0.0 <= value <= 1.0:
-        await message.reply(_TOLERANCE_INVALID[lang])
+        await message.reply(
+            _TOLERANCE_INVALID[lang], reply_markup=tolerance_cancel_keyboard(lang, chat_id)
+        )
         return
 
     await state.clear()
@@ -393,3 +418,42 @@ async def handle_chat_panel_tolerance_input(
         chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
     )
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_pnl_tolcancel:"))
+async def handle_chat_panel_tolerance_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Clear the tolerance-input state and return to the panel.
+
+    The escape hatch for ``awaiting_setting_value`` (2026-08-07 review):
+    the input handler deliberately keeps the state set on invalid input,
+    so cancelling must be possible without typing a valid float.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+    except (ValueError, IndexError):
+        await state.clear()
+        await callback.answer(_TOLERANCE_CANCELLED[lang])
+        return
+
+    await state.clear()
+    await callback.answer(_TOLERANCE_CANCELLED[lang])
+    await _render_and_show_panel(
+        callback, chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    )

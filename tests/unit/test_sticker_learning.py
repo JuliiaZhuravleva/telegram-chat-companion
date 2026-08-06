@@ -1032,6 +1032,46 @@ class TestDuplicateDetection:
         )
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "canonical_row",
+        [
+            None,
+            _canonical_record(visual_description=None, original_vision_description=None),
+            _canonical_record(analysis_failed=True),
+        ],
+        ids=["vanished", "analysis-cleared", "analysis-failed"],
+    )
+    async def test_dead_canonical_falls_back_to_vision(self, sticker_service, canonical_row):
+        """A hash match whose canonical row vanished, was cleared via
+        «Очистить анализ», or has analysis_failed=true must NOT be copied
+        from — copying would mint a permanently dead row (no description,
+        analysis_failed=false, never re-analyzed because learn()
+        short-circuits on existing rows). The chain stays reachable through
+        find_duplicate()'s flattening even though the canonical itself
+        dropped out of get_dedup_candidates() (2026-08-07 review). All three
+        cases fall open into the normal Vision pipeline."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(side_effect=[None, canonical_row])
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        result = await sticker_service.learn(sticker=_make_sticker(), image_data=image_data)
+
+        sticker_service._ai.analyze_image.assert_awaited()
+        assert result.duplicate_of is None
+        assert result.visual_description == "A happy cat"
+
+    @pytest.mark.asyncio
     async def test_duplicate_copies_null_explicitness_score_from_unscored_canonical(
         self, sticker_service
     ):

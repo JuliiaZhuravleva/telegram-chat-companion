@@ -44,6 +44,28 @@ _INHERITED_MARK = {"ru": " · унаследовано", "en": " · inherited"}
 _MAX_VALUE_LEN = 40
 
 
+def tolerance_cancel_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
+    """Single-button escape hatch attached to the tolerance FSM prompt.
+
+    Without it the ``awaiting_setting_value`` state had no exit: invalid
+    input deliberately re-prompts (reject-not-clamp, ADR-0008 Decision 10),
+    so an admin who changed their mind was stuck until they typed a valid
+    float (2026-08-07 review). ``chat_id``/``lang`` ride along so the cancel
+    handler can re-render the panel the prompt came from.
+    """
+    label = "✖️ Отмена" if lang == "ru" else "✖️ Cancel"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"adm_pnl_tolcancel:{lang}:{chat_id}",
+                )
+            ]
+        ]
+    )
+
+
 def chat_panel_picker_keyboard(
     chats: list[dict[str, object]],
     *,

@@ -149,12 +149,16 @@ def test_calculate_frame_differences_max_contrast(analyzer: MotionAnalyzer) -> N
 
 
 def test_calculate_frame_differences_partial_change(analyzer: MotionAnalyzer) -> None:
-    """Partial color change should produce a score between 0 and 1."""
+    """Scores are relative to the animation's own strongest transition
+    (observed-max normalization, 2026-08-07 review): the biggest change maps
+    to 1.0 and a weaker change lands strictly between 0 and 1."""
     frame_a = _solid_frame((0, 0, 0))
-    frame_b = _solid_frame((128, 0, 0))  # only red channel, half-max
-    scores = analyzer._calculate_frame_differences([frame_a, frame_b])
-    assert len(scores) == 2
+    frame_b = _solid_frame((128, 0, 0))  # half-max red — the weaker transition
+    frame_c = _solid_frame((255, 255, 255))  # full contrast — the strongest
+    scores = analyzer._calculate_frame_differences([frame_a, frame_b, frame_c])
+    assert len(scores) == 3
     assert 0.0 < scores[1] < 1.0
+    assert scores[2] == pytest.approx(1.0)
 
 
 def test_calculate_frame_differences_single_frame(analyzer: MotionAnalyzer) -> None:
@@ -336,3 +340,47 @@ async def test_analyze_tgs_frames_does_not_flag_real_single_direction_change(
     )
 
     assert motion.is_oscillating is False
+
+
+def _small_shape_frame(pos: int, size: int = 64, square: int = 8) -> Image.Image:
+    """A realistic sticker-like frame: small dark square on a large white
+    canvas at horizontal position `pos`. One position swap changes ~3% of
+    pixels — the raw diff the 2026-08-07 review measured for real sticker
+    motion (0.01–0.08), far below _detect_oscillation's min_delta=0.15 on
+    the old theoretical-max scale."""
+    img = Image.new("RGB", (size, size), (255, 255, 255))
+    for x in range(pos, pos + square):
+        for y in range(28, 28 + square):
+            img.putpixel((x, y), (20, 20, 20))
+    return img
+
+
+def test_small_shape_oscillation_detected(analyzer: MotionAnalyzer) -> None:
+    """THE .tgs regression (2026-08-07 review, feature C dead for its target
+    class): a small shape snapping between two positions in a move–hold
+    rhythm must be flagged as oscillating. Pre-fix, theoretical-max
+    normalization left these diffs at ~0.03 and the verdict was always
+    False; observed-max normalization (mirroring the webm path) restores
+    the documented 0–1 contract."""
+    a, b = 10, 40
+    positions = [a, a, b, b, a, a, b, b, a, a]
+    frames = [_small_shape_frame(p) for p in positions]
+
+    scores = analyzer._calculate_frame_differences(frames)
+    assert max(scores) == pytest.approx(1.0)  # observed-max contract
+    assert analyzer._detect_oscillation(scores) is True
+
+
+def test_single_pixel_noise_not_amplified_to_oscillation(analyzer: MotionAnalyzer) -> None:
+    """The noise floor: a near-static animation whose only change is one
+    pixel toggling (raw diff ~2e-4) must NOT be scaled up to full-range
+    swings by observed-max normalization — imperceptible motion stays
+    zero, and no phantom oscillation is reported."""
+    base = Image.new("RGB", (64, 64), (255, 255, 255))
+    noisy = base.copy()
+    noisy.putpixel((0, 0), (0, 0, 0))
+    frames = [base, noisy, base, noisy, base, noisy, base, noisy]
+
+    scores = analyzer._calculate_frame_differences(frames)
+    assert max(scores) == pytest.approx(0.0)
+    assert analyzer._detect_oscillation(scores) is False

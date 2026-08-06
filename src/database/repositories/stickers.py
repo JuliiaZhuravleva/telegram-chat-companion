@@ -124,7 +124,9 @@ class StickerRepository:
                 END,
                 image_hash = COALESCE(EXCLUDED.image_hash, sticker_knowledge.image_hash),
                 duplicate_of_file_unique_id = EXCLUDED.duplicate_of_file_unique_id,
-                explicitness_score = EXCLUDED.explicitness_score,
+                explicitness_score = COALESCE(
+                    EXCLUDED.explicitness_score, sticker_knowledge.explicitness_score
+                ),
                 updated_at = NOW()
             RETURNING id
             """,

@@ -380,15 +380,28 @@ class StickerLearningService:
 
         Returns:
             The learning result on success, or ``None`` if the canonical row
-            disappeared between the candidate scan and here — callers must
-            fall back to the normal Vision pipeline in that case (fail open).
+            disappeared — or no longer has a live analysis to copy — between
+            the candidate scan and here. Callers must fall back to the
+            normal Vision pipeline in that case (fail open).
         """
         canonical = await self._repo.get_by_file_unique_id(duplicate_of)
-        if canonical is None:
+        # A canonical whose analysis was cleared ("Очистить анализ") or whose
+        # re-analyze failed drops out of get_dedup_candidates(), but rows that
+        # still point at it via duplicate_of keep it reachable through
+        # find_duplicate()'s chain flattening. Copying from it would mint a
+        # permanently dead row: no description, analysis_failed=false, never
+        # re-analyzed because learn() short-circuits on existing rows
+        # (2026-08-07 review). Same fail-open contract as the vanished case.
+        if (
+            canonical is None
+            or not canonical.get("visual_description")
+            or canonical.get("analysis_failed")
+        ):
             logger.warning(
-                "Duplicate candidate disappeared before copy, falling back to Vision",
+                "Duplicate canonical missing or no longer analyzed, falling back to Vision",
                 file_unique_id=file_unique_id,
                 duplicate_of=duplicate_of,
+                canonical_exists=canonical is not None,
             )
             return None
 

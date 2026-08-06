@@ -24,12 +24,19 @@ precedent for this module).
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import dataclass
 from typing import Literal
 
 import asyncpg
 import structlog
 from aiogram import Bot
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 
 from src.config import Settings
 from src.database.connection import close_pool, create_pool
@@ -53,6 +60,15 @@ _EXPLICITNESS_PROMPT = (
 
 _Outcome = Literal["scored", "skipped", "failed"]
 
+# Pacing between rows: the loop hits bot.get_file + bot.download_file +
+# Vision back-to-back per row against live APIs — an unthrottled run over a
+# large catalog is its own 429 storm (2026-08-07 review).
+_INTER_ROW_DELAY_S = 0.2
+
+# TelegramRetryAfter is honored (sleep exc.retry_after) and the row retried
+# this many times before counting it "failed".
+_RATE_LIMIT_ATTEMPTS = 3
+
 
 @dataclass
 class BackfillSummary:
@@ -73,36 +89,74 @@ async def _score_one(
     """Score a single catalog row and persist the result.
 
     Returns:
-        "scored" on success. "skipped" when the sticker's file is no longer
-        retrievable from Telegram (expected for an old catalog — not a bug
-        to investigate). "failed" when rendering or the Vision call itself
-        errored, or Vision returned no usable score (worth investigating).
+        "scored" on success. "skipped" ONLY when Telegram positively says the
+        file is gone (expected for an old catalog — not a bug to
+        investigate). "failed" for everything worth a re-run or a look:
+        transport/rate-limit errors that survived the retries, rendering
+        errors, Vision errors, or no usable score. The 2026-08-07 review
+        found the original classification put rate-limit storms under
+        "skipped" — the one label the operator is told to ignore.
     """
     file_unique_id: str = row["file_unique_id"]
 
-    try:
-        file = await bot.get_file(row["file_id"])
-        if not file.file_path:
-            logger.warning(
-                "Backfill: sticker file no longer resolvable on Telegram",
+    raw: bytes | None = None
+    for attempt in range(_RATE_LIMIT_ATTEMPTS):
+        try:
+            file = await bot.get_file(row["file_id"])
+            if not file.file_path:
+                logger.warning(
+                    "Backfill: sticker file no longer resolvable on Telegram",
+                    file_unique_id=file_unique_id,
+                )
+                return "skipped"
+            buf = await bot.download_file(file.file_path)
+            if buf is None:
+                logger.warning(
+                    "Backfill: sticker download returned no data",
+                    file_unique_id=file_unique_id,
+                )
+                return "skipped"
+            raw = buf.read()
+            break
+        except TelegramRetryAfter as exc:
+            if attempt == _RATE_LIMIT_ATTEMPTS - 1:
+                logger.warning(
+                    "Backfill: still rate-limited after retries — counting as failed, re-run later",
+                    file_unique_id=file_unique_id,
+                    retry_after=exc.retry_after,
+                )
+                return "failed"
+            logger.info(
+                "Backfill: rate-limited by Telegram, honoring retry_after",
                 file_unique_id=file_unique_id,
+                retry_after=exc.retry_after,
+                attempt=attempt + 1,
+            )
+            await asyncio.sleep(exc.retry_after)
+        except TelegramBadRequest:
+            # Telegram positively rejected the file reference — genuinely gone.
+            logger.warning(
+                "Backfill: Telegram rejected the file reference (gone) — skipping",
+                file_unique_id=file_unique_id,
+                exc_info=True,
             )
             return "skipped"
-        buf = await bot.download_file(file.file_path)
-        if buf is None:
+        except (TelegramNetworkError, TelegramServerError):
             logger.warning(
-                "Backfill: sticker download returned no data",
+                "Backfill: transient Telegram transport error — counting as failed, re-run later",
                 file_unique_id=file_unique_id,
+                exc_info=True,
             )
-            return "skipped"
-        raw = buf.read()
-    except Exception:
-        logger.warning(
-            "Backfill: failed to download sticker from Telegram",
-            file_unique_id=file_unique_id,
-            exc_info=True,
-        )
-        return "skipped"
+            return "failed"
+        except Exception:
+            logger.warning(
+                "Backfill: unexpected download error — counting as failed",
+                file_unique_id=file_unique_id,
+                exc_info=True,
+            )
+            return "failed"
+    if raw is None:  # defensive: loop exhausted without break or return
+        return "failed"
 
     # Reuse the existing render path's anchor frame (ADR-0007 Decision 2) —
     # do not invent a second "which frame represents this sticker" answer.
@@ -175,7 +229,10 @@ async def run_backfill(
     summary = BackfillSummary()
     logger.info("Backfill: starting", candidate_count=len(candidates))
 
-    for row in candidates:
+    for i, row in enumerate(candidates):
+        if i:
+            # Pace the loop — see _INTER_ROW_DELAY_S.
+            await asyncio.sleep(_INTER_ROW_DELAY_S)
         try:
             outcome = await _score_one(bot=bot, ai_router=ai_router, repo=repo, row=row)
         except Exception:
@@ -200,10 +257,25 @@ async def run_backfill(
         failed=summary.failed,
         total=len(candidates),
     )
+    if summary.failed:
+        # Failed rows stay explicitness_score = NULL and therefore fail-closed
+        # hidden from every low-tolerance chat — a "complete" log line alone
+        # reads as success and nothing would prompt a re-run.
+        logger.warning(
+            "Backfill: %d row(s) still unscored after failures — re-run this script",
+            summary.failed,
+        )
     return summary
 
 
-async def main() -> None:
+def _exit_code(summary: BackfillSummary) -> int:
+    """Non-zero when any row failed — a wrapper script (or the operator)
+    must be able to tell "everything scored or genuinely gone" from
+    "re-run needed" without parsing logs."""
+    return 1 if summary.failed else 0
+
+
+async def main() -> int:
     """Bootstrap Bot/AIRouter/StickerRepository/pool directly (no Dishka
     request scope — there is no request to scope to, ADR-0008 Decision 5)."""
     settings = Settings()
@@ -214,11 +286,12 @@ async def main() -> None:
         repo = StickerRepository(pool)
         response_log_repo = ResponseLogRepository(pool)
         ai_router = AIRouter(settings, response_log_repo)
-        await run_backfill(bot=bot, ai_router=ai_router, repo=repo)
+        summary = await run_backfill(bot=bot, ai_router=ai_router, repo=repo)
+        return _exit_code(summary)
     finally:
         await bot.session.close()
         await close_pool(pool)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    sys.exit(asyncio.run(main()))

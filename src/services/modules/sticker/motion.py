@@ -20,6 +20,14 @@ from PIL import Image, ImageChops, ImageStat
 
 logger = structlog.get_logger(__name__)
 
+# Raw mean frame difference (fraction of the theoretical canvas maximum,
+# 255×3 per pixel) below which motion counts as imperceptible. Guards the
+# observed-max normalization in _calculate_frame_differences from amplifying
+# encoder noise on a near-static animation into full-scale score swings and a
+# phantom oscillation verdict. Realistic sticker motion measures ~0.01-0.08
+# on this scale (2026-08-07 review); single-pixel noise is ~1e-4.
+_MIN_MEANINGFUL_RAW_DIFF = 0.005
+
 
 @dataclass
 class AnimationMotion:
@@ -280,11 +288,20 @@ class MotionAnalyzer:
         (avoids a slow Python pixel-by-pixel loop: ~100-1000x faster on typical
         sticker frames at 256-512 px).
 
+        Scores are normalized by the animation's own strongest transition
+        (observed max), mirroring ``_parse_scdet_output`` — both producers of
+        ``AnimationMotion.motion_scores`` must honour the same 0-1 contract,
+        because ``_detect_oscillation``'s ``min_delta=0.15`` is calibrated for
+        it. Normalizing by the theoretical max (canvas × 255 × 3) left
+        realistic sticker motion at ~0.01-0.08 and made oscillation detection
+        unreachable for every .tgs animation (2026-08-07 review).
+
         Returns:
             List of motion scores (0-1), length = len(frames). First element is
-            always 0.0 (no prior frame to compare against).
+            always 0.0 (no prior frame to compare against). All-zero when the
+            strongest transition is imperceptible (below the noise floor).
         """
-        scores: list[float] = []
+        raw: list[float] = []
 
         for i in range(len(frames) - 1):
             frame1 = frames[i].convert("RGB")
@@ -297,14 +314,22 @@ class MotionAnalyzer:
             # stat.sum gives [R_total, G_total, B_total] — sum all channels
             total_diff = sum(stat.sum)
 
-            # Normalize by image size and max possible difference (255*3 per pixel)
+            # Mean per-pixel change as a fraction of the maximum possible
+            # (255 per channel × 3) — the absolute scale the noise floor
+            # below is calibrated against.
             width, height = frame1.size
             max_diff = width * height * 255 * 3
-            normalized_score = total_diff / max_diff if max_diff > 0 else 0.0
-            scores.append(normalized_score)
+            raw.append(total_diff / max_diff if max_diff > 0 else 0.0)
 
         # Prepend zero: first frame has no preceding frame to diff against
-        return [0.0] + scores
+        raw = [0.0] + raw
+
+        max_score = max(raw)
+        if max_score < _MIN_MEANINGFUL_RAW_DIFF:
+            # Near-static animation: scaling encoder noise up to full range
+            # would manufacture phantom oscillation — report "no motion".
+            return [0.0] * len(raw)
+        return [score / max_score for score in raw]
 
     def _interpolate_motion_scores(
         self,

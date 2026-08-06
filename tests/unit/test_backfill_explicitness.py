@@ -8,8 +8,14 @@ reused here.
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramRetryAfter
 
-from scripts.backfill_explicitness import BackfillSummary, _score_one, run_backfill
+from scripts.backfill_explicitness import (
+    BackfillSummary,
+    _exit_code,
+    _score_one,
+    run_backfill,
+)
 from src.services.ai.base import AIProviderError, VisionResult
 from src.services.modules.sticker.models import StickerRenderError
 from src.services.modules.sticker.renderer import RenderedSticker
@@ -145,18 +151,90 @@ class TestScoreOne:
         repo.update_explicitness_score.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_download_error_is_skipped_not_failed(self):
-        """An old catalog sticker whose file has expired on Telegram's side
-        is an EXPECTED condition, not a code fault — counted separately from
-        'failed'."""
+    async def test_file_gone_bad_request_is_skipped(self):
+        """Telegram positively rejecting the file reference (expired old
+        catalog entry) is the ONLY download outcome that counts as
+        'skipped' — the expected, not-a-bug-to-investigate condition."""
         bot = _make_bot_mock()
-        bot.get_file = AsyncMock(side_effect=Exception("file not found"))
+        bot.get_file = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="file not found")
+        )
         ai_router = _make_ai_router()
         repo = _make_repo()
 
         outcome = await _score_one(bot=bot, ai_router=ai_router, repo=repo, row=_make_row())
 
         assert outcome == "skipped"
+
+    @pytest.mark.asyncio
+    async def test_network_error_is_failed_not_skipped(self):
+        """2026-08-07 review: transport errors were classified 'skipped' —
+        the one label the operator is told to ignore — so a 429/network
+        storm read as an expected old-catalog condition. They must count as
+        'failed' (re-run material)."""
+        bot = _make_bot_mock()
+        bot.get_file = AsyncMock(
+            side_effect=TelegramNetworkError(method=MagicMock(), message="conn reset")
+        )
+        ai_router = _make_ai_router()
+        repo = _make_repo()
+
+        outcome = await _score_one(bot=bot, ai_router=ai_router, repo=repo, row=_make_row())
+
+        assert outcome == "failed"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_download_error_is_failed(self):
+        """Generic download failures are 'failed' too — only a positive
+        Telegram 'file is gone' earns 'skipped'."""
+        bot = _make_bot_mock()
+        bot.get_file = AsyncMock(side_effect=Exception("boom"))
+        ai_router = _make_ai_router()
+        repo = _make_repo()
+
+        outcome = await _score_one(bot=bot, ai_router=ai_router, repo=repo, row=_make_row())
+
+        assert outcome == "failed"
+
+    @pytest.mark.asyncio
+    async def test_retry_after_is_honored_then_scored(self):
+        """A rate-limited download sleeps exc.retry_after and retries the
+        row instead of dropping it."""
+        bot = _make_bot_mock()
+        file_obj = MagicMock()
+        file_obj.file_path = "stickers/file.webp"
+        bot.get_file = AsyncMock(
+            side_effect=[
+                TelegramRetryAfter(method=MagicMock(), message="flood", retry_after=7),
+                file_obj,
+            ]
+        )
+        ai_router = _make_ai_router(0.5)
+        repo = _make_repo()
+
+        with patch("scripts.backfill_explicitness.asyncio.sleep", new_callable=AsyncMock) as slp:
+            outcome = await _score_one(bot=bot, ai_router=ai_router, repo=repo, row=_make_row())
+
+        assert outcome == "scored"
+        slp.assert_awaited_once_with(7)
+        repo.update_explicitness_score.assert_awaited_once_with("uid-1", 0.5)
+
+    @pytest.mark.asyncio
+    async def test_persistent_rate_limit_is_failed(self):
+        """Rate-limiting that survives every retry ends as 'failed', never
+        'skipped'."""
+        bot = _make_bot_mock()
+        bot.get_file = AsyncMock(
+            side_effect=TelegramRetryAfter(method=MagicMock(), message="flood", retry_after=1)
+        )
+        ai_router = _make_ai_router()
+        repo = _make_repo()
+
+        with patch("scripts.backfill_explicitness.asyncio.sleep", new_callable=AsyncMock):
+            outcome = await _score_one(bot=bot, ai_router=ai_router, repo=repo, row=_make_row())
+
+        assert outcome == "failed"
+        repo.update_explicitness_score.assert_not_awaited()
 
     @pytest.mark.asyncio
     @patch("scripts.backfill_explicitness.render_tgs", new_callable=AsyncMock)
@@ -257,3 +335,31 @@ class TestRunBackfill:
         assert summary.scored == 1
         assert summary.skipped == 0
         assert summary.failed == 1
+
+    @pytest.mark.asyncio
+    async def test_rows_are_paced(self):
+        """The loop sleeps between rows (2026-08-07 review: an unthrottled
+        run over a large catalog is its own 429 storm) — n-1 pacing sleeps
+        for n rows."""
+        bot = _make_bot_mock()
+        ai_router = _make_ai_router(0.5)
+        repo = _make_repo()
+        repo.get_explicitness_backfill_candidates = AsyncMock(
+            return_value=[_make_row("uid-1"), _make_row("uid-2"), _make_row("uid-3")]
+        )
+
+        with patch("scripts.backfill_explicitness.asyncio.sleep", new_callable=AsyncMock) as slp:
+            await run_backfill(bot=bot, ai_router=ai_router, repo=repo)
+
+        assert slp.await_count == 2
+
+
+class TestExitCode:
+    def test_failures_exit_nonzero(self):
+        """Failed rows stay NULL → fail-closed hidden; the process exit code
+        is what a wrapper can act on without parsing logs."""
+        assert _exit_code(BackfillSummary(scored=5, skipped=1, failed=1)) == 1
+
+    def test_skips_alone_exit_zero(self):
+        """Genuinely-gone files are expected — they must not fail the run."""
+        assert _exit_code(BackfillSummary(scored=5, skipped=3, failed=0)) == 0
