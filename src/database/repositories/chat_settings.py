@@ -110,6 +110,33 @@ class ChatSettingsRepository:
             value,
         )
 
+    async def toggle_bool_field(self, chat_id: int, field: str, effective: bool) -> bool | None:
+        """Flip a bool column atomically, returning the value now stored.
+
+        ``None`` means no row matched — the caller must not report success.
+
+        Read-modify-write in Python loses a flip when an admin double-taps a
+        toggle: aiogram runs the two updates concurrently, both read the same
+        value across their awaits, and both write the same negation, so two
+        taps produce one flip. Negating inside the UPDATE removes the window.
+
+        ``effective`` supplies the merged value (YAML/global layers) used only
+        when the column is NULL, i.e. "inherited": flipping must start from
+        what the chat actually behaves like, not from SQL NULL. When the column
+        is non-NULL, COALESCE keeps the stored value and ``effective`` equals
+        it anyway, so the negation is the same either way.
+        """
+        if field not in _WRITABLE_COLUMNS:
+            raise ValueError(f"Unknown chat_settings column: {field}")
+
+        stored = await self._pool.fetchval(
+            f"UPDATE chat_settings SET {field} = NOT COALESCE({field}, $2) "  # noqa: S608
+            f"WHERE chat_id = $1 RETURNING {field}",
+            chat_id,
+            effective,
+        )
+        return None if stored is None else bool(stored)
+
     async def ensure_exists(
         self,
         chat_id: int,

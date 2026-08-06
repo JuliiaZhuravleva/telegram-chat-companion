@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T00:47:17Z",
+  "role": "evaluator",
+  "item_id": "B-2",
+  "verdict": "PASS",
+  "evidence": "Reviewed commit 4ab7d81a: _is_inherited() gates the marker on 'not field.legacy' and 'raw is None', applied uniformly to bool/read-only rows and both halves of the KB/Reactions link rows, matching Julia's B-2 answer exactly. Ran the claimed test command myself (105 passed), independently re-ran the sabotage control (return False instead of raw is None) and confirmed the same 5 tests fail including the explicit test_legacy_field_never_marked_even_if_raw_is_null, then reverted cleanly. ruff/mypy clean on touched files; diff scope limited to the two panel files + their tests, consistent with depends_on B-1.",
+  "regression_risk": "low",
+  "notes": ""
+}

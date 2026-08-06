@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T00:37:18Z",
+  "role": "specialist",
+  "item_id": "G-1",
+  "verdict": "PASS",
+  "cost_usd": 2.15,
+  "notes": "Added tests/integration/test_admin_chat_panel_toggle.py and tests/integration/test_admin_defaults_toggle.py, driving handle_chat_panel_toggle (B-1) and handle_defaults_toggle (C-1) against a real Postgres testcontainer with real ChatSettingsRepository/BotConfigRepository/ChatConfigService (no mocks), mirroring the existing test_kb_enabled_toggle.py pattern. Covers: (1) toggle write reaches chat_settings/bot_config.default_* columns for real; (2) get_config() reflects the flip immediately post-invalidate (the PRD's documented delayed-toggle bug) instead of serving the 60s-TTL stale cache entry; (3) B-1's invalidate(chat_id) stays scoped to one chat while C-1's invalidate_all() clears every already-cached chat -- the ADR's own flagged 'easy to get backwards by analogy' regression; (4) an explicit per-chat override still outranks a global default flip after the toggle; (5) KB/Reactions link-only codes stay unreachable via the generic panel toggle, re-verified against a real (non-mocked) repo. Validated discriminating power empirically: commented out invalidate()/invalidate_all() in both handlers, re-ran the suite -- exactly the 4 cache-dependent tests failed while the write/rejection tests still passed -- then reverted via git checkout (confirmed clean via git diff/status) before committing. 14/14 integration tests pass together (new + pre-existing test_kb_enabled_toggle.py, no container/fixture conflicts); 28/28 pre-existing unit tests for both handlers still pass; ruff/ruff-format clean; mypy src/ clean (128 files, unchanged since no src/ edits survived the revert).",
+  "result": {
+    "kind": "commit",
+    "ref": "711df8e21889532083cc026e9e71e6075e0515a4",
+    "verification": "pytest tests/integration/test_admin_chat_panel_toggle.py tests/integration/test_admin_defaults_toggle.py tests/integration/test_kb_enabled_toggle.py -v (14 passed, real testcontainers Postgres); pytest tests/unit/test_admin_chat_panel_handler.py tests/unit/test_admin_defaults_handler.py -q (28 passed, unaffected); control check disabled invalidate calls, re-ran suite, 4 cache-dependent tests failed as expected, reverted (git diff/status clean); ruff check clean; ruff format --check clean; mypy src/ clean"
+  },
+  "confidence": 0.92,
+  "clarification_request": null,
+  "session_id": null
+}

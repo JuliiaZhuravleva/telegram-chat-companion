@@ -41,6 +41,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
+from src.services.chat_config import ChatConfigService
 
 logger = structlog.get_logger(__name__)
 
@@ -311,8 +312,25 @@ async def handle_kb_toggle(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
 ) -> None:
-    """Flip kb_enabled for a chat."""
+    """Flip kb_enabled for a chat.
+
+    Invalidates ``ChatConfigService``'s cache after the write (E-1), keeping
+    the "write settings -> drop the cache" invariant uniform across every
+    write path (``chat_events.py`` already did this).
+
+    Note what this does NOT fix, contrary to what E-1 originally claimed:
+    there is no cross-update staleness to fix today, because
+    ``ChatConfigService`` is Dishka ``Scope.REQUEST`` (``src/di.py``), so each
+    update builds a fresh service with an empty cache and the 60s TTL never
+    spans two updates. Measured 2026-08-06: two messages 14s apart both ran
+    ``ensure_exists()``, i.e. the cache was cold both times. This call is
+    therefore defensive, and becomes load-bearing the moment the service
+    moves to ``Scope.APP`` -- see TD-046, which must land together with the
+    two still-missing invalidations in ``admin.py`` (approve / whitelist
+    removal). Mirrors ``admin_chat_panel.py``'s ``handle_chat_panel_toggle``.
+    """
     if not _is_private(callback):
         await callback.answer()
         return
@@ -336,6 +354,7 @@ async def handle_kb_toggle(
     effective = await _effective_kb_enabled(chat_settings_repo, bot_config_repo, chat_id)
     new_value = not effective
     await chat_settings_repo.set_field(chat_id, "kb_enabled", new_value)
+    chat_config_service.invalidate(chat_id)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])
     await _render_kb_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id)

@@ -573,6 +573,23 @@ class TestApproveNotification:
         cb.message.edit_reply_markup.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_approved_keyboard_links_to_chat_settings_panel(self):
+        """D-1 regression: settings button after approve carries the right chat_id."""
+        cb = _make_callback("adm_approve:ru:42")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(
+            return_value={"id": 42, "chat_id": -100, "status": "pending"}
+        )
+        admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
+        chat_settings_repo = _make_chat_settings_repo()
+
+        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
+
+        keyboard = cb.message.edit_reply_markup.call_args.kwargs["reply_markup"]
+        callback_datas = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+        assert "adm_pnl_menu:ru:-100" in callback_datas
+
+    @pytest.mark.asyncio
     async def test_already_handled(self):
         cb = _make_callback("adm_approve:ru:42")
         admin_repo = _make_admin_repo()
@@ -633,22 +650,30 @@ class TestRejectNotification:
 
 class TestWlApprove:
     @pytest.mark.asyncio
-    async def test_approves_and_rerenders(self):
+    async def test_approves_and_shows_settings_link(self):
+        """D-1: pending-list approve shows a settings-panel link instead of
+        re-rendering the (now shorter) pending list -- the approved attempt
+        no longer matches ``get_pending_attempts_page`` and would simply
+        vanish, leaving no row to attach the "⚙️ Chat settings" button to.
+        """
         cb = _make_callback("adm_wl_apr:ru:42:0")
         admin_repo = _make_admin_repo()
         admin_repo.get_attempt = AsyncMock(
             return_value={"id": 42, "chat_id": -100, "status": "pending"}
         )
         admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
-        admin_repo.get_pending_attempts_page = AsyncMock(return_value=([], 0))
         chat_settings_repo = _make_chat_settings_repo()
 
         await handle_wl_approve(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         admin_repo.approve_all_for_chat.assert_awaited_once_with(-100)
         chat_settings_repo.upsert.assert_awaited_once_with(-100, enabled=True)
-        # Should re-render pending list
+        admin_repo.get_pending_attempts_page.assert_not_awaited()
         cb.message.edit_text.assert_awaited_once()
+        keyboard = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callback_datas = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
+        assert "adm_pnl_menu:ru:-100" in callback_datas
+        assert "adm_wl_pending:ru:0" in callback_datas
 
 
 class TestWlReject:

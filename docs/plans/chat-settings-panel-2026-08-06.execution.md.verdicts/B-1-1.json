@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T00:12:22Z",
+  "role": "specialist",
+  "item_id": "B-1",
+  "verdict": "PASS",
+  "cost_usd": 4.1,
+  "notes": "Implemented per ADR-0006 exactly: own picker (adm_pnl:/adm_pnl_menu:), generic bool toggle (adm_pnl_tgl:, Decision 3) for the ~20 fields with no existing UI, KB/Reactions rendered as link rows into their existing sub-panels (Decision 2, never reachable via the generic toggle -- explicit rejection test for codes kb/rx/rh even though A-1's registry marks them BOOL). render_chat_panel() is a pure (text, keyboard) function per Decision 1 (no CallbackQuery/permission check inside), permission check (check_admin_direct + private-chat) lives in each callback handler, matching KB/Reactions precedent. New main-menu button per Decision 4. KB/Reactions status is read fresh (chat_settings_repo + bot_config_repo direct read, bypassing ChatConfigService's 60s cache) rather than through the cached effective config, because their existing toggle handlers (admin_kb.py/admin_reactions.py) don't self-invalidate yet (E-1, not landed) -- regression test test_kb_reactions_status_is_fresh_not_cached asserts this with a deliberately contradictory stale cache. The panel's own generic toggle path does self-invalidate (chat_config_service.invalidate(chat_id)) per Decision 3. Non-BOOL fields render read-only (noop callback) per F-1 deferral. 33 new unit tests (keyboards: picker/format/grouping/link-rows/back-button; handler: render_chat_panel incl. the freshness regression, picker/menu/toggle admin-gating, invalid chat_id, link-only-code rejection, non-bool-code rejection, unknown-code rejection, cache invalidation, re-render after toggle) plus 2 added assertions in the pre-existing main-menu keyboard test for the new adm_pnl button. Full unit suite (1444 tests), ruff, ruff format, mypy --strict all green. Routing hint for G-1 (qa, depends_on B-1): integration coverage should assert the toggle write reaches chat_settings via a real repo/DB and that chat_config_service.get_config() reflects the flip post-invalidate -- this item's tests mock both repos and the service.",
+  "result": {
+    "kind": "commit",
+    "ref": "97cedc42f9aea1bf231423002ab20aeaff9d2f85",
+    "verification": "pytest tests/unit/test_admin_chat_panel_keyboards.py tests/unit/test_admin_chat_panel_handler.py tests/unit/test_admin_keyboards.py -q (92 passed); pytest tests/unit/ -q (1444 passed); ruff check src/ clean; ruff format --check clean (128 files); mypy src/ clean (126 files)"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T00:53:18Z",
+  "role": "specialist",
+  "item_id": "E-1",
+  "verdict": "PASS",
+  "cost_usd": 2.3,
+  "notes": "Added chat_config_service.invalidate(chat_id) right after the DB write in admin_kb.py's handle_kb_toggle and admin_reactions.py's handle_reactions_toggle (the two pre-existing KB/Reactions toggle handlers named in the item) -- mirrors B-1's handle_chat_panel_toggle self-invalidation pattern. Reactions handler places the invalidate call before the not-admin-warning branch since the write commits either way. Also refreshed two now-stale 'E-1, not landed' docstrings in admin_chat_panel.py/keyboards/admin_chat_panel.py (B-1's fresh-read bypass of the cache for KB/Reactions link rows) to say the bypass is now defense-in-depth rather than a required workaround -- no behavior change there, B-1's own regression test (test_kb_reactions_status_is_fresh_not_cached) still passes untouched since the bypass mechanism itself wasn't removed. 5 new/updated unit tests (2 new regression tests asserting invalidate() is called exactly once with chat_id after a successful toggle, plus invalidate.assert_not_called() added to the existing denial/rejection tests, plus one existing not-admin-warning test extended to assert invalidate still fires on that branch). Verified discriminating power: commented out both invalidate() calls, re-ran the two test files -- exactly the 3 invalidate-dependent tests failed, reverted via Edit (grep confirms no leftover SABOTAGE marker) before committing. Full unit suite (1481 passed, up from 1479), ruff check clean, ruff format --check clean, mypy src/ clean (128 files). No DB/integration surface touched -- pure handler-level cache-invalidation call plus DI param -- no additional qa routing hint needed; existing G-1 integration coverage exercises the analogous B-1/C-1 invalidate paths against a real Postgres testcontainer, this item's mechanism is identical (ChatConfigService.invalidate(chat_id), same as chat_events.py:73's precedent).",
+  "result": {
+    "kind": "commit",
+    "ref": "1b58b193ef3e16fc48fa29f49b6f2ce3c58419d7",
+    "verification": "pytest tests/unit/test_admin_kb_handler.py tests/unit/test_admin_reactions_handler.py tests/unit/test_admin_chat_panel_handler.py -q (65 passed); pytest tests/unit/ -q (1481 passed); ruff check src/ clean; ruff format --check clean (224 files); mypy src/ clean (128 files); control check: commented out both invalidate() calls, 3 tests failed as expected (test_invalidates_cache_for_this_chat_after_write x2, test_enabling_reactions_when_bot_not_admin_warns_immediately), reverted and verified clean before commit"
+  },
+  "confidence": 0.95,
+  "clarification_request": null,
+  "session_id": null
+}

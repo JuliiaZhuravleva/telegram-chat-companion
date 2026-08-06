@@ -20,7 +20,7 @@ _L: dict[str, dict[str, str]] = {
     "whitelist": {"ru": "📋 Whitelist", "en": "📋 Whitelist"},
     "rules": {"ru": "📏 Правила", "en": "📏 Rules"},
     "stickers": {"ru": "🎨 Стикеры", "en": "🎨 Stickers"},
-    "defaults": {"ru": "⚙️ Настройки", "en": "⚙️ Default Settings"},
+    "defaults": {"ru": "🌍 Глобальные настройки", "en": "🌍 Global settings"},
     "statistics": {"ru": "📊 Статистика", "en": "📊 Statistics"},
     "language": {"ru": "🌐 Язык / Language", "en": "🌐 Language / Язык"},
     "costs": {"ru": "💰 Расходы", "en": "💰 Costs"},
@@ -28,6 +28,7 @@ _L: dict[str, dict[str, str]] = {
     "notifications": {"ru": "🔔 Уведомления", "en": "🔔 Notifications"},
     "kb": {"ru": "📚 База знаний", "en": "📚 Knowledge Base"},
     "reactions": {"ru": "😀 Реакции", "en": "😀 Reactions"},
+    "chat_panel": {"ru": "⚙️ Настройки чата", "en": "⚙️ Chat settings"},
     "close": {"ru": "✖️ Закрыть", "en": "✖️ Close"},
     "back": {"ru": "◀️ Назад", "en": "◀️ Back"},
     "russian": {"ru": "🇷🇺 Русский", "en": "🇷🇺 Русский"},
@@ -101,6 +102,12 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text=_t("reactions", lang),
                     callback_data=f"adm_react:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("chat_panel", lang),
+                    callback_data=f"adm_pnl:{lang}:0",
                 ),
             ],
             [
@@ -592,17 +599,56 @@ def pending_list_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def wl_approved_keyboard(lang: str, chat_id: int, page: int) -> InlineKeyboardMarkup:
+    """Post-approve screen for the pending list (D-1): settings link + back.
+
+    ``handle_wl_approve`` (``adm_wl_apr:``) shows this instead of immediately
+    re-rendering the pending list: the just-approved attempt no longer
+    matches ``get_pending_attempts_page`` (status flipped), so it would
+    simply vanish from a re-render -- there is no row left to attach a
+    "⚙️ Chat settings" button next to. ``page`` routes "back" to the pending
+    list at the page the admin came from.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_t("chat_panel", lang),
+                    callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("back", lang),
+                    callback_data=f"adm_wl_pending:{lang}:{page}",
+                ),
+            ],
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Notification status indicators (replace buttons after action)
 # ---------------------------------------------------------------------------
 
 
-def approved_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Status indicator after approval (replaces approve/reject buttons)."""
+def approved_notification_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
+    """Status indicator + settings-panel link after approval (D-1).
+
+    Replaces the approve/reject buttons on the DM notification. ``chat_id``
+    is already known at approve time, so the settings button links straight
+    to the per-chat panel (ADR-0006 Decision 4) -- no picker step needed.
+    """
     label = {"ru": "✅ Одобрено", "en": "✅ Approved"}
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=label.get(lang, "✅ Approved"), callback_data="noop")],
+            [
+                InlineKeyboardButton(text=label.get(lang, "✅ Approved"), callback_data="noop"),
+                InlineKeyboardButton(
+                    text=_t("chat_panel", lang),
+                    callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
+                ),
+            ],
         ]
     )
 

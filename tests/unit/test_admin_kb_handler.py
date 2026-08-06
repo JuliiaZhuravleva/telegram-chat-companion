@@ -80,6 +80,13 @@ def _make_chat_settings_repo(
     return repo
 
 
+def _make_chat_config_service() -> MagicMock:
+    """``ChatConfigService`` mock -- ``invalidate`` is sync, not a coroutine."""
+    service = MagicMock()
+    service.invalidate = MagicMock()
+    return service
+
+
 class TestExtractUsername:
     def test_strips_leading_at(self) -> None:
         assert _extract_username("@newbie") == "newbie"
@@ -112,10 +119,12 @@ class TestHandleKbToggle:
         callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}", user_id=999)
         chat_settings_repo = _make_chat_settings_repo()
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo, chat_config_service)
 
         chat_settings_repo.set_field.assert_not_awaited()
+        chat_config_service.invalidate.assert_not_called()
         callback.answer.assert_awaited_once()
         assert callback.answer.call_args.kwargs.get("show_alert") is True
 
@@ -124,8 +133,9 @@ class TestHandleKbToggle:
         callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
         chat_settings_repo = _make_chat_settings_repo(kb_enabled=False)
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo, chat_config_service)
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "kb_enabled", True)
 
@@ -136,8 +146,9 @@ class TestHandleKbToggle:
         callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
         chat_settings_repo = _make_chat_settings_repo(kb_enabled=None)
         bot_config_repo = _make_bot_config_repo(default_kb_enabled=True)
+        chat_config_service = _make_chat_config_service()
 
-        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo, chat_config_service)
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "kb_enabled", False)
 
@@ -146,10 +157,25 @@ class TestHandleKbToggle:
         callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
         chat_settings_repo = _make_chat_settings_repo(kb_enabled=None)
         bot_config_repo = _make_bot_config_repo(default_kb_enabled=None)
+        chat_config_service = _make_chat_config_service()
 
-        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo, chat_config_service)
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "kb_enabled", True)
+
+    @pytest.mark.asyncio
+    async def test_invalidates_cache_for_this_chat_after_write(self) -> None:
+        """E-1 regression: without this, the flip applied with up to 60s of
+        delay because ChatConfigService kept serving the pre-toggle cached
+        config -- the PRD's documented delayed-toggle bug."""
+        callback = _make_callback(f"adm_kb_toggle:ru:{CHAT_ID}")
+        chat_settings_repo = _make_chat_settings_repo(kb_enabled=False)
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
+
+        await handle_kb_toggle(callback, chat_settings_repo, bot_config_repo, chat_config_service)
+
+        chat_config_service.invalidate.assert_called_once_with(CHAT_ID)
 
 
 class TestHandleKbOrganizerRemove:

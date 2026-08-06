@@ -18,6 +18,7 @@ from src.bot.keyboards.admin import (
     rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
+    wl_approved_keyboard,
 )
 
 
@@ -48,6 +49,7 @@ class TestMainMenuKeyboard:
         assert any("adm_stats:" in c for c in callbacks)
         assert any("adm_costs:" in c for c in callbacks)
         assert any("adm_notif:" in c for c in callbacks)
+        assert any("adm_pnl:" in c for c in callbacks)
         assert any("adm_lang:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
@@ -56,6 +58,7 @@ class TestMainMenuKeyboard:
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:" in c for c in callbacks)
         assert any("adm_notif:" in c for c in callbacks)
+        assert any("adm_pnl:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
     def test_language_embedded_in_callbacks(self):
@@ -462,14 +465,21 @@ class TestNumberedButtonSharedAcrossLists:
 
 class TestNotificationStatusKeyboards:
     def test_approved_keyboard_ru(self):
-        kb = approved_notification_keyboard("ru")
+        kb = approved_notification_keyboard("ru", -100)
         labels = _get_labels(kb)
         assert any("Одобрено" in label for label in labels)
 
     def test_approved_keyboard_en(self):
-        kb = approved_notification_keyboard("en")
+        kb = approved_notification_keyboard("en", -100)
         labels = _get_labels(kb)
         assert any("Approved" in label for label in labels)
+
+    def test_approved_keyboard_links_to_chat_panel(self):
+        """D-1: settings button deep-links straight to adm_pnl_menu: (ADR-0006
+        Decision 4) with the same chat_id, no picker step."""
+        kb = approved_notification_keyboard("ru", -100)
+        callbacks = _get_callbacks(kb)
+        assert "adm_pnl_menu:ru:-100" in callbacks
 
     def test_rejected_keyboard_ru(self):
         kb = rejected_notification_keyboard("ru")
@@ -480,6 +490,26 @@ class TestNotificationStatusKeyboards:
         kb = rejected_notification_keyboard("en")
         labels = _get_labels(kb)
         assert any("Rejected" in label for label in labels)
+
+
+class TestWlApprovedKeyboard:
+    """D-1: post-approve interstitial for the pending-list (adm_wl_apr:) flow."""
+
+    def test_links_to_chat_settings_panel(self):
+        kb = wl_approved_keyboard("ru", -100, 0)
+        callbacks = _get_callbacks(kb)
+        assert "adm_pnl_menu:ru:-100" in callbacks
+
+    def test_back_returns_to_pending_list_at_same_page(self):
+        kb = wl_approved_keyboard("ru", -100, 2)
+        callbacks = _get_callbacks(kb)
+        assert "adm_wl_pending:ru:2" in callbacks
+
+    def test_en_labels(self):
+        kb = wl_approved_keyboard("en", -100, 0)
+        labels = _get_labels(kb)
+        assert any("Chat settings" in label for label in labels)
+        assert any("Back" in label for label in labels)
 
 
 class TestCostsKeyboard:

@@ -85,6 +85,13 @@ def _make_admin_repo(chats=None, total=0) -> MagicMock:
     return repo
 
 
+def _make_chat_config_service() -> MagicMock:
+    """``ChatConfigService`` mock -- ``invalidate`` is sync, not a coroutine."""
+    service = MagicMock()
+    service.invalidate = MagicMock()
+    return service
+
+
 class TestHandleReactionsPicker:
     @pytest.mark.asyncio
     async def test_denies_non_admin(self) -> None:
@@ -177,10 +184,14 @@ class TestHandleReactionsToggle:
         )
         chat_settings_repo = _make_chat_settings_repo()
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         chat_settings_repo.set_field.assert_not_awaited()
+        chat_config_service.invalidate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_rejects_unknown_field(self) -> None:
@@ -189,10 +200,14 @@ class TestHandleReactionsToggle:
         )
         chat_settings_repo = _make_chat_settings_repo()
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         chat_settings_repo.set_field.assert_not_awaited()
+        chat_config_service.invalidate.assert_not_called()
         assert callback.answer.call_args.kwargs.get("show_alert") is True
 
     @pytest.mark.asyncio
@@ -208,8 +223,11 @@ class TestHandleReactionsToggle:
         )
         chat_settings_repo = _make_chat_settings_repo(reactions_history_enabled=True)
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         chat_settings_repo.set_field.assert_awaited_once_with(
             CHAT_ID, "reactions_history_enabled", False
@@ -223,8 +241,11 @@ class TestHandleReactionsToggle:
         callback = _make_callback(f"adm_react_toggle:ru:{CHAT_ID}:reactions_enabled", bot=bot)
         chat_settings_repo = _make_chat_settings_repo(reactions_enabled=False)
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "reactions_enabled", True)
         bot.get_chat_member.assert_awaited_with(CHAT_ID, BOT_ID)
@@ -241,14 +262,20 @@ class TestHandleReactionsToggle:
         callback = _make_callback(f"adm_react_toggle:ru:{CHAT_ID}:reactions_enabled", bot=bot)
         chat_settings_repo = _make_chat_settings_repo(reactions_enabled=False)
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         # The toggle itself still commits -- owner's choice, just informed.
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "reactions_enabled", True)
         popup = callback.answer.call_args.args[0]
         assert callback.answer.call_args.kwargs.get("show_alert") is True
         assert "не администратор" in popup
+        # E-1: the cache must still be invalidated on this branch -- the
+        # write already committed before the not-admin warning is decided.
+        chat_config_service.invalidate.assert_called_once_with(CHAT_ID)
 
     @pytest.mark.asyncio
     async def test_disabling_reactions_skips_the_toggle_time_check(self) -> None:
@@ -260,8 +287,11 @@ class TestHandleReactionsToggle:
         callback = _make_callback(f"adm_react_toggle:ru:{CHAT_ID}:reactions_enabled", bot=bot)
         chat_settings_repo = _make_chat_settings_repo(reactions_enabled=True)
         bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "reactions_enabled", False)
         assert bot.get_chat_member.await_count == 1
@@ -275,7 +305,27 @@ class TestHandleReactionsToggle:
         callback = _make_callback(f"adm_react_toggle:ru:{CHAT_ID}:reactions_enabled", bot=bot)
         chat_settings_repo = _make_chat_settings_repo(reactions_enabled=None)
         bot_config_repo = _make_bot_config_repo(default_reactions_enabled=True)
+        chat_config_service = _make_chat_config_service()
 
-        await handle_reactions_toggle(callback, chat_settings_repo, bot_config_repo)
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "reactions_enabled", False)
+
+    @pytest.mark.asyncio
+    async def test_invalidates_cache_for_this_chat_after_write(self) -> None:
+        """E-1 regression: without this, both reactions toggles applied with
+        up to 60s of delay because nothing dropped the cached ``ChatConfig``
+        for this chat -- the PRD's documented delayed-toggle bug."""
+        bot = _make_bot(ChatMemberStatus.ADMINISTRATOR)
+        callback = _make_callback(f"adm_react_toggle:ru:{CHAT_ID}:reactions_enabled", bot=bot)
+        chat_settings_repo = _make_chat_settings_repo(reactions_enabled=False)
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service()
+
+        await handle_reactions_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        chat_config_service.invalidate.assert_called_once_with(CHAT_ID)

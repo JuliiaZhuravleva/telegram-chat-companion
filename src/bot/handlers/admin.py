@@ -39,6 +39,7 @@ from src.bot.keyboards.admin import (
     rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
+    wl_approved_keyboard,
 )
 from src.config import Settings
 from src.database.repositories.admin import AdminRepository
@@ -95,11 +96,6 @@ _INTERVAL_MAP: dict[str, timedelta] = {
     "1h": timedelta(hours=1),
     "24h": timedelta(hours=24),
     "7d": timedelta(days=7),
-}
-
-_PLACEHOLDER: dict[str, str] = {
-    "ru": "Функция будет доступна позже.",
-    "en": "Feature coming soon.",
 }
 
 _HEALTH_TITLE: dict[str, str] = {
@@ -1573,11 +1569,11 @@ async def handle_approve_notification(
 
     await callback.answer(_WL_APPROVED[lang])
 
-    # Replace buttons with status indicator
+    # Replace buttons with status indicator + settings-panel link (D-1)
     msg = callback.message
     if isinstance(msg, Message):
         await msg.edit_reply_markup(
-            reply_markup=approved_notification_keyboard(lang),
+            reply_markup=approved_notification_keyboard(lang, attempt["chat_id"]),
         )
 
 
@@ -1655,8 +1651,20 @@ async def handle_wl_approve(
 
     await callback.answer(_WL_APPROVED[lang])
 
-    # Re-render pending list
-    await _render_wl_pending(callback, admin_repo, lang, page)
+    # Show settings-panel link instead of re-rendering the pending list (D-1):
+    # the approved attempt no longer matches get_pending_attempts_page (status
+    # flipped) and would simply vanish from a re-render, leaving no row left
+    # to attach a "⚙️ Chat settings" button to.
+    chat_id = attempt["chat_id"]
+    chat_link = _build_chat_link_html(chat_id, attempt.get("chat_title"), attempt.get("chat_type"))
+    text = f"{_WL_APPROVED[lang]}\n\n{chat_link} <code>{chat_id}</code>"
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=wl_approved_keyboard(lang, chat_id, page),
+        )
 
 
 @router.callback_query(F.data.startswith("adm_wl_rej:"))
@@ -1818,26 +1826,7 @@ async def handle_notification_toggle(
         )
 
 
-# ---------------------------------------------------------------------------
-# Placeholders for future stages (prevent "unhandled callback" warnings)
-# ---------------------------------------------------------------------------
-
-
-async def _placeholder_callback(callback: CallbackQuery, **kwargs: Any) -> None:
-    """Generic placeholder: show alert and keep the current screen."""
-    if not _guard_admin(kwargs, callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    await callback.answer(_PLACEHOLDER[lang], show_alert=True)
-
-
 # adm_stk: callbacks are handled by admin_sticker_router
-
-
-@router.callback_query(F.data.startswith("adm_defs:"))
-async def handle_defaults_placeholder(callback: CallbackQuery, **kwargs: Any) -> None:
-    """Default settings — placeholder for Stage 3.1.4."""
-    await _placeholder_callback(callback, **kwargs)
+# adm_defs:/adm_defs_tgl: callbacks are handled by admin_defaults_router (C-1,
+# ADR-0006) -- replaces the former Stage 3.1.4 placeholder that used to live
+# here as handle_defaults_placeholder.
