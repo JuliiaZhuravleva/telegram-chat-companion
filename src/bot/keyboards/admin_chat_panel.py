@@ -131,10 +131,10 @@ def chat_panel_keyboard(
     ``config`` is the effective ``ChatConfigService.get_config()`` value,
     used for every field except the KB/Reactions link rows. Those two use
     ``kb_status``/``reactions_status`` instead -- the caller resolves them
-    with a fresh direct read, bypassing the service's 60s cache, because
-    their existing toggle handlers (admin_kb.py/admin_reactions.py) don't
-    self-invalidate it yet (E-1, not landed): a cached read here could show
-    stale state right after a tap on the dedicated submenu.
+    with a fresh direct read, bypassing the service's 60s cache. Their
+    existing toggle handlers (admin_kb.py/admin_reactions.py) now
+    self-invalidate on write (E-1), so this is defense in depth rather than
+    a required workaround.
 
     ``row`` is the *raw* ``chat_settings_repo.get(chat_id)`` row (B-2) --
     needed alongside ``config`` because the effective value alone can't tell

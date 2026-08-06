@@ -32,6 +32,7 @@ from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.services.chat_config import ChatConfigService
 
 logger = structlog.get_logger(__name__)
 
@@ -252,6 +253,7 @@ async def handle_reactions_toggle(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
     **kwargs: Any,
 ) -> None:
     """Flip one of the two reactions toggles (ADR-0004 Decision 3: independent).
@@ -261,6 +263,11 @@ async def handle_reactions_toggle(
     isn't an admin -- the menu's status line (Decision 5(b)) repeats the
     same fact on every subsequent render, so the warning isn't a one-time
     popup only.
+
+    Self-invalidates ``ChatConfigService``'s cache right after the write
+    (E-1), before either the not-admin-warning branch or the normal
+    confirmation branch, since the write has already committed by that
+    point either way -- mirrors ``admin_kb.py``'s ``handle_kb_toggle``.
     """
     if not _is_private(callback):
         await callback.answer()
@@ -289,6 +296,7 @@ async def handle_reactions_toggle(
     current = reactions_enabled if field == "reactions_enabled" else reactions_history_enabled
     new_value = not current
     await chat_settings_repo.set_field(chat_id, field, new_value)
+    chat_config_service.invalidate(chat_id)
 
     bot_id_hint = kwargs.get("bot_id")
     if field == "reactions_enabled" and new_value and callback.bot is not None:

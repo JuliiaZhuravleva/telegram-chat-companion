@@ -101,10 +101,11 @@ class TestRenderChatPanel:
     @pytest.mark.asyncio
     async def test_kb_reactions_status_is_fresh_not_cached(self) -> None:
         """Regression: KB/Reactions status must come from a direct read, not
-        ChatConfigService's cache -- their existing toggle handlers
-        (admin_kb.py/admin_reactions.py) don't self-invalidate it yet (E-1
-        not landed), so a cached read would show stale state right after a
-        tap on the dedicated submenu.
+        ChatConfigService's cache, even though their toggle handlers
+        (admin_kb.py/admin_reactions.py) now self-invalidate on write (E-1)
+        -- the direct read is defense in depth, not a requirement lifted by
+        E-1, and this render path must not silently start trusting the
+        cache again.
         """
         row = {
             "chat_title": "Chat",

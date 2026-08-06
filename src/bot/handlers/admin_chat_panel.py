@@ -77,11 +77,12 @@ async def _fresh_effective(
 ) -> bool:
     """Direct-read effective bool, bypassing ``ChatConfigService``'s cache.
 
-    Used only for the KB/Reactions link rows (Decision 2): their own toggle
-    handlers (admin_kb.py/admin_reactions.py) don't self-invalidate the
-    shared cache yet (E-1, not landed), so a cached read here could show
-    stale state right after a tap on the dedicated submenu -- exactly the
-    delayed-toggle bug the PRD documents. Mirrors admin_kb.py's
+    Used only for the KB/Reactions link rows (Decision 2). Their own toggle
+    handlers (admin_kb.py/admin_reactions.py) now self-invalidate the shared
+    cache on write (E-1), so this bypass is no longer strictly required to
+    avoid stale state -- kept anyway as a direct read is cheap here and it
+    decouples this render path from E-1's invalidation staying correct in
+    every future admin_kb.py/admin_reactions.py edit. Mirrors admin_kb.py's
     ``_effective_kb_enabled`` / admin_reactions.py's ``_resolve_toggles``.
     """
     raw = row.get(key) if row else None

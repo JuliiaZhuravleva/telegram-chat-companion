@@ -41,6 +41,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
+from src.services.chat_config import ChatConfigService
 
 logger = structlog.get_logger(__name__)
 
@@ -311,8 +312,16 @@ async def handle_kb_toggle(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
 ) -> None:
-    """Flip kb_enabled for a chat."""
+    """Flip kb_enabled for a chat.
+
+    Self-invalidates ``ChatConfigService``'s cache after the write (E-1):
+    before this, the toggle applied with up to 60s of delay because nothing
+    dropped the cached ``ChatConfig`` for this chat -- only
+    ``chat_events.py``'s bot-removal path did. Mirrors
+    ``admin_chat_panel.py``'s ``handle_chat_panel_toggle``.
+    """
     if not _is_private(callback):
         await callback.answer()
         return
@@ -336,6 +345,7 @@ async def handle_kb_toggle(
     effective = await _effective_kb_enabled(chat_settings_repo, bot_config_repo, chat_id)
     new_value = not effective
     await chat_settings_repo.set_field(chat_id, "kb_enabled", new_value)
+    chat_config_service.invalidate(chat_id)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])
     await _render_kb_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id)
