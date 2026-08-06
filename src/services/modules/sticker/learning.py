@@ -239,6 +239,8 @@ class StickerLearningService:
         contexts = parsed.get("contexts")
         tags = parsed.get("tags") or []
         character = parsed.get("character")
+        # ADR-0008: already validated (reject-not-clamp) by _parse_vision_response.
+        explicitness_score = parsed.get("explicit")
         analysis_failed = not bool(visual)
         # Determine structured failure reason: API error/content_filter from exception,
         # or 'empty' when the API returned successfully but produced no usable result.
@@ -282,6 +284,7 @@ class StickerLearningService:
             # stale duplicate_of_file_unique_id if this is a re-analyze of a
             # previously-detected duplicate (ADR-0007).
             duplicate_of_file_unique_id=None,
+            explicitness_score=explicitness_score,
         )
 
         # Save debug artifacts if debug mode is enabled
@@ -351,6 +354,7 @@ class StickerLearningService:
             analysis_failed=analysis_failed,
             failure_reason=_failure_reason,
             collage_png=vision_image if sticker_type != "static" else None,
+            explicitness_score=explicitness_score,
         )
 
     # ── Duplicate copy (ADR-0007) ───────────────────────────────────────
@@ -422,6 +426,10 @@ class StickerLearningService:
         visual = copied["visual_description"]
         emotion = copied["emotion"]
         character = copied["character_or_meme"]
+        # ADR-0008 Decision 7: copied verbatim, including a NULL if the
+        # canonical row predates this feature (accepted, self-healing edge
+        # case — see the ADR).
+        explicitness_score = copied["explicitness_score"]
 
         await self._repo.save_sticker(
             file_unique_id=file_unique_id,
@@ -440,6 +448,7 @@ class StickerLearningService:
             analysis_failed=False,
             image_hash=image_hash,
             duplicate_of_file_unique_id=duplicate_of,
+            explicitness_score=explicitness_score,
         )
 
         embedding = copied["description_embedding"]
@@ -464,6 +473,7 @@ class StickerLearningService:
             failure_reason=None,
             collage_png=collage_png,
             duplicate_of=duplicate_of,
+            explicitness_score=explicitness_score,
         )
 
     # ── Admin re-analyze ─────────────────────────────────────────────
@@ -1057,13 +1067,21 @@ class StickerLearningService:
             lines.append('- "Кадры почти одинаковые" — БЕСПОЛЕЗНО')
 
         lines.append("")
+        lines.append("## ОЦЕНКА ОТКРОВЕННОСТИ")
+        lines.append(
+            "Оцени, насколько стикер откровенный/пошлый, числом от 0.0 до 1.0: "
+            "0.0 = совершенно безобидный, 1.0 = максимально откровенный/18+."
+        )
+
+        lines.append("")
         lines.append("## ФОРМАТ ОТВЕТА (JSON):")
         lines.append("{")
         lines.append('  "visual": "[Текст если есть]. Кто/что изображено + смысл",')
         lines.append('  "emotion": "основная эмоция (1 слово)",')
         lines.append('  "contexts": ["когда использовать 1", "когда использовать 2", ... 3-5],')
         lines.append('  "tags": ["meme", "reaction", "cute", ...],')
-        lines.append('  "character": "имя персонажа/мема или null"')
+        lines.append('  "character": "имя персонажа/мема или null",')
+        lines.append('  "explicit": 0.0-1.0')
         lines.append("}")
 
         return "\n".join(lines)
@@ -1217,6 +1235,11 @@ class StickerLearningService:
                 "none",
             ):
                 result["character"] = _unescape(character_match.group(1))
+            # explicit (ADR-0008 Decision 4) — bare or quoted number, unlike
+            # the string fields above.
+            explicit_match = re.search(r'"explicit"\s*:\s*"?([-+]?[0-9]*\.?[0-9]+)"?', cleaned)
+            if explicit_match:
+                result["explicit"] = _validate_explicitness_score(explicit_match.group(1))
             if result:
                 logger.info(
                     "Extracted fields from truncated JSON via regex",
@@ -1264,7 +1287,35 @@ class StickerLearningService:
         ):
             result["context"] = context_val.strip()
 
+        # explicitness score (ADR-0008 Decision 4) — reject-not-clamp
+        # validation; only attempted when the caller's prompt actually asked
+        # for this key (merge/pack-context prompts never include it, so this
+        # stays a silent no-op for them rather than a spurious warning).
+        if "explicit" in data:
+            result["explicit"] = _validate_explicitness_score(data["explicit"])
+
         return result
+
+
+def _validate_explicitness_score(raw: Any) -> float | None:
+    """Validate a Vision-reported explicitness score (ADR-0008 Decision 4).
+
+    Reject, don't clamp: a non-numeric value or one outside [0.0, 1.0]
+    resolves to ``None`` (logged at warning) rather than being coerced into
+    range — a wildly-wrong model output (e.g. a percentage like ``"70"``)
+    must not manufacture a false sense of a real score. This keeps Decision
+    3's fail-closed guarantee intact for exactly the case where the model's
+    output can't be trusted.
+    """
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Vision returned non-numeric explicitness score", raw_value=raw)
+        return None
+    if not (0.0 <= score <= 1.0):
+        logger.warning("Vision returned out-of-range explicitness score", raw_value=raw)
+        return None
+    return score
 
 
 def _detect_sticker_type(sticker: types.Sticker) -> str:

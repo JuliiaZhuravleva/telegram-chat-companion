@@ -98,6 +98,58 @@ async def test_learn_new_sticker(sticker_service):
 
 
 @pytest.mark.asyncio
+async def test_learn_new_sticker_wires_explicitness_score(sticker_service):
+    """ADR-0008: a valid 'explicit' field in the Vision response reaches
+    both save_sticker()'s kwargs and the returned StickerLearningResult."""
+    sticker_service._ai.analyze_image = AsyncMock(
+        return_value=VisionResult(
+            text='{"visual": "A happy cat", "emotion": "joy", "explicit": 0.6}',
+            model="gemini-3-flash",
+            provider="gemini",
+        )
+    )
+
+    sticker = _make_sticker()
+    result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
+
+    assert result.explicitness_score == 0.6
+    save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+    assert save_kwargs["explicitness_score"] == 0.6
+
+
+@pytest.mark.asyncio
+async def test_learn_new_sticker_explicitness_score_none_when_absent(sticker_service):
+    """Vision response with no 'explicit' key at all (e.g. an older prompt
+    version or a partial response) must not crash — resolves to None."""
+    sticker = _make_sticker()
+    result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
+
+    assert result.explicitness_score is None
+    save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+    assert save_kwargs["explicitness_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_learn_new_sticker_rejects_invalid_explicitness_score(sticker_service):
+    """Reject-not-clamp (ADR-0008 Decision 4) end to end: a wildly-wrong
+    Vision value never reaches the DB as a coerced-in-range number."""
+    sticker_service._ai.analyze_image = AsyncMock(
+        return_value=VisionResult(
+            text='{"visual": "A happy cat", "emotion": "joy", "explicit": "70%"}',
+            model="gemini-3-flash",
+            provider="gemini",
+        )
+    )
+
+    sticker = _make_sticker()
+    result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
+
+    assert result.explicitness_score is None
+    save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+    assert save_kwargs["explicitness_score"] is None
+
+
+@pytest.mark.asyncio
 async def test_learn_existing_sticker(sticker_service):
     sticker_service._repo.get_by_file_unique_id = AsyncMock(
         return_value={
@@ -300,6 +352,67 @@ class TestParseVisionResponse:
         result = StickerLearningService._parse_vision_response(text)
         assert "character" not in result
 
+    def test_explicit_score_valid(self):
+        text = '{"visual": "test", "explicit": 0.4}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] == 0.4
+
+    def test_explicit_score_boundary_values_accepted(self):
+        """ADR-0008 Decision 2 needs the boundary itself included, not just
+        the open interval."""
+        assert (
+            StickerLearningService._parse_vision_response('{"visual": "t", "explicit": 0.0}')[
+                "explicit"
+            ]
+            == 0.0
+        )
+        assert (
+            StickerLearningService._parse_vision_response('{"visual": "t", "explicit": 1.0}')[
+                "explicit"
+            ]
+            == 1.0
+        )
+
+    def test_explicit_score_out_of_range_rejected_not_clamped(self):
+        """ADR-0008 Decision 4: reject, don't clamp — a wildly-wrong value
+        (e.g. the model returns a percentage) must resolve to None, never be
+        coerced into [0, 1]."""
+        text = '{"visual": "test", "explicit": 7.0}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
+    def test_explicit_score_negative_rejected(self):
+        text = '{"visual": "test", "explicit": -0.5}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
+    def test_explicit_score_non_numeric_rejected(self):
+        text = '{"visual": "test", "explicit": "very"}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
+    def test_explicit_score_absent_key_omitted_no_spurious_entry(self):
+        """A response with no 'explicit' key (e.g. merge/pack-context
+        prompts, which never ask for this field) must not manufacture the
+        key — downstream `.get('explicit')` already returns None either way,
+        but this also proves no warning-worthy validation path fired."""
+        text = '{"visual": "test", "emotion": "joy"}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert "explicit" not in result
+
+    def test_explicit_score_regex_fallback_on_truncated_json(self):
+        """Attempt 3 (regex fallback for truncated responses) also extracts
+        and validates 'explicit', not just the string fields."""
+        text = '{"visual": "A cat", "explicit": 0.8, "emotion": "joy'  # truncated
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["visual"] == "A cat"
+        assert result["explicit"] == 0.8
+
+    def test_explicit_score_regex_fallback_rejects_out_of_range(self):
+        text = '{"visual": "A cat", "explicit": 12, "emotion": "joy'  # truncated
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
 
 class TestMergeAdminDescription:
     @pytest.mark.asyncio
@@ -456,6 +569,14 @@ class TestBuildVisionPrompt:
         assert "funny_cats" in prompt
         assert "JSON" in prompt
         assert "visual" in prompt
+
+    def test_explicit_field_included_in_json_schema(self):
+        """ADR-0008 Decision 4: the same Vision call now also asks for an
+        explicitness score, on every sticker type (not just when timing/
+        motion data is present)."""
+        sticker = _make_sticker()
+        prompt = StickerLearningService._build_vision_prompt(sticker, sticker_type="static")
+        assert '"explicit"' in prompt
 
     def test_with_pack_context(self):
         sticker = _make_sticker()
@@ -842,6 +963,7 @@ def _canonical_record(**overrides) -> dict:
         "character_or_meme": "Pepe",
         "description_embedding": [0.2] * 768,
         "image_hash": "0000000000000000",
+        "explicitness_score": 0.3,
     }
     base.update(overrides)
     return base
@@ -878,6 +1000,9 @@ class TestDuplicateDetection:
         assert result.visual_description == "A happy cat waving"
         assert result.emotion == "joy"
         assert result.character_or_meme == "Pepe"
+        # ADR-0008 Decision 7: explicitness_score is a Vision-derived column
+        # too — copied verbatim from the canonical row, no new Vision call.
+        assert result.explicitness_score == 0.3
 
         sticker_service._ai.analyze_image.assert_not_awaited()
         sticker_service._ai.generate_embedding.assert_not_awaited()
@@ -887,11 +1012,43 @@ class TestDuplicateDetection:
         assert save_kwargs["visual_description"] == "A happy cat waving"
         assert save_kwargs["duplicate_of_file_unique_id"] == "canonical-uid"
         assert save_kwargs["image_hash"] == target_hash
+        assert save_kwargs["explicitness_score"] == 0.3
 
         # Embedding copied via update_embedding(), not regenerated.
         sticker_service._repo.update_embedding.assert_awaited_once_with(
             sticker.file_unique_id, [0.2] * 768
         )
+
+    @pytest.mark.asyncio
+    async def test_duplicate_copies_null_explicitness_score_from_unscored_canonical(
+        self, sticker_service
+    ):
+        """ADR-0008 Decision 7 accepted edge case: a canonical row that
+        predates the explicitness feature (NULL) makes the new duplicate
+        NULL too, not a fresh Vision call and not a fabricated 0.0."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[None, _canonical_record(explicitness_score=None)]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+
+        assert result.explicitness_score is None
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["explicitness_score"] is None
 
     @pytest.mark.asyncio
     async def test_no_matching_candidate_falls_through_to_vision(self, sticker_service):

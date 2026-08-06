@@ -210,3 +210,66 @@ async def test_get_sticker_set_not_found(repo):
     result = await repo.get_sticker_set("unknown")
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_save_sticker_passes_explicitness_score(repo):
+    """ADR-0008: explicitness_score is wired through to the INSERT (both the
+    SQL text and the bound positional params), and reaches the ON CONFLICT
+    UPDATE clause too (unconditional overwrite, same as emotion/character)."""
+    repo._pool.fetchrow = AsyncMock(return_value={"id": 9})
+
+    await repo.save_sticker(
+        file_unique_id="unique-1",
+        file_id="file-1",
+        explicitness_score=0.7,
+    )
+
+    sql = repo._pool.fetchrow.call_args.args[0]
+    assert "explicitness_score" in sql
+    bound_args = repo._pool.fetchrow.call_args.args[1:]
+    assert 0.7 in bound_args
+
+
+@pytest.mark.asyncio
+async def test_save_sticker_explicitness_score_defaults_to_none(repo):
+    repo._pool.fetchrow = AsyncMock(return_value={"id": 9})
+
+    await repo.save_sticker(file_unique_id="unique-1", file_id="file-1")
+
+    bound_args = repo._pool.fetchrow.call_args.args[1:]
+    assert bound_args[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_get_explicitness_backfill_candidates_query_shape(repo):
+    repo._pool.fetch = AsyncMock(
+        return_value=[
+            {
+                "file_unique_id": "uid-1",
+                "file_id": "file-1",
+                "is_animated": False,
+                "is_video": False,
+            }
+        ]
+    )
+
+    results = await repo.get_explicitness_backfill_candidates()
+
+    assert len(results) == 1
+    sql = repo._pool.fetch.call_args.args[0]
+    assert "visual_description IS NOT NULL" in sql
+    assert "analysis_failed = false" in sql
+    assert "explicitness_score IS NULL" in sql
+
+
+@pytest.mark.asyncio
+async def test_update_explicitness_score(repo):
+    await repo.update_explicitness_score("unique-1", 0.4)
+
+    repo._pool.execute.assert_awaited_once()
+    sql = repo._pool.execute.call_args.args[0]
+    assert "explicitness_score" in sql
+    assert "UPDATE sticker_knowledge" in sql
+    assert repo._pool.execute.call_args.args[1] == "unique-1"
+    assert repo._pool.execute.call_args.args[2] == 0.4
