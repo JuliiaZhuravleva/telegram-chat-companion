@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T17:43:22Z",
+  "role": "evaluator",
+  "item_id": "D-2",
+  "verdict": "PASS",
+  "evidence": "Verified commit b41ae14 against ADR-0008 Decisions 4/5/7/8: migration 024 is nullable/no-DEFAULT as mandated, learning.py adds explicit reject-not-clamp validation (_validate_explicitness_score) wired through both direct-JSON and regex-fallback parse paths and both the fresh-Vision and A-2 duplicate-copy paths, stickers.py adds explicitness_score to _VISION_DERIVED_COLUMNS plus the exact narrow backfill-candidate WHERE clause and single-column UPDATE from Decision 5, and scripts/backfill_explicitness.py reuses the renderer's existing anchor frame and the shared parser per the ADR's mechanics. Ran the touched test files plus the full unit suite myself (92/92 relevant, 1586/1586 full, matching the specialist's claimed count) and ruff+mypy clean on all touched files.",
+  "regression_risk": "low",
+  "notes": ""
+}

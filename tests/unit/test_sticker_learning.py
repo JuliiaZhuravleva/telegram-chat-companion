@@ -1,9 +1,11 @@
 """Tests for sticker learning service."""
 
 import asyncio
+import io
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from PIL import Image
 
 from src.services.ai.base import (
     AIProviderError,
@@ -11,8 +13,10 @@ from src.services.ai.base import (
     TextGenerationResult,
     VisionResult,
 )
+from src.services.modules.sticker.dedup import compute_image_hash
 from src.services.modules.sticker.learning import StickerLearningService
 from src.services.modules.sticker.models import ReanalyzeResult, StickerRenderError
+from src.services.modules.sticker.motion import AnimationMotion
 from src.services.modules.sticker.renderer import RenderedSticker
 
 
@@ -91,6 +95,58 @@ async def test_learn_new_sticker(sticker_service):
 
     sticker_service._repo.save_sticker.assert_awaited_once()
     sticker_service._repo.update_embedding.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_learn_new_sticker_wires_explicitness_score(sticker_service):
+    """ADR-0008: a valid 'explicit' field in the Vision response reaches
+    both save_sticker()'s kwargs and the returned StickerLearningResult."""
+    sticker_service._ai.analyze_image = AsyncMock(
+        return_value=VisionResult(
+            text='{"visual": "A happy cat", "emotion": "joy", "explicit": 0.6}',
+            model="gemini-3-flash",
+            provider="gemini",
+        )
+    )
+
+    sticker = _make_sticker()
+    result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
+
+    assert result.explicitness_score == 0.6
+    save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+    assert save_kwargs["explicitness_score"] == 0.6
+
+
+@pytest.mark.asyncio
+async def test_learn_new_sticker_explicitness_score_none_when_absent(sticker_service):
+    """Vision response with no 'explicit' key at all (e.g. an older prompt
+    version or a partial response) must not crash — resolves to None."""
+    sticker = _make_sticker()
+    result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
+
+    assert result.explicitness_score is None
+    save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+    assert save_kwargs["explicitness_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_learn_new_sticker_rejects_invalid_explicitness_score(sticker_service):
+    """Reject-not-clamp (ADR-0008 Decision 4) end to end: a wildly-wrong
+    Vision value never reaches the DB as a coerced-in-range number."""
+    sticker_service._ai.analyze_image = AsyncMock(
+        return_value=VisionResult(
+            text='{"visual": "A happy cat", "emotion": "joy", "explicit": "70%"}',
+            model="gemini-3-flash",
+            provider="gemini",
+        )
+    )
+
+    sticker = _make_sticker()
+    result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
+
+    assert result.explicitness_score is None
+    save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+    assert save_kwargs["explicitness_score"] is None
 
 
 @pytest.mark.asyncio
@@ -250,11 +306,23 @@ async def test_search_success(sticker_service):
         ]
     )
 
-    results = await sticker_service.search("happy greeting")
+    results = await sticker_service.search("happy greeting", tolerance_level=0.5)
 
     assert len(results) == 1
     assert results[0].file_id == "file-1"
     assert results[0].similarity == 0.85
+
+
+@pytest.mark.asyncio
+async def test_search_threads_tolerance_level_to_repo(sticker_service):
+    """ADR-0008 Decision 6: tolerance_level must reach search_by_embedding
+    unchanged, not silently dropped at this layer."""
+    sticker_service._repo.search_by_embedding = AsyncMock(return_value=[])
+
+    await sticker_service.search("happy greeting", tolerance_level=0.73)
+
+    sticker_service._repo.search_by_embedding.assert_awaited_once()
+    assert sticker_service._repo.search_by_embedding.call_args.kwargs["tolerance_level"] == 0.73
 
 
 @pytest.mark.asyncio
@@ -263,7 +331,7 @@ async def test_search_embedding_failure(sticker_service):
         side_effect=AIProviderError("Embedding failed", provider="gemini")
     )
 
-    results = await sticker_service.search("test")
+    results = await sticker_service.search("test", tolerance_level=0.5)
 
     assert results == []
 
@@ -295,6 +363,67 @@ class TestParseVisionResponse:
         text = '{"visual": "test", "character": "None"}'
         result = StickerLearningService._parse_vision_response(text)
         assert "character" not in result
+
+    def test_explicit_score_valid(self):
+        text = '{"visual": "test", "explicit": 0.4}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] == 0.4
+
+    def test_explicit_score_boundary_values_accepted(self):
+        """ADR-0008 Decision 2 needs the boundary itself included, not just
+        the open interval."""
+        assert (
+            StickerLearningService._parse_vision_response('{"visual": "t", "explicit": 0.0}')[
+                "explicit"
+            ]
+            == 0.0
+        )
+        assert (
+            StickerLearningService._parse_vision_response('{"visual": "t", "explicit": 1.0}')[
+                "explicit"
+            ]
+            == 1.0
+        )
+
+    def test_explicit_score_out_of_range_rejected_not_clamped(self):
+        """ADR-0008 Decision 4: reject, don't clamp — a wildly-wrong value
+        (e.g. the model returns a percentage) must resolve to None, never be
+        coerced into [0, 1]."""
+        text = '{"visual": "test", "explicit": 7.0}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
+    def test_explicit_score_negative_rejected(self):
+        text = '{"visual": "test", "explicit": -0.5}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
+    def test_explicit_score_non_numeric_rejected(self):
+        text = '{"visual": "test", "explicit": "very"}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
+
+    def test_explicit_score_absent_key_omitted_no_spurious_entry(self):
+        """A response with no 'explicit' key (e.g. merge/pack-context
+        prompts, which never ask for this field) must not manufacture the
+        key — downstream `.get('explicit')` already returns None either way,
+        but this also proves no warning-worthy validation path fired."""
+        text = '{"visual": "test", "emotion": "joy"}'
+        result = StickerLearningService._parse_vision_response(text)
+        assert "explicit" not in result
+
+    def test_explicit_score_regex_fallback_on_truncated_json(self):
+        """Attempt 3 (regex fallback for truncated responses) also extracts
+        and validates 'explicit', not just the string fields."""
+        text = '{"visual": "A cat", "explicit": 0.8, "emotion": "joy'  # truncated
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["visual"] == "A cat"
+        assert result["explicit"] == 0.8
+
+    def test_explicit_score_regex_fallback_rejects_out_of_range(self):
+        text = '{"visual": "A cat", "explicit": 12, "emotion": "joy'  # truncated
+        result = StickerLearningService._parse_vision_response(text)
+        assert result["explicit"] is None
 
 
 class TestMergeAdminDescription:
@@ -453,6 +582,14 @@ class TestBuildVisionPrompt:
         assert "JSON" in prompt
         assert "visual" in prompt
 
+    def test_explicit_field_included_in_json_schema(self):
+        """ADR-0008 Decision 4: the same Vision call now also asks for an
+        explicitness score, on every sticker type (not just when timing/
+        motion data is present)."""
+        sticker = _make_sticker()
+        prompt = StickerLearningService._build_vision_prompt(sticker, sticker_type="static")
+        assert '"explicit"' in prompt
+
     def test_with_pack_context(self):
         sticker = _make_sticker()
         prompt = StickerLearningService._build_vision_prompt(
@@ -460,6 +597,71 @@ class TestBuildVisionPrompt:
         )
         assert "Another happy cat" in prompt
         assert "Sad cat" in prompt
+
+    @staticmethod
+    def _timing_with_motion(*, is_oscillating: bool) -> RenderedSticker:
+        motion = AnimationMotion(
+            duration=1.0,
+            keyframe_indices=[0, 5, 10, 15, 20, 29],
+            keyframe_times=[0.0, 0.17, 0.33, 0.5, 0.67, 1.0],
+            avg_motion=0.5,
+            peak_motion_time=0.33,
+            motion_scores=[0.1, 0.9, 0.1, 0.9, 0.1, 0.9],
+            is_oscillating=is_oscillating,
+        )
+        return RenderedSticker(
+            collage_png=b"fake-png",
+            duration=1.0,
+            frame_times=motion.keyframe_times,
+            motion=motion,
+        )
+
+    def test_oscillation_hint_included_when_motion_is_oscillating_animated(self):
+        sticker = _make_sticker(is_animated=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="animated",
+            timing=self._timing_with_motion(is_oscillating=True),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" in prompt
+        assert "ШЛЕЙФ" in prompt
+
+    def test_oscillation_hint_omitted_when_motion_not_oscillating_animated(self):
+        sticker = _make_sticker(is_animated=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="animated",
+            timing=self._timing_with_motion(is_oscillating=False),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" not in prompt
+        assert "ШЛЕЙФ" not in prompt
+
+    def test_oscillation_hint_included_when_motion_is_oscillating_video(self):
+        sticker = _make_sticker(is_video=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="video",
+            timing=self._timing_with_motion(is_oscillating=True),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" in prompt
+        assert "ШЛЕЙФ" in prompt
+
+    def test_oscillation_hint_omitted_when_motion_not_oscillating_video(self):
+        sticker = _make_sticker(is_video=True)
+        prompt = StickerLearningService._build_vision_prompt(
+            sticker,
+            sticker_type="video",
+            timing=self._timing_with_motion(is_oscillating=False),
+        )
+        assert "ОСЦИЛЛЯЦИЯ" not in prompt
+        assert "ШЛЕЙФ" not in prompt
+
+    def test_no_oscillation_hint_without_timing(self):
+        """Static stickers (no timing/motion at all) never get the hint —
+        current route for static stickers stays untouched."""
+        sticker = _make_sticker()
+        prompt = StickerLearningService._build_vision_prompt(sticker, sticker_type="static")
+        assert "ОСЦИЛЛЯЦИЯ" not in prompt
 
 
 class TestLogUsageOnMerge:
@@ -742,3 +944,289 @@ class TestLearnFailureReason:
 
         assert result.analysis_failed is True
         assert result.failure_reason == "vision"
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection via image hash (ADR-0007, A-2)
+# ---------------------------------------------------------------------------
+
+
+def _real_png_bytes(seed: int = 0) -> bytes:
+    """A real, Pillow-parseable image — needed because compute_image_hash()
+    fails open (image_hash=None) on the fake `b"fake-png"` bytes the other
+    tests use, which would silently skip the whole dedup code path."""
+    img = Image.new("RGBA", (64, 64), (200, 30, 30, 255))
+    for x in range(10, 30):
+        for y in range(10, 30):
+            img.putpixel((x, y), (30 + seed, 255, 30, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _canonical_record(**overrides) -> dict:
+    base = {
+        "file_unique_id": "canonical-uid",
+        "visual_description": "A happy cat waving",
+        "original_vision_description": "A happy cat waving",
+        "emotion": "joy",
+        "suggested_contexts": ["greeting"],
+        "style_tags": ["cute"],
+        "character_or_meme": "Pepe",
+        "description_embedding": [0.2] * 768,
+        "image_hash": "0000000000000000",
+        "explicitness_score": 0.3,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestDuplicateDetection:
+    """learn()'s pre-Vision image-hash dedup check (ADR-0007)."""
+
+    @pytest.mark.asyncio
+    async def test_duplicate_match_skips_vision_and_copies_canonical_fields(self, sticker_service):
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[None, _canonical_record()]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+
+        assert result.is_new is True
+        assert result.analysis_failed is False
+        assert result.duplicate_of == "canonical-uid"
+        assert result.visual_description == "A happy cat waving"
+        assert result.emotion == "joy"
+        assert result.character_or_meme == "Pepe"
+        # ADR-0008 Decision 7: explicitness_score is a Vision-derived column
+        # too — copied verbatim from the canonical row, no new Vision call.
+        assert result.explicitness_score == 0.3
+
+        sticker_service._ai.analyze_image.assert_not_awaited()
+        sticker_service._ai.generate_embedding.assert_not_awaited()
+
+        sticker_service._repo.save_sticker.assert_awaited_once()
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["visual_description"] == "A happy cat waving"
+        assert save_kwargs["duplicate_of_file_unique_id"] == "canonical-uid"
+        assert save_kwargs["image_hash"] == target_hash
+        assert save_kwargs["explicitness_score"] == 0.3
+
+        # Embedding copied via update_embedding(), not regenerated.
+        sticker_service._repo.update_embedding.assert_awaited_once_with(
+            sticker.file_unique_id, [0.2] * 768
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "canonical_row",
+        [
+            None,
+            _canonical_record(visual_description=None, original_vision_description=None),
+            _canonical_record(analysis_failed=True),
+        ],
+        ids=["vanished", "analysis-cleared", "analysis-failed"],
+    )
+    async def test_dead_canonical_falls_back_to_vision(self, sticker_service, canonical_row):
+        """A hash match whose canonical row vanished, was cleared via
+        «Очистить анализ», or has analysis_failed=true must NOT be copied
+        from — copying would mint a permanently dead row (no description,
+        analysis_failed=false, never re-analyzed because learn()
+        short-circuits on existing rows). The chain stays reachable through
+        find_duplicate()'s flattening even though the canonical itself
+        dropped out of get_dedup_candidates() (2026-08-07 review). All three
+        cases fall open into the normal Vision pipeline."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(side_effect=[None, canonical_row])
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        result = await sticker_service.learn(sticker=_make_sticker(), image_data=image_data)
+
+        sticker_service._ai.analyze_image.assert_awaited()
+        assert result.duplicate_of is None
+        assert result.visual_description == "A happy cat"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_copies_null_explicitness_score_from_unscored_canonical(
+        self, sticker_service
+    ):
+        """ADR-0008 Decision 7 accepted edge case: a canonical row that
+        predates the explicitness feature (NULL) makes the new duplicate
+        NULL too, not a fresh Vision call and not a fabricated 0.0."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[None, _canonical_record(explicitness_score=None)]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+
+        assert result.explicitness_score is None
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["explicitness_score"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_matching_candidate_falls_through_to_vision(self, sticker_service):
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+        # Flip every bit -> maximum possible distance, guaranteed to exceed
+        # DEDUP_HAMMING_THRESHOLD regardless of what target_hash happens to be.
+        far_hash = f"{(~int(target_hash, 16)) & ((1 << 64) - 1):016x}"
+
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "other-uid",
+                    "image_hash": far_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+
+        assert result.duplicate_of is None
+        sticker_service._ai.analyze_image.assert_awaited_once()
+        sticker_service._repo.save_sticker.assert_awaited_once()
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["image_hash"] == target_hash
+        assert save_kwargs["duplicate_of_file_unique_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_force_reanalyze_skips_dedup_check_entirely(self, sticker_service):
+        """Admin re-analyze must always run Vision, never silently resolve to
+        a copy — even if a matching candidate exists (contract of
+        force_reanalyze, unchanged by ADR-0007)."""
+        image_data = _real_png_bytes()
+        sticker_service._repo.get_dedup_candidates = AsyncMock(return_value=[])
+
+        sticker = _make_sticker()
+        await sticker_service.learn(sticker=sticker, image_data=image_data, force_reanalyze=True)
+
+        sticker_service._repo.get_dedup_candidates.assert_not_awaited()
+        sticker_service._ai.analyze_image.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unparseable_image_fails_open_to_vision(self, sticker_service):
+        """Hash computation failure must not break ingestion — proceeds to
+        the normal Vision pipeline exactly as if there were no candidates."""
+        sticker_service._repo.get_dedup_candidates = AsyncMock(return_value=[])
+
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=b"not-an-image")
+
+        assert result.analysis_failed is False
+        sticker_service._repo.get_dedup_candidates.assert_not_awaited()
+        sticker_service._ai.analyze_image.assert_awaited_once()
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["image_hash"] is None
+
+    @pytest.mark.asyncio
+    @patch("src.services.modules.sticker.learning.render_tgs", new_callable=AsyncMock)
+    async def test_duplicate_reapplies_format_tag_for_own_type(
+        self, mock_render_tgs, sticker_service
+    ):
+        """Pitfall 1 (ADR-0007 Decision 7): a cross-type hash match must not
+        carry over the canonical's format tag verbatim — the new (animated)
+        sticker gets its OWN format tag, not the canonical's (a static
+        sticker with no format tag, and a stale 'video' tag to prove it's
+        stripped, not merely appended-to)."""
+        hash_frame = _real_png_bytes()
+        target_hash = compute_image_hash(hash_frame)
+        mock_render_tgs.return_value = RenderedSticker(
+            collage_png=b"fake-collage-png",
+            duration=3.0,
+            frame_times=[0.0, 0.6, 1.2, 1.8, 2.4, 3.0],
+            hash_frame=hash_frame,
+        )
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[
+                None,
+                _canonical_record(style_tags=["meme", "video"]),
+            ]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        sticker = _make_sticker(is_animated=True)
+        result = await sticker_service.learn(sticker=sticker, image_data=b"fake-tgs")
+
+        assert result.duplicate_of == "canonical-uid"
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["style_tags"] == ["meme", "animated"]
+
+    @pytest.mark.asyncio
+    async def test_duplicate_chain_flattens_to_root(self, sticker_service):
+        """Matching a row that is itself already a detected duplicate points
+        the new sticker at the ROOT, not the intermediate row (Decision 6)."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[None, _canonical_record(file_unique_id="root-uid")]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "mid-duplicate-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": "root-uid",
+                }
+            ]
+        )
+
+        sticker = _make_sticker()
+        result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+
+        assert result.duplicate_of == "root-uid"
+        # The copy reads the ROOT's own record, not the intermediate row's.
+        sticker_service._repo.get_by_file_unique_id.assert_awaited_with("root-uid")

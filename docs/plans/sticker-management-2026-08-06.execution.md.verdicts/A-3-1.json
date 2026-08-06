@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T16:20:23Z",
+  "role": "specialist",
+  "item_id": "A-3",
+  "verdict": "PASS",
+  "cost_usd": 4.47,
+  "notes": "Scope per A-2's own routing note + ADR-0007 Implementation notes for A-3: (1) tests/integration/test_sticker_dedup_integration.py -- real Postgres+pgvector testcontainer, real StickerRepository, only AI router mocked: proves analyze_image/generate_embedding stay uncalled on a REAL DB-backed duplicate path (not the mocked-repo unit tests A-2 already wrote), proves get_dedup_candidates()'s WHERE clause really filters analysis_failed/NULL-description/NULL-hash rows, proves chain-flatten-to-root end to end, proves pgvector embedding round-trips. (2) tests/unit/test_sticker_dedup.py: 2 added adversarial controls closing ADR-0007 Consequences' own named gaps -- same-pack 'different expression' pair (harder than the existing solid-vs-checkerboard control) stays above threshold; a same-silhouette/different-fill-color pair lands well INSIDE threshold (2/64 bits) -- a real, empirically measured, previously-undocumented false-positive risk (dHash has near-zero color sensitivity), documented in the test docstring. Not a regression to fix under this item (ADR-0007 Decision 1 chose dHash deliberately) -- flagging as a finding, not blocking. (3) docs/plans/sticker-management-2026-08-06.a3-live-checklist.md: manual hash-correctness checklist for the 3 named stickers per Decision 8 -- explicitly framed as 'hash algorithm correctness', NOT 'these will retroactively merge' (they predate migration 023, image_hash stays NULL until someone re-triggers analysis). Checklist sections 1-2 require a live bot + real Telegram file access QA doesn't have in this session; deferred to Julia, same convention as reactions-2026-08-03's QA-1 checklist. False-positive boundary already had solid unit coverage from A-2's own test authorship -- did not duplicate, only added the harder adversarial gap ADR-0007 explicitly named as unaddressed.",
+  "result": {
+    "kind": "commit",
+    "ref": "c15a000",
+    "verification": "pytest tests/unit tests/integration -q: 1529+177 passed (24 skipped, pre-existing env-gated), no regressions; ruff check src/ tests/ clean; mypy src/ clean (129 files). Control-verified the 3 new integration tests actually bite: disabled the dedup branch in learning.py, confirmed all 3 fail, re-enabled, confirmed all pass, reverted via git checkout."
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

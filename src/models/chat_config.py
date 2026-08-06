@@ -48,6 +48,12 @@ class ChatConfig:
     image_comment_sticker_enabled: bool = True
     image_comment_sticker_chance: float = 0.3
 
+    # Sticker explicitness gating (ADR-0008). Ceiling on acceptable
+    # explicitness_score (0.0 = strictest, 1.0 = anarchy/no restriction).
+    # Layer-1 fallback used whenever neither bot_config.default_tolerance_level
+    # nor a per-chat chat_settings.tolerance_level override is set.
+    tolerance_level: float = 0.5
+
     # Link comments
     link_comments_enabled: bool = False
 

@@ -23,6 +23,14 @@ class StickerLearningResult:
     collage_png: bytes | None = None
     # Set when analysis_failed=True; None on success.
     failure_reason: Literal["vision", "content_filter", "empty"] | None = None
+    # file_unique_id of the canonical sticker this description was copied
+    # from via the pre-Vision image-hash dedup check (ADR-0007). None for
+    # a sticker that was actually analyzed by Vision (or failed to be).
+    duplicate_of: str | None = None
+    # Vision-reported explicitness, 0.0 (safe) - 1.0 (maximally explicit)
+    # (ADR-0008). None when unscored (analysis failed, or the model's
+    # response didn't carry a valid value — reject-not-clamp, Decision 4).
+    explicitness_score: float | None = None
 
 
 @dataclass

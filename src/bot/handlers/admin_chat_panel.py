@@ -7,6 +7,13 @@ Handles:
   dedicated UI (Decision 3). The three KB/Reactions fields are link-only
   (Decision 2) and are rejected here -- their write path stays
   admin_kb.py's/admin_reactions.py's own toggle handlers, never duplicated.
+- ``adm_pnl_tol:*``   — dedicated single-field FSM edit flow for
+  ``tolerance_level`` (ADR-0008 Decision 10). Independent of F-1's still-
+  deferred generic non-BOOL editing; reuses
+  ``AdminStates.awaiting_setting_value`` (grep-verified unused elsewhere).
+- ``adm_pnl_tolcancel:*`` — escape hatch for that FSM flow: clears the
+  state and re-renders the panel (2026-08-07 review — commands also pass
+  through the input handler via ``~F.text.startswith("/")``).
 
 ``render_chat_panel`` is a pure ``(text, keyboard)`` function, parameterized
 by ``chat_id`` alone -- no ``CallbackQuery``/permission check inside, so a
@@ -16,7 +23,8 @@ different guard at its own call site. The permission check
 before ``render_chat_panel`` is invoked -- same split KB/Reactions already
 use for their own ``_render_*`` helpers.
 
-See docs/decisions/ADR-0006-chat-settings-panel-architecture.md.
+See docs/decisions/ADR-0006-chat-settings-panel-architecture.md and
+docs/decisions/ADR-0008-sticker-explicitness-tolerance.md (``adm_pnl_tol:``).
 """
 
 from __future__ import annotations
@@ -26,11 +34,17 @@ from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.keyboards.admin_chat_panel import chat_panel_keyboard, chat_panel_picker_keyboard
+from src.bot.keyboards.admin_chat_panel import (
+    chat_panel_keyboard,
+    chat_panel_picker_keyboard,
+    tolerance_cancel_keyboard,
+)
 from src.bot.settings_fields import FieldType, field_by_code
+from src.bot.states.admin import AdminStates
 from src.bot.utils import check_admin_direct, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -57,6 +71,19 @@ _NO_ROW = {
 }
 _TOGGLE_ON = {"ru": "Включено", "en": "Enabled"}
 _TOGGLE_OFF = {"ru": "Выключено", "en": "Disabled"}
+_TOLERANCE_PROMPT = {
+    "ru": "Введите новый уровень приличия стикеров (0.0–1.0, где 1.0 — без ограничений):",
+    "en": "Enter a new sticker tolerance level (0.0–1.0, where 1.0 = no restriction):",
+}
+_TOLERANCE_INVALID = {
+    "ru": "Нужно число от 0.0 до 1.0. Попробуйте ещё раз.",
+    "en": "Enter a number between 0.0 and 1.0. Try again.",
+}
+_TOLERANCE_CANCELLED = {"ru": "Ввод отменён.", "en": "Input cancelled."}
+_TOLERANCE_SAVED = {
+    "ru": "Уровень приличия установлен: {value}",
+    "en": "Tolerance level set to {value}",
+}
 
 # Decision 2: these three fields render as a link to the existing KB/
 # Reactions sub-panels; the generic toggle handler must refuse them even
@@ -282,6 +309,151 @@ async def handle_chat_panel_toggle(
     chat_config_service.invalidate(chat_id)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])
+    await _render_and_show_panel(
+        callback, chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    )
+
+
+# ── tolerance_level (ADR-0008 Decision 10) ──────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("adm_pnl_tol:"))
+async def handle_chat_panel_tolerance_prompt(
+    callback: CallbackQuery,
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+) -> None:
+    """Prompt for a new ``tolerance_level`` value (ADR-0008 Decision 10).
+
+    A dedicated, single-field FSM flow independent of F-1 (generic non-BOOL
+    settings editing, deferred to a separate iteration) -- reuses
+    ``AdminStates.awaiting_setting_value``, a scaffold state that was
+    declared and never wired to a handler before this.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.awaiting_setting_value)
+    await state.update_data(tol_chat_id=chat_id, tol_lang=lang)
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            _TOLERANCE_PROMPT[lang],
+            reply_markup=tolerance_cancel_keyboard(lang, chat_id),
+        )
+
+
+@router.message(
+    AdminStates.awaiting_setting_value,
+    F.chat.type == "private",
+    ~F.text.startswith("/"),
+)
+async def handle_chat_panel_tolerance_input(
+    message: Message,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Validate and persist the new ``tolerance_level`` (ADR-0008 Decision 10).
+
+    Reject-not-clamp, same posture as Decision 4's Vision-score validation:
+    non-numeric or out-of-``[0.0, 1.0]`` input re-prompts (state stays set)
+    instead of silently no-opping or clamping into range.
+
+    Escape hatches (2026-08-07 review — this router precedes
+    ``commands_router``, so without them the state ate every admin command
+    until a valid float arrived): commands pass through untouched via the
+    ``~F.text.startswith("/")`` filter, and the prompt carries a cancel
+    button (``adm_pnl_tolcancel:*``) that clears the state.
+    """
+    data = await state.get_data()
+    chat_id = data.get("tol_chat_id")
+    lang = _get_lang(data.get("tol_lang"))
+    if chat_id is None:
+        await state.clear()
+        return
+
+    if not await check_admin_direct(
+        bot_config_repo, message.from_user.id if message.from_user else None
+    ):
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip().replace(",", ".")
+    try:
+        value = float(raw)
+    except ValueError:
+        await message.reply(
+            _TOLERANCE_INVALID[lang], reply_markup=tolerance_cancel_keyboard(lang, chat_id)
+        )
+        return
+    if not 0.0 <= value <= 1.0:
+        await message.reply(
+            _TOLERANCE_INVALID[lang], reply_markup=tolerance_cancel_keyboard(lang, chat_id)
+        )
+        return
+
+    await state.clear()
+    await chat_settings_repo.set_field(chat_id, "tolerance_level", value)
+    chat_config_service.invalidate(chat_id)
+
+    await message.reply(_TOLERANCE_SAVED[lang].format(value=f"{value:g}"))
+    text, keyboard = await render_chat_panel(
+        chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    )
+    await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("adm_pnl_tolcancel:"))
+async def handle_chat_panel_tolerance_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Clear the tolerance-input state and return to the panel.
+
+    The escape hatch for ``awaiting_setting_value`` (2026-08-07 review):
+    the input handler deliberately keeps the state set on invalid input,
+    so cancelling must be possible without typing a valid float.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+    except (ValueError, IndexError):
+        await state.clear()
+        await callback.answer(_TOLERANCE_CANCELLED[lang])
+        return
+
+    await state.clear()
+    await callback.answer(_TOLERANCE_CANCELLED[lang])
     await _render_and_show_panel(
         callback, chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
     )

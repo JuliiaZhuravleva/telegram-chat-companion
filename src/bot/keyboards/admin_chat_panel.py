@@ -9,7 +9,9 @@ precedent rather than reusing ``adm_wl_chats:``. Per Decision 3, every
 button (``adm_pnl_tgl:{lang}:{chat_id}:{code}``); per Decision 2, the three
 KB/Reactions fields render as a status line + "open" button linking to their
 existing sub-panels instead, so this module never writes those three columns.
-Non-BOOL fields render read-only (F-1, deferred, owns FSM-driven editing).
+Non-BOOL fields render read-only (F-1, deferred, owns generic FSM-driven
+editing) -- except ``tolerance_level``, which gets its own small dedicated
+edit flow (``adm_pnl_tol:``, ADR-0008 Decision 10) independent of F-1.
 
 Per B-2 (ADR-0006 "Implementation notes", item 2), every ``new_fields()`` row
 (the 11 nullable/no-DEFAULT columns) gets an "inherited from default" marker
@@ -40,6 +42,28 @@ _INHERITED_MARK = {"ru": " · унаследовано", "en": " · inherited"}
 # Button text is plain (Telegram doesn't apply parse_mode to captions), but
 # very long joined/free-text values still make for an unreadable row.
 _MAX_VALUE_LEN = 40
+
+
+def tolerance_cancel_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
+    """Single-button escape hatch attached to the tolerance FSM prompt.
+
+    Without it the ``awaiting_setting_value`` state had no exit: invalid
+    input deliberately re-prompts (reject-not-clamp, ADR-0008 Decision 10),
+    so an admin who changed their mind was stuck until they typed a valid
+    float (2026-08-07 review). ``chat_id``/``lang`` ride along so the cancel
+    handler can re-render the panel the prompt came from.
+    """
+    label = "✖️ Отмена" if lang == "ru" else "✖️ Cancel"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"adm_pnl_tolcancel:{lang}:{chat_id}",
+                )
+            ]
+        ]
+    )
 
 
 def chat_panel_picker_keyboard(
@@ -191,7 +215,13 @@ def chat_panel_keyboard(
                 callback_data = f"adm_pnl_tgl:{lang}:{chat_id}:{field.code}"
             else:
                 text = f"{field.label_for(lang)}: {_format_value(field, value)}{marker}"
-                callback_data = "noop"
+                # ADR-0008 Decision 10: tolerance_level gets its own dedicated
+                # FSM edit flow (admin_chat_panel.py handler), independent of
+                # F-1's still-deferred generic non-BOOL editing -- every other
+                # non-BOOL field stays read-only ("noop") until F-1 lands.
+                callback_data = (
+                    f"adm_pnl_tol:{lang}:{chat_id}" if field.key == "tolerance_level" else "noop"
+                )
             rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
 
     rows.append(

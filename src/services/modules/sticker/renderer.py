@@ -37,12 +37,19 @@ class RenderedSticker:
         duration: Total animation duration in seconds
         frame_times: Timestamp (in seconds) of each extracted frame
         motion: Motion analysis result (optional)
+        hash_frame: PNG bytes of a single deterministic frame used for
+            pre-Vision dedup hashing (ADR-0007 Decision 2) — never the
+            Vision collage (its timestamp/motion-score labels would
+            corrupt the hash) and, for video, never a motion-selected
+            keyframe (those can land at different timestamps between two
+            re-encoded copies of the same clip).
     """
 
     collage_png: bytes
     duration: float
     frame_times: list[float]
     motion: AnimationMotion | None = None
+    hash_frame: bytes = b""
 
 
 # Collage layout: 3 columns x 2 rows = 6 frames
@@ -107,6 +114,7 @@ def _composite_collage(
     frames: list[Image.Image],
     label: str,
     motion: AnimationMotion | None = None,
+    trail_frame_index: int | None = None,
 ) -> bytes:
     """Arrange frames in a 3x2 grid with labels, return PNG bytes.
 
@@ -114,6 +122,10 @@ def _composite_collage(
         frames: List of frames to arrange
         label: Title label for collage
         motion: Optional motion analysis data for enhanced labels
+        trail_frame_index: Position (0-based) of a frame that was replaced
+            with a motion-trail ghost composite (C-1) — its label gets a
+            " ШЛЕЙФ" suffix so Vision doesn't mistake the ghosting for a
+            corrupted frame.
 
     Returns:
         PNG bytes of the composited collage
@@ -167,6 +179,9 @@ def _composite_collage(
             "Frame 5",
             "Frame 6 (end)",
         ]
+
+    if trail_frame_index is not None and 0 <= trail_frame_index < len(frame_labels):
+        frame_labels[trail_frame_index] += " ШЛЕЙФ"
 
     try:
         small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 10)
@@ -264,6 +279,7 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
             avg_motion=avg_motion,
             peak_motion_time=peak_time,
             motion_scores=motion_scores,
+            is_oscillating=analyzer._detect_oscillation(motion_scores),
         )
     except Exception as exc:
         logger.warning("Motion analysis failed, using fallback", error=str(exc))
@@ -281,12 +297,39 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
             logger.warning("Failed to render TGS keyframe", frame_num=frame_num, error=str(exc))
             frames.append(Image.new("RGBA", default_size))
 
-    collage_png = _composite_collage(frames, "ANIMATED STICKER", motion=motion)
+    # Motion-trail substitution (C-1): when the oscillation heuristic flags
+    # rapid back-and-forth movement (e.g. a head shaking side to side), swap
+    # the keyframe closest to the motion peak for a ghosted trail composite
+    # (_create_motion_trail_frame) built from the frames already sampled for
+    # motion analysis above — zero extra rlottie render cost, same reuse
+    # idiom as hash_frame below. Non-oscillating stickers are unaffected
+    # (current route preserved).
+    trail_frame_pos: int | None = None
+    if motion.is_oscillating and motion.motion_scores and sampled_frames:
+        peak_idx = motion.motion_scores.index(max(motion.motion_scores))
+        sampled_peak_idx = min(peak_idx // sampling, len(sampled_frames) - 1)
+        trail_frame_pos = min(
+            range(len(keyframe_indices)), key=lambda i: abs(keyframe_indices[i] - peak_idx)
+        )
+        frames[trail_frame_pos] = _create_motion_trail_frame(sampled_frames, sampled_peak_idx)
+
+    collage_png = _composite_collage(
+        frames, "ANIMATED STICKER", motion=motion, trail_frame_index=trail_frame_pos
+    )
+
+    # Dedup hash frame (ADR-0007 Decision 2): reuse sampled_frames[0], which
+    # is anim.render_pillow_frame(frame_num=0) since the sampling loop above
+    # starts at frame_num=0 — zero extra render cost, bit-for-bit
+    # deterministic for identical Lottie input.
+    hash_buf = io.BytesIO()
+    sampled_frames[0].convert("RGBA").save(hash_buf, format="PNG")
+
     return RenderedSticker(
         collage_png=collage_png,
         duration=duration,
         frame_times=keyframe_times,
         motion=motion,
+        hash_frame=hash_buf.getvalue(),
     )
 
 
@@ -335,6 +378,14 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
         if total_frames <= 0 or duration <= 0:
             raise StickerRenderError(f"Invalid video: frames={total_frames}, duration={duration}")
 
+        # Dedup hash frame (ADR-0007 Decision 2): a dedicated t=0 anchor
+        # frame, extracted BEFORE motion analysis and never reused from the
+        # motion-selected keyframes below — those land at motion-*peak*
+        # timestamps, which can shift between two re-encoded copies of the
+        # same video even though the underlying content is identical, and
+        # comparing two different moments would defeat the dedup check.
+        hash_frame = await _extract_hash_anchor_frame(input_path, tmp_dir)
+
         # Analyze motion via ffmpeg mestimate filter
         analyzer = MotionAnalyzer(target_keyframes=_FRAME_COUNT)
         try:
@@ -352,26 +403,7 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
 
         for idx, timestamp in zip(keyframe_indices, frame_times, strict=True):
             frame_path = Path(tmp_dir) / f"frame_{idx}.png"
-
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-y",
-                "-ss",
-                f"{timestamp:.3f}",
-                "-i",
-                str(input_path),
-                "-frames:v",
-                "1",
-                "-vf",
-                f"scale={_FRAME_SIZE}:{_FRAME_SIZE}:force_original_aspect_ratio=decrease,"
-                f"pad={_FRAME_SIZE}:{_FRAME_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
-                "-pix_fmt",
-                "rgba",
-                str(frame_path),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15)
+            await _ffmpeg_extract_frame(input_path, frame_path, timestamp)
 
             if frame_path.exists():
                 frames.append(Image.open(frame_path).convert("RGBA"))
@@ -381,12 +413,41 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
         if not frames:
             raise StickerRenderError("No frames extracted from WebM")
 
-        collage_png = _composite_collage(frames, "VIDEO STICKER", motion=motion)
+        # Motion-trail substitution (C-1): mirrors the TGS branch above, but
+        # WebM has no cheap pre-rendered frame list to reuse, so the trail's
+        # source frames are extracted on demand (only when oscillation is
+        # detected) via the same ffmpeg helper the keyframe loop already
+        # uses. Non-oscillating stickers are unaffected (current route
+        # preserved), and any ffmpeg failure here fails open — no trail
+        # substitution, not a render error.
+        trail_frame_pos: int | None = None
+        if motion.is_oscillating and motion.motion_scores:
+            peak_idx = motion.motion_scores.index(max(motion.motion_scores))
+            peak_time = (peak_idx / total_frames) * duration if total_frames > 0 else 0.0
+            trail_sources = await _extract_trail_frames(
+                input_path,
+                tmp_dir,
+                peak_time=peak_time,
+                duration=duration,
+                total_frames=total_frames,
+            )
+            if trail_sources:
+                trail_frame_pos = min(
+                    range(len(keyframe_indices)), key=lambda i: abs(keyframe_indices[i] - peak_idx)
+                )
+                frames[trail_frame_pos] = _create_motion_trail_frame(
+                    trail_sources, len(trail_sources) - 1
+                )
+
+        collage_png = _composite_collage(
+            frames, "VIDEO STICKER", motion=motion, trail_frame_index=trail_frame_pos
+        )
         return RenderedSticker(
             collage_png=collage_png,
             duration=duration,
             frame_times=frame_times,
             motion=motion,
+            hash_frame=hash_frame,
         )
 
     except StickerRenderError:
@@ -397,6 +458,94 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
         raise StickerRenderError(f"WebM rendering failed: {exc}") from exc
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def _ffmpeg_extract_frame(input_path: Path, out_path: Path, timestamp: float) -> None:
+    """Extract a single scaled+padded RGBA frame at ``timestamp`` via ffmpeg -ss.
+
+    Shared by the motion-keyframe extraction loop and the dedup anchor-frame
+    extraction (`_extract_hash_anchor_frame`) — same command, different
+    timestamp source. Writes to ``out_path`` (PNG, by extension); silently
+    leaves it missing on ffmpeg failure, same fail-open contract callers
+    already handle for the keyframe loop.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{timestamp:.3f}",
+        "-i",
+        str(input_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale={_FRAME_SIZE}:{_FRAME_SIZE}:force_original_aspect_ratio=decrease,"
+        f"pad={_FRAME_SIZE}:{_FRAME_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+        "-pix_fmt",
+        "rgba",
+        str(out_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.wait_for(proc.wait(), timeout=15)
+
+
+async def _extract_hash_anchor_frame(input_path: Path, tmp_dir: str) -> bytes:
+    """Extract the t=0 dedup-hash anchor frame (ADR-0007 Decision 2).
+
+    Deliberately NOT one of the motion-selected keyframes (see caller)
+    Falls back to a blank RGBA frame on ffmpeg failure — mirrors the
+    existing blank-frame fallback in the keyframe extraction loop, and
+    keeps ``hash_frame`` a well-formed image `compute_image_hash()` can
+    always parse (dedup itself fails open on a *degenerate* hash, not on
+    an unparseable one).
+    """
+    anchor_path = Path(tmp_dir) / "hash_anchor.png"
+    await _ffmpeg_extract_frame(input_path, anchor_path, 0.0)
+    if anchor_path.exists():
+        return anchor_path.read_bytes()
+
+    logger.warning("Failed to extract dedup anchor frame, using blank fallback")
+    buf = io.BytesIO()
+    Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE)).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def _extract_trail_frames(
+    input_path: Path,
+    tmp_dir: str,
+    *,
+    peak_time: float,
+    duration: float,
+    total_frames: int,
+    trail_length: int = 3,
+) -> list[Image.Image]:
+    """Extract ``trail_length`` frames leading up to (and including) the motion
+    peak, as source material for ``_create_motion_trail_frame`` (C-1).
+
+    Spacing mirrors the TGS motion-analysis stride (every 3rd native frame),
+    so the WebM and TGS trail composites span a comparable slice of real
+    time. Only called when ``AnimationMotion.is_oscillating`` is True, so
+    this extra ffmpeg cost is paid only for stickers that actually benefit.
+
+    Returns:
+        Up to ``trail_length`` RGBA frames, oldest first. Empty list if
+        ffmpeg fails to produce any of them — caller must fail open (skip
+        the trail substitution), same convention as the rest of this
+        module's ffmpeg extraction helpers.
+    """
+    frame_duration = duration / total_frames if total_frames > 0 else 1 / 30
+    step = max(frame_duration * 3, 0.05)
+    timestamps = [max(0.0, peak_time - step * (trail_length - 1 - i)) for i in range(trail_length)]
+
+    frames: list[Image.Image] = []
+    for i, ts in enumerate(timestamps):
+        frame_path = Path(tmp_dir) / f"trail_{i}.png"
+        await _ffmpeg_extract_frame(input_path, frame_path, ts)
+        if frame_path.exists():
+            frames.append(Image.open(frame_path).convert("RGBA"))
+
+    return frames
 
 
 async def _probe_video(path: str) -> tuple[int, float]:

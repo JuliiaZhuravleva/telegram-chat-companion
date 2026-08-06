@@ -15,9 +15,10 @@ from typing import Any, Literal
 import structlog
 from aiogram import Bot, types
 
-from src.database.repositories.stickers import StickerRepository
+from src.database.repositories.stickers import _VISION_DERIVED_COLUMNS, StickerRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
+from src.services.modules.sticker.dedup import compute_image_hash, find_duplicate, hamming_distance
 from src.services.modules.sticker.models import (
     ReanalyzeResult,
     StickerLearningResult,
@@ -129,6 +130,51 @@ class StickerLearningService:
                     failure_reason="vision",
                 )
 
+        # Duplicate detection via image hash, BEFORE the Vision call (ADR-0007).
+        # Skipped on force_reanalyze: an explicit admin re-analyze must always
+        # run Vision, never silently resolve to a copy of another sticker.
+        if sticker_type == "static":
+            hash_source = image_data
+        else:
+            hash_source = timing_metadata.hash_frame if timing_metadata else b""
+        try:
+            image_hash: str | None = compute_image_hash(hash_source)
+        except Exception:
+            logger.warning(
+                "Sticker hash computation failed, skipping dedup check",
+                file_unique_id=file_unique_id,
+                sticker_type=sticker_type,
+            )
+            image_hash = None
+
+        if image_hash is not None and not force_reanalyze:
+            candidate_rows = await self._repo.get_dedup_candidates()
+            candidates = [
+                (
+                    r["file_unique_id"],
+                    r["image_hash"],
+                    r["created_at"],
+                    r["duplicate_of_file_unique_id"],
+                )
+                for r in candidate_rows
+            ]
+            duplicate_of = find_duplicate(image_hash, candidates)
+            if duplicate_of:
+                dup_result = await self._save_duplicate(
+                    sticker=sticker,
+                    file_unique_id=file_unique_id,
+                    sticker_type=sticker_type,
+                    image_hash=image_hash,
+                    duplicate_of=duplicate_of,
+                    collage_png=vision_image if sticker_type != "static" else None,
+                    preceding_messages=preceding_messages,
+                )
+                if dup_result is not None:
+                    return dup_result
+                # Canonical row vanished between the candidate scan and the
+                # copy (e.g. deleted concurrently) — fail open, fall through
+                # to the normal Vision pipeline below.
+
         # Get pack context (other stickers from same set)
         pack_context: list[str] | None = None
         if sticker.set_name:
@@ -193,6 +239,8 @@ class StickerLearningService:
         contexts = parsed.get("contexts")
         tags = parsed.get("tags") or []
         character = parsed.get("character")
+        # ADR-0008: already validated (reject-not-clamp) by _parse_vision_response.
+        explicitness_score = parsed.get("explicit")
         analysis_failed = not bool(visual)
         # Determine structured failure reason: API error/content_filter from exception,
         # or 'empty' when the API returned successfully but produced no usable result.
@@ -231,6 +279,12 @@ class StickerLearningService:
             character_or_meme=character,
             usage_contexts=usage_contexts,
             analysis_failed=analysis_failed,
+            image_hash=image_hash,
+            # This row is a Vision-analyzed result, not a copy — clears any
+            # stale duplicate_of_file_unique_id if this is a re-analyze of a
+            # previously-detected duplicate (ADR-0007).
+            duplicate_of_file_unique_id=None,
+            explicitness_score=explicitness_score,
         )
 
         # Save debug artifacts if debug mode is enabled
@@ -300,6 +354,139 @@ class StickerLearningService:
             analysis_failed=analysis_failed,
             failure_reason=_failure_reason,
             collage_png=vision_image if sticker_type != "static" else None,
+            explicitness_score=explicitness_score,
+        )
+
+    # ── Duplicate copy (ADR-0007) ───────────────────────────────────────
+
+    async def _save_duplicate(
+        self,
+        *,
+        sticker: types.Sticker,
+        file_unique_id: str,
+        sticker_type: str,
+        image_hash: str,
+        duplicate_of: str,
+        collage_png: bytes | None,
+        preceding_messages: list[str] | None,
+    ) -> StickerLearningResult | None:
+        """Copy a canonical sticker's Vision-derived fields onto a detected duplicate.
+
+        Skips `self._ai.analyze_image` / `_generate_and_store_embedding` entirely
+        (ADR-0007 Decision 7). Re-applies the format auto-tag for THIS sticker's
+        own type — a cross-type hash match (e.g. a static re-post of a picture
+        that also exists as an animated sticker) must not carry over the
+        canonical's format tag verbatim (pitfall 1).
+
+        Returns:
+            The learning result on success, or ``None`` if the canonical row
+            disappeared — or no longer has a live analysis to copy — between
+            the candidate scan and here. Callers must fall back to the
+            normal Vision pipeline in that case (fail open).
+        """
+        canonical = await self._repo.get_by_file_unique_id(duplicate_of)
+        # A canonical whose analysis was cleared ("Очистить анализ") or whose
+        # re-analyze failed drops out of get_dedup_candidates(), but rows that
+        # still point at it via duplicate_of keep it reachable through
+        # find_duplicate()'s chain flattening. Copying from it would mint a
+        # permanently dead row: no description, analysis_failed=false, never
+        # re-analyzed because learn() short-circuits on existing rows
+        # (2026-08-07 review). Same fail-open contract as the vanished case.
+        if (
+            canonical is None
+            or not canonical.get("visual_description")
+            or canonical.get("analysis_failed")
+        ):
+            logger.warning(
+                "Duplicate canonical missing or no longer analyzed, falling back to Vision",
+                file_unique_id=file_unique_id,
+                duplicate_of=duplicate_of,
+                canonical_exists=canonical is not None,
+            )
+            return None
+
+        canonical_hash = canonical.get("image_hash")
+        logger.info(
+            "Sticker duplicate detected via image hash",
+            file_unique_id=file_unique_id,
+            duplicate_of=duplicate_of,
+            hamming_distance=(
+                hamming_distance(image_hash, canonical_hash) if canonical_hash else None
+            ),
+        )
+
+        # Single source of truth for "what counts as Vision-derived" (ADR-0007
+        # Decision 7) — copied verbatim except style_tags (pitfall 1, below).
+        copied = {col: canonical.get(col) for col in _VISION_DERIVED_COLUMNS}
+
+        # Pitfall 1: re-apply the format tag for THIS sticker's own type,
+        # never copy the canonical's format tag verbatim.
+        copied_tags = [t for t in (copied["style_tags"] or []) if t not in ("animated", "video")]
+        if sticker_type == "animated":
+            copied_tags.append("animated")
+        elif sticker_type == "video":
+            copied_tags.append("video")
+
+        # Usage context is derived from THIS ingestion's preceding messages,
+        # same as any new sticker — not copied from canonical (Decision 7:
+        # "this row's own usage log starts empty").
+        usage_contexts: list[str] | None = None
+        if preceding_messages:
+            context_text = " | ".join(preceding_messages[:3])
+            if len(context_text) >= 5:
+                usage_contexts = [context_text[:200]]
+
+        visual = copied["visual_description"]
+        emotion = copied["emotion"]
+        character = copied["character_or_meme"]
+        # ADR-0008 Decision 7: copied verbatim, including a NULL if the
+        # canonical row predates this feature (accepted, self-healing edge
+        # case — see the ADR).
+        explicitness_score = copied["explicitness_score"]
+
+        await self._repo.save_sticker(
+            file_unique_id=file_unique_id,
+            file_id=sticker.file_id,
+            set_name=sticker.set_name,
+            emoji=sticker.emoji,
+            is_animated=sticker.is_animated,
+            is_video=sticker.is_video,
+            visual_description=visual,
+            original_vision_description=copied["original_vision_description"],
+            emotion=emotion,
+            suggested_contexts=copied["suggested_contexts"],
+            style_tags=copied_tags or None,
+            character_or_meme=character,
+            usage_contexts=usage_contexts,
+            analysis_failed=False,
+            image_hash=image_hash,
+            duplicate_of_file_unique_id=duplicate_of,
+            explicitness_score=explicitness_score,
+        )
+
+        embedding = copied["description_embedding"]
+        if embedding is not None:
+            await self._repo.update_embedding(file_unique_id, embedding)
+
+        logger.info(
+            "Learned new sticker (duplicate copy)",
+            file_unique_id=file_unique_id,
+            set_name=sticker.set_name,
+            sticker_type=sticker_type,
+            duplicate_of=duplicate_of,
+        )
+
+        return StickerLearningResult(
+            is_new=True,
+            file_unique_id=file_unique_id,
+            visual_description=visual,
+            emotion=emotion,
+            character_or_meme=character,
+            analysis_failed=False,
+            failure_reason=None,
+            collage_png=collage_png,
+            duplicate_of=duplicate_of,
+            explicitness_score=explicitness_score,
         )
 
     # ── Admin re-analyze ─────────────────────────────────────────────
@@ -365,6 +552,7 @@ class StickerLearningService:
         *,
         limit: int = 5,
         min_similarity: float = 0.7,
+        tolerance_level: float,
     ) -> list[StickerSearchResult]:
         """Find stickers relevant to a text context.
 
@@ -372,6 +560,9 @@ class StickerLearningService:
             context: Text describing what kind of sticker is needed.
             limit: Maximum results.
             min_similarity: Minimum cosine similarity threshold.
+            tolerance_level: Ceiling on candidate ``explicitness_score``
+                (ADR-0008 Decision 6), threaded through unchanged to
+                ``StickerRepository.search_by_embedding``.
 
         Returns:
             List of StickerSearchResult sorted by descending similarity.
@@ -386,6 +577,7 @@ class StickerLearningService:
             embedding_result.embedding,
             limit=limit,
             min_similarity=min_similarity,
+            tolerance_level=tolerance_level,
         )
 
         return [
@@ -720,6 +912,26 @@ class StickerLearningService:
 
                     lines.append(label)
 
+                # Oscillation hint (C-1): the motion heuristic in motion.py
+                # flags rapid direction-reversal (shaking/wobbling, e.g. a
+                # head turning side to side) that a single peak keyframe
+                # fails to convey — nudge Vision to read it as repeated
+                # quick movement, and explain the ghosted trail frame among
+                # the 6 above (renderer.py's _create_motion_trail_frame)
+                # so it isn't mistaken for a corrupted image.
+                if motion.is_oscillating:
+                    lines.append(
+                        "⚠️ ОБНАРУЖЕНА ОСЦИЛЛЯЦИЯ: движение резко меняет направление "
+                        "туда-сюда (вероятно тряска / мотание головой / дрожание), "
+                        "а не единое плавное движение к одной точке."
+                    )
+                    lines.append(
+                        "Один из кадров выше — это «ШЛЕЙФ» (наложение нескольких "
+                        "последних кадров с затуханием прозрачности): это осознанная "
+                        "визуализация тряски, а не повреждённое изображение — "
+                        "используй его, чтобы понять характер и направление движения."
+                    )
+
                 lines.append("")
             else:
                 # Fallback for timing without motion
@@ -776,6 +988,26 @@ class StickerLearningService:
                         label = f"  • t={time:.1f}с (движение={motion_score:.2f})"
 
                     lines.append(label)
+
+                # Oscillation hint (C-1): the motion heuristic in motion.py
+                # flags rapid direction-reversal (shaking/wobbling, e.g. a
+                # head turning side to side) that a single peak keyframe
+                # fails to convey — nudge Vision to read it as repeated
+                # quick movement, and explain the ghosted trail frame among
+                # the 6 above (renderer.py's _create_motion_trail_frame)
+                # so it isn't mistaken for a corrupted image.
+                if motion.is_oscillating:
+                    lines.append(
+                        "⚠️ ОБНАРУЖЕНА ОСЦИЛЛЯЦИЯ: движение резко меняет направление "
+                        "туда-сюда (вероятно тряска / мотание головой / дрожание), "
+                        "а не единое плавное движение к одной точке."
+                    )
+                    lines.append(
+                        "Один из кадров выше — это «ШЛЕЙФ» (наложение нескольких "
+                        "последних кадров с затуханием прозрачности): это осознанная "
+                        "визуализация тряски, а не повреждённое изображение — "
+                        "используй его, чтобы понять характер и направление движения."
+                    )
 
                 lines.append("")
             else:
@@ -853,13 +1085,21 @@ class StickerLearningService:
             lines.append('- "Кадры почти одинаковые" — БЕСПОЛЕЗНО')
 
         lines.append("")
+        lines.append("## ОЦЕНКА ОТКРОВЕННОСТИ")
+        lines.append(
+            "Оцени, насколько стикер откровенный/пошлый, числом от 0.0 до 1.0: "
+            "0.0 = совершенно безобидный, 1.0 = максимально откровенный/18+."
+        )
+
+        lines.append("")
         lines.append("## ФОРМАТ ОТВЕТА (JSON):")
         lines.append("{")
         lines.append('  "visual": "[Текст если есть]. Кто/что изображено + смысл",')
         lines.append('  "emotion": "основная эмоция (1 слово)",')
         lines.append('  "contexts": ["когда использовать 1", "когда использовать 2", ... 3-5],')
         lines.append('  "tags": ["meme", "reaction", "cute", ...],')
-        lines.append('  "character": "имя персонажа/мема или null"')
+        lines.append('  "character": "имя персонажа/мема или null",')
+        lines.append('  "explicit": 0.0-1.0')
         lines.append("}")
 
         return "\n".join(lines)
@@ -1013,6 +1253,11 @@ class StickerLearningService:
                 "none",
             ):
                 result["character"] = _unescape(character_match.group(1))
+            # explicit (ADR-0008 Decision 4) — bare or quoted number, unlike
+            # the string fields above.
+            explicit_match = re.search(r'"explicit"\s*:\s*"?([-+]?[0-9]*\.?[0-9]+)"?', cleaned)
+            if explicit_match:
+                result["explicit"] = _validate_explicitness_score(explicit_match.group(1))
             if result:
                 logger.info(
                     "Extracted fields from truncated JSON via regex",
@@ -1060,7 +1305,35 @@ class StickerLearningService:
         ):
             result["context"] = context_val.strip()
 
+        # explicitness score (ADR-0008 Decision 4) — reject-not-clamp
+        # validation; only attempted when the caller's prompt actually asked
+        # for this key (merge/pack-context prompts never include it, so this
+        # stays a silent no-op for them rather than a spurious warning).
+        if "explicit" in data:
+            result["explicit"] = _validate_explicitness_score(data["explicit"])
+
         return result
+
+
+def _validate_explicitness_score(raw: Any) -> float | None:
+    """Validate a Vision-reported explicitness score (ADR-0008 Decision 4).
+
+    Reject, don't clamp: a non-numeric value or one outside [0.0, 1.0]
+    resolves to ``None`` (logged at warning) rather than being coerced into
+    range — a wildly-wrong model output (e.g. a percentage like ``"70"``)
+    must not manufacture a false sense of a real score. This keeps Decision
+    3's fail-closed guarantee intact for exactly the case where the model's
+    output can't be trusted.
+    """
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Vision returned non-numeric explicitness score", raw_value=raw)
+        return None
+    if not (0.0 <= score <= 1.0):
+        logger.warning("Vision returned out-of-range explicitness score", raw_value=raw)
+        return None
+    return score
 
 
 def _detect_sticker_type(sticker: types.Sticker) -> str:

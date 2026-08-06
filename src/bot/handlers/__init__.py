@@ -20,7 +20,9 @@ from src.bot.handlers.rules import router as rules_router
 
 # Main router that includes all sub-routers.
 # Order matters: admin first (own commands + adm_ callbacks), then admin_sticker
-# (adm_stk_* callbacks + reply handler), then admin_kb (adm_kb_* callbacks +
+# (adm_stk_* callbacks + reply handler; also the admin's DM sticker check, B-1 —
+# must precede media_router so an admin's own DM sticker never gets silently
+# auto-learned by handle_sticker_message), then admin_kb (adm_kb_* callbacks +
 # organizer-add reply handler), then admin_reactions (adm_react_* callbacks,
 # R-D1), then admin_chat_panel (adm_pnl_* callbacks, B-1 -- own prefix, no
 # overlap with the others), then admin_defaults (adm_defs_*/adm_defs_tgl_*

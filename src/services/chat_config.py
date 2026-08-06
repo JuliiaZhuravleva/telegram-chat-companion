@@ -145,6 +145,7 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "sticker_reply_to_sticker_chance",
         "image_comment_sticker_enabled",
         "image_comment_sticker_chance",
+        "tolerance_level",
         "image_analysis_enabled",
         "save_messages",
         "rules_enabled",

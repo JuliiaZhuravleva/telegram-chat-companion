@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T17:23:10Z",
+  "role": "specialist",
+  "item_id": "D-1",
+  "verdict": "PASS",
+  "cost_usd": 2.81,
+  "notes": "ADR-0008 (docs/decisions/): explicitness_score (sticker_knowledge, Vision-derived, nullable no-DEFAULT) + tolerance_level (chat_settings, nullable no-DEFAULT, ChatConfig dataclass default 0.5 mirroring sticker_reply_to_sticker_chance precedent, no bot_config seed row). Comparison direction pinned to one named function (is_within_tolerance: score<=tolerance, ceiling not floor) so D-4 has a single assertion point. NULL fail-closed as explicit IS NOT NULL guard (rejected 0.0-default and 1.0-default sentinel alternatives). Score source: piggyback the existing single Vision call for new/re-analyzed stickers; backfill of existing catalog is a narrow explicitness-ONLY one-off script (scripts/backfill_explicitness.py, first Python one-off in this repo), NOT a full re-analysis, NOT touching analyzed_at/visual_description -- avoids doubling Vision spend and perturbing already-good descriptions; targets rows search_by_embedding already treats as eligible-but-unscored. Gating point: one SQL predicate threaded through the 3 existing candidate call sites (pipeline.py, media.py) which already hold ChatConfig in scope. Explicit non-abuse-module rejection with file:line evidence. Key finding beyond the item title: chat-settings-panel's F-1 (generic FSM editing of non-BOOL fields) is blocked/deferred with no landing estimate, so D-3 cannot depend on it -- ADR mandates a minimal single-field FSM reusing AdminStates.awaiting_setting_value (grep-verified unused anywhere in src or tests), framed as an explicit two-way door. Also flags a concrete schema pitfall: migration 020 already had to fix rules_mode/rules_enabled for shadowing bot_config.default_* via a SQL DEFAULT -- both new columns mandated nullable/no-DEFAULT, and tolerance_level must be added to ChatConfigService._CHAT_CONFIG_FIELDS or the merge silently no-ops. No src/ or alembic changes -- architect stays doc-only; migration DDL given as illustrative snippets only.",
+  "result": {
+    "kind": "file",
+    "ref": "docs/decisions/ADR-0008-sticker-explicitness-tolerance.md",
+    "verification": "grep -n confirms full section structure (Context/10 Decisions/Consequences/Rejected alternatives/Implementation notes for D-2+D-3+D-4/Out of scope). All file:line citations re-verified against the live tree after drafting; 2 were wrong on first pass (VISION_DERIVED_COLUMNS actual location, FieldType docstring lines) and corrected before submission."
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

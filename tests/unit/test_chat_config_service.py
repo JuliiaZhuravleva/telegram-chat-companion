@@ -198,6 +198,48 @@ class TestMerge:
         assert config.reactions_enabled is True
         assert config.reactions_history_enabled is False
 
+    def test_tolerance_level_defaults_to_point_five(self):
+        """ADR-0008 Decision 1/8: no bot_config seed row and no SQL DEFAULT --
+        the dataclass default (0.5) is the only layer-1 fallback."""
+        service, _, _ = _make_service()
+        config = service._merge(chat_id=1, global_overrides={}, chat_row=None)
+        assert config.tolerance_level == 0.5
+
+    def test_tolerance_level_from_global_default(self):
+        """bot_config.default_tolerance_level set, no per-chat override."""
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={"tolerance_level": 1.0},
+            chat_row=None,
+        )
+        assert config.tolerance_level == 1.0
+
+    def test_tolerance_level_per_chat_overrides_global(self):
+        """Per-chat value wins over the global default when both are set
+        (ADR-0008 Decision 1's stated three-layer precedent)."""
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={"tolerance_level": 1.0},
+            chat_row={"tolerance_level": 0.2},
+        )
+        assert config.tolerance_level == 0.2
+
+    def test_tolerance_level_null_chat_row_value_falls_back_to_global(self):
+        """A chat_settings row that exists but has tolerance_level=NULL must
+        NOT shadow the global default with None -- only non-None per-chat
+        values participate in layer 3 (mirrors ``test_none_values_do_not_override``
+        for the pre-existing fields; this is the tolerance-specific instance
+        of the exact bug class migration 020 fixed)."""
+        service, _, _ = _make_service()
+        config = service._merge(
+            chat_id=1,
+            global_overrides={"tolerance_level": 0.8},
+            chat_row={"tolerance_level": None},
+        )
+        assert config.tolerance_level == 0.8
+
 
 # ---------------------------------------------------------------------------
 # get_config() tests — caching behavior
@@ -283,3 +325,49 @@ class TestGetConfig:
 
         # Global defaults re-fetched after invalidate_all
         assert bot_repo.get_defaults.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_brand_new_chat_tolerance_defaults_to_point_five(self):
+        """ADR-0008 D-4: a brand-new chat (no chat_settings row, no global
+        override) resolves tolerance_level to 0.5 through the *full*
+        get_config() path -- repo mocks stand in for "row absent"/"no global
+        override", not just the dataclass default read in isolation."""
+        service, bot_repo, chat_repo = _make_service()
+        bot_repo.get_defaults.return_value = {}
+        chat_repo.get.return_value = None
+
+        config = await service.get_config(999)
+        assert config.tolerance_level == 0.5
+
+    @pytest.mark.asyncio
+    async def test_get_config_three_layer_tolerance_precedence(self):
+        """Full get_config() path, three scenarios in one test to pin the
+        precedence order ADR-0008's D-4 notes name explicitly: per-chat wins
+        over global; per-chat NULL falls back to global; both absent falls
+        back to the dataclass default."""
+        service, bot_repo, chat_repo = _make_service()
+
+        # Global set, no per-chat row -> global wins.
+        bot_repo.get_defaults.return_value = {"tolerance_level": 0.9}
+        chat_repo.get.return_value = None
+        config = await service.get_config(1)
+        assert config.tolerance_level == 0.9
+
+        # Per-chat override present -> per-chat wins over global.
+        service.invalidate_all()
+        chat_repo.get.return_value = {"tolerance_level": 0.1}
+        config = await service.get_config(2)
+        assert config.tolerance_level == 0.1
+
+        # Per-chat row exists but tolerance_level is NULL -> falls back to global.
+        service.invalidate_all()
+        chat_repo.get.return_value = {"tolerance_level": None}
+        config = await service.get_config(3)
+        assert config.tolerance_level == 0.9
+
+        # Neither layer set -> dataclass default.
+        service.invalidate_all()
+        bot_repo.get_defaults.return_value = {}
+        chat_repo.get.return_value = None
+        config = await service.get_config(4)
+        assert config.tolerance_level == 0.5

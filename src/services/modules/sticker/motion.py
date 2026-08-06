@@ -20,6 +20,14 @@ from PIL import Image, ImageChops, ImageStat
 
 logger = structlog.get_logger(__name__)
 
+# Raw mean frame difference (fraction of the theoretical canvas maximum,
+# 255×3 per pixel) below which motion counts as imperceptible. Guards the
+# observed-max normalization in _calculate_frame_differences from amplifying
+# encoder noise on a near-static animation into full-scale score swings and a
+# phantom oscillation verdict. Realistic sticker motion measures ~0.01-0.08
+# on this scale (2026-08-07 review); single-pixel noise is ~1e-4.
+_MIN_MEANINGFUL_RAW_DIFF = 0.005
+
 
 @dataclass
 class AnimationMotion:
@@ -32,6 +40,14 @@ class AnimationMotion:
         avg_motion: Average motion score (0.0 to 1.0)
         peak_motion_time: Timestamp of highest motion intensity
         motion_scores: Per-frame motion scores (normalized 0-1)
+        is_oscillating: True when the motion-score sequence reverses
+            direction repeatedly (e.g. a head shaking side to side) rather
+            than following a single smooth rise/fall to one peak. See
+            ``MotionAnalyzer._detect_oscillation``. Renderer/prompt code
+            uses this to (C-1): substitute a motion-trail ghost frame for
+            the keyframe closest to the peak, and add a vision-prompt hint
+            — both no-ops when False, so non-oscillating stickers keep the
+            exact prior collage/prompt (current route preserved).
     """
 
     duration: float
@@ -40,6 +56,7 @@ class AnimationMotion:
     avg_motion: float
     peak_motion_time: float
     motion_scores: list[float]
+    is_oscillating: bool = False
 
 
 class MotionAnalyzer:
@@ -119,6 +136,7 @@ class MotionAnalyzer:
             avg_motion=avg_motion,
             peak_motion_time=peak_time,
             motion_scores=motion_scores,
+            is_oscillating=self._detect_oscillation(motion_scores),
         )
 
     async def analyze_tgs_frames(
@@ -178,7 +196,57 @@ class MotionAnalyzer:
             avg_motion=avg_motion,
             peak_motion_time=peak_time,
             motion_scores=motion_scores,
+            is_oscillating=self._detect_oscillation(motion_scores),
         )
+
+    def _detect_oscillation(
+        self,
+        motion_scores: list[float],
+        *,
+        min_reversals: int = 3,
+        min_delta: float = 0.15,
+    ) -> bool:
+        """Detect rapid back-and-forth motion (shaking/wobbling) via direction reversals.
+
+        A single deliberate gesture (e.g. a punch) produces motion scores that
+        rise smoothly to one peak and fall back — at most one reversal. A
+        shake/wobble (e.g. a cat rapidly turning its head side to side)
+        produces several significant rises and falls in quick succession.
+        Counts direction reversals in ``motion_scores``, ignoring changes
+        smaller than ``min_delta`` so sensor/encoding noise on an otherwise
+        flat or smoothly-ramping signal doesn't get miscounted as motion —
+        that noise floor is what keeps a single-peak gesture (and a static
+        near-zero signal) classified as non-oscillating.
+
+        Args:
+            motion_scores: Per-frame motion scores (normalized 0-1).
+            min_reversals: Minimum number of significant direction reversals
+                required to classify the sequence as oscillating.
+            min_delta: Minimum score change (0-1) to count as a genuine
+                directional move rather than noise.
+
+        Returns:
+            True if the sequence reverses direction at least ``min_reversals``
+            times with each reversal exceeding ``min_delta``.
+        """
+        if len(motion_scores) < 3:
+            return False
+
+        reversals = 0
+        direction = 0  # -1 falling, 0 unknown (no significant move yet), +1 rising
+        last_extreme = motion_scores[0]
+
+        for score in motion_scores[1:]:
+            delta = score - last_extreme
+            if abs(delta) < min_delta:
+                continue
+            new_direction = 1 if delta > 0 else -1
+            if direction != 0 and new_direction != direction:
+                reversals += 1
+            direction = new_direction
+            last_extreme = score
+
+        return reversals >= min_reversals
 
     def _parse_scdet_output(self, stderr: str) -> list[float]:
         """Parse motion scores from ffmpeg scdet filter output.
@@ -220,11 +288,20 @@ class MotionAnalyzer:
         (avoids a slow Python pixel-by-pixel loop: ~100-1000x faster on typical
         sticker frames at 256-512 px).
 
+        Scores are normalized by the animation's own strongest transition
+        (observed max), mirroring ``_parse_scdet_output`` — both producers of
+        ``AnimationMotion.motion_scores`` must honour the same 0-1 contract,
+        because ``_detect_oscillation``'s ``min_delta=0.15`` is calibrated for
+        it. Normalizing by the theoretical max (canvas × 255 × 3) left
+        realistic sticker motion at ~0.01-0.08 and made oscillation detection
+        unreachable for every .tgs animation (2026-08-07 review).
+
         Returns:
             List of motion scores (0-1), length = len(frames). First element is
-            always 0.0 (no prior frame to compare against).
+            always 0.0 (no prior frame to compare against). All-zero when the
+            strongest transition is imperceptible (below the noise floor).
         """
-        scores: list[float] = []
+        raw: list[float] = []
 
         for i in range(len(frames) - 1):
             frame1 = frames[i].convert("RGB")
@@ -237,14 +314,22 @@ class MotionAnalyzer:
             # stat.sum gives [R_total, G_total, B_total] — sum all channels
             total_diff = sum(stat.sum)
 
-            # Normalize by image size and max possible difference (255*3 per pixel)
+            # Mean per-pixel change as a fraction of the maximum possible
+            # (255 per channel × 3) — the absolute scale the noise floor
+            # below is calibrated against.
             width, height = frame1.size
             max_diff = width * height * 255 * 3
-            normalized_score = total_diff / max_diff if max_diff > 0 else 0.0
-            scores.append(normalized_score)
+            raw.append(total_diff / max_diff if max_diff > 0 else 0.0)
 
         # Prepend zero: first frame has no preceding frame to diff against
-        return [0.0] + scores
+        raw = [0.0] + raw
+
+        max_score = max(raw)
+        if max_score < _MIN_MEANINGFUL_RAW_DIFF:
+            # Near-static animation: scaling encoder noise up to full range
+            # would manufacture phantom oscillation — report "no motion".
+            return [0.0] * len(raw)
+        return [score / max_score for score in raw]
 
     def _interpolate_motion_scores(
         self,

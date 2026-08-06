@@ -10,6 +10,8 @@ from aiogram.types import Message
 
 from src.bot.handlers.admin_sticker import (
     _extract_file_unique_id_from_reply,
+    handle_admin_sticker_check,
+    handle_admin_sticker_dm_analyze,
     handle_admin_sticker_reply,
     handle_clear,
     handle_clear_ask,
@@ -21,10 +23,12 @@ from src.bot.keyboards.admin_sticker import (
     _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
+    sticker_dm_check_keyboard,
     sticker_reanalyze_retry_keyboard,
     sticker_set_detail_keyboard,
 )
-from src.services.modules.sticker.models import ReanalyzeResult
+from src.services.modules.sticker.models import ReanalyzeResult, StickerLearningResult
+from src.utils.telegram import TelegramFileError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1219,3 +1223,393 @@ class TestHandleStickerDetailStatusBadge:
         assert "happy cat" in text
         assert "⏳" not in text
         assert "⚠️" not in text
+
+
+# ---------------------------------------------------------------------------
+# handle_admin_sticker_check / handle_admin_sticker_dm_analyze — DM check (B-1)
+# ---------------------------------------------------------------------------
+
+
+def _make_sticker(
+    file_unique_id: str = "AgADvh4AAlkbCFI",
+    file_id: str = "CAACAgIAAxkB",
+    set_name: str | None = "test_set",
+    emoji: str | None = "😺",
+    is_animated: bool = False,
+    is_video: bool = False,
+) -> MagicMock:
+    """Mock aiogram Sticker with just the attributes the handlers touch."""
+    sticker = MagicMock()
+    sticker.file_unique_id = file_unique_id
+    sticker.file_id = file_id
+    sticker.set_name = set_name
+    sticker.emoji = emoji
+    sticker.is_animated = is_animated
+    sticker.is_video = is_video
+    return sticker
+
+
+def _make_sticker_dm_message(
+    sticker: MagicMock | None = None,
+    user_id: int = 12345,
+    chat_type: str = "private",
+) -> MagicMock:
+    """Mock aiogram Message carrying a sticker, sent by the admin in DM."""
+    msg = MagicMock()
+    msg.sticker = sticker if sticker is not None else _make_sticker()
+    msg.chat = MagicMock()
+    msg.chat.id = user_id
+    msg.chat.type = chat_type
+    msg.from_user = MagicMock()
+    msg.from_user.id = user_id
+    msg.reply = AsyncMock()
+    return msg
+
+
+def _make_admin_repo(lang: str = "ru") -> MagicMock:
+    repo = MagicMock()
+    repo.get_admin_language = AsyncMock(return_value=lang)
+    return repo
+
+
+def _cb_with_reply(
+    callback_data: str = "adm_stk_dmchk:ru:AgADvh4AAlkbCFI",
+    sticker: MagicMock | None = None,
+    user_id: int = 12345,
+) -> MagicMock:
+    """Callback whose message.reply_to_message carries `sticker` (default:
+    a matching _make_sticker()) -- mirrors the real flow, where
+    handle_admin_sticker_check() sent the analyze prompt as a reply to the
+    admin's original sticker message.
+    """
+    cb = _make_callback(callback_data, user_id=user_id)
+    reply_msg = MagicMock()
+    reply_msg.sticker = sticker if sticker is not None else _make_sticker()
+    cb.message.reply_to_message = reply_msg
+    return cb
+
+
+def _cb_without_reply(
+    callback_data: str = "adm_stk_dmchk:ru:AgADvh4AAlkbCFI",
+    user_id: int = 12345,
+) -> MagicMock:
+    cb = _make_callback(callback_data, user_id=user_id)
+    cb.message.reply_to_message = None
+    return cb
+
+
+class TestHandleAdminStickerCheck:
+    """Admin sends a sticker in DM (no command) -- B-1 catalog check."""
+
+    @pytest.mark.asyncio()
+    async def test_known_sticker_replies_with_detail(self) -> None:
+        msg = _make_sticker_dm_message()
+        sticker_repo = _make_sticker_repo()  # returns _SAMPLE_STICKER
+        admin_repo = _make_admin_repo("ru")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
+
+        msg.reply.assert_awaited_once()
+        text = msg.reply.call_args[0][0]
+        assert "happy cat" in text
+        assert msg.reply.call_args.kwargs["parse_mode"] == "HTML"
+        keyboard = msg.reply.call_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
+
+    @pytest.mark.asyncio()
+    async def test_unknown_sticker_shows_analyze_button_ru(self) -> None:
+        msg = _make_sticker_dm_message(sticker=_make_sticker(file_unique_id="unknownID"))
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.get_by_file_unique_id = AsyncMock(return_value=None)
+        admin_repo = _make_admin_repo("ru")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
+
+        msg.reply.assert_awaited_once()
+        text = msg.reply.call_args[0][0]
+        assert "нет в базе" in text
+        keyboard = msg.reply.call_args.kwargs["reply_markup"]
+        btn = keyboard.inline_keyboard[0][0]
+        assert btn.callback_data == "adm_stk_dmchk:ru:unknownID"
+        assert "Проанализировать" in btn.text
+
+    @pytest.mark.asyncio()
+    async def test_unknown_sticker_shows_analyze_button_en(self) -> None:
+        msg = _make_sticker_dm_message(sticker=_make_sticker(file_unique_id="unknownID"))
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.get_by_file_unique_id = AsyncMock(return_value=None)
+        admin_repo = _make_admin_repo("en")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
+
+        text = msg.reply.call_args[0][0]
+        assert "isn't in the catalog" in text
+        btn = msg.reply.call_args.kwargs["reply_markup"].inline_keyboard[0][0]
+        assert "Analyze" in btn.text
+
+    @pytest.mark.asyncio()
+    async def test_no_sticker_on_message_is_noop(self) -> None:
+        """Defensive guard: message.sticker is None (shouldn't happen given
+        the F.sticker filter, but the handler must not blow up)."""
+        msg = _make_sticker_dm_message()
+        msg.sticker = None
+        sticker_repo = _make_sticker_repo()
+        admin_repo = _make_admin_repo("ru")
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
+
+        msg.reply.assert_not_awaited()
+        sticker_repo.get_by_file_unique_id.assert_not_awaited()
+
+    # Note: admin+private scoping is enforced at router-registration time by
+    # `F.sticker, F.chat.type == "private", IsAdmin()` on the @router.message
+    # decorator (src/bot/handlers/admin_sticker.py) -- same pattern as
+    # handle_admin_sticker_reply above. aiogram drops the update before it
+    # reaches this handler for a non-admin or a non-DM chat, so that path is
+    # verified by inspection of the decorator, not by a handler-level test.
+
+
+class TestHandleAdminStickerDmAnalyze:
+    """The "🔍 Проанализировать" button -- B-1's not-found branch."""
+
+    @pytest.mark.asyncio()
+    async def test_success_edits_in_place_with_detail(self) -> None:
+        cb = _cb_with_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock(
+            return_value=StickerLearningResult(
+                is_new=True,
+                file_unique_id="AgADvh4AAlkbCFI",
+                visual_description="happy cat",
+                analysis_failed=False,
+            )
+        )
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.get_sticker_set = AsyncMock(return_value={"set_name": "test_set"})
+        bot_config_repo = _make_bot_config_repo()
+
+        with patch(
+            "src.bot.handlers.admin_sticker.download_telegram_file",
+            new=AsyncMock(return_value=b"fake-bytes"),
+        ):
+            await handle_admin_sticker_dm_analyze(
+                cb, sticker_service, sticker_repo, bot_config_repo
+            )
+
+        sticker_service.learn.assert_awaited_once()
+        cb.message.bot.send_message.assert_not_awaited()
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "happy cat" in result_text
+
+    @pytest.mark.asyncio()
+    async def test_shows_in_progress_edit_before_download(self) -> None:
+        cb = _cb_with_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock(
+            return_value=StickerLearningResult(
+                is_new=True,
+                file_unique_id="AgADvh4AAlkbCFI",
+                visual_description="cat",
+                analysis_failed=False,
+            )
+        )
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        with patch(
+            "src.bot.handlers.admin_sticker.download_telegram_file",
+            new=AsyncMock(return_value=b"fake-bytes"),
+        ):
+            await handle_admin_sticker_dm_analyze(
+                cb, sticker_service, sticker_repo, bot_config_repo
+            )
+
+        first_call = cb.message.edit_text.call_args_list[0]
+        assert "⏳" in first_call[0][0]
+        assert first_call[1]["reply_markup"].inline_keyboard == []
+
+    @pytest.mark.asyncio()
+    async def test_missing_reply_to_message_shows_alert_and_skips_learn(self) -> None:
+        cb = _cb_without_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock()
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_admin_sticker_dm_analyze(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        sticker_service.learn.assert_not_awaited()
+        cb.answer.assert_awaited_once()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio()
+    async def test_mismatched_file_unique_id_shows_alert_and_skips_learn(self) -> None:
+        # Reply carries a DIFFERENT sticker than callback_data references --
+        # e.g. the admin sent a second sticker before tapping the first
+        # prompt's button. Must not analyze the wrong sticker.
+        cb = _cb_with_reply(sticker=_make_sticker(file_unique_id="someOtherID"))
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock()
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_admin_sticker_dm_analyze(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        sticker_service.learn.assert_not_awaited()
+        cb.answer.assert_awaited_once()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio()
+    async def test_download_failure_shows_reason_and_retry_button(self) -> None:
+        cb = _cb_with_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock()
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        with patch(
+            "src.bot.handlers.admin_sticker.download_telegram_file",
+            new=AsyncMock(side_effect=TelegramFileError("boom")),
+        ):
+            await handle_admin_sticker_dm_analyze(
+                cb, sticker_service, sticker_repo, bot_config_repo
+            )
+
+        sticker_service.learn.assert_not_awaited()
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "⚠️" in result_text
+        assert "Ошибка загрузки" in result_text
+        keyboard = cb.message.edit_text.call_args_list[-1][1]["reply_markup"]
+        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
+
+    @pytest.mark.asyncio()
+    async def test_analysis_failed_shows_retry_button(self) -> None:
+        cb = _cb_with_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock(
+            return_value=StickerLearningResult(
+                is_new=True,
+                file_unique_id="AgADvh4AAlkbCFI",
+                analysis_failed=True,
+                failure_reason="vision",
+            )
+        )
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        with patch(
+            "src.bot.handlers.admin_sticker.download_telegram_file",
+            new=AsyncMock(return_value=b"fake-bytes"),
+        ):
+            await handle_admin_sticker_dm_analyze(
+                cb, sticker_service, sticker_repo, bot_config_repo
+            )
+
+        result_text = cb.message.edit_text.call_args_list[-1][0][0]
+        assert "⚠️" in result_text
+        assert "Ошибка API" in result_text
+        keyboard = cb.message.edit_text.call_args_list[-1][1]["reply_markup"]
+        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
+
+    @pytest.mark.asyncio()
+    async def test_registers_new_sticker_set(self) -> None:
+        cb = _cb_with_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock(
+            return_value=StickerLearningResult(
+                is_new=True,
+                file_unique_id="AgADvh4AAlkbCFI",
+                visual_description="cat",
+                analysis_failed=False,
+            )
+        )
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.get_sticker_set = AsyncMock(return_value=None)
+        sticker_repo.upsert_sticker_set = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        tg_set = MagicMock()
+        tg_set.name = "test_set"
+        tg_set.title = "Test Set"
+        tg_set.thumbnail = None
+        set_sticker = MagicMock()
+        set_sticker.is_animated = False
+        set_sticker.is_video = False
+        tg_set.stickers = [set_sticker]
+        cb.message.bot.get_sticker_set = AsyncMock(return_value=tg_set)
+
+        with patch(
+            "src.bot.handlers.admin_sticker.download_telegram_file",
+            new=AsyncMock(return_value=b"fake-bytes"),
+        ):
+            await handle_admin_sticker_dm_analyze(
+                cb, sticker_service, sticker_repo, bot_config_repo
+            )
+
+        sticker_repo.upsert_sticker_set.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_skips_set_registration_when_already_known(self) -> None:
+        cb = _cb_with_reply()
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock(
+            return_value=StickerLearningResult(
+                is_new=True,
+                file_unique_id="AgADvh4AAlkbCFI",
+                visual_description="cat",
+                analysis_failed=False,
+            )
+        )
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.get_sticker_set = AsyncMock(return_value={"set_name": "test_set"})
+        sticker_repo.upsert_sticker_set = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        with patch(
+            "src.bot.handlers.admin_sticker.download_telegram_file",
+            new=AsyncMock(return_value=b"fake-bytes"),
+        ):
+            await handle_admin_sticker_dm_analyze(
+                cb, sticker_service, sticker_repo, bot_config_repo
+            )
+
+        sticker_repo.upsert_sticker_set.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_run(self) -> None:
+        cb = _cb_with_reply(user_id=99999)
+        sticker_service = MagicMock()
+        sticker_service.learn = AsyncMock()
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_admin_sticker_dm_analyze(cb, sticker_service, sticker_repo, bot_config_repo)
+
+        sticker_service.learn.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# sticker_dm_check_keyboard — callback_data format
+# ---------------------------------------------------------------------------
+
+
+class TestStickerDmCheckKeyboard:
+    def test_single_analyze_button_ru(self) -> None:
+        kb = sticker_dm_check_keyboard("AgADvh4AAlkbCFI", lang="ru")
+        assert len(kb.inline_keyboard) == 1
+        btn = kb.inline_keyboard[0][0]
+        assert "Проанализировать" in btn.text
+        assert btn.callback_data == "adm_stk_dmchk:ru:AgADvh4AAlkbCFI"
+
+    def test_single_analyze_button_en(self) -> None:
+        kb = sticker_dm_check_keyboard("AgADvh4AAlkbCFI", lang="en")
+        btn = kb.inline_keyboard[0][0]
+        assert "Analyze" in btn.text
+        assert btn.callback_data == "adm_stk_dmchk:en:AgADvh4AAlkbCFI"

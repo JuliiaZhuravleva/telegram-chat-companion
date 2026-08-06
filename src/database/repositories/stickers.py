@@ -6,6 +6,25 @@ from typing import Any
 
 import asyncpg
 
+# Vision-derived columns copied onto a duplicate sticker's row instead of
+# re-running Vision (ADR-0007 Decision 7). Keep this list visible next to
+# save_sticker() so it stays up to date when a new Vision-derived column
+# lands.
+_VISION_DERIVED_COLUMNS = (
+    "visual_description",
+    "original_vision_description",
+    "emotion",
+    "suggested_contexts",
+    "style_tags",
+    "character_or_meme",
+    "description_embedding",
+    # ADR-0008 Decision 7: a duplicate inherits the canonical row's score at
+    # insert time — if the canonical row predates the explicitness feature
+    # (NULL), the duplicate copies that NULL and stays fail-closed-hidden
+    # too, consistent with Decision 3.
+    "explicitness_score",
+)
+
 
 class StickerRepository:
     """Data access layer for sticker intelligence."""
@@ -46,10 +65,29 @@ class StickerRepository:
         character_or_meme: str | None = None,
         usage_contexts: list[str] | None = None,
         analysis_failed: bool = False,
+        image_hash: str | None = None,
+        duplicate_of_file_unique_id: str | None = None,
+        explicitness_score: float | None = None,
     ) -> int:
         """Insert or update a sticker. Returns sticker ID.
 
         On conflict (file_unique_id): increments total_uses and updates file_id.
+
+        ``image_hash`` / ``duplicate_of_file_unique_id`` (ADR-0007): used both
+        by the normal Vision-analysis path (stores this sticker's own hash so
+        it becomes a future dedup candidate; clears any stale
+        ``duplicate_of_file_unique_id`` on a re-analyze) and by the
+        duplicate-copy path (stores the new sticker's own hash plus a pointer
+        to the canonical row it copied its description from). Both paths
+        share this one INSERT so their total_uses/last_used_at semantics
+        never diverge.
+
+        ``explicitness_score`` (ADR-0008): overwritten unconditionally on
+        every call, same as ``emotion``/``character_or_meme`` — this is the
+        score of THIS analysis attempt (or the copied value on a duplicate),
+        never a value to preserve across re-analyzes. The one-off backfill
+        script does NOT go through this method (Decision 5: a narrow,
+        single-column UPDATE via ``update_explicitness_score`` instead).
         """
         row = await self._pool.fetchrow(
             """
@@ -58,11 +96,13 @@ class StickerRepository:
                 is_animated, is_video,
                 visual_description, original_vision_description,
                 emotion, suggested_contexts, style_tags, character_or_meme,
-                usage_contexts, analysis_failed, analyzed_at, total_uses
+                usage_contexts, analysis_failed, analyzed_at, total_uses,
+                image_hash, duplicate_of_file_unique_id, explicitness_score
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                 CASE WHEN $7::TEXT IS NOT NULL THEN NOW() END,
-                1
+                1,
+                $15, $16, $17
             )
             ON CONFLICT (file_unique_id) DO UPDATE
             SET file_id = EXCLUDED.file_id,
@@ -82,6 +122,11 @@ class StickerRepository:
                     WHEN EXCLUDED.visual_description IS NOT NULL THEN NOW()
                     ELSE NULL
                 END,
+                image_hash = COALESCE(EXCLUDED.image_hash, sticker_knowledge.image_hash),
+                duplicate_of_file_unique_id = EXCLUDED.duplicate_of_file_unique_id,
+                explicitness_score = COALESCE(
+                    EXCLUDED.explicitness_score, sticker_knowledge.explicitness_score
+                ),
                 updated_at = NOW()
             RETURNING id
             """,
@@ -99,9 +144,78 @@ class StickerRepository:
             character_or_meme,
             usage_contexts or [],
             analysis_failed,
+            image_hash,
+            duplicate_of_file_unique_id,
+            explicitness_score,
         )
         assert row is not None
         return int(row["id"])
+
+    async def get_dedup_candidates(self) -> list[asyncpg.Record]:
+        """Fetch existing stickers eligible for dedup-hash matching (ADR-0007 Decision 5).
+
+        Includes rows that are themselves already-detected duplicates (their
+        own ``duplicate_of_file_unique_id`` is returned so callers can
+        flatten a chained match to its root — Decision 6): a duplicate row's
+        own ``image_hash`` is still a legitimate match target for a third
+        copy of the same picture.
+
+        App-side O(N) Hamming scan by design (no bit(64)/pg_trgm extension):
+        the catalog is small (migration 005's own sizing note). Revisit if it
+        passes ~5,000 rows and this scan is visibly on learn()'s critical path.
+        """
+        result: list[asyncpg.Record] = await self._pool.fetch(
+            """
+            SELECT file_unique_id, image_hash, created_at, duplicate_of_file_unique_id
+            FROM sticker_knowledge
+            WHERE image_hash IS NOT NULL
+              AND visual_description IS NOT NULL
+              AND analysis_failed = false
+            """
+        )
+        return result
+
+    async def get_explicitness_backfill_candidates(self) -> list[asyncpg.Record]:
+        """Fetch catalog rows eligible for the one-off explicitness backfill script
+        (ADR-0008 Decision 5).
+
+        Target set is exactly ``search_by_embedding``'s own WHERE clause minus
+        the new predicate: every row that is *today* an eligible response
+        candidate and would otherwise silently stop being one the moment
+        Decision 3's fail-closed filter ships, because it predates this
+        feature and has never been scored. Rows with ``analysis_failed =
+        true`` or no ``visual_description`` are already excluded from
+        candidate selection regardless of this feature — no reason to spend
+        a Vision call scoring them.
+        """
+        result: list[asyncpg.Record] = await self._pool.fetch(
+            """
+            SELECT file_unique_id, file_id, is_animated, is_video
+            FROM sticker_knowledge
+            WHERE visual_description IS NOT NULL
+              AND analysis_failed = false
+              AND explicitness_score IS NULL
+            """
+        )
+        return result
+
+    async def update_explicitness_score(self, file_unique_id: str, score: float) -> None:
+        """Persist a backfilled explicitness score for one sticker (ADR-0008 Decision 5).
+
+        Narrow, single-column UPDATE — deliberately does NOT touch
+        ``analyzed_at``/``analysis_failed``/any other column. Those retain
+        their ADR-0003 meaning ("was a full analysis attempted"); a
+        score-only backfill is not that.
+        """
+        await self._pool.execute(
+            """
+            UPDATE sticker_knowledge
+            SET explicitness_score = $2
+            WHERE file_unique_id = $1
+            """,
+            file_unique_id,
+            score,
+        )
 
     async def update_embedding(
         self,
@@ -144,11 +258,23 @@ class StickerRepository:
         *,
         limit: int = 5,
         min_similarity: float = 0.6,
+        tolerance_level: float,
     ) -> list[asyncpg.Record]:
         """Semantic search using cosine similarity.
 
         Returns stickers with similarity >= min_similarity,
         ordered by descending similarity.
+
+        ``tolerance_level`` (ADR-0008 Decision 6): every candidate must have
+        a non-NULL ``explicitness_score`` no greater than this ceiling.
+        Filtered in SQL, not app-side, so ``ORDER BY ... LIMIT`` semantics
+        stay correct for every ``tolerance_level`` (an app-side post-filter
+        would return fewer than ``limit`` results). Keyword-only with no
+        default -- every caller must pass the chat's resolved ceiling
+        explicitly; NULL ``explicitness_score`` (unscored) is always
+        excluded, even at ``tolerance_level = 1.0`` (Decision 3,
+        fail-closed). See ``src/services/modules/sticker/tolerance.py``'s
+        ``is_within_tolerance`` for the equivalent Python-level comparison.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
@@ -162,12 +288,15 @@ class StickerRepository:
               AND visual_description IS NOT NULL
               AND analysis_failed = false
               AND 1 - (description_embedding <=> $1) >= $2
+              AND explicitness_score IS NOT NULL
+              AND explicitness_score <= $4
             ORDER BY description_embedding <=> $1
             LIMIT $3
             """,
             query_embedding,
             min_similarity,
             limit,
+            tolerance_level,
         )
         return result
 

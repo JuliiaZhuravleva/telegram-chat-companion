@@ -12,6 +12,9 @@ from src.bot.handlers.admin_chat_panel import (
     handle_chat_panel_menu,
     handle_chat_panel_picker,
     handle_chat_panel_toggle,
+    handle_chat_panel_tolerance_cancel,
+    handle_chat_panel_tolerance_input,
+    handle_chat_panel_tolerance_prompt,
     render_chat_panel,
 )
 from src.models.chat_config import ChatConfig
@@ -29,6 +32,7 @@ def _make_callback(data: str, user_id: int = ADMIN_ID, chat_type: str = "private
     callback.message.chat = MagicMock()
     callback.message.chat.type = chat_type
     callback.message.edit_text = AsyncMock()
+    callback.message.answer = AsyncMock()
     callback.answer = AsyncMock()
     callback.bot = None
     return callback
@@ -399,3 +403,163 @@ class TestHandleChatPanelToggle:
         )
 
         callback.message.edit_text.assert_awaited_once()
+
+
+def _make_state(data: dict[str, object] | None = None) -> MagicMock:
+    state = MagicMock()
+    state.set_state = AsyncMock()
+    state.update_data = AsyncMock()
+    state.get_data = AsyncMock(return_value=data or {})
+    state.clear = AsyncMock()
+    return state
+
+
+def _make_message(text: str, user_id: int = ADMIN_ID) -> MagicMock:
+    message = MagicMock()
+    message.text = text
+    message.from_user = MagicMock()
+    message.from_user.id = user_id
+    message.reply = AsyncMock()
+    message.answer = AsyncMock()
+    return message
+
+
+class TestHandleChatPanelTolerancePrompt:
+    @pytest.mark.asyncio
+    async def test_sets_state_and_prompts(self) -> None:
+        callback = _make_callback(f"adm_pnl_tol:ru:{CHAT_ID}")
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_chat_panel_tolerance_prompt(callback, bot_config_repo, state)
+
+        state.set_state.assert_awaited_once()
+        state.update_data.assert_awaited_once_with(tol_chat_id=CHAT_ID, tol_lang="ru")
+        callback.message.answer.assert_awaited_once()
+        # The prompt must carry the cancel button — without it the FSM state
+        # has no exit (invalid input deliberately re-prompts, 2026-08-07 review).
+        assert callback.message.answer.call_args.kwargs.get("reply_markup") is not None
+
+    @pytest.mark.asyncio
+    async def test_denies_non_admin(self) -> None:
+        callback = _make_callback(f"adm_pnl_tol:ru:{CHAT_ID}", user_id=999)
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_state()
+
+        await handle_chat_panel_tolerance_prompt(callback, bot_config_repo, state)
+
+        state.set_state.assert_not_awaited()
+
+
+class TestHandleChatPanelToleranceInput:
+    @pytest.mark.asyncio
+    async def test_valid_value_writes_and_clears_state(self) -> None:
+        message = _make_message("0.8")
+        state = _make_state({"tol_chat_id": CHAT_ID, "tol_lang": "ru"})
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_input(
+            message, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        state.clear.assert_awaited_once()
+        chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "tolerance_level", 0.8)
+        chat_config_service.invalidate.assert_called_once_with(CHAT_ID)
+        message.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_out_of_range_reprompts_without_writing(self) -> None:
+        message = _make_message("1.5")
+        state = _make_state({"tol_chat_id": CHAT_ID, "tol_lang": "ru"})
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_input(
+            message, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        state.clear.assert_not_awaited()
+        chat_settings_repo.set_field.assert_not_awaited()
+        message.reply.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_reprompts_without_writing(self) -> None:
+        message = _make_message("not a number")
+        state = _make_state({"tol_chat_id": CHAT_ID, "tol_lang": "ru"})
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_input(
+            message, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        state.clear.assert_not_awaited()
+        chat_settings_repo.set_field.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_input_reprompt_carries_cancel_button(self) -> None:
+        """The re-prompt must keep the escape hatch visible — the state stays
+        set on invalid input by design (reject-not-clamp), so every re-prompt
+        without a cancel button is another turn of the trap (2026-08-07)."""
+        message = _make_message("not a number")
+        state = _make_state({"tol_chat_id": CHAT_ID, "tol_lang": "ru"})
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_input(
+            message, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        assert message.reply.call_args.kwargs.get("reply_markup") is not None
+
+
+class TestHandleChatPanelToleranceCancel:
+    @pytest.mark.asyncio
+    async def test_clears_state_and_rerenders_panel(self) -> None:
+        callback = _make_callback(f"adm_pnl_tolcancel:ru:{CHAT_ID}")
+        state = _make_state({"tol_chat_id": CHAT_ID, "tol_lang": "ru"})
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_cancel(
+            callback, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        state.clear.assert_awaited_once()
+        callback.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_non_admin_cannot_cancel(self) -> None:
+        callback = _make_callback(f"adm_pnl_tolcancel:ru:{CHAT_ID}", user_id=999)
+        state = _make_state()
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_cancel(
+            callback, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        state.clear.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_malformed_chat_id_still_clears_state(self) -> None:
+        """Escaping the trap must not depend on well-formed callback data —
+        clearing the state is the one thing this handler may never skip."""
+        callback = _make_callback("adm_pnl_tolcancel:ru:not-an-int")
+        state = _make_state()
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_tolerance_cancel(
+            callback, state, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        state.clear.assert_awaited_once()

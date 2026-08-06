@@ -101,6 +101,65 @@ class TestSaveStickerUpsert:
         assert row["analysis_failed"] is True
 
 
+class TestExplicitnessScoreUpsert:
+    """explicitness_score must survive a failed (re-)analysis (2026-08-07
+    review, CRITICAL). Every failure path in learn() calls save_sticker()
+    with explicitness_score=None (render error, Vision AIProviderError,
+    malformed/rejected score), and admin re-analyze runs the full pipeline
+    on an existing row — so without COALESCE in the upsert a transient
+    Vision error silently wipes a good score to NULL, and the fail-closed
+    tolerance gate re-hides an already-vetted sticker in every
+    low-tolerance chat. Mirrors image_hash's existing protection."""
+
+    @pytest.mark.asyncio
+    async def test_failed_reanalyze_preserves_existing_score(self, repo: StickerRepository) -> None:
+        await repo.save_sticker(
+            file_unique_id="expl-001",
+            file_id="file-expl-001",
+            visual_description="A vetted sticker",
+            explicitness_score=0.7,
+        )
+        # A failed re-analysis attempt: no description, no score produced.
+        await repo.save_sticker(
+            file_unique_id="expl-001",
+            file_id="file-expl-001",
+            analysis_failed=True,
+        )
+        row = await repo.get_by_file_unique_id("expl-001")
+        assert row is not None
+        assert row["explicitness_score"] == pytest.approx(0.7)
+
+    @pytest.mark.asyncio
+    async def test_fresh_valid_score_replaces_old(self, repo: StickerRepository) -> None:
+        """COALESCE must not freeze the score forever — a successful
+        re-analysis with a real value still updates it."""
+        await repo.save_sticker(
+            file_unique_id="expl-002",
+            file_id="file-expl-002",
+            visual_description="First analysis",
+            explicitness_score=0.7,
+        )
+        await repo.save_sticker(
+            file_unique_id="expl-002",
+            file_id="file-expl-002",
+            visual_description="Second analysis",
+            explicitness_score=0.2,
+        )
+        row = await repo.get_by_file_unique_id("expl-002")
+        assert row is not None
+        assert row["explicitness_score"] == pytest.approx(0.2)
+
+    @pytest.mark.asyncio
+    async def test_never_scored_row_stays_null(self, repo: StickerRepository) -> None:
+        """A sticker that has never produced a score keeps NULL (and stays
+        fail-closed hidden) — COALESCE(NULL, NULL) must not invent one."""
+        await repo.save_sticker(file_unique_id="expl-003", file_id="file-expl-003")
+        await repo.save_sticker(file_unique_id="expl-003", file_id="file-expl-003")
+        row = await repo.get_by_file_unique_id("expl-003")
+        assert row is not None
+        assert row["explicitness_score"] is None
+
+
 # ---------------------------------------------------------------------------
 # increment_usage
 # ---------------------------------------------------------------------------

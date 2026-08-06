@@ -32,6 +32,7 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "sticker_reply_to_sticker_chance",
         "image_comment_sticker_enabled",
         "image_comment_sticker_chance",
+        "tolerance_level",
         "link_comments_enabled",
         "relevancy_gate_enabled",
         "kb_enabled",

@@ -980,3 +980,28 @@ class TestPipelineObservability:
         ]
         assert len(kb_calls) == 1
         assert kb_calls[0].kwargs["error"].startswith("search:")
+
+
+class TestPipelineStickerTolerance:
+    """ADR-0008 Decision 6: the chat's tolerance_level must reach the sticker
+    candidate search unchanged, not silently dropped at the pipeline layer."""
+
+    async def test_sticker_candidates_threaded_with_chat_tolerance_level(self, make_chat_config):
+        config = make_chat_config(enabled=True, sticker_learning_enabled=True, tolerance_level=0.73)
+        sticker_service = AsyncMock()
+        sticker_service.get_sticker_candidates.return_value = []
+        pipeline, _mocks = _make_pipeline()
+        pipeline._sticker = sticker_service
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="hello",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+        await asyncio.sleep(0)
+
+        sticker_service.get_sticker_candidates.assert_awaited_once()
+        assert sticker_service.get_sticker_candidates.call_args.kwargs["tolerance_level"] == 0.73

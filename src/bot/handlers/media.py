@@ -233,7 +233,9 @@ async def handle_photo_message(
         and random.random() < chat_config.image_comment_sticker_chance
     ):
         try:
-            sticker_match = await sticker_responder.get_sticker_candidates(description, limit=1)
+            sticker_match = await sticker_responder.get_sticker_candidates(
+                description, limit=1, tolerance_level=chat_config.tolerance_level
+            )
             if sticker_match:
                 await message.reply_sticker(sticker_match[0].file_id)
                 await sticker_responder.record_bot_use(sticker_match[0].file_unique_id)
@@ -380,7 +382,7 @@ async def handle_sticker_message(
     ):
         try:
             response = await sticker_responder.find_sticker_for_sticker_reply(
-                sticker.file_unique_id
+                sticker.file_unique_id, tolerance_level=chat_config.tolerance_level
             )
             if response:
                 await message.reply_sticker(response.file_id)
