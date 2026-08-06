@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T00:54:26Z",
+  "role": "evaluator",
+  "item_id": "E-1",
+  "verdict": "PASS",
+  "evidence": "git show 1b58b193 confirms chat_config_service.invalidate(chat_id) added right after the DB write in both handle_kb_toggle (admin_kb.py) and handle_reactions_toggle (admin_reactions.py, placed before the not-admin-warning early-return so it fires on both branches); invalidate(chat_id) exists on ChatConfigService and pops the per-chat cache entry as intended. Ran the 65 relevant unit tests (test_admin_kb_handler.py, test_admin_reactions_handler.py, test_admin_chat_panel_handler.py) -- all pass, and the 3 new/updated assert_called_once_with(CHAT_ID) assertions match the specialist's claimed control-check (3 tests fail when invalidate() is commented out). ruff check and mypy clean on all 4 touched source files.",
+  "regression_risk": "low",
+  "notes": "Scope matches item exactly (only the two named pre-existing handlers touched); docstring updates in admin_chat_panel.py/keyboards are consequential (they explained the now-resolved E-1 gap) not scope creep."
+}

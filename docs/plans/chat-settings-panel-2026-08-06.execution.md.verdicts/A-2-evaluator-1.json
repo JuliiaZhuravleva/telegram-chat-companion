@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T00:00:59Z",
+  "role": "evaluator",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "evidence": "ADR-0006 addresses all three parts of A-2's intent (render/permission separation, KB/Reactions embed-by-link, kb_organizer_ids stays KB-only); sampled ~15 file:line citations (utils.py:32-52, admin_kb.py:187-201/281/310-338, admin_reactions.py:155-183/251, admin.py:1017-1105/240-248, keyboards/admin.py:335-409/96-104, settings_fields.py:294-317/342-346, chat_config.py:52-54/66-68, chat_settings.py:102-107, bot_config.py:27-35, ADR-0003/0004 cross-refs) against the actual source tree and all matched exactly; no src/** files touched, only the new ADR (untracked, matches result.kind=file); ADR-0006 correctly follows ADR-0005 as next sequential number.",
+  "regression_risk": "low",
+  "notes": "ADR explicitly flags consequences for B-1/B-2/C-1/D-1/E-1 (e.g. C-1 must call invalidate_all() not invalidate(chat_id)) -- downstream evaluators for those items should confirm the specialists actually followed these call-outs rather than defaulting to invalidate(chat_id) by analogy."
+}
