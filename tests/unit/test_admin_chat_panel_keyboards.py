@@ -94,6 +94,7 @@ class TestChatPanelKeyboard:
             "ru",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=False,
             reactions_status=(False, True),
         )
@@ -107,6 +108,7 @@ class TestChatPanelKeyboard:
             "ru",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=False,
             reactions_status=(False, True),
         )
@@ -122,6 +124,7 @@ class TestChatPanelKeyboard:
             "ru",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=False,
             reactions_status=(False, True),
         )
@@ -140,6 +143,7 @@ class TestChatPanelKeyboard:
             "ru",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=True,
             reactions_status=(False, True),
         )
@@ -158,6 +162,7 @@ class TestChatPanelKeyboard:
             "ru",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=False,
             reactions_status=(True, False),
         )
@@ -172,6 +177,7 @@ class TestChatPanelKeyboard:
             "ru",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=False,
             reactions_status=(False, True),
         )
@@ -183,8 +189,140 @@ class TestChatPanelKeyboard:
             "en",
             chat_id=CHAT_ID,
             config=config,
+            row=None,
             kb_status=False,
             reactions_status=(False, True),
         )
         labels = _get_labels(kb)
         assert group_label(FieldGroup.MODULES, "en") in labels
+
+
+class TestInheritedMarker:
+    """B-2: "inherited from default" suffix, only for ``not legacy`` rows."""
+
+    def _config(self, **overrides) -> ChatConfig:
+        return replace(ChatConfig(chat_id=CHAT_ID), **overrides)
+
+    def test_new_field_marked_when_raw_is_null(self):
+        # link_comments_enabled ("lc") is legacy=False.
+        config = self._config(link_comments_enabled=True)
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"link_comments_enabled": None},
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
+        assert btn is not None
+        assert "унаследовано" in btn.text
+
+    def test_new_field_not_marked_when_raw_is_explicit(self):
+        config = self._config(link_comments_enabled=True)
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"link_comments_enabled": True},
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
+        assert btn is not None
+        assert "унаследовано" not in btn.text
+
+    def test_new_field_not_marked_when_row_missing_entirely(self):
+        # No chat_settings row at all is still "not explicitly set" -- but
+        # exercised separately from row=None to document the row-is-None
+        # default used by every other test in this module means "inherited".
+        config = self._config(link_comments_enabled=False)
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row=None,
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
+        assert btn is not None
+        assert "унаследовано" in btn.text
+
+    def test_legacy_field_never_marked_even_if_raw_is_null(self):
+        # rag_enabled ("rag") is legacy=True -- must never show the marker,
+        # even in the (shouldn't-happen) case its column reads NULL.
+        config = self._config(rag_enabled=True)
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"rag_enabled": None},
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
+        assert btn is not None
+        assert "унаследовано" not in btn.text
+
+    def test_non_bool_new_field_marked(self):
+        # rules_mode ("rm") is legacy=False and non-BOOL.
+        config = self._config(rules_mode="strict")
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"rules_mode": None},
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        labels = _get_labels(kb)
+        assert any("strict" in label and "унаследовано" in label for label in labels)
+
+    def test_kb_link_row_marked_when_raw_is_null(self):
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"kb_enabled": None},
+            kb_status=True,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
+        assert btn is not None
+        assert "унаследовано" in btn.text
+
+    def test_kb_link_row_not_marked_when_raw_is_explicit(self):
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"kb_enabled": True},
+            kb_status=True,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
+        assert btn is not None
+        assert "унаследовано" not in btn.text
+
+    def test_reactions_link_row_marks_each_half_independently(self):
+        # reactions_enabled explicitly set, reactions_history_enabled
+        # inherited -- the marker must attach to only its own half.
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            row={"reactions_enabled": True, "reactions_history_enabled": None},
+            kb_status=False,
+            reactions_status=(True, False),
+        )
+        btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}")
+        assert btn is not None
+        assert btn.text.count("унаследовано") == 1
+        # The marked half is the history status, which comes after " / ".
+        before, _, after = btn.text.partition(" / ")
+        assert "унаследовано" not in before
+        assert "унаследовано" in after

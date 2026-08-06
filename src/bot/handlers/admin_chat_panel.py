@@ -1,4 +1,4 @@
-"""Chat settings panel sub-router (B-1, ADR-0006).
+"""Chat settings panel sub-router (B-1, ADR-0006; inherited-marker: B-2).
 
 Handles:
 - ``adm_pnl:*``       — chat picker (own dedicated picker, Decision 4)
@@ -98,7 +98,13 @@ async def render_chat_panel(
     lang: str,
     chat_id: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Render the panel's ``(text, keyboard)`` for a chat (ADR-0006 Decision 1)."""
+    """Render the panel's ``(text, keyboard)`` for a chat (ADR-0006 Decision 1).
+
+    ``row`` (the raw ``chat_settings`` columns) is threaded into
+    ``chat_panel_keyboard`` alongside the effective ``config`` so it can show
+    the "inherited from default" marker (B-2) -- the effective value alone
+    can't distinguish an explicit override from an inherited default.
+    """
     row = await chat_settings_repo.get(chat_id)
     config = await chat_config_service.get_config(chat_id)
     kb_status = await _fresh_effective(row, bot_config_repo, "kb_enabled", False)
@@ -115,6 +121,7 @@ async def render_chat_panel(
         lang,
         chat_id=chat_id,
         config=config,
+        row=row,
         kb_status=kb_status,
         reactions_status=reactions_status,
     )

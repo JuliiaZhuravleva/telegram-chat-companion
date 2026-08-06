@@ -11,12 +11,22 @@ KB/Reactions fields render as a status line + "open" button linking to their
 existing sub-panels instead, so this module never writes those three columns.
 Non-BOOL fields render read-only (F-1, deferred, owns FSM-driven editing).
 
+Per B-2 (ADR-0006 "Implementation notes", item 2), every ``new_fields()`` row
+(the 11 nullable/no-DEFAULT columns) gets an "inherited from default" marker
+suffix when its *raw* per-chat column is ``NULL`` -- the effective
+(``ChatConfig``) value alone can't distinguish "explicitly set, happens to
+match the default" from "inherited." The 13 legacy columns never get the
+marker (they always materialize a value, see ``settings_fields.py``'s module
+docstring) -- ``_is_inherited`` bakes that gate in so no call site can forget
+it.
+
 See docs/decisions/ADR-0006-chat-settings-panel-architecture.md.
 """
 
 from __future__ import annotations
 
 import math
+from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -25,6 +35,7 @@ from src.models.chat_config import ChatConfig
 
 _BACK = {"ru": "◀️ Назад", "en": "◀️ Back"}
 _HISTORY_SHORT = {"ru": "История", "en": "History"}
+_INHERITED_MARK = {"ru": " · унаследовано", "en": " · inherited"}
 
 # Button text is plain (Telegram doesn't apply parse_mode to captions), but
 # very long joined/free-text values still make for an unreadable row.
@@ -73,6 +84,22 @@ def _status(value: bool) -> str:
     return "✅" if value else "⚫"
 
 
+def _is_inherited(field: FieldSpec, row: dict[str, Any] | None) -> bool:
+    """True when ``field``'s row is honestly "inherited from default" (B-2).
+
+    Only ``not field.legacy`` fields qualify: the 13 legacy migration-001
+    columns materialize a SQL DEFAULT on ``ensure_exists()`` and never read
+    back NULL for a chat the bot has already seen, so the marker would be a
+    lie for them until C-2 (deferred tech debt) drops those defaults. The
+    check is baked in here (not left to callers) precisely because it's easy
+    to forget by analogy with the other 11 fields.
+    """
+    if field.legacy:
+        return False
+    raw = row.get(field.key) if row is not None else None
+    return raw is None
+
+
 def _format_value(field: FieldSpec, value: object) -> str:
     """Read-only display for non-BOOL fields (F-1, deferred, owns editing)."""
     if field.type is FieldType.STR_LIST:
@@ -95,6 +122,7 @@ def chat_panel_keyboard(
     *,
     chat_id: int,
     config: ChatConfig,
+    row: dict[str, Any] | None,
     kb_status: bool,
     reactions_status: tuple[bool, bool],
 ) -> InlineKeyboardMarkup:
@@ -107,13 +135,20 @@ def chat_panel_keyboard(
     their existing toggle handlers (admin_kb.py/admin_reactions.py) don't
     self-invalidate it yet (E-1, not landed): a cached read here could show
     stale state right after a tap on the dedicated submenu.
+
+    ``row`` is the *raw* ``chat_settings_repo.get(chat_id)`` row (B-2) --
+    needed alongside ``config`` because the effective value alone can't tell
+    "explicitly set, happens to match the default" from "inherited." Used
+    only to compute the inherited-from-default marker (``_is_inherited``);
+    it never changes what value is displayed.
     """
     rows: list[list[InlineKeyboardButton]] = []
 
     for group, fields in fields_by_group():
         if group is FieldGroup.KB:
             field = fields[0]  # kb_enabled -- the only field in this group
-            text = f"{field.label_for(lang)}: {_status(kb_status)}"
+            marker = _INHERITED_MARK[lang] if _is_inherited(field, row) else ""
+            text = f"{field.label_for(lang)}: {_status(kb_status)}{marker}"
             rows.append(
                 [
                     InlineKeyboardButton(text=text, callback_data=f"adm_kb_menu:{lang}:{chat_id}"),
@@ -122,10 +157,21 @@ def chat_panel_keyboard(
             continue
 
         if group is FieldGroup.REACTIONS:
+            fields_by_key = {f.key: f for f in fields}
+            enabled_marker = (
+                _INHERITED_MARK[lang]
+                if _is_inherited(fields_by_key["reactions_enabled"], row)
+                else ""
+            )
+            history_marker = (
+                _INHERITED_MARK[lang]
+                if _is_inherited(fields_by_key["reactions_history_enabled"], row)
+                else ""
+            )
             enabled, history_enabled = reactions_status
             text = (
-                f"{group_label(group, lang)}: {_status(enabled)} / "
-                f"{_HISTORY_SHORT[lang]}: {_status(history_enabled)}"
+                f"{group_label(group, lang)}: {_status(enabled)}{enabled_marker} / "
+                f"{_HISTORY_SHORT[lang]}: {_status(history_enabled)}{history_marker}"
             )
             rows.append(
                 [
@@ -139,11 +185,12 @@ def chat_panel_keyboard(
         rows.append([InlineKeyboardButton(text=group_label(group, lang), callback_data="noop")])
         for field in fields:
             value = getattr(config, field.key)
+            marker = _INHERITED_MARK[lang] if _is_inherited(field, row) else ""
             if field.type is FieldType.BOOL:
-                text = f"{field.label_for(lang)}: {_status(bool(value))}"
+                text = f"{field.label_for(lang)}: {_status(bool(value))}{marker}"
                 callback_data = f"adm_pnl_tgl:{lang}:{chat_id}:{field.code}"
             else:
-                text = f"{field.label_for(lang)}: {_format_value(field, value)}"
+                text = f"{field.label_for(lang)}: {_format_value(field, value)}{marker}"
                 callback_data = "noop"
             rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
 

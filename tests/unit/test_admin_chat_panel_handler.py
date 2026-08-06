@@ -148,6 +148,44 @@ class TestRenderChatPanel:
         assert react_btn.text.count("✅") == 1
         assert react_btn.text.count("⚫") == 1
 
+    @pytest.mark.asyncio
+    async def test_inherited_marker_threaded_from_raw_row(self) -> None:
+        """B-2: render_chat_panel must pass the raw row through to the
+        keyboard, not just the effective config -- a new field whose raw
+        column is NULL gets the marker even though the effective value
+        (from the global default) is a concrete bool.
+        """
+        row = {
+            "chat_title": "Chat",
+            "link_comments_enabled": None,  # inherited
+            "relevancy_gate_enabled": False,  # explicit override
+        }
+        chat_settings_repo = _make_chat_settings_repo(row)
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(
+            _base_config(link_comments_enabled=True, relevancy_gate_enabled=False)
+        )
+
+        _, keyboard = await render_chat_panel(
+            chat_settings_repo, bot_config_repo, chat_config_service, "ru", CHAT_ID
+        )
+
+        lc_btn = next(
+            btn
+            for row_ in keyboard.inline_keyboard
+            for btn in row_
+            if btn.callback_data == f"adm_pnl_tgl:ru:{CHAT_ID}:lc"
+        )
+        assert "унаследовано" in lc_btn.text
+
+        rg_btn = next(
+            btn
+            for row_ in keyboard.inline_keyboard
+            for btn in row_
+            if btn.callback_data == f"adm_pnl_tgl:ru:{CHAT_ID}:rg"
+        )
+        assert "унаследовано" not in rg_btn.text
+
 
 class TestHandleChatPanelPicker:
     @pytest.mark.asyncio
