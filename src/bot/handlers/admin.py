@@ -97,11 +97,6 @@ _INTERVAL_MAP: dict[str, timedelta] = {
     "7d": timedelta(days=7),
 }
 
-_PLACEHOLDER: dict[str, str] = {
-    "ru": "Функция будет доступна позже.",
-    "en": "Feature coming soon.",
-}
-
 _HEALTH_TITLE: dict[str, str] = {
     "ru": "<b>Состояние бота</b>",
     "en": "<b>Bot Health</b>",
@@ -1818,26 +1813,7 @@ async def handle_notification_toggle(
         )
 
 
-# ---------------------------------------------------------------------------
-# Placeholders for future stages (prevent "unhandled callback" warnings)
-# ---------------------------------------------------------------------------
-
-
-async def _placeholder_callback(callback: CallbackQuery, **kwargs: Any) -> None:
-    """Generic placeholder: show alert and keep the current screen."""
-    if not _guard_admin(kwargs, callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    await callback.answer(_PLACEHOLDER[lang], show_alert=True)
-
-
 # adm_stk: callbacks are handled by admin_sticker_router
-
-
-@router.callback_query(F.data.startswith("adm_defs:"))
-async def handle_defaults_placeholder(callback: CallbackQuery, **kwargs: Any) -> None:
-    """Default settings — placeholder for Stage 3.1.4."""
-    await _placeholder_callback(callback, **kwargs)
+# adm_defs:/adm_defs_tgl: callbacks are handled by admin_defaults_router (C-1,
+# ADR-0006) -- replaces the former Stage 3.1.4 placeholder that used to live
+# here as handle_defaults_placeholder.
