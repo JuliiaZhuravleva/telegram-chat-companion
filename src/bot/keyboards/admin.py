@@ -28,6 +28,7 @@ _L: dict[str, dict[str, str]] = {
     "notifications": {"ru": "🔔 Уведомления", "en": "🔔 Notifications"},
     "kb": {"ru": "📚 База знаний", "en": "📚 Knowledge Base"},
     "reactions": {"ru": "😀 Реакции", "en": "😀 Reactions"},
+    "chat_panel": {"ru": "⚙️ Настройки чата", "en": "⚙️ Chat settings"},
     "close": {"ru": "✖️ Закрыть", "en": "✖️ Close"},
     "back": {"ru": "◀️ Назад", "en": "◀️ Back"},
     "russian": {"ru": "🇷🇺 Русский", "en": "🇷🇺 Русский"},
@@ -101,6 +102,12 @@ def main_menu_keyboard(lang: str) -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text=_t("reactions", lang),
                     callback_data=f"adm_react:{lang}:0",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text=_t("chat_panel", lang),
+                    callback_data=f"adm_pnl:{lang}:0",
                 ),
             ],
             [

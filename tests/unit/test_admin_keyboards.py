@@ -48,6 +48,7 @@ class TestMainMenuKeyboard:
         assert any("adm_stats:" in c for c in callbacks)
         assert any("adm_costs:" in c for c in callbacks)
         assert any("adm_notif:" in c for c in callbacks)
+        assert any("adm_pnl:" in c for c in callbacks)
         assert any("adm_lang:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
@@ -56,6 +57,7 @@ class TestMainMenuKeyboard:
         callbacks = _get_callbacks(kb)
         assert any("adm_wl:" in c for c in callbacks)
         assert any("adm_notif:" in c for c in callbacks)
+        assert any("adm_pnl:" in c for c in callbacks)
         assert any("adm_close:" in c for c in callbacks)
 
     def test_language_embedded_in_callbacks(self):

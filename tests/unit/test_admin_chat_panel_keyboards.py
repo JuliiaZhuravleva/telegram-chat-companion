@@ -1,0 +1,190 @@
+"""Tests for the chat settings panel's keyboards (B-1, ADR-0006)."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+from src.bot.keyboards.admin_chat_panel import (
+    _format_value,
+    chat_panel_keyboard,
+    chat_panel_picker_keyboard,
+)
+from src.bot.settings_fields import FIELDS_BY_KEY, FieldGroup, group_label
+from src.models.chat_config import ChatConfig
+
+CHAT_ID = -1001234567890
+
+
+def _get_callbacks(keyboard):
+    return [
+        btn.callback_data for row in keyboard.inline_keyboard for btn in row if btn.callback_data
+    ]
+
+
+def _get_labels(keyboard):
+    return [btn.text for row in keyboard.inline_keyboard for btn in row]
+
+
+def _row_for(keyboard, callback_data: str):
+    for row in keyboard.inline_keyboard:
+        for btn in row:
+            if btn.callback_data == callback_data:
+                return btn
+    return None
+
+
+class TestChatPanelPickerKeyboard:
+    def test_one_row_per_chat_with_menu_callback(self):
+        chats = [
+            {"chat_id": 111, "chat_title": "Alpha"},
+            {"chat_id": 222, "chat_title": "Beta"},
+        ]
+        kb = chat_panel_picker_keyboard(chats, lang="ru", page=0, total=2, per_page=10)
+        callbacks = _get_callbacks(kb)
+        assert "adm_pnl_menu:ru:111" in callbacks
+        assert "adm_pnl_menu:ru:222" in callbacks
+
+    def test_back_button_goes_to_main_menu(self):
+        kb = chat_panel_picker_keyboard([], lang="ru", page=0, total=0, per_page=10)
+        callbacks = _get_callbacks(kb)
+        assert "adm_menu:ru" in callbacks
+
+    def test_pagination_uses_own_prefix(self):
+        chats = [{"chat_id": i, "chat_title": f"Chat {i}"} for i in range(10)]
+        kb = chat_panel_picker_keyboard(chats, lang="ru", page=0, total=25, per_page=10)
+        callbacks = _get_callbacks(kb)
+        assert "adm_pnl:ru:1" in callbacks
+
+
+class TestFormatValue:
+    def test_str_list_joins_items(self):
+        field = FIELDS_BY_KEY["trigger_words"]
+        assert _format_value(field, ("bot", "бот")) == "bot, бот"
+
+    def test_str_list_empty_placeholder(self):
+        field = FIELDS_BY_KEY["trigger_words"]
+        assert _format_value(field, ()) == "—"
+
+    def test_float_uses_general_format(self):
+        field = FIELDS_BY_KEY["random_response_chance"]
+        assert _format_value(field, 0.05) == "0.05"
+
+    def test_int_as_plain_string(self):
+        field = FIELDS_BY_KEY["random_response_min_interval"]
+        assert _format_value(field, 300) == "300"
+
+    def test_str_empty_placeholder(self):
+        field = FIELDS_BY_KEY["system_prompt"]
+        assert _format_value(field, "") == "—"
+
+    def test_str_truncated_with_ellipsis(self):
+        field = FIELDS_BY_KEY["system_prompt"]
+        text = _format_value(field, "x" * 100)
+        assert text.endswith("…")
+        assert len(text) == 40
+
+
+class TestChatPanelKeyboard:
+    def _config(self, **overrides) -> ChatConfig:
+        return replace(ChatConfig(chat_id=CHAT_ID), **overrides)
+
+    def test_bool_field_gets_toggle_row(self):
+        config = self._config(rag_enabled=True)
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
+        assert btn is not None
+        assert "✅" in btn.text
+
+    def test_non_bool_field_is_read_only_noop(self):
+        config = self._config(system_prompt="Be nice")
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        labels = _get_labels(kb)
+        assert any("Be nice" in label for label in labels)
+        # system_prompt's row must not be wired to the generic toggle handler.
+        sp_rows = [btn for row in kb.inline_keyboard for btn in row if "Be nice" in btn.text]
+        assert all(btn.callback_data == "noop" for btn in sp_rows)
+
+    def test_group_headers_present(self):
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        labels = _get_labels(kb)
+        for group in (
+            FieldGroup.BEHAVIOR,
+            FieldGroup.MODULES,
+            FieldGroup.STICKERS,
+            FieldGroup.RULES,
+        ):
+            assert group_label(group, "ru") in labels
+
+    def test_kb_group_renders_link_row_not_a_toggle(self):
+        config = self._config(kb_enabled=False)  # deliberately stale/irrelevant
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=True,
+            reactions_status=(False, True),
+        )
+        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
+        assert btn is not None
+        assert "✅" in btn.text
+        # kb_enabled must never be reachable through the generic toggle prefix.
+        assert not any(
+            (cb or "").startswith("adm_pnl_tgl:") and cb.endswith(":kb")
+            for cb in _get_callbacks(kb)
+        )
+
+    def test_reactions_group_renders_combined_link_row(self):
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=False,
+            reactions_status=(True, False),
+        )
+        btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}")
+        assert btn is not None
+        assert btn.text.count("✅") == 1
+        assert btn.text.count("⚫") == 1
+
+    def test_back_button_returns_to_picker(self):
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        assert kb.inline_keyboard[-1][0].callback_data == "adm_pnl:ru:0"
+
+    def test_english_labels(self):
+        config = self._config()
+        kb = chat_panel_keyboard(
+            "en",
+            chat_id=CHAT_ID,
+            config=config,
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        labels = _get_labels(kb)
+        assert group_label(FieldGroup.MODULES, "en") in labels
