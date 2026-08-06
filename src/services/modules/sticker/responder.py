@@ -37,18 +37,29 @@ class StickerResponderService:
         *,
         limit: int = 3,
         min_similarity: float = 0.6,
+        tolerance_level: float,
     ) -> list[StickerSearchResult]:
-        """Get top sticker candidates for injection into AI prompt."""
-        return await self._sticker.search(context, limit=limit, min_similarity=min_similarity)
+        """Get top sticker candidates for injection into AI prompt.
+
+        ``tolerance_level`` (ADR-0008 Decision 6): the calling chat's
+        resolved explicitness ceiling -- callers must pass
+        ``ChatConfig.tolerance_level`` from the config already in scope.
+        """
+        return await self._sticker.search(
+            context, limit=limit, min_similarity=min_similarity, tolerance_level=tolerance_level
+        )
 
     async def find_sticker_for_sticker_reply(
         self,
         incoming_file_unique_id: str,
+        *,
+        tolerance_level: float,
     ) -> StickerSearchResult | None:
         """Find a response sticker when user sends a sticker.
 
         Uses the incoming sticker's description as the search context.
-        Excludes the same sticker from results.
+        Excludes the same sticker from results. ``tolerance_level`` (ADR-0008
+        Decision 6): the calling chat's resolved explicitness ceiling.
         """
         existing = await self._repo.get_by_file_unique_id(incoming_file_unique_id)
         if not existing or not existing["visual_description"]:
@@ -58,7 +69,9 @@ class StickerResponderService:
         if existing.get("emotion"):
             context += f" {existing['emotion']}"
 
-        results = await self._sticker.search(context, limit=5, min_similarity=0.6)
+        results = await self._sticker.search(
+            context, limit=5, min_similarity=0.6, tolerance_level=tolerance_level
+        )
 
         for r in results:
             if r.file_unique_id != incoming_file_unique_id:

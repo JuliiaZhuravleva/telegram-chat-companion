@@ -306,11 +306,23 @@ async def test_search_success(sticker_service):
         ]
     )
 
-    results = await sticker_service.search("happy greeting")
+    results = await sticker_service.search("happy greeting", tolerance_level=0.5)
 
     assert len(results) == 1
     assert results[0].file_id == "file-1"
     assert results[0].similarity == 0.85
+
+
+@pytest.mark.asyncio
+async def test_search_threads_tolerance_level_to_repo(sticker_service):
+    """ADR-0008 Decision 6: tolerance_level must reach search_by_embedding
+    unchanged, not silently dropped at this layer."""
+    sticker_service._repo.search_by_embedding = AsyncMock(return_value=[])
+
+    await sticker_service.search("happy greeting", tolerance_level=0.73)
+
+    sticker_service._repo.search_by_embedding.assert_awaited_once()
+    assert sticker_service._repo.search_by_embedding.call_args.kwargs["tolerance_level"] == 0.73
 
 
 @pytest.mark.asyncio
@@ -319,7 +331,7 @@ async def test_search_embedding_failure(sticker_service):
         side_effect=AIProviderError("Embedding failed", provider="gemini")
     )
 
-    results = await sticker_service.search("test")
+    results = await sticker_service.search("test", tolerance_level=0.5)
 
     assert results == []
 

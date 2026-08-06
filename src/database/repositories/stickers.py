@@ -256,11 +256,23 @@ class StickerRepository:
         *,
         limit: int = 5,
         min_similarity: float = 0.6,
+        tolerance_level: float,
     ) -> list[asyncpg.Record]:
         """Semantic search using cosine similarity.
 
         Returns stickers with similarity >= min_similarity,
         ordered by descending similarity.
+
+        ``tolerance_level`` (ADR-0008 Decision 6): every candidate must have
+        a non-NULL ``explicitness_score`` no greater than this ceiling.
+        Filtered in SQL, not app-side, so ``ORDER BY ... LIMIT`` semantics
+        stay correct for every ``tolerance_level`` (an app-side post-filter
+        would return fewer than ``limit`` results). Keyword-only with no
+        default -- every caller must pass the chat's resolved ceiling
+        explicitly; NULL ``explicitness_score`` (unscored) is always
+        excluded, even at ``tolerance_level = 1.0`` (Decision 3,
+        fail-closed). See ``src/services/modules/sticker/tolerance.py``'s
+        ``is_within_tolerance`` for the equivalent Python-level comparison.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
@@ -274,12 +286,15 @@ class StickerRepository:
               AND visual_description IS NOT NULL
               AND analysis_failed = false
               AND 1 - (description_embedding <=> $1) >= $2
+              AND explicitness_score IS NOT NULL
+              AND explicitness_score <= $4
             ORDER BY description_embedding <=> $1
             LIMIT $3
             """,
             query_embedding,
             min_similarity,
             limit,
+            tolerance_level,
         )
         return result
 

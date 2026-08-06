@@ -195,7 +195,9 @@ class TextProcessingPipeline:
 
         sticker_task: asyncio.Task[str | None] | None = None
         if config.sticker_learning_enabled and self._sticker:
-            sticker_task = asyncio.ensure_future(self._safe_get_sticker_candidates(message_text))
+            sticker_task = asyncio.ensure_future(
+                self._safe_get_sticker_candidates(message_text, config.tolerance_level)
+            )
 
         recent_msgs, message_lengths = await asyncio.gather(recent_msgs_task, lengths_task)
 
@@ -575,12 +577,20 @@ class TextProcessingPipeline:
                 exc_info=True,
             )
 
-    async def _safe_get_sticker_candidates(self, message_text: str) -> str | None:
-        """Get sticker candidates for prompt injection (non-blocking on failure)."""
+    async def _safe_get_sticker_candidates(
+        self, message_text: str, tolerance_level: float
+    ) -> str | None:
+        """Get sticker candidates for prompt injection (non-blocking on failure).
+
+        ``tolerance_level`` (ADR-0008 Decision 6): the calling chat's resolved
+        explicitness ceiling, threaded through to the candidate search.
+        """
         if not self._sticker:
             return None
         try:
-            candidates = await self._sticker.get_sticker_candidates(message_text)
+            candidates = await self._sticker.get_sticker_candidates(
+                message_text, tolerance_level=tolerance_level
+            )
             if not candidates:
                 return None
             return StickerResponderService.format_candidates_for_prompt(candidates)

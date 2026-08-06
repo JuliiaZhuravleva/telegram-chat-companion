@@ -539,6 +539,7 @@ class StickerLearningService:
         *,
         limit: int = 5,
         min_similarity: float = 0.7,
+        tolerance_level: float,
     ) -> list[StickerSearchResult]:
         """Find stickers relevant to a text context.
 
@@ -546,6 +547,9 @@ class StickerLearningService:
             context: Text describing what kind of sticker is needed.
             limit: Maximum results.
             min_similarity: Minimum cosine similarity threshold.
+            tolerance_level: Ceiling on candidate ``explicitness_score``
+                (ADR-0008 Decision 6), threaded through unchanged to
+                ``StickerRepository.search_by_embedding``.
 
         Returns:
             List of StickerSearchResult sorted by descending similarity.
@@ -560,6 +564,7 @@ class StickerLearningService:
             embedding_result.embedding,
             limit=limit,
             min_similarity=min_similarity,
+            tolerance_level=tolerance_level,
         )
 
         return [

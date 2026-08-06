@@ -134,13 +134,30 @@ async def test_search_by_embedding(repo):
         ]
     )
 
-    results = await repo.search_by_embedding([0.1] * 768, limit=3, min_similarity=0.7)
+    results = await repo.search_by_embedding(
+        [0.1] * 768, limit=3, min_similarity=0.7, tolerance_level=0.5
+    )
 
     assert len(results) == 1
     assert results[0]["similarity"] == 0.85
     sql = repo._pool.fetch.call_args.args[0]
     assert "description_embedding" in sql
     assert "analysis_failed = false" in sql
+
+
+@pytest.mark.asyncio
+async def test_search_by_embedding_gates_on_tolerance(repo):
+    """ADR-0008 Decision 6: the tolerance predicate + value are wired into
+    the SQL text and bound params, not silently dropped."""
+    repo._pool.fetch = AsyncMock(return_value=[])
+
+    await repo.search_by_embedding([0.1] * 768, limit=3, min_similarity=0.7, tolerance_level=0.42)
+
+    sql = repo._pool.fetch.call_args.args[0]
+    assert "explicitness_score IS NOT NULL" in sql
+    assert "explicitness_score <=" in sql
+    bound_args = repo._pool.fetch.call_args.args[1:]
+    assert 0.42 in bound_args
 
 
 @pytest.mark.asyncio
