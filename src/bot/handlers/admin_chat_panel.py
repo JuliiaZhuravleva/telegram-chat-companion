@@ -51,6 +51,10 @@ _PICKER_TITLE = {
 _NO_CHATS = {"ru": "Нет чатов в whitelist.", "en": "No whitelisted chats."}
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
 _INVALID_FIELD = {"ru": "Некорректное поле.", "en": "Invalid field."}
+_NO_ROW = {
+    "ru": "Чат не найден в настройках — настройка не изменена.",
+    "en": "Chat not found in settings — nothing was changed.",
+}
 _TOGGLE_ON = {"ru": "Включено", "en": "Enabled"}
 _TOGGLE_OFF = {"ru": "Выключено", "en": "Disabled"}
 
@@ -75,15 +79,14 @@ async def _fresh_effective(
     key: str,
     fallback: bool,
 ) -> bool:
-    """Direct-read effective bool, bypassing ``ChatConfigService``'s cache.
+    """Direct-read effective bool for the KB/Reactions link rows (Decision 2).
 
-    Used only for the KB/Reactions link rows (Decision 2). Their own toggle
-    handlers (admin_kb.py/admin_reactions.py) now self-invalidate the shared
-    cache on write (E-1), so this bypass is no longer strictly required to
-    avoid stale state -- kept anyway as a direct read is cheap here and it
-    decouples this render path from E-1's invalidation staying correct in
-    every future admin_kb.py/admin_reactions.py edit. Mirrors admin_kb.py's
-    ``_effective_kb_enabled`` / admin_reactions.py's ``_resolve_toggles``.
+    Reads the raw row + global default instead of going through
+    ``ChatConfigService``, mirroring admin_kb.py's ``_effective_kb_enabled``
+    and admin_reactions.py's ``_resolve_toggles`` so all three render the
+    same value by the same rule. Note this is not a cache workaround: the
+    service is ``Scope.REQUEST`` (``src/di.py``), so nothing it caches
+    outlives one update anyway -- see TD-046.
     """
     raw = row.get(key) if row else None
     if raw is not None:
@@ -262,8 +265,20 @@ async def handle_chat_panel_toggle(
         return
 
     config = await chat_config_service.get_config(chat_id)
-    new_value = not getattr(config, field.key)
-    await chat_settings_repo.set_field(chat_id, field.key, new_value)
+    effective = bool(getattr(config, field.key))
+    # The negation happens inside the UPDATE, so a double-tap cannot collapse
+    # two flips into one; `effective` only supplies the starting point for a
+    # NULL ("inherited") column. A None result means no chat_settings row
+    # matched -- report the failure instead of a toast that claims otherwise.
+    new_value = await chat_settings_repo.toggle_bool_field(chat_id, field.key, effective)
+    if new_value is None:
+        logger.warning(
+            "Toggle affected no chat_settings row",
+            chat_id=chat_id,
+            field=field.key,
+        )
+        await callback.answer(_NO_ROW[lang], show_alert=True)
+        return
     chat_config_service.invalidate(chat_id)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])

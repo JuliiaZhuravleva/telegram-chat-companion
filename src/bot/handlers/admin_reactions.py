@@ -264,10 +264,12 @@ async def handle_reactions_toggle(
     same fact on every subsequent render, so the warning isn't a one-time
     popup only.
 
-    Self-invalidates ``ChatConfigService``'s cache right after the write
-    (E-1), before either the not-admin-warning branch or the normal
-    confirmation branch, since the write has already committed by that
-    point either way -- mirrors ``admin_kb.py``'s ``handle_kb_toggle``.
+    Invalidates ``ChatConfigService``'s cache right after the write (E-1),
+    before either the not-admin-warning branch or the normal confirmation
+    branch, since the write has already committed by that point either way.
+    As in ``admin_kb.py``'s ``handle_kb_toggle``, this is defensive rather
+    than a fix for observed staleness: the service is ``Scope.REQUEST``, so
+    no cache survives an update today (TD-046).
     """
     if not _is_private(callback):
         await callback.answer()

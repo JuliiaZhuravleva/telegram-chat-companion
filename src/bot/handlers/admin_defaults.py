@@ -1,10 +1,16 @@
-"""Settings-by-default sub-router (C-1, ADR-0006).
+"""Global-settings sub-router (C-1, ADR-0006).
 
 Handles:
-- ``adm_defs:*``      -- render the "settings by default" screen (replaces
+- ``adm_defs:*``      -- render the global-settings screen (replaces
   the Stage 3.1.4 placeholder that used to live in ``admin.py`` as
   ``handle_defaults_placeholder``)
-- ``adm_defs_tgl:*``  -- toggle one bool default field
+- ``adm_defs_tgl:*``  -- toggle one bool global field
+
+These are ``bot_config.default_*`` values, i.e. merge layer 2, NOT a template
+copied into new chats: a change here takes effect immediately for every chat
+whose own column is NULL, existing chats included. The screen says so, because
+the earlier "defaults for new chats" wording promised the opposite and an admin
+could flip a module on fleet-wide believing they were configuring the future.
 
 Scoped to ``settings_fields.new_fields()`` (11 fields) -- see ADR-0006's C-1
 consequence to Decision 2 and the module docstring in
@@ -42,13 +48,38 @@ logger = structlog.get_logger(__name__)
 router = Router(name="admin_defaults")
 
 _DEFAULTS_TITLE = {
-    "ru": "⚙️ Настройки по умолчанию для новых чатов",
-    "en": "⚙️ Default settings for new chats",
+    "ru": "⚙️ Глобальные настройки",
+    "en": "⚙️ Global settings",
+}
+# The screen used to be titled "defaults for NEW chats", which is the one thing
+# `bot_config.default_*` does NOT mean: it is an override LAYER, applied on every
+# read to every chat whose own column is NULL (ChatConfigService._merge layer 2).
+# Nothing copies it into a chat_settings row at creation time, and the 11 fields
+# on this screen are precisely the nullable/no-DEFAULT columns that are NULL on
+# essentially every existing row -- so each control here retroactively changes
+# every chat that has not overridden that field in its own panel.
+_DEFAULTS_SUBTITLE = {
+    "ru": (
+        "Применяются к каждому чату, где нет своего значения — "
+        "включая уже существующие.\n"
+        "Значение, заданное в панели самого чата, имеет приоритет."
+    ),
+    "en": (
+        "Applied to every chat that has no value of its own — "
+        "existing chats included.\n"
+        "A value set in a chat's own panel takes precedence."
+    ),
 }
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
 _INVALID_FIELD = {"ru": "Некорректное поле.", "en": "Invalid field."}
-_TOGGLE_ON = {"ru": "Включено", "en": "Enabled"}
-_TOGGLE_OFF = {"ru": "Выключено", "en": "Disabled"}
+_TOGGLE_ON = {
+    "ru": "Включено для всех чатов без своего значения",
+    "en": "Enabled for every chat without its own value",
+}
+_TOGGLE_OFF = {
+    "ru": "Выключено для всех чатов без своего значения",
+    "en": "Disabled for every chat without its own value",
+}
 
 # Fallback when bot_config has no explicit `default_<key>` row yet -- this is
 # exactly the same fallback ChatConfigService._merge() applies for a chat
@@ -78,10 +109,10 @@ async def _resolve_values(bot_config_repo: BotConfigRepository) -> dict[str, obj
 async def render_defaults_panel(
     bot_config_repo: BotConfigRepository, lang: str
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Render the defaults screen's ``(text, keyboard)`` (ADR-0006, C-1)."""
+    """Render the global-settings screen's ``(text, keyboard)`` (ADR-0006, C-1)."""
     values = await _resolve_values(bot_config_repo)
     keyboard = defaults_keyboard(lang, values)
-    return _DEFAULTS_TITLE[lang], keyboard
+    return f"{_DEFAULTS_TITLE[lang]}\n\n{_DEFAULTS_SUBTITLE[lang]}", keyboard
 
 
 async def _render_and_show(

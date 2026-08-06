@@ -300,5 +300,36 @@ second handler.
 
 ---
 
+## Addendum 2026-08-06 — the invalidation rules above are defensive, not corrective
+
+Deep review after implementation measured the premise this ADR (and the PRD before it) took on
+trust, and it does not hold: **`ChatConfigService` is Dishka `Scope.REQUEST`** (`src/di.py`,
+`ServiceProvider.scope`), so every update builds a fresh service with an empty cache. Its 60s TTL
+therefore never spans two updates, and there is no cross-update stale read for `invalidate()` to
+prevent.
+
+Measured, not inferred: two messages sent 14s apart both bumped `chat_settings.updated_at`
+(10:07:38.09 → 10:07:52.58), i.e. `ChatConfigMiddleware`'s `was_cached` guard was False both
+times and `ensure_exists()` wrote on each message. That also falsifies the older claim in
+CLAUDE.md's middleware ADR ("max 1 write per 60s per chat").
+
+What this changes about the decisions above:
+
+- Decision 3's `invalidate(chat_id)` in the panel's own toggle **is** load-bearing, but only
+  *within* one update: the handler warms the cache via `get_config()` a few lines earlier, so
+  without the call the immediate re-render would show the pre-toggle value.
+- C-1's `invalidate_all()` and E-1's retrofit are **defensive**: they keep the invariant "a write
+  to settings drops the cache" uniform across every write path. They fix no observable bug today.
+- The two decisions themselves (which layer each screen writes, and which invalidation belongs to
+  it) stay correct and become load-bearing the moment the service moves to `Scope.APP`.
+
+Do not silently "clean up" these calls as dead code. If the scope is ever changed (TD-046 — the
+natural fix for the per-message write), the two write sites still missing invalidation,
+`_do_approve` and `handle_wl_remove` in `admin.py`, must be fixed in the same commit, or approving
+a chat leaves it blocked and removing one leaves it answering, for up to 60s each.
+
+---
+
 *Document generated as part of ADR-0006 (chat-settings-panel-2026-08-06 plan, item A-2).*
 *Architect: specialist-architect (universal baseline).*
+*Addendum: post-implementation deep review, 2026-08-06.*

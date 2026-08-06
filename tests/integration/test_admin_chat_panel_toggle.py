@@ -136,9 +136,71 @@ class TestToggleWriteReachesRepository:
         assert row is not None
         assert row["rag_enabled"] is True
 
+    @pytest.mark.asyncio
+    async def test_flip_derives_from_stored_value_not_from_callers_read(
+        self,
+        chat_settings_repo: ChatSettingsRepository,
+    ) -> None:
+        """This is what makes a double-tap harmless.
+
+        aiogram runs updates concurrently, so on a laggy client the second tap
+        reads the same value as the first and both would write the same
+        negation -- two taps, one flip. The negation now happens inside the
+        UPDATE, so the result depends on what is *stored* when the statement
+        runs, not on what the caller read earlier.
+
+        Simulated deterministically rather than with real concurrency: the
+        integration harness hands every test ONE asyncpg connection inside a
+        transaction, and a single connection cannot run two statements at once
+        (`another operation is in progress`) -- an `asyncio.gather` test there
+        fails on the harness, not on the defect, and would pass vacuously.
+        Here the caller passes a deliberately stale ``effective=True`` while
+        the column already holds False, exactly the state the losing tap is in.
+        """
+        await chat_settings_repo.ensure_exists(CHAT_ID, "Chat", "group")
+        await chat_settings_repo.set_field(CHAT_ID, "rag_enabled", False)
+
+        result = await chat_settings_repo.toggle_bool_field(CHAT_ID, "rag_enabled", True)
+
+        # Old read-modify-write would have written `not True` = False again.
+        assert result is True
+        row = await chat_settings_repo.get(CHAT_ID)
+        assert row is not None and row["rag_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_inherited_null_column_flips_from_the_effective_value(
+        self,
+        chat_settings_repo: ChatSettingsRepository,
+    ) -> None:
+        """NULL means "inherited", so the flip starts from the merged value the
+        caller supplies -- otherwise `NOT NULL` would yield NULL and the tap
+        would appear to do nothing."""
+        await chat_settings_repo.ensure_exists(CHAT_ID, "Chat", "group")
+        await chat_settings_repo.set_field(CHAT_ID, "kb_enabled", None)
+
+        result = await chat_settings_repo.toggle_bool_field(CHAT_ID, "kb_enabled", False)
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_toggle_on_absent_row_reports_failure(
+        self,
+        chat_settings_repo: ChatSettingsRepository,
+    ) -> None:
+        """The repository contract the handler relies on: no row -> None, so a
+        caller can refuse to claim success instead of silently no-opping."""
+        result = await chat_settings_repo.toggle_bool_field(-999_000_111, "rag_enabled", True)
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
-# Cache invalidation (the PRD's documented "up to a minute delay" bug)
+# Cache invalidation
+#
+# NB: `service` here is one long-lived ChatConfigService, which is what makes
+# these assertions meaningful. In production the service is Dishka
+# Scope.REQUEST (src/di.py), so no cache survives an update and the
+# invalidation is defensive rather than corrective -- see TD-046 and the
+# ADR-0006 addendum. These tests pin the invariant, not a live bug.
 # ---------------------------------------------------------------------------
 
 

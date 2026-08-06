@@ -46,10 +46,15 @@ def _make_bot_config_repo(admin_ids: list[int] | None = None, **defaults: object
     return repo
 
 
-def _make_chat_settings_repo(row: dict[str, object] | None) -> MagicMock:
+def _make_chat_settings_repo(
+    row: dict[str, object] | None, toggle_result: bool | None = False
+) -> MagicMock:
     repo = MagicMock()
     repo.get = AsyncMock(return_value=row)
     repo.set_field = AsyncMock()
+    # Mirrors the repo contract: returns the value now stored, or None when no
+    # row matched. Default False matches the rag_enabled flip the tests below use.
+    repo.toggle_bool_field = AsyncMock(return_value=toggle_result)
     return repo
 
 
@@ -296,8 +301,47 @@ class TestHandleChatPanelToggle:
             callback, chat_settings_repo, bot_config_repo, chat_config_service
         )
 
-        chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "rag_enabled", False)
+        # The flip is delegated to SQL (atomic); the handler only supplies the
+        # effective starting value, and never computes the new one itself.
+        chat_settings_repo.toggle_bool_field.assert_awaited_once_with(CHAT_ID, "rag_enabled", True)
+        chat_settings_repo.set_field.assert_not_awaited()
         chat_config_service.invalidate.assert_called_once_with(CHAT_ID)
+
+    @pytest.mark.asyncio
+    async def test_inherited_null_column_flips_from_effective_value(self) -> None:
+        """A NULL column means "inherited": the flip must start from what the
+        chat actually behaves like, not from SQL NULL."""
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:lc")  # link_comments_enabled
+        chat_settings_repo = _make_chat_settings_repo(
+            {"chat_title": "Chat", "link_comments_enabled": None}, toggle_result=True
+        )
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config(link_comments_enabled=False))
+
+        await handle_chat_panel_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        chat_settings_repo.toggle_bool_field.assert_awaited_once_with(
+            CHAT_ID, "link_comments_enabled", False
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_row_reports_failure_instead_of_success_toast(self) -> None:
+        """toggle_bool_field returns None when no row matched. The admin must be
+        told nothing changed rather than shown an 'Enabled'/'Disabled' toast."""
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"}, toggle_result=None)
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config(rag_enabled=True))
+
+        await handle_chat_panel_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.answer.assert_awaited_once()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+        chat_config_service.invalidate.assert_not_called()
 
     @pytest.mark.parametrize("code", ["kb", "rx", "rh"])
     @pytest.mark.asyncio

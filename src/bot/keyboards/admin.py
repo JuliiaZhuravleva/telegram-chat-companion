@@ -20,7 +20,7 @@ _L: dict[str, dict[str, str]] = {
     "whitelist": {"ru": "📋 Whitelist", "en": "📋 Whitelist"},
     "rules": {"ru": "📏 Правила", "en": "📏 Rules"},
     "stickers": {"ru": "🎨 Стикеры", "en": "🎨 Stickers"},
-    "defaults": {"ru": "⚙️ Настройки", "en": "⚙️ Default Settings"},
+    "defaults": {"ru": "🌍 Глобальные настройки", "en": "🌍 Global settings"},
     "statistics": {"ru": "📊 Статистика", "en": "📊 Statistics"},
     "language": {"ru": "🌐 Язык / Language", "en": "🌐 Language / Язык"},
     "costs": {"ru": "💰 Расходы", "en": "💰 Costs"},

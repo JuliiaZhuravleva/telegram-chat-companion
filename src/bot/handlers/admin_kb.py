@@ -316,11 +316,20 @@ async def handle_kb_toggle(
 ) -> None:
     """Flip kb_enabled for a chat.
 
-    Self-invalidates ``ChatConfigService``'s cache after the write (E-1):
-    before this, the toggle applied with up to 60s of delay because nothing
-    dropped the cached ``ChatConfig`` for this chat -- only
-    ``chat_events.py``'s bot-removal path did. Mirrors
-    ``admin_chat_panel.py``'s ``handle_chat_panel_toggle``.
+    Invalidates ``ChatConfigService``'s cache after the write (E-1), keeping
+    the "write settings -> drop the cache" invariant uniform across every
+    write path (``chat_events.py`` already did this).
+
+    Note what this does NOT fix, contrary to what E-1 originally claimed:
+    there is no cross-update staleness to fix today, because
+    ``ChatConfigService`` is Dishka ``Scope.REQUEST`` (``src/di.py``), so each
+    update builds a fresh service with an empty cache and the 60s TTL never
+    spans two updates. Measured 2026-08-06: two messages 14s apart both ran
+    ``ensure_exists()``, i.e. the cache was cold both times. This call is
+    therefore defensive, and becomes load-bearing the moment the service
+    moves to ``Scope.APP`` -- see TD-046, which must land together with the
+    two still-missing invalidations in ``admin.py`` (approve / whitelist
+    removal). Mirrors ``admin_chat_panel.py``'s ``handle_chat_panel_toggle``.
     """
     if not _is_private(callback):
         await callback.answer()
