@@ -69,6 +69,106 @@ def _minimal_tgs_bytes() -> bytes:
     return gzip.compress(_MINIMAL_LOTTIE_JSON.encode("utf-8"))
 
 
+def _lottie_bytes_with_color_keyframes(color_keyframes: list[dict]) -> bytes:
+    """A Lottie animation whose (canvas-covering) shape fill color is driven
+    by explicit, hold-interpolated (``"h": 1``) keyframes — real rlottie
+    rendering, no mocking. The shape covers almost the entire 64x64 canvas
+    so a color swap produces a near-maximal per-pixel diff (small moving
+    shapes were tried first and produced diffs normalized well under
+    `min_delta=0.15` against the full-canvas `max_diff` denominator in
+    `_calculate_frame_differences` — verified empirically, not assumed).
+    Used by ``TestRealOscillationEndToEnd`` (C-2) to drive
+    `_detect_oscillation` from genuinely differing rendered pixels instead
+    of a forced mock return value, closing the gap C-1's own call-site tests
+    (which mock `_detect_oscillation` directly) leave open."""
+    import gzip
+    import json
+
+    lottie = {
+        "v": "5.5.2",
+        "fr": 30,
+        "ip": 0,
+        "op": 30,
+        "w": 64,
+        "h": 64,
+        "nm": "test",
+        "ddd": 0,
+        "assets": [],
+        "layers": [
+            {
+                "ddd": 0,
+                "ind": 1,
+                "ty": 4,
+                "nm": "shape",
+                "sr": 1,
+                "ks": {
+                    "o": {"a": 0, "k": 100},
+                    "r": {"a": 0, "k": 0},
+                    "p": {"a": 0, "k": [32, 32, 0]},
+                    "a": {"a": 0, "k": [0, 0, 0]},
+                    "s": {"a": 0, "k": [100, 100, 100]},
+                },
+                "ao": 0,
+                "shapes": [
+                    {
+                        "ty": "rc",
+                        "p": {"a": 0, "k": [0, 0]},
+                        "s": {"a": 0, "k": [60, 60]},
+                        "r": {"a": 0, "k": 0},
+                    },
+                    {"ty": "fl", "c": {"a": 1, "k": color_keyframes}, "o": {"a": 0, "k": 100}},
+                ],
+                "ip": 0,
+                "op": 30,
+                "st": 0,
+                "bm": 0,
+            }
+        ],
+    }
+    return gzip.compress(json.dumps(lottie).encode("utf-8"))
+
+
+_RED = [1, 0, 0, 1]
+_BLUE = [0, 0, 1, 1]
+
+# Fill color snaps back and forth between red/blue every 3 frames (matches
+# the analyzer's default sampling stride) — a real analogue of "cat rapidly
+# turns its head side to side" (the plan's own AgAD7DoAAppnmEg example):
+# repeated large, fast changes rather than one smooth move. Empirically
+# verified (not just asserted) to make the real `_calculate_frame_differences`
+# -> interpolate -> `_detect_oscillation` chain land on True.
+_OSCILLATING_COLOR_KEYFRAMES = [
+    {"t": 0, "s": _RED, "h": 1},
+    {"t": 3, "s": _RED, "h": 1},
+    {"t": 6, "s": _BLUE, "h": 1},
+    {"t": 9, "s": _BLUE, "h": 1},
+    {"t": 12, "s": _RED, "h": 1},
+    {"t": 15, "s": _RED, "h": 1},
+    {"t": 18, "s": _BLUE, "h": 1},
+    {"t": 21, "s": _BLUE, "h": 1},
+    {"t": 24, "s": _RED, "h": 1},
+    {"t": 27, "s": _RED, "h": 1},
+    {"t": 29, "s": _RED},
+]
+
+# Exactly one color change, held before and after — a single deliberate
+# transition (no back-and-forth), real analogue of C-1's "current route
+# stays unaffected" claim for non-shaky animations.
+_SMOOTH_SWEEP_COLOR_KEYFRAMES = [
+    {"t": 0, "s": _RED, "h": 1},
+    {"t": 3, "s": _RED, "h": 1},
+    {"t": 6, "s": _RED, "h": 1},
+    {"t": 9, "s": _RED, "h": 1},
+    {"t": 12, "s": _RED, "h": 1},
+    {"t": 15, "s": _BLUE, "h": 1},
+    {"t": 18, "s": _BLUE, "h": 1},
+    {"t": 21, "s": _BLUE, "h": 1},
+    {"t": 24, "s": _BLUE, "h": 1},
+    {"t": 27, "s": _BLUE, "h": 1},
+    {"t": 29, "s": _BLUE},
+]
+
+
 class TestTgsHashFrame:
     """RenderedSticker.hash_frame for .tgs stickers (ADR-0007 Decision 2)."""
 
@@ -317,6 +417,53 @@ class TestTgsMotionTrailSubstitution:
             ) as mock_trail,
         ):
             result = await render_tgs(_minimal_tgs_bytes())
+
+        assert result.motion is not None
+        assert result.motion.is_oscillating is False
+        mock_trail.assert_not_called()
+
+
+class TestRealOscillationEndToEnd:
+    """C-2 regression: TestTgsMotionTrailSubstitution above proves the
+    substitution *wiring* is correct, but it forces the verdict via
+    ``patch.object(MotionAnalyzer, "_detect_oscillation", return_value=...)``
+    — a mirror of the implementation, not an independent check (the real
+    detection logic is never exercised). These two drive a genuinely
+    oscillating / genuinely single-direction Lottie animation through the
+    REAL rlottie render -> real frame differencing -> real
+    `_detect_oscillation` -> real trail substitution chain, with nothing
+    mocked except an observability wrapper around
+    `_create_motion_trail_frame` (to assert call/no-call without changing
+    its behavior)."""
+
+    @pytest.mark.asyncio
+    async def test_real_oscillating_animation_triggers_trail_and_hint(self):
+        with patch(
+            "src.services.modules.sticker.renderer._create_motion_trail_frame",
+            wraps=_create_motion_trail_frame,
+        ) as mock_trail:
+            result = await render_tgs(
+                _lottie_bytes_with_color_keyframes(_OSCILLATING_COLOR_KEYFRAMES)
+            )
+
+        assert result.motion is not None
+        # Real detection, not a mocked return value.
+        assert result.motion.is_oscillating is True
+        mock_trail.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_real_single_direction_animation_stays_on_current_route(self):
+        """A real, genuinely non-oscillating animation must reach the same
+        'no substitution' outcome C-1's mocked test asserts — proving current
+        route preservation isn't an artifact of the mock always returning
+        False."""
+        with patch(
+            "src.services.modules.sticker.renderer._create_motion_trail_frame",
+            wraps=_create_motion_trail_frame,
+        ) as mock_trail:
+            result = await render_tgs(
+                _lottie_bytes_with_color_keyframes(_SMOOTH_SWEEP_COLOR_KEYFRAMES)
+            )
 
         assert result.motion is not None
         assert result.motion.is_oscillating is False

@@ -265,3 +265,74 @@ def test_detect_oscillation_too_short_sequence(analyzer: MotionAnalyzer) -> None
     """Fewer than 3 samples can't establish a reversal — always False."""
     assert analyzer._detect_oscillation([0.0, 1.0]) is False
     assert analyzer._detect_oscillation([]) is False
+
+
+# --- analyze_tgs_frames real-pipeline propagation (C-2) ---
+#
+# The tests above call `_detect_oscillation` directly with hand-picked score
+# lists — they prove the heuristic itself is correct, but never prove that a
+# real call to the public `analyze_tgs_frames()` (sampling -> real frame
+# differencing via PIL -> interpolation -> `_detect_oscillation`) actually
+# lands on the same verdict. C-1's own renderer-level tests
+# (test_sticker_renderer.py::TestTgsMotionTrailSubstitution) mock
+# `_detect_oscillation` to force True/False, so they prove the *wiring* but
+# not that real pixel content correctly reaches that flag. These two close
+# that gap end to end, without mocking any part of the analyzer.
+
+
+def _frames_for_sampled_pattern(
+    colors: list[tuple[int, int, int]], sampling: int = 3, size: int = 8
+) -> list[Image.Image]:
+    """Build a frame list where only the indices `analyze_tgs_frames` will
+    actually sample (multiples of `sampling`) hold real content — matches
+    `colors[i]` at index `i * sampling`. Unsampled indices hold a shared
+    placeholder image; `analyze_tgs_frames` never reads them (it only reads
+    `frames[i] for i in range(0, len(frames), sampling)`), so their content
+    is irrelevant to the outcome.
+    """
+    total = (len(colors) - 1) * sampling + 1
+    placeholder = Image.new("RGB", (size, size), (128, 128, 128))
+    frames: list[Image.Image] = [placeholder for _ in range(total)]
+    for i, color in enumerate(colors):
+        frames[i * sampling] = Image.new("RGB", (size, size), color)
+    return frames
+
+
+@pytest.mark.asyncio
+async def test_analyze_tgs_frames_flags_real_alternating_motion(
+    analyzer: MotionAnalyzer,
+) -> None:
+    """Real frames that alternate full-contrast black/white in pairs (mirrors
+    a head snapping side to side: fast move, brief hold, fast move back)
+    drive real `_calculate_frame_differences` + interpolation into a
+    genuinely oscillating score sequence — no `_detect_oscillation` mocking."""
+    black = (0, 0, 0)
+    white = (255, 255, 255)
+    colors = [black, black, white, white, black, black, white, white, black, black, black]
+    frames = _frames_for_sampled_pattern(colors, sampling=3)
+
+    motion = await analyzer.analyze_tgs_frames(
+        frames, total_frames=len(frames), duration=1.0, sampling=3
+    )
+
+    assert motion.is_oscillating is True
+
+
+@pytest.mark.asyncio
+async def test_analyze_tgs_frames_does_not_flag_real_single_direction_change(
+    analyzer: MotionAnalyzer,
+) -> None:
+    """Real frames that hold steady and then make exactly one transition
+    (a single deliberate change, no back-and-forth) must NOT be flagged —
+    proves the current (non-oscillating) route stays unaffected when driven
+    through the real pipeline, not just via a forced-False mock."""
+    black = (0, 0, 0)
+    white = (255, 255, 255)
+    colors = [black, black, black, black, black, white]
+    frames = _frames_for_sampled_pattern(colors, sampling=3)
+
+    motion = await analyzer.analyze_tgs_frames(
+        frames, total_frames=len(frames), duration=1.0, sampling=3
+    )
+
+    assert motion.is_oscillating is False
