@@ -38,6 +38,7 @@ def _all_values(**overrides: object) -> dict[str, object]:
         "kb_enabled": False,
         "reactions_enabled": False,
         "reactions_history_enabled": True,
+        "tolerance_level": 0.5,
     }
     base.update(overrides)
     return base
