@@ -39,6 +39,7 @@ from src.bot.keyboards.admin import (
     rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
+    wl_approved_keyboard,
 )
 from src.config import Settings
 from src.database.repositories.admin import AdminRepository
@@ -1568,11 +1569,11 @@ async def handle_approve_notification(
 
     await callback.answer(_WL_APPROVED[lang])
 
-    # Replace buttons with status indicator
+    # Replace buttons with status indicator + settings-panel link (D-1)
     msg = callback.message
     if isinstance(msg, Message):
         await msg.edit_reply_markup(
-            reply_markup=approved_notification_keyboard(lang),
+            reply_markup=approved_notification_keyboard(lang, attempt["chat_id"]),
         )
 
 
@@ -1650,8 +1651,20 @@ async def handle_wl_approve(
 
     await callback.answer(_WL_APPROVED[lang])
 
-    # Re-render pending list
-    await _render_wl_pending(callback, admin_repo, lang, page)
+    # Show settings-panel link instead of re-rendering the pending list (D-1):
+    # the approved attempt no longer matches get_pending_attempts_page (status
+    # flipped) and would simply vanish from a re-render, leaving no row left
+    # to attach a "⚙️ Chat settings" button to.
+    chat_id = attempt["chat_id"]
+    chat_link = _build_chat_link_html(chat_id, attempt.get("chat_title"), attempt.get("chat_type"))
+    text = f"{_WL_APPROVED[lang]}\n\n{chat_link} <code>{chat_id}</code>"
+    msg = callback.message
+    if isinstance(msg, Message):
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=wl_approved_keyboard(lang, chat_id, page),
+        )
 
 
 @router.callback_query(F.data.startswith("adm_wl_rej:"))
