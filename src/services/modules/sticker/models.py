@@ -23,6 +23,10 @@ class StickerLearningResult:
     collage_png: bytes | None = None
     # Set when analysis_failed=True; None on success.
     failure_reason: Literal["vision", "content_filter", "empty"] | None = None
+    # file_unique_id of the canonical sticker this description was copied
+    # from via the pre-Vision image-hash dedup check (ADR-0007). None for
+    # a sticker that was actually analyzed by Vision (or failed to be).
+    duplicate_of: str | None = None
 
 
 @dataclass

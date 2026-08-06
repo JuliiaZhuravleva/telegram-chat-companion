@@ -15,9 +15,10 @@ from typing import Any, Literal
 import structlog
 from aiogram import Bot, types
 
-from src.database.repositories.stickers import StickerRepository
+from src.database.repositories.stickers import _VISION_DERIVED_COLUMNS, StickerRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
+from src.services.modules.sticker.dedup import compute_image_hash, find_duplicate, hamming_distance
 from src.services.modules.sticker.models import (
     ReanalyzeResult,
     StickerLearningResult,
@@ -129,6 +130,51 @@ class StickerLearningService:
                     failure_reason="vision",
                 )
 
+        # Duplicate detection via image hash, BEFORE the Vision call (ADR-0007).
+        # Skipped on force_reanalyze: an explicit admin re-analyze must always
+        # run Vision, never silently resolve to a copy of another sticker.
+        if sticker_type == "static":
+            hash_source = image_data
+        else:
+            hash_source = timing_metadata.hash_frame if timing_metadata else b""
+        try:
+            image_hash: str | None = compute_image_hash(hash_source)
+        except Exception:
+            logger.warning(
+                "Sticker hash computation failed, skipping dedup check",
+                file_unique_id=file_unique_id,
+                sticker_type=sticker_type,
+            )
+            image_hash = None
+
+        if image_hash is not None and not force_reanalyze:
+            candidate_rows = await self._repo.get_dedup_candidates()
+            candidates = [
+                (
+                    r["file_unique_id"],
+                    r["image_hash"],
+                    r["created_at"],
+                    r["duplicate_of_file_unique_id"],
+                )
+                for r in candidate_rows
+            ]
+            duplicate_of = find_duplicate(image_hash, candidates)
+            if duplicate_of:
+                dup_result = await self._save_duplicate(
+                    sticker=sticker,
+                    file_unique_id=file_unique_id,
+                    sticker_type=sticker_type,
+                    image_hash=image_hash,
+                    duplicate_of=duplicate_of,
+                    collage_png=vision_image if sticker_type != "static" else None,
+                    preceding_messages=preceding_messages,
+                )
+                if dup_result is not None:
+                    return dup_result
+                # Canonical row vanished between the candidate scan and the
+                # copy (e.g. deleted concurrently) — fail open, fall through
+                # to the normal Vision pipeline below.
+
         # Get pack context (other stickers from same set)
         pack_context: list[str] | None = None
         if sticker.set_name:
@@ -231,6 +277,11 @@ class StickerLearningService:
             character_or_meme=character,
             usage_contexts=usage_contexts,
             analysis_failed=analysis_failed,
+            image_hash=image_hash,
+            # This row is a Vision-analyzed result, not a copy — clears any
+            # stale duplicate_of_file_unique_id if this is a re-analyze of a
+            # previously-detected duplicate (ADR-0007).
+            duplicate_of_file_unique_id=None,
         )
 
         # Save debug artifacts if debug mode is enabled
@@ -300,6 +351,119 @@ class StickerLearningService:
             analysis_failed=analysis_failed,
             failure_reason=_failure_reason,
             collage_png=vision_image if sticker_type != "static" else None,
+        )
+
+    # ── Duplicate copy (ADR-0007) ───────────────────────────────────────
+
+    async def _save_duplicate(
+        self,
+        *,
+        sticker: types.Sticker,
+        file_unique_id: str,
+        sticker_type: str,
+        image_hash: str,
+        duplicate_of: str,
+        collage_png: bytes | None,
+        preceding_messages: list[str] | None,
+    ) -> StickerLearningResult | None:
+        """Copy a canonical sticker's Vision-derived fields onto a detected duplicate.
+
+        Skips `self._ai.analyze_image` / `_generate_and_store_embedding` entirely
+        (ADR-0007 Decision 7). Re-applies the format auto-tag for THIS sticker's
+        own type — a cross-type hash match (e.g. a static re-post of a picture
+        that also exists as an animated sticker) must not carry over the
+        canonical's format tag verbatim (pitfall 1).
+
+        Returns:
+            The learning result on success, or ``None`` if the canonical row
+            disappeared between the candidate scan and here — callers must
+            fall back to the normal Vision pipeline in that case (fail open).
+        """
+        canonical = await self._repo.get_by_file_unique_id(duplicate_of)
+        if canonical is None:
+            logger.warning(
+                "Duplicate candidate disappeared before copy, falling back to Vision",
+                file_unique_id=file_unique_id,
+                duplicate_of=duplicate_of,
+            )
+            return None
+
+        canonical_hash = canonical.get("image_hash")
+        logger.info(
+            "Sticker duplicate detected via image hash",
+            file_unique_id=file_unique_id,
+            duplicate_of=duplicate_of,
+            hamming_distance=(
+                hamming_distance(image_hash, canonical_hash) if canonical_hash else None
+            ),
+        )
+
+        # Single source of truth for "what counts as Vision-derived" (ADR-0007
+        # Decision 7) — copied verbatim except style_tags (pitfall 1, below).
+        copied = {col: canonical.get(col) for col in _VISION_DERIVED_COLUMNS}
+
+        # Pitfall 1: re-apply the format tag for THIS sticker's own type,
+        # never copy the canonical's format tag verbatim.
+        copied_tags = [t for t in (copied["style_tags"] or []) if t not in ("animated", "video")]
+        if sticker_type == "animated":
+            copied_tags.append("animated")
+        elif sticker_type == "video":
+            copied_tags.append("video")
+
+        # Usage context is derived from THIS ingestion's preceding messages,
+        # same as any new sticker — not copied from canonical (Decision 7:
+        # "this row's own usage log starts empty").
+        usage_contexts: list[str] | None = None
+        if preceding_messages:
+            context_text = " | ".join(preceding_messages[:3])
+            if len(context_text) >= 5:
+                usage_contexts = [context_text[:200]]
+
+        visual = copied["visual_description"]
+        emotion = copied["emotion"]
+        character = copied["character_or_meme"]
+
+        await self._repo.save_sticker(
+            file_unique_id=file_unique_id,
+            file_id=sticker.file_id,
+            set_name=sticker.set_name,
+            emoji=sticker.emoji,
+            is_animated=sticker.is_animated,
+            is_video=sticker.is_video,
+            visual_description=visual,
+            original_vision_description=copied["original_vision_description"],
+            emotion=emotion,
+            suggested_contexts=copied["suggested_contexts"],
+            style_tags=copied_tags or None,
+            character_or_meme=character,
+            usage_contexts=usage_contexts,
+            analysis_failed=False,
+            image_hash=image_hash,
+            duplicate_of_file_unique_id=duplicate_of,
+        )
+
+        embedding = copied["description_embedding"]
+        if embedding is not None:
+            await self._repo.update_embedding(file_unique_id, embedding)
+
+        logger.info(
+            "Learned new sticker (duplicate copy)",
+            file_unique_id=file_unique_id,
+            set_name=sticker.set_name,
+            sticker_type=sticker_type,
+            duplicate_of=duplicate_of,
+        )
+
+        return StickerLearningResult(
+            is_new=True,
+            file_unique_id=file_unique_id,
+            visual_description=visual,
+            emotion=emotion,
+            character_or_meme=character,
+            analysis_failed=False,
+            failure_reason=None,
+            collage_png=collage_png,
+            duplicate_of=duplicate_of,
         )
 
     # ── Admin re-analyze ─────────────────────────────────────────────

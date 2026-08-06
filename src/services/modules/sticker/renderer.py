@@ -37,12 +37,19 @@ class RenderedSticker:
         duration: Total animation duration in seconds
         frame_times: Timestamp (in seconds) of each extracted frame
         motion: Motion analysis result (optional)
+        hash_frame: PNG bytes of a single deterministic frame used for
+            pre-Vision dedup hashing (ADR-0007 Decision 2) — never the
+            Vision collage (its timestamp/motion-score labels would
+            corrupt the hash) and, for video, never a motion-selected
+            keyframe (those can land at different timestamps between two
+            re-encoded copies of the same clip).
     """
 
     collage_png: bytes
     duration: float
     frame_times: list[float]
     motion: AnimationMotion | None = None
+    hash_frame: bytes = b""
 
 
 # Collage layout: 3 columns x 2 rows = 6 frames
@@ -282,11 +289,20 @@ def _render_tgs_sync(tgs_data: bytes) -> RenderedSticker:
             frames.append(Image.new("RGBA", default_size))
 
     collage_png = _composite_collage(frames, "ANIMATED STICKER", motion=motion)
+
+    # Dedup hash frame (ADR-0007 Decision 2): reuse sampled_frames[0], which
+    # is anim.render_pillow_frame(frame_num=0) since the sampling loop above
+    # starts at frame_num=0 — zero extra render cost, bit-for-bit
+    # deterministic for identical Lottie input.
+    hash_buf = io.BytesIO()
+    sampled_frames[0].convert("RGBA").save(hash_buf, format="PNG")
+
     return RenderedSticker(
         collage_png=collage_png,
         duration=duration,
         frame_times=keyframe_times,
         motion=motion,
+        hash_frame=hash_buf.getvalue(),
     )
 
 
@@ -335,6 +351,14 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
         if total_frames <= 0 or duration <= 0:
             raise StickerRenderError(f"Invalid video: frames={total_frames}, duration={duration}")
 
+        # Dedup hash frame (ADR-0007 Decision 2): a dedicated t=0 anchor
+        # frame, extracted BEFORE motion analysis and never reused from the
+        # motion-selected keyframes below — those land at motion-*peak*
+        # timestamps, which can shift between two re-encoded copies of the
+        # same video even though the underlying content is identical, and
+        # comparing two different moments would defeat the dedup check.
+        hash_frame = await _extract_hash_anchor_frame(input_path, tmp_dir)
+
         # Analyze motion via ffmpeg mestimate filter
         analyzer = MotionAnalyzer(target_keyframes=_FRAME_COUNT)
         try:
@@ -352,26 +376,7 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
 
         for idx, timestamp in zip(keyframe_indices, frame_times, strict=True):
             frame_path = Path(tmp_dir) / f"frame_{idx}.png"
-
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg",
-                "-y",
-                "-ss",
-                f"{timestamp:.3f}",
-                "-i",
-                str(input_path),
-                "-frames:v",
-                "1",
-                "-vf",
-                f"scale={_FRAME_SIZE}:{_FRAME_SIZE}:force_original_aspect_ratio=decrease,"
-                f"pad={_FRAME_SIZE}:{_FRAME_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
-                "-pix_fmt",
-                "rgba",
-                str(frame_path),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await asyncio.wait_for(proc.wait(), timeout=15)
+            await _ffmpeg_extract_frame(input_path, frame_path, timestamp)
 
             if frame_path.exists():
                 frames.append(Image.open(frame_path).convert("RGBA"))
@@ -387,6 +392,7 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
             duration=duration,
             frame_times=frame_times,
             motion=motion,
+            hash_frame=hash_frame,
         )
 
     except StickerRenderError:
@@ -397,6 +403,57 @@ async def render_webm(webm_data: bytes) -> RenderedSticker:
         raise StickerRenderError(f"WebM rendering failed: {exc}") from exc
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+async def _ffmpeg_extract_frame(input_path: Path, out_path: Path, timestamp: float) -> None:
+    """Extract a single scaled+padded RGBA frame at ``timestamp`` via ffmpeg -ss.
+
+    Shared by the motion-keyframe extraction loop and the dedup anchor-frame
+    extraction (`_extract_hash_anchor_frame`) — same command, different
+    timestamp source. Writes to ``out_path`` (PNG, by extension); silently
+    leaves it missing on ffmpeg failure, same fail-open contract callers
+    already handle for the keyframe loop.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-ss",
+        f"{timestamp:.3f}",
+        "-i",
+        str(input_path),
+        "-frames:v",
+        "1",
+        "-vf",
+        f"scale={_FRAME_SIZE}:{_FRAME_SIZE}:force_original_aspect_ratio=decrease,"
+        f"pad={_FRAME_SIZE}:{_FRAME_SIZE}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+        "-pix_fmt",
+        "rgba",
+        str(out_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await asyncio.wait_for(proc.wait(), timeout=15)
+
+
+async def _extract_hash_anchor_frame(input_path: Path, tmp_dir: str) -> bytes:
+    """Extract the t=0 dedup-hash anchor frame (ADR-0007 Decision 2).
+
+    Deliberately NOT one of the motion-selected keyframes (see caller)
+    Falls back to a blank RGBA frame on ffmpeg failure — mirrors the
+    existing blank-frame fallback in the keyframe extraction loop, and
+    keeps ``hash_frame`` a well-formed image `compute_image_hash()` can
+    always parse (dedup itself fails open on a *degenerate* hash, not on
+    an unparseable one).
+    """
+    anchor_path = Path(tmp_dir) / "hash_anchor.png"
+    await _ffmpeg_extract_frame(input_path, anchor_path, 0.0)
+    if anchor_path.exists():
+        return anchor_path.read_bytes()
+
+    logger.warning("Failed to extract dedup anchor frame, using blank fallback")
+    buf = io.BytesIO()
+    Image.new("RGBA", (_FRAME_SIZE, _FRAME_SIZE)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 async def _probe_video(path: str) -> tuple[int, float]:

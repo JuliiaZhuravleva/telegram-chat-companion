@@ -57,6 +57,49 @@ async def test_save_sticker_returns_id(repo):
 
 
 @pytest.mark.asyncio
+async def test_save_sticker_passes_dedup_columns(repo):
+    """ADR-0007: image_hash / duplicate_of_file_unique_id are wired through
+    to the INSERT (both the SQL text and the bound positional params)."""
+    repo._pool.fetchrow = AsyncMock(return_value={"id": 7})
+
+    await repo.save_sticker(
+        file_unique_id="unique-1",
+        file_id="file-1",
+        image_hash="0123456789abcdef",
+        duplicate_of_file_unique_id="canonical-uid",
+    )
+
+    sql = repo._pool.fetchrow.call_args.args[0]
+    assert "image_hash" in sql
+    assert "duplicate_of_file_unique_id" in sql
+    bound_args = repo._pool.fetchrow.call_args.args[1:]
+    assert "0123456789abcdef" in bound_args
+    assert "canonical-uid" in bound_args
+
+
+@pytest.mark.asyncio
+async def test_get_dedup_candidates_query_shape(repo):
+    repo._pool.fetch = AsyncMock(
+        return_value=[
+            {
+                "file_unique_id": "uid-1",
+                "image_hash": "0000000000000000",
+                "created_at": "2026-01-01",
+                "duplicate_of_file_unique_id": None,
+            }
+        ]
+    )
+
+    results = await repo.get_dedup_candidates()
+
+    assert len(results) == 1
+    sql = repo._pool.fetch.call_args.args[0]
+    assert "image_hash IS NOT NULL" in sql
+    assert "visual_description IS NOT NULL" in sql
+    assert "analysis_failed = false" in sql
+
+
+@pytest.mark.asyncio
 async def test_update_embedding(repo):
     embedding = [0.1] * 768
 

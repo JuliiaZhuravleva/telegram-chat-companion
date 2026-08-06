@@ -6,6 +6,20 @@ from typing import Any
 
 import asyncpg
 
+# Vision-derived columns copied onto a duplicate sticker's row instead of
+# re-running Vision (ADR-0007 Decision 7). Keep this list visible next to
+# save_sticker() so it stays up to date when a new Vision-derived column
+# lands (D-2's explicitness_score, when it ships, is the next candidate).
+_VISION_DERIVED_COLUMNS = (
+    "visual_description",
+    "original_vision_description",
+    "emotion",
+    "suggested_contexts",
+    "style_tags",
+    "character_or_meme",
+    "description_embedding",
+)
+
 
 class StickerRepository:
     """Data access layer for sticker intelligence."""
@@ -46,10 +60,21 @@ class StickerRepository:
         character_or_meme: str | None = None,
         usage_contexts: list[str] | None = None,
         analysis_failed: bool = False,
+        image_hash: str | None = None,
+        duplicate_of_file_unique_id: str | None = None,
     ) -> int:
         """Insert or update a sticker. Returns sticker ID.
 
         On conflict (file_unique_id): increments total_uses and updates file_id.
+
+        ``image_hash`` / ``duplicate_of_file_unique_id`` (ADR-0007): used both
+        by the normal Vision-analysis path (stores this sticker's own hash so
+        it becomes a future dedup candidate; clears any stale
+        ``duplicate_of_file_unique_id`` on a re-analyze) and by the
+        duplicate-copy path (stores the new sticker's own hash plus a pointer
+        to the canonical row it copied its description from). Both paths
+        share this one INSERT so their total_uses/last_used_at semantics
+        never diverge.
         """
         row = await self._pool.fetchrow(
             """
@@ -58,11 +83,13 @@ class StickerRepository:
                 is_animated, is_video,
                 visual_description, original_vision_description,
                 emotion, suggested_contexts, style_tags, character_or_meme,
-                usage_contexts, analysis_failed, analyzed_at, total_uses
+                usage_contexts, analysis_failed, analyzed_at, total_uses,
+                image_hash, duplicate_of_file_unique_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                 CASE WHEN $7::TEXT IS NOT NULL THEN NOW() END,
-                1
+                1,
+                $15, $16
             )
             ON CONFLICT (file_unique_id) DO UPDATE
             SET file_id = EXCLUDED.file_id,
@@ -82,6 +109,8 @@ class StickerRepository:
                     WHEN EXCLUDED.visual_description IS NOT NULL THEN NOW()
                     ELSE NULL
                 END,
+                image_hash = COALESCE(EXCLUDED.image_hash, sticker_knowledge.image_hash),
+                duplicate_of_file_unique_id = EXCLUDED.duplicate_of_file_unique_id,
                 updated_at = NOW()
             RETURNING id
             """,
@@ -99,9 +128,35 @@ class StickerRepository:
             character_or_meme,
             usage_contexts or [],
             analysis_failed,
+            image_hash,
+            duplicate_of_file_unique_id,
         )
         assert row is not None
         return int(row["id"])
+
+    async def get_dedup_candidates(self) -> list[asyncpg.Record]:
+        """Fetch existing stickers eligible for dedup-hash matching (ADR-0007 Decision 5).
+
+        Includes rows that are themselves already-detected duplicates (their
+        own ``duplicate_of_file_unique_id`` is returned so callers can
+        flatten a chained match to its root — Decision 6): a duplicate row's
+        own ``image_hash`` is still a legitimate match target for a third
+        copy of the same picture.
+
+        App-side O(N) Hamming scan by design (no bit(64)/pg_trgm extension):
+        the catalog is small (migration 005's own sizing note). Revisit if it
+        passes ~5,000 rows and this scan is visibly on learn()'s critical path.
+        """
+        result: list[asyncpg.Record] = await self._pool.fetch(
+            """
+            SELECT file_unique_id, image_hash, created_at, duplicate_of_file_unique_id
+            FROM sticker_knowledge
+            WHERE image_hash IS NOT NULL
+              AND visual_description IS NOT NULL
+              AND analysis_failed = false
+            """
+        )
+        return result
 
     async def update_embedding(
         self,
