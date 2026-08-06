@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T17:38:13Z",
+  "role": "specialist",
+  "item_id": "D-2",
+  "verdict": "NEEDS_WORK",
+  "cost_usd": 5.7,
+  "notes": "Implementation complete per ADR-0008 Decision 4/5/7/8, NOT YET VERIFIED OR COMMITTED (budget exhausted before test run): (1) alembic/versions/024_sticker_explicitness_score.py - nullable explicitness_score, no DEFAULT, mirrors 023's style. (2) models.py - StickerLearningResult.explicitness_score field. (3) stickers.py - _VISION_DERIVED_COLUMNS includes explicitness_score; save_sticker() gained explicitness_score param (unconditional EXCLUDED overwrite like emotion); new get_explicitness_backfill_candidates() (Decision 5 target-set WHERE) and update_explicitness_score() (narrow single-column UPDATE, does not touch analyzed_at). (4) learning.py - _build_vision_prompt adds \"explicit\" 0.0-1.0 to the JSON schema; _parse_vision_response extracts+validates it (reject-not-clamp: non-numeric/out-of-range -> None + warning) in BOTH the direct-JSON path and the attempt-3 regex fallback, via new module-level _validate_explicitness_score(); learn() wires explicitness_score through both the fresh-Vision-analysis path and the ADR-0007 duplicate-copy path (_save_duplicate) into save_sticker()+StickerLearningResult. (5) scripts/backfill_explicitness.py - first Python one-off script in repo; narrow single-field prompt; reuses renderer.py's hash_frame anchor (not the 6-frame collage) for animated/video; reuses StickerLearningService._parse_vision_response for identical validation; log-and-continue per row (scored/skipped/failed three-way summary per Decision 5); bootstraps Bot/AIRouter/StickerRepository/pool directly, no Dishka scope. Tests written (unrun): tests/unit/test_sticker_repository.py (+5 tests: save_sticker explicitness_score wiring incl. default-None, backfill-candidates query shape, update_explicitness_score), tests/unit/test_sticker_learning.py (+~14 tests: parse validation incl. regex-fallback path and boundary/reject cases, prompt schema, learn() end-to-end wiring incl. reject-not-clamp, duplicate-copy incl. NULL-carries-over case), tests/unit/test_backfill_explicitness.py (new file, ~12 tests: static/animated/video frame selection, download-failure=skipped vs render/vision/invalid-score=failed distinction, run_backfill summary counts, one-bad-row-does-not-abort-run). BLOCKER: this worktree's own .venv has no dev deps (no pytest/ruff/mypy, no pip either - uv-managed venv) and both 'uv sync --extra dev --python \"$PWD/.venv/bin/python\"' and invoking the sibling main-checkout's .venv/bin/python (which does have the deps) were blocked by the sandbox requiring approval I could not grant headlessly, even with dangerouslyDisableSandbox. Nothing committed - working tree has only the edits above, no unrelated changes. NEXT ATTEMPT: sync dev deps into this worktree's .venv (or get sandbox approval for cross-checkout python), then run pytest tests/unit/test_sticker_repository.py tests/unit/test_backfill_explicitness.py tests/unit/test_sticker_learning.py -q, ruff check src/ scripts/ tests/, mypy src/ (scripts/ not in mypy's configured target per sessions.md convention but worth a manual check), fix any findings, then git add + commit (scope: the 6 files touched here) with Conventional Commits e.g. 'feat(sticker): explicitness score pipeline + backfill script (ADR-0008 D-2)'.",
+  "result": {
+    "kind": null,
+    "ref": null,
+    "verification": null
+  },
+  "confidence": 0.75,
+  "clarification_request": null,
+  "session_id": null
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T19:36:05Z",
+  "role": "evaluator",
+  "item_id": "D-4",
+  "verdict": "PASS",
+  "evidence": "Verified commit 46a2563 independently: ran the 3 new/touched test files directly — tests/unit/test_chat_config_service.py (28 passed, three-layer merge incl. NULL-falls-back-to-global + brand-new-chat 0.5 default), tests/integration/test_sticker_tolerance_gating_integration.py + test_migration_024_025_tolerance_schema.py (7 passed against real testcontainer Postgres — NULL fail-closed even at tolerance=1.0, 0.6-score excluded/included at 0.5/1.0, boundary score==tolerance included, nullable-no-DEFAULT schema assertion), and the fixed tests/unit/test_admin_defaults_keyboards.py (10 passed). Inequality-direction table test (is_within_tolerance) already existed from D-3's own commit and D-4 correctly did not duplicate it — confirmed present and passing at tests/unit/test_sticker_tolerance.py. All ADR-0008 D-4 implementation-note bullets are covered; search_by_embedding signature matches the new integration tests' call shape.",
+  "regression_risk": "low",
+  "notes": ""
+}

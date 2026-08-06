@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T16:45:10Z",
+  "role": "evaluator",
+  "item_id": "B-2",
+  "verdict": "PASS",
+  "evidence": "Reproduced the specialist's regression-bite control independently: reordering handlers/__init__.py to the pre-B-1 order fails exactly the 2 positive tests + the structural test (3/5) while the 2 negative controls stay green, then reverted with a clean git diff. Full new test file (5 tests) passes on current tree, ruff clean; confirmed via B-1's own test file that found/not-found/analyze and ADR-0003 edit-in-place were indeed already covered there (TestHandleAdminStickerCheck/TestHandleAdminStickerDmAnalyze), and B-2's new router-order tests additionally exercise real admin+private scoping through actual filters (IsAdmin/F.chat.type) via propagate_event, which B-1's handler-level tests only covered by decorator inspection -- so B-2 closes the exact gap flagged in B-1's own last_update note.",
+  "regression_risk": "low",
+  "notes": ""
+}

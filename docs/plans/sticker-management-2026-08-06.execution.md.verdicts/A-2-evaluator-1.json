@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T16:08:12Z",
+  "role": "evaluator",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "evidence": "Diff 5598e2a2 matches ADR-0007 decisions 1-7 line for line: dHash algo, per-type hash_frame (tgs reuses sampled_frames[0], webm gets dedicated t=0 anchor before motion analysis, not motion keyframe[0]), migration 023 columns/index, app-side Hamming scan with chain-flatten-to-root, format-tag reapply pitfall handled. Insertion point in learning.py is exactly where the ADR specifies (after exact-match shortcut, after render, before Vision prompt), force_reanalyze bypasses dedup, fail-open on hash-compute error / vanished canonical. Ran the actual relevant suite: pytest tests/unit/test_sticker_dedup.py test_sticker_learning.py test_sticker_repository.py test_sticker_renderer.py -q = 80 passed; ruff check and mypy clean on all touched files. Tests directly assert analyze_image/generate_embedding NOT awaited on a duplicate hit plus the two ADR-flagged pitfalls (cross-type format tag, chain flattening).",
+  "regression_risk": "low",
+  "notes": "Minor gap, not blocking: the canonical-vanished-between-scan-and-copy fallback branch in _save_duplicate has no dedicated unit test (code reading only) - low risk rare race; A-3 already has an integration-level duplicate-skips-Vision assertion planned."
+}

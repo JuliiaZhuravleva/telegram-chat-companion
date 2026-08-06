@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T17:24:32Z",
+  "role": "evaluator",
+  "item_id": "D-1",
+  "verdict": "PASS",
+  "evidence": "ADR-0008 covers all required decisions (fields/scale, comparison direction, NULL fail-closed policy, score source, backfill script shape, gating, non-abuse-module, schema no-DEFAULT, admin FSM); spot-checked 10+ file:line citations (stickers.py:196-227/216-219, responder.py:34/44, chat_config.py:95/130/161, admin.py:10 unused-elsewhere confirmed via grep, settings_fields.py F-1 docstring, alembic 020 precedent, renderer.py sampled_frames[0]) all resolve exactly against the live tree. Correctly implements Julia's [D-1] one-off-script answer and the source plan's 0.5-default/1.0-anarchy example. git status confirms doc-only change (no src/ or alembic/ files touched), matching architect scope.",
+  "regression_risk": "low",
+  "notes": ""
+}

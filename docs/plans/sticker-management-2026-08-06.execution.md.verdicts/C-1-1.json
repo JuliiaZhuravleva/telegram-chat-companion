@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T16:57:11Z",
+  "role": "specialist",
+  "item_id": "C-1",
+  "verdict": "PASS",
+  "cost_usd": 4.0,
+  "notes": "Wired the ready-made _create_motion_trail_frame (previously dead code) via a new MotionAnalyzer._detect_oscillation heuristic (direction-reversal counting with a noise-floor min_delta) added to motion.py plus AnimationMotion.is_oscillating. Renderer: when oscillation is detected, the keyframe closest to the motion peak is substituted with a ghosted trail composite: TGS reuses already-sampled motion-analysis frames (zero extra render cost); WebM extracts a few extra ffmpeg frames on demand, only when oscillation fires, via a new _extract_trail_frames helper. Collage label gets a trail-frame suffix so Vision does not read the ghosting as corruption. Vision prompt gets an explicit RU hint in both the animated and video branches of _build_vision_prompt. No new dependencies. Current route strictly preserved: everything gated behind is_oscillating, default False, proved via a call-site test that mocks _detect_oscillation True and False and asserts _create_motion_trail_frame is called or not-called accordingly, for both TGS and WebM (not just a helper-correctness test). Added 7 tests in test_motion.py, 8 in test_sticker_renderer.py, 5 in test_sticker_learning.py, 20 new total. Full suite 1554 passed, no regressions, ruff and mypy clean. QA C-2 should do the live-checklist resend of the AgAD7DoAAppnmEg example sticker to confirm the real-world fix; unit coverage of the heuristic and the prompt hint is already covered here.",
+  "result": {
+    "kind": "commit",
+    "ref": "403b0e0f6e26b26ea6b84d3945b45ac2e044b04f",
+    "verification": "pytest tests/unit/ -q: 1554 passed (1534 prior + 20 new), no regressions; ruff check src/ clean; ruff format --check clean; mypy src/ clean (129 files)"
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

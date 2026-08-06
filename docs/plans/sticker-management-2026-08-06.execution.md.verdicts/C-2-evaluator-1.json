@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-06T17:12:11Z",
+  "role": "evaluator",
+  "item_id": "C-2",
+  "verdict": "PASS",
+  "evidence": "Ran the 4 new tests (test_motion.py + test_sticker_renderer.py::TestRealOscillationEndToEnd) plus full test_motion.py/test_sticker_renderer.py suites (42 passed) and ruff check - all clean; confirmed is_oscillating/_detect_oscillation genuinely didn't exist pre-C-1 (git show 403b0e0^), corroborating the specialist's control-verification claim. Tests drive real analyze_tgs_frames()/render_tgs() pipelines (no mocking of the detection itself), closing the gap left by C-1's mocked call-site tests, and the live checklist for AgAD7DoAAppnmEg follows the established A-3/B-2 deferred-human-verification convention. No src/ changes, respecting qa scope.",
+  "regression_risk": "low",
+  "notes": ""
+}
