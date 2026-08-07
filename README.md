@@ -168,7 +168,15 @@ pytest tests/ -v             # Run tests
 ruff check src/ tests/       # Lint
 mypy src/                    # Type check
 pre-commit install           # Set up git hooks
+
+python -m scripts.verify_commands   # Check the bot's registered slash commands
 ```
+
+The bot pushes its command menus to Telegram on every start and verifies what
+Telegram actually holds; `scripts/verify_commands.py` runs the same check on
+demand (`--fix` re-pushes, `--json` for machines). Commands are declared once in
+[src/bot/command_registry.py](src/bot/command_registry.py) — adding a handler
+without a spec there fails CI.
 
 ## Documentation
 
