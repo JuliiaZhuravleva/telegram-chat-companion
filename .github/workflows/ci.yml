@@ -27,6 +27,15 @@ jobs:
       # .gitignore, so this stays limited to tracked files.
       - run: ruff check .
       - run: ruff format --check .
+      # uv.lock is committed for contributors who use uv, but NOTHING else in
+      # this project consumes it: the Dockerfile and the jobs below install with
+      # pip. An unchecked lockfile is therefore the worst of both worlds — it
+      # looks like reproducibility while quietly drifting from pyproject.toml,
+      # and `uv sync` then builds an environment nobody has tested. This step is
+      # what makes committing it honest. Pinned like ruff above: an unpinned
+      # resolver is a gate that changes with no repository change.
+      - run: pip install uv==0.12.2
+      - run: uv lock --check
 
   typecheck:
     runs-on: ubuntu-latest

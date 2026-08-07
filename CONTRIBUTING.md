@@ -15,6 +15,17 @@ pip install -e ".[dev]"
 pre-commit install
 ```
 
+<details>
+<summary>Using <a href="https://docs.astral.sh/uv/">uv</a> instead of pip</summary>
+
+`uv.lock` is committed, so `uv sync --extra dev` gives you the exact dependency
+set CI resolves from. It is an alternative, not the canonical path: the
+Dockerfile and CI install with pip, so pip is what production actually runs.
+
+If you change dependencies in `pyproject.toml`, run `uv lock` and commit the
+updated lockfile — CI runs `uv lock --check` and fails on a stale one.
+</details>
+
 ## Code Style
 
 - **Formatter & linter:** ruff (configured in `pyproject.toml`)
