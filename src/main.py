@@ -6,6 +6,7 @@ not just a command responder.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 
@@ -17,7 +18,7 @@ from aiogram.enums import ParseMode
 from dishka import make_async_container
 from dishka.integrations.aiogram import setup_dishka
 
-from src.bot.commands import setup_bot_commands
+from src.bot.commands import sync_and_report
 from src.bot.handlers import router as main_router
 from src.bot.middleware import (
     AccessControlMiddleware,
@@ -28,11 +29,13 @@ from src.bot.middleware import (
     TopicMiddleware,
 )
 from src.config import Settings
+from src.database.repositories.bot_config import BotConfigRepository
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
 from src.services.health.checker import HealthChecker
 from src.services.maintenance.cleanup import RetentionCleaner
 from src.services.modules.sticker.scheduler import StickerSetSyncScheduler
 from src.utils import parse_admin_ids
+from src.utils.background import fire_and_forget
 
 _REQUIRED_TABLES = ("bot_config", "chat_settings", "custom_rules", "health_log")
 
@@ -158,11 +161,29 @@ async def main() -> None:
 
     dp.include_router(main_router)
 
-    # Register bot commands with Telegram API for autocomplete hints
+    # Register bot commands with Telegram API for autocomplete hints, then check
+    # that Telegram really holds what the registry declares. A deploy is the one
+    # moment this can be verified for free, and merging to main deploys
+    # unattended — see src/bot/command_registry.py.
     admin_ids_raw = await pool.fetchval("SELECT value FROM bot_config WHERE key = 'admin_ids'")
     if admin_ids_raw is not None:
         admin_ids_raw = json.loads(admin_ids_raw)
-    await setup_bot_commands(bot, parse_admin_ids(admin_ids_raw))
+    admin_ids = parse_admin_ids(admin_ids_raw)
+    bot_config_repo = BotConfigRepository(pool)
+    # Backgrounded on purpose: the sync makes ~a dozen sequential Bot API calls
+    # and nothing downstream waits on their result, so keeping it on the startup
+    # path only means a slow or rate-limited Telegram delays the first answered
+    # message. `fire_and_forget` holds the strong reference asyncio does not;
+    # the task is cancelled in the shutdown block below, before the session it
+    # uses is closed.
+    command_sync_task = fire_and_forget(
+        sync_and_report(
+            bot,
+            admin_ids,
+            bot_config_repo=bot_config_repo,
+            router=main_router,
+        )
+    )
 
     # Cache bot identity for handlers (avoids per-message getMe calls)
     dp["bot_id"] = (await bot.me()).id
@@ -183,6 +204,12 @@ async def main() -> None:
         await dp.start_polling(bot)
     finally:
         logger.info("Shutting down...")
+        # First: the command sync may still be mid-flight on this bot session,
+        # and cancelling it after the session closes turns a clean shutdown into
+        # a stack trace. Cancelling is safe — see sync_and_report's docstring.
+        command_sync_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await command_sync_task
         await retention_cleaner.stop()
         await sticker_sync.stop()
         await health_checker.stop()
