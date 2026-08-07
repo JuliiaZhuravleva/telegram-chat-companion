@@ -136,6 +136,40 @@ check will report it; nothing reverts it.
 
 ---
 
+## Slash commands are re-registered and checked on every deploy
+
+Telegram stores the bot's command menus on *its* side, per scope and per language, and they only
+change when the bot pushes them. That state therefore outlives any deploy, and used to drift
+silently: `/kb` and `/remember` were implemented for weeks while advertised nowhere, and a demoted
+admin kept their `/admin` menu forever.
+
+[src/bot/command_registry.py](../src/bot/command_registry.py) is now the single source of truth for
+which commands exist and where they are advertised, and it is checked at three points:
+
+| When | What it catches | On failure |
+|---|---|---|
+| CI `test` job | Registry vs. handlers: a command with no spec, a spec with no handler, admin gating that disagrees with the advertised scope | Fails the check the deployer waits on — the drift never reaches production |
+| Bot startup (every deploy) | Push failures, Telegram not holding what was pushed, per-admin scopes belonging to non-admins (deleted here) | Logs `command_registry_drift` and DMs the admins once per distinct problem set; **never blocks startup** |
+| `python -m scripts.verify_commands` | The same, on demand, without a restart; `--fix` re-pushes | Exit 1 on drift, exit 2 if the check itself could not run |
+
+Two consequences worth keeping in mind:
+
+- **Adding a command means editing two places** — the handler and `COMMANDS` — plus the snapshot in
+  `tests/unit/test_command_registry.py`. That is deliberate: what users are told the bot can do
+  should not change as a side effect.
+- **Startup self-heals before it verifies.** The push happens first, so a menu edited by hand
+  through BotFather is silently corrected by the next deploy rather than reported. To *see* that
+  kind of drift, run `scripts/verify_commands` (read-only) before restarting.
+- **The cleanup only knows scopes pushed since this landed.** The Bot API cannot enumerate the
+  scopes a bot has set, so `bot_config.command_scopes_pushed` is the only record — and it starts
+  from whoever was an admin at the first startup on this code. Anyone removed from `admin_ids`
+  *before* that keeps their `/admin` menu, invisibly and forever. There is exactly one of these
+  per deployment history; clear it by hand once:
+  `bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=<old id>), language_code=…)` for
+  `None`, `"ru"` and `"en"` — all three, or the ru/en menus survive.
+
+---
+
 ## Failure modes
 
 | What failed | What happens |
