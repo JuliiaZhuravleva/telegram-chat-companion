@@ -244,8 +244,8 @@ review_gate:
   - 'budget cap reached: consumed $24.03 of $30.0'
   - budget cap raised 30->60 by julia (finish all remaining items); --max-budget-override flag is a no-op, applied directly to envelope
   - budget cap raised 60->80 by julia (finish D branch incl. D-2 retry)
-  approve_action: /execute-plan /Users/julia/my-projects/telegram-chat-companion.sticker-management-2026-08-06-wt/docs/plans/sticker-management-2026-08-06.execution.md --resume
-  reject_action: /plan-fixes docs/plans/sticker-management-2026-08-06.md --revise /Users/julia/my-projects/telegram-chat-companion.sticker-management-2026-08-06-wt/docs/plans/sticker-management-2026-08-06.execution.md
+  approve_action: /execute-plan <projects>/telegram-chat-companion.sticker-management-2026-08-06-wt/docs/plans/sticker-management-2026-08-06.execution.md --resume
+  reject_action: /plan-fixes docs/plans/sticker-management-2026-08-06.md --revise <projects>/telegram-chat-companion.sticker-management-2026-08-06-wt/docs/plans/sticker-management-2026-08-06.execution.md
 safe_to_replay_from: null
 clarifying_questions: []
 human_feedback:
