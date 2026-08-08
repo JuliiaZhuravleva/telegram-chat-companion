@@ -17,7 +17,14 @@ import pytest
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import BotCommand
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllChatAdministrators,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
+)
 
 from src.bot.command_registry import (
     COMMAND_NAME_RE,
@@ -44,6 +51,28 @@ from src.bot.commands import (
 )
 from src.bot.filters.admin import IsAdmin
 from src.bot.handlers import router as main_router
+
+
+def fail_only_for_chat_scopes(exc: Exception):
+    """A ``delete_my_commands`` side effect that fails for per-chat scopes only.
+
+    Every sync now issues two kinds of delete: the per-admin
+    ``BotCommandScopeChat`` cleanup, and the unconditional emptying of the
+    global scopes the registry does not manage. A blanket ``side_effect=exc``
+    hits both, so a test aiming at the first would silently also assert
+    something false about the second — "chat not found" is impossible for a
+    scope that has no chat. Keyword-only on purpose: both call sites pass
+    ``scope=``/``language_code=`` by name, and a positional call should blow up
+    here rather than quietly match.
+    """
+
+    def _side_effect(**kwargs: object) -> bool:
+        if isinstance(kwargs["scope"], BotCommandScopeChat):
+            raise exc
+        return True
+
+    return _side_effect
+
 
 # The commands this bot advertises, per scope. Duplicated from the registry on
 # purpose: adding, moving or hiding a command must be a deliberate edit in two
@@ -315,10 +344,17 @@ async def test_stale_admin_scopes_are_deleted_and_the_list_is_updated() -> None:
 
     report = await sync_bot_commands(bot, [111], bot_config_repo=repo, verify=False)
 
-    deleted_ids = {call.kwargs["scope"].chat_id for call in bot.delete_my_commands.await_args_list}
-    assert deleted_ids == {999}
+    # A sync also empties the unmanaged global scopes, so filter to the per-chat
+    # deletes this test is actually about rather than reading .chat_id off all
+    # of them (which raises on a global scope and reads as a failure here).
+    chat_deletes = [
+        call
+        for call in bot.delete_my_commands.await_args_list
+        if isinstance(call.kwargs["scope"], BotCommandScopeChat)
+    ]
+    assert {call.kwargs["scope"].chat_id for call in chat_deletes} == {999}
     # every language variant, or the ex-admin keeps the ru/en menu
-    assert len(bot.delete_my_commands.await_args_list) == 3
+    assert len(chat_deletes) == 3
     assert report.deleted_scopes == (999,)
     repo.set.assert_awaited()
     assert repo.set.await_args.args[1] == [111]
@@ -338,7 +374,9 @@ async def test_unreachable_stale_scope_is_dropped_not_retried_forever() -> None:
     bot.set_my_commands = AsyncMock(return_value=True)
     bot.get_my_commands = AsyncMock(return_value=[])
     bot.delete_my_commands = AsyncMock(
-        side_effect=TelegramBadRequest(method=MagicMock(), message="chat not found")
+        side_effect=fail_only_for_chat_scopes(
+            TelegramBadRequest(method=MagicMock(), message="chat not found")
+        )
     )
 
     report = await sync_bot_commands(bot, [111], bot_config_repo=repo, verify=False)
@@ -359,7 +397,9 @@ async def test_transport_error_keeps_the_stale_scope_for_a_retry() -> None:
     bot = MagicMock()
     bot.set_my_commands = AsyncMock(return_value=True)
     bot.get_my_commands = AsyncMock(return_value=[])
-    bot.delete_my_commands = AsyncMock(side_effect=OSError("connection reset"))
+    bot.delete_my_commands = AsyncMock(
+        side_effect=fail_only_for_chat_scopes(OSError("connection reset"))
+    )
 
     report = await sync_bot_commands(bot, [111], bot_config_repo=repo, verify=False)
 
@@ -612,3 +652,127 @@ def test_chat_type_filters_do_not_break_discovery() -> None:
     found = discover_handler_commands(router)
     assert "probe" in found
     assert found["probe"].admin_gated is False
+
+
+# ---------------------------------------------------------------------------
+# Shadowing scopes: the class of bug that is invisible to a per-scope diff
+# ---------------------------------------------------------------------------
+
+
+def _bot_with_scopes(shadow: dict[str, list[str]] | None = None) -> MagicMock:
+    """A bot whose managed scopes are perfectly in sync.
+
+    ``shadow`` seeds the *unmanaged* global scopes, keyed by label, with the
+    language-less variant only — which is how the real leftover looked: an
+    older deploy set it once, without a language, and every locale falls back
+    to it inside that scope.
+    """
+    shadow = shadow or {}
+    scope_map = {
+        BotCommandScopeAllGroupChats: CommandScope.GROUPS,
+        BotCommandScopeAllPrivateChats: CommandScope.PRIVATE,
+        BotCommandScopeChat: CommandScope.ADMIN,
+    }
+
+    def _get(**kwargs: object) -> list[BotCommand]:
+        scope = kwargs["scope"]
+        language = kwargs["language_code"]
+        for scope_type, registry_scope in scope_map.items():
+            if isinstance(scope, scope_type):
+                return build_commands(registry_scope, language)  # type: ignore[arg-type]
+        label = (
+            "all_chat_administrators"
+            if isinstance(scope, BotCommandScopeAllChatAdministrators)
+            else "default"
+        )
+        if language is None:
+            return [BotCommand(command=name, description=name) for name in shadow.get(label, [])]
+        return []
+
+    bot = MagicMock()
+    bot.set_my_commands = AsyncMock(return_value=True)
+    bot.delete_my_commands = AsyncMock(return_value=True)
+    bot.get_my_commands = AsyncMock(side_effect=_get)
+    return bot
+
+
+@pytest.mark.asyncio
+async def test_stale_all_chat_administrators_scope_is_reported() -> None:
+    """The production defect of 2026-08-08, reproduced.
+
+    Every managed scope agreed with the registry — `all_group_chats` carried
+    `/kb` in all three languages and the read-back was clean — yet no chat
+    administrator ever saw `/kb`, because a list left by a pre-registry version
+    sat one level more specific and Telegram never merges scopes. The old
+    verifier printed "registry, handlers and Telegram agree" throughout, since
+    it only ever looked at the scopes it manages.
+    """
+    bot = _bot_with_scopes({"all_chat_administrators": ["help", "summary"]})
+
+    report = await sync_bot_commands(bot, [], push=False)
+
+    assert not report.ok, "a scope that outranks every managed one must not read as clean"
+    assert any("all_chat_administrators" in problem for problem in report.problems())
+    assert any("shadowing scope" in problem for problem in report.problems())
+    # The managed scopes really were fine — otherwise this test would pass for
+    # the wrong reason, flagging ordinary drift instead of the shadow.
+    assert report.live_diffs == ()
+
+
+@pytest.mark.asyncio
+async def test_clean_bot_reports_no_shadowing() -> None:
+    """False-positive control. Without it the assertion above proves only that
+    *something* is reported, not that an empty scope stays quiet."""
+    report = await sync_bot_commands(_bot_with_scopes(), [], push=False)
+
+    assert report.shadow_scopes == ()
+    assert report.ok, report.problems()
+
+
+@pytest.mark.asyncio
+async def test_sync_empties_the_unmanaged_global_scopes() -> None:
+    """Reporting is not enough: a deploy has to converge production without a
+    human running anything by hand."""
+    bot = _bot_with_scopes({"default": ["help", "summary"]})
+
+    await sync_bot_commands(bot, [], verify=False)
+
+    cleared = {
+        (
+            "all_chat_administrators"
+            if isinstance(call.kwargs["scope"], BotCommandScopeAllChatAdministrators)
+            else "default",
+            call.kwargs["language_code"],
+        )
+        for call in bot.delete_my_commands.await_args_list
+        if isinstance(
+            call.kwargs["scope"], BotCommandScopeAllChatAdministrators | BotCommandScopeDefault
+        )
+    }
+    assert cleared == {
+        (label, language)
+        for label in ("all_chat_administrators", "default")
+        for language in (None, "ru", "en")
+    }, "every language variant, or the language-less fallback keeps shadowing"
+
+
+@pytest.mark.asyncio
+async def test_unreadable_unmanaged_scope_is_unverified_not_clean() -> None:
+    """Same rule as everywhere else here: a scope we could not read is UNKNOWN.
+    An empty list and a failed call look identical, so the failure is recorded
+    rather than allowed to render as "nothing is shadowing"."""
+    bot = _bot_with_scopes()
+
+    def _get(**kwargs: object) -> list[BotCommand]:
+        scope = kwargs["scope"]
+        if isinstance(scope, BotCommandScopeAllChatAdministrators | BotCommandScopeDefault):
+            raise OSError("connection reset")
+        return build_commands(CommandScope.GROUPS, kwargs["language_code"])  # type: ignore[arg-type]
+
+    bot.get_my_commands = AsyncMock(side_effect=_get)
+
+    report = await sync_bot_commands(bot, [], push=False)
+
+    assert report.shadow_scopes == ()
+    assert report.unverified, "a read-back that never happened must be recorded"
+    assert not report.ok

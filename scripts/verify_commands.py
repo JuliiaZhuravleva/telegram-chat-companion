@@ -73,6 +73,7 @@ def _report_to_dict(report: CommandSyncReport, admin_ids: list[int]) -> dict[str
             for d in report.live_diffs
         ],
         "unverified": list(report.unverified),
+        "shadow_scopes": list(report.shadow_scopes),
         "pushed": list(report.pushed),
         "deleted_scopes": list(report.deleted_scopes),
         "stale_scopes": list(report.stale_scopes),
@@ -111,7 +112,9 @@ def _print_human(report: CommandSyncReport, admin_ids: list[int], *, fixed: bool
         if not fixed:
             print("\nRe-run with --fix to push the registry and clear stale scopes.")
     else:
-        print("\n✓ registry, handlers and Telegram agree")
+        # Naming the shadowing check explicitly: its absence is what let a stale
+        # `all_chat_administrators` list sit behind this same tick for months.
+        print("\n✓ registry, handlers and Telegram agree; no shadowing scope set")
 
 
 async def main() -> int:

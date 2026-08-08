@@ -34,9 +34,11 @@ from aiogram import Bot, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     BotCommand,
+    BotCommandScopeAllChatAdministrators,
     BotCommandScopeAllGroupChats,
     BotCommandScopeAllPrivateChats,
     BotCommandScopeChat,
+    BotCommandScopeDefault,
 )
 
 from src.bot.command_registry import (
@@ -91,6 +93,29 @@ _BARE_ID_RE = re.compile(r"(?<![\w:/])(\d{6,15})(?![\w])")
 # than the `BotCommandScope` base class because aiogram's set_my_commands is
 # typed against the concrete union, and the base class does not satisfy it.
 TelegramScope = BotCommandScopeAllGroupChats | BotCommandScopeAllPrivateChats | BotCommandScopeChat
+
+
+# Global scopes this project deliberately keeps EMPTY, and actively empties.
+#
+# Telegram resolves a menu most-specific-scope-first and never merges lists: the
+# first scope that has anything set wins outright. So a scope we do not manage
+# is not neutral — it silently *replaces* the one we do. Concretely, on
+# 2026-08-08 the production bot was found still holding an
+# `all_chat_administrators` list of `[help, summary]` left by a version that
+# predates the registry. Every chat administrator therefore saw that stale pair
+# and never `/kb`, while `all_group_chats` — correctly carrying `/kb`, verified
+# green on every deploy — was never reached. Ordinary members were unaffected,
+# which is why it survived so long.
+#
+# Both are safe to keep empty: `all_private_chats` and `all_group_chats` between
+# them cover every chat type this bot serves, so nothing legitimate resolves
+# here. Emptiness is the intended state, not merely the convenient one.
+UNMANAGED_GLOBAL_SCOPES: tuple[
+    tuple[str, BotCommandScopeAllChatAdministrators | BotCommandScopeDefault], ...
+] = (
+    ("all_chat_administrators", BotCommandScopeAllChatAdministrators()),
+    ("default", BotCommandScopeDefault()),
+)
 
 
 @dataclass(frozen=True)
@@ -153,6 +178,9 @@ class CommandSyncReport:
     unverified: tuple[str, ...] = ()
     """Scopes whose read-back failed — the state is UNKNOWN, not clean."""
 
+    shadow_scopes: tuple[str, ...] = ()
+    """Unmanaged global scopes found non-empty — each one hides a managed scope."""
+
     registry_audit: RegistryAudit | None = None
     spec_violations: tuple[SpecViolation, ...] = ()
     notes: tuple[str, ...] = ()
@@ -171,6 +199,11 @@ class CommandSyncReport:
         lines.extend(f"push failed: {failure}" for failure in self.push_failures)
         lines.extend(f"live: {diff.describe()}" for diff in self.live_diffs if not diff.empty)
         lines.extend(f"NOT verified: {entry}" for entry in self.unverified)
+        lines.extend(
+            f"shadowing scope: {entry} — Telegram resolves this before the scopes "
+            "the registry manages, so those commands are what users actually see"
+            for entry in self.shadow_scopes
+        )
         lines.extend(
             f"stale scope: chat {chat_id} still has an admin command menu but is not an admin"
             for chat_id in self.stale_scopes
@@ -340,6 +373,67 @@ async def _verify_target(bot: Bot, target: ScopeTarget) -> tuple[list[LiveComman
     return diffs, unverified
 
 
+async def _clear_unmanaged_scopes(bot: Bot) -> list[str]:
+    """Empty every scope in :data:`UNMANAGED_GLOBAL_SCOPES`. Returns failures.
+
+    Deleting is idempotent — Telegram accepts a delete for a scope that holds
+    nothing — so this runs unconditionally rather than reading first and
+    deleting conditionally. One round trip either way, and no window between
+    the read and the write.
+
+    Only the language variants *we* could have created are cleared: the Bot API
+    has no way to enumerate which languages a scope was set for, so a list left
+    under some other locale by an older deploy would survive. The language-less
+    variant is the one that actually shadows (it is what every locale falls back
+    to within a scope), and it is always cleared here.
+    """
+    failures: list[str] = []
+    for label, scope in UNMANAGED_GLOBAL_SCOPES:
+        for language in _PUSH_LANGUAGES:
+            try:
+                await bot.delete_my_commands(scope=scope, language_code=language)
+            except Exception as exc:
+                failures.append(f"clear {label}[{language or 'default'}]: {exc}")
+                logger.warning(
+                    "command_scope_clear_failed",
+                    target=label,
+                    language=language,
+                    error=str(exc),
+                )
+    return failures
+
+
+async def _audit_unmanaged_scopes(bot: Bot) -> tuple[list[str], list[str]]:
+    """Read back the unmanaged global scopes. Returns ``(shadows, unverified)``.
+
+    A non-empty list here is a defect even though nothing in this codebase put
+    it there, because of how Telegram resolves scopes — see
+    :data:`UNMANAGED_GLOBAL_SCOPES`. This is the check whose absence let the
+    2026-08-08 case hide behind a green verifier: the old read-back inspected
+    only the scopes the registry manages, so a list one level *more specific*
+    than those was structurally invisible to it.
+    """
+    shadows: list[str] = []
+    unverified: list[str] = []
+    for label, scope in UNMANAGED_GLOBAL_SCOPES:
+        for language in _PUSH_LANGUAGES:
+            try:
+                live = await bot.get_my_commands(scope=scope, language_code=language)
+            except Exception as exc:
+                unverified.append(f"{label}[{language or 'default'}]: {exc}")
+                logger.warning(
+                    "command_scope_audit_failed",
+                    target=label,
+                    language=language,
+                    error=str(exc),
+                )
+                continue
+            if live:
+                names = ", ".join(f"/{cmd.command}" for cmd in live)
+                shadows.append(f"{label}[{language or 'default'}] holds {names}")
+    return shadows, unverified
+
+
 async def detect_stale_scopes(
     admin_ids: list[int],
     bot_config_repo: BotConfigRepository,
@@ -463,6 +557,11 @@ async def sync_bot_commands(
             if not target_failures:
                 pushed.append(target.label)
 
+        # After the pushes, before the read-back: a scope left by an older
+        # version outranks everything just pushed, so clearing it is part of
+        # publishing the registry, not an optional tidy-up.
+        failures.extend(await _clear_unmanaged_scopes(bot))
+
         if bot_config_repo is not None:
             deleted_ids, still_stale, cleanup_failures = await _cleanup_stale_scopes(
                 bot, admin_ids, bot_config_repo
@@ -479,11 +578,16 @@ async def sync_bot_commands(
 
     diffs: list[LiveCommandDiff] = []
     unverified: list[str] = []
+    shadows: list[str] = []
     if verify:
         for target in targets:
             target_diffs, target_unverified = await _verify_target(bot, target)
             diffs.extend(target_diffs)
             unverified.extend(target_unverified)
+        # Runs on read-only audits too, where it is the whole point: nothing
+        # cleared the scope, so reporting it is the only way anyone finds out.
+        shadows, shadow_unverified = await _audit_unmanaged_scopes(bot)
+        unverified.extend(shadow_unverified)
     else:
         notes.append("read-back verification skipped")
 
@@ -494,6 +598,7 @@ async def sync_bot_commands(
         push_failures=tuple(failures),
         live_diffs=tuple(diffs),
         unverified=tuple(unverified),
+        shadow_scopes=tuple(shadows),
         registry_audit=audit_registry(router) if router is not None else None,
         spec_violations=validate_specs(),
         notes=tuple(notes),
