@@ -50,8 +50,15 @@ own numeric telemetry (token counts, durations) cannot produce a false hit. A
 line that does not parse is scanned as text rather than skipped: a malformed
 record must not become a silent pass.
 
+A single rule can be waived on a single line with an explicit marker, so a
+legitimate 10-digit number in prose does not force the id rule to be loosened
+for everyone::
+
+    Ran with a budget of 1000000000 tokens.  <!-- check-plan-artifacts: allow telegram-id -->
+
 Exit codes: 0 = clean; 1 = violations (details on stdout); 2 = the check could
-not be completed (no git, unreadable file) — never confused with "clean".
+not be completed (no git, unreadable file, anything unexpected) — never confused
+with "clean", and never with "violations found" either.
 """
 
 from __future__ import annotations
@@ -77,6 +84,21 @@ CAPTURED_OUTPUT_KEYS = frozenset(
 )
 
 STRUCTURED_SUFFIXES = {".json", ".jsonl"}
+
+# Per-rule waiver marker, e.g. `<!-- check-plan-artifacts: allow telegram-id -->`.
+# Rule-specific on purpose: a blanket "ignore this line" would also wave through
+# a credential that happens to sit next to the number being excused.
+_ALLOW_RE = re.compile(r"check-plan-artifacts:\s*allow\s+([a-z][a-z-]*)")
+
+# …and only this rule may be waived at all. The marker lives INSIDE the file
+# being scanned, and these files are written by orchestrator agents — the exact
+# authors this check exists to be independent of. A waivable `credential` rule
+# would let the thing under inspection switch off its own inspection by emitting
+# one line of text. `telegram-id` is the only rule with a real false-positive
+# surface (any bare 9-11 digit number in prose), so it is the only one that
+# needs an escape hatch. Markers naming any other rule are ignored, and the
+# violation still fires — the safe direction, and visible immediately.
+WAIVABLE_RULES = frozenset({"telegram-id"})
 
 # (rule, pattern, why) — kept as a table so the unit tests can assert that every
 # rule has at least one adversarial fixture behind it.
@@ -207,14 +229,83 @@ def scan_structured(text: str, path: str) -> Iterator[Violation]:
             yield from scan_text(value, path, line_no, f" in {trail}")
 
 
+def _display_path(path: Path, root: Path) -> str:
+    """Repo-relative where possible, the path as given otherwise.
+
+    ``Path.relative_to`` raises for a path outside ``root`` — which used to
+    escape as an uncaught ``ValueError`` and exit 1, the code this script's own
+    contract reserves for "violations found". "Could not check" reporting as
+    "found something" is the same confusion as a silent zero, just inverted.
+    """
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _allowed_rules(source_line: str) -> set[str]:
+    """Rules waived on one line by an explicit marker.
+
+    The id rule matches any bare 9-11 digit run, so a legitimate number in prose
+    ("budget 1000000000 tokens") blocks a commit. The alternative — loosening the
+    pattern until prose stops matching — trades a noisy gate for a quiet one,
+    and this whole file exists because a quiet gate is worse. An explicit,
+    per-rule waiver keeps detection at full strength and puts the decision in
+    the diff where a reviewer can see it::
+
+        Ran with a budget of 1000000000 tokens.  <!-- check-plan-artifacts: allow telegram-id -->
+
+    Only :data:`WAIVABLE_RULES` can be excused; a marker naming anything else is
+    ignored, because the marker is written by the same agents whose output this
+    check is meant to police.
+    """
+    return set(_ALLOW_RE.findall(source_line)) & WAIVABLE_RULES
+
+
 def scan_file(path: Path, root: Path) -> Iterator[Violation]:
-    rel = path.relative_to(root).as_posix() if path.is_absolute() else path.as_posix()
+    rel = _display_path(path, root)
     text = path.read_text(encoding="utf-8", errors="replace")
+    lines = text.splitlines()
+
     if path.suffix in STRUCTURED_SUFFIXES:
-        yield from scan_structured(text, rel)
-        return
-    for line_no, line in enumerate(text.splitlines(), 1):
-        yield from scan_text(line, rel, line_no, "")
+        found: Iterator[Violation] = scan_structured(text, rel)
+    else:
+        found = _scan_plain(lines, rel)
+
+    for violation in found:
+        source = lines[violation.line - 1] if 0 < violation.line <= len(lines) else ""
+        if violation.rule in _allowed_rules(source):
+            continue
+        yield violation
+
+
+def _scan_plain(lines: list[str], path: str) -> Iterator[Violation]:
+    """Markdown, .progress and anything else without a parseable structure."""
+    for line_no, line in enumerate(lines, 1):
+        # A wrapper payload pasted into a plan write-up lands here rather than in
+        # a JSON field, where the size rules cannot see it. Prose is never a
+        # JSON object, so parsing is what keeps this from firing on a long
+        # paragraph — length alone would.
+        stripped = line.strip()
+        if len(stripped) > MAX_VALUE_CHARS and stripped[:1] in {"{", "["}:
+            try:
+                json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+            else:
+                yield Violation(
+                    path=path,
+                    line=line_no,
+                    rule="captured-output",
+                    detail=(
+                        f"{len(stripped)} chars of embedded JSON (limit {MAX_VALUE_CHARS}) — "
+                        "raw agent output does not belong in a tracked artifact"
+                    ),
+                    excerpt=stripped[:80] + "…",
+                )
+        yield from scan_text(line, path, line_no, "")
 
 
 def tracked_plan_files(root: Path) -> list[Path]:
@@ -251,8 +342,13 @@ def main(argv: list[str] | None = None) -> int:
     for target in targets:
         try:
             violations.extend(scan_file(target, args.root))
-        except OSError as exc:
-            print(f"error: cannot read {target}: {exc}", file=sys.stderr)
+        except Exception as exc:
+            # Deliberately broad, and it must stay that way: ANY failure to scan
+            # has to leave through exit 2. An escaping exception exits 1, which
+            # this contract reserves for "violations found" — so a crash would
+            # be read as a finding, and a caller that only distinguishes 0 from
+            # non-zero would call an unscanned tree "checked".
+            print(f"error: cannot scan {target}: {exc!r}", file=sys.stderr)
             return 2
 
     if not violations:

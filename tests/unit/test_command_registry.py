@@ -56,8 +56,8 @@ from src.bot.handlers import router as main_router
 def fail_only_for_chat_scopes(exc: Exception):
     """A ``delete_my_commands`` side effect that fails for per-chat scopes only.
 
-    Every sync now issues two kinds of delete: the per-admin
-    ``BotCommandScopeChat`` cleanup, and the unconditional emptying of the
+    A sync can issue two kinds of delete: the per-admin ``BotCommandScopeChat``
+    cleanup, and — when something is actually found there — the emptying of the
     global scopes the registry does not manage. A blanket ``side_effect=exc``
     hits both, so a test aiming at the first would silently also assert
     something false about the second — "chat not found" is impossible for a
@@ -679,7 +679,7 @@ def _bot_with_scopes(shadow: dict[str, list[str]] | None = None) -> MagicMock:
         language = kwargs["language_code"]
         for scope_type, registry_scope in scope_map.items():
             if isinstance(scope, scope_type):
-                return build_commands(registry_scope, language)  # type: ignore[arg-type]
+                return build_commands(registry_scope, language)
         label = (
             "all_chat_administrators"
             if isinstance(scope, BotCommandScopeAllChatAdministrators)
@@ -729,15 +729,8 @@ async def test_clean_bot_reports_no_shadowing() -> None:
     assert report.ok, report.problems()
 
 
-@pytest.mark.asyncio
-async def test_sync_empties_the_unmanaged_global_scopes() -> None:
-    """Reporting is not enough: a deploy has to converge production without a
-    human running anything by hand."""
-    bot = _bot_with_scopes({"default": ["help", "summary"]})
-
-    await sync_bot_commands(bot, [], verify=False)
-
-    cleared = {
+def _unmanaged_deletes(bot: MagicMock) -> set[tuple[str, str | None]]:
+    return {
         (
             "all_chat_administrators"
             if isinstance(call.kwargs["scope"], BotCommandScopeAllChatAdministrators)
@@ -749,11 +742,54 @@ async def test_sync_empties_the_unmanaged_global_scopes() -> None:
             call.kwargs["scope"], BotCommandScopeAllChatAdministrators | BotCommandScopeDefault
         )
     }
-    assert cleared == {
-        (label, language)
-        for label in ("all_chat_administrators", "default")
-        for language in (None, "ru", "en")
-    }, "every language variant, or the language-less fallback keeps shadowing"
+
+
+@pytest.mark.asyncio
+async def test_sync_empties_the_unmanaged_global_scopes() -> None:
+    """Reporting is not enough: a deploy has to converge production without a
+    human running anything by hand.
+
+    Exactly the variants that hold something are deleted. The others are already
+    empty, so deleting them would be six API calls per startup, forever, to
+    re-empty nothing — against this module's own bounded-read-back principle.
+    """
+    bot = _bot_with_scopes({"default": ["help", "summary"]})
+
+    report = await sync_bot_commands(bot, [], verify=False)
+
+    assert _unmanaged_deletes(bot) == {("default", None)}
+    assert report.shadow_scopes == (), "it was cleared, so nothing is still shadowing"
+    assert any("cleared shadowing scope" in note for note in report.notes)
+    assert report.ok
+
+
+@pytest.mark.asyncio
+async def test_clean_bot_issues_no_unmanaged_deletes() -> None:
+    """The cost half of the control above. Read-then-delete is only worth its
+    complexity if the steady state really is read-only."""
+    bot = _bot_with_scopes()
+
+    await sync_bot_commands(bot, [], verify=False)
+
+    assert _unmanaged_deletes(bot) == set()
+
+
+@pytest.mark.asyncio
+async def test_failed_clear_keeps_reporting_the_shadow() -> None:
+    """A delete that failed leaves users looking at the wrong menu. Reporting
+    only "a call failed" would lose that; the scope must stay in shadow_scopes."""
+    bot = _bot_with_scopes({"all_chat_administrators": ["help", "summary"]})
+    bot.delete_my_commands = AsyncMock(side_effect=OSError("connection reset"))
+
+    report = await sync_bot_commands(bot, [], verify=False)
+
+    assert any("all_chat_administrators" in entry for entry in report.shadow_scopes)
+    assert any("delete failed" in entry for entry in report.shadow_scopes), (
+        "the cause belongs on the shadow line, not in a second problem for the same condition"
+    )
+    # One condition, one problem line — not also a "push failed: …" entry.
+    assert len([p for p in report.problems() if "all_chat_administrators" in p]) == 1
+    assert not report.ok
 
 
 @pytest.mark.asyncio
@@ -767,7 +803,7 @@ async def test_unreadable_unmanaged_scope_is_unverified_not_clean() -> None:
         scope = kwargs["scope"]
         if isinstance(scope, BotCommandScopeAllChatAdministrators | BotCommandScopeDefault):
             raise OSError("connection reset")
-        return build_commands(CommandScope.GROUPS, kwargs["language_code"])  # type: ignore[arg-type]
+        return build_commands(CommandScope.GROUPS, kwargs["language_code"])
 
     bot.get_my_commands = AsyncMock(side_effect=_get)
 
