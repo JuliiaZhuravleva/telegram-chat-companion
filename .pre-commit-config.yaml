@@ -1,8 +1,14 @@
 repos:
+  # Pinned to exactly the ruff that CI installs (.github/workflows/ci.yml:
+  # `pip install ruff==0.15.0`). These two must move together. A hook that lags
+  # the gate is *more permissive* than the gate, so "pre-commit passed" quietly
+  # stops being evidence that CI will pass — and the divergence is invisible
+  # until a job fails on a file nobody touched. This pair sat six minor versions
+  # apart (hook v0.9.6 vs CI 0.15.0) until 2026-08-08.
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+    rev: v0.15.0
     hooks:
-      - id: ruff
+      - id: ruff-check # `ruff` still resolves here, but only as a legacy alias
         args: [--fix]
       - id: ruff-format
 
@@ -12,6 +18,22 @@ repos:
     rev: v8.30.1
     hooks:
       - id: gitleaks
+
+  # The plan-orchestration artifacts under docs/plans/ are committed on purpose
+  # as the audit trail of a run, which means agent-authored text goes straight to
+  # a public repository. gitleaks above cannot cover this: it matches credential
+  # *shapes*, and the two leaks this repo has actually had — a raw `claude -p`
+  # payload captured with 2>&1, and an absolute /Users/<name>/ path — have no
+  # shape at all. Local hook rather than a pinned remote: the check has no
+  # dependencies and lives in the repo it protects, so it cannot drift from it.
+  - repo: local
+    hooks:
+      - id: check-plan-artifacts
+        name: docs/plans artifacts (raw payloads, paths, ids, credentials)
+        entry: python3 scripts/check_plan_artifacts.py
+        language: system
+        files: ^docs/plans/
+        pass_filenames: true
 
   # Shell linting. The backup and restore scripts run unattended against a
   # production database, where the usual shell traps (unquoted expansions, a
