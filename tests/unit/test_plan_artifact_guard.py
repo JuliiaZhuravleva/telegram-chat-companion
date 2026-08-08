@@ -276,3 +276,158 @@ def test_tracked_plan_artifacts_are_clean() -> None:
         "docs/plans artifacts carry something that must not be public — "
         "run `python3 scripts/check_plan_artifacts.py` for the detail"
     )
+
+
+# --------------------------------------------------------------------------
+# Exit-code contract and the waiver marker (review findings, 2026-08-08)
+# --------------------------------------------------------------------------
+
+
+def test_path_outside_root_does_not_crash(tmp_path: Path) -> None:
+    """`Path.relative_to` raises for a path outside --root. That used to escape
+    as an uncaught ValueError and exit 1 — the code reserved for "violations
+    found", so "could not check" was reported as a finding."""
+    outside = tmp_path / "elsewhere" / "p.execution.md"
+    outside.parent.mkdir()
+    outside.write_text("nothing interesting here\n", encoding="utf-8")
+
+    assert main([str(outside), "--root", str(tmp_path / "repo")]) == 0
+
+
+def test_unexpected_failure_exits_two_not_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Any scan failure must leave through 2. Exiting 1 would make a crash
+    indistinguishable from a real finding for anything reading the code."""
+    target = write(tmp_path, "p.execution.md", "status: done\n", marker="status")
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("something nobody predicted")
+
+    monkeypatch.setattr("scripts.check_plan_artifacts.scan_file", _boom)
+    assert main([str(target), "--root", str(tmp_path)]) == 2
+
+
+def test_waiver_marker_excuses_one_rule_on_one_line(tmp_path: Path) -> None:
+    """A legitimate 10-digit number in prose must not force the id rule to be
+    loosened for everyone."""
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        "Ran with a budget of 1000000000 tokens. "
+        "<!-- check-plan-artifacts: allow telegram-id -->\n",
+        marker="1000000000",
+    )
+    assert rules_hit(path, tmp_path) == set()
+
+
+def test_waiver_is_per_rule_and_per_line(tmp_path: Path) -> None:
+    """Control: the marker must not become a blanket mute. A credential sitting
+    on the excused line, and an id on the next line, both still fire."""
+    secret = "gh" + "p_" + "AbCdEf0123456789AbCdEf0123456789"
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        f"budget 1000000000 and {secret} <!-- check-plan-artifacts: allow telegram-id -->\n"
+        "and the chat was -1003908877878\n",
+        marker=secret,
+    )
+    hits = rules_hit(path, tmp_path)
+    assert "credential" in hits, "a waiver for one rule must not mute another"
+    assert "telegram-id" in hits, "the waiver must not carry to the next line"
+
+
+def test_json_payload_pasted_into_markdown_is_caught(tmp_path: Path) -> None:
+    """The size rules only look at parsed JSON fields, so a wrapper payload
+    pasted into a plan write-up used to slip through unless it held a secret."""
+    payload = json.dumps({"is_error": True, "result": "x" * 2000})
+    path = write(tmp_path, "p.execution.md", f"The run failed:\n{payload}\n", marker='"is_error"')
+    assert "captured-output" in rules_hit(path, tmp_path)
+
+
+def test_long_markdown_prose_is_not_a_payload(tmp_path: Path) -> None:
+    """False-positive control: length alone must not fire, or every thorough
+    plan write-up becomes a violation."""
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        "The rationale for this decision. " * 100 + "\n",
+        marker="rationale",
+    )
+    assert rules_hit(path, tmp_path) == set()
+
+
+def test_credential_rule_cannot_be_waived(tmp_path: Path) -> None:
+    """The marker lives inside the file being scanned, and these files are
+    written by orchestrator agents — the very authors this check exists to be
+    independent of. A waivable credential rule would let the inspected thing
+    switch off its own inspection with one line of text."""
+    secret = "gh" + "p_" + "AbCdEf0123456789AbCdEf0123456789"
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        f"used {secret} <!-- check-plan-artifacts: allow credential -->\n",
+        marker="allow credential",
+    )
+    assert "credential" in rules_hit(path, tmp_path)
+
+
+def test_home_path_rule_cannot_be_waived(tmp_path: Path) -> None:
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        "path /Users/someone/my-projects/x <!-- check-plan-artifacts: allow home-path -->\n",
+        marker="allow home-path",
+    )
+    assert "home-path" in rules_hit(path, tmp_path)
+
+
+def test_json_array_payload_in_markdown_is_caught(tmp_path: Path) -> None:
+    """Wrapper output is usually an object, but a transcript dump is an array."""
+    payload = json.dumps([{"role": "assistant", "content": "x" * 2000}])
+    path = write(tmp_path, "p.execution.md", f"Transcript:\n{payload}\n", marker='"role"')
+    assert "captured-output" in rules_hit(path, tmp_path)
+
+
+def test_pretty_printed_payload_in_markdown_is_caught(tmp_path: Path) -> None:
+    """A paste out of a log viewer is indented as often as it is one line. The
+    first version of this rule only matched the single-line form."""
+    pretty = json.dumps({"is_error": True, "result": "x" * 2000}, indent=2)
+    path = write(tmp_path, "p.execution.md", f"The run failed:\n{pretty}\n", marker='"is_error"')
+    hits = rules_hit(path, tmp_path)
+    assert "captured-output" in hits
+
+
+def test_payload_violation_points_at_the_right_line(tmp_path: Path) -> None:
+    """The line number is what someone uses to go fix it."""
+    pretty = json.dumps({"is_error": True, "result": "x" * 2000}, indent=2)
+    path = write(tmp_path, "p.execution.md", f"intro\nmore intro\n{pretty}\n", marker='"is_error"')
+    payload = [v for v in scan_file(path, tmp_path) if v.rule == "captured-output"]
+    assert [v.line for v in payload] == [3]
+
+
+def test_small_json_snippet_in_markdown_is_allowed(tmp_path: Path) -> None:
+    """False-positive control: documenting a short example payload is normal in
+    a plan write-up and must stay legal."""
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        'Example:\n{\n  "event": "item_done",\n  "item": "A-1"\n}\n',
+        marker='"item_done"',
+    )
+    assert rules_hit(path, tmp_path) == set()
+
+
+def test_waiver_works_in_a_pretty_printed_verdict(tmp_path: Path) -> None:
+    """Verdict sidecars are indented JSON — one record over many lines, so every
+    violation in them is reported against line 1. A waiver had to be findable
+    somewhere a human can actually write it."""
+    path = write(
+        tmp_path,
+        "p.execution.md.verdicts/A-1-1.json",
+        '{\n  "verdict": "PASS",\n'
+        '  "notes": "ran with 1000000000 tokens",\n'
+        '  "waiver": "check-plan-artifacts: allow telegram-id"\n}\n',
+        marker="allow telegram-id",
+    )
+    assert rules_hit(path, tmp_path) == set()

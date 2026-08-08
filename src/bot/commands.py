@@ -373,65 +373,79 @@ async def _verify_target(bot: Bot, target: ScopeTarget) -> tuple[list[LiveComman
     return diffs, unverified
 
 
-async def _clear_unmanaged_scopes(bot: Bot) -> list[str]:
-    """Empty every scope in :data:`UNMANAGED_GLOBAL_SCOPES`. Returns failures.
+@dataclass(frozen=True)
+class UnmanagedScopeReport:
+    """Outcome of one reconcile pass over :data:`UNMANAGED_GLOBAL_SCOPES`."""
 
-    Deleting is idempotent — Telegram accepts a delete for a scope that holds
-    nothing — so this runs unconditionally rather than reading first and
-    deleting conditionally. One round trip either way, and no window between
-    the read and the write.
+    shadows: tuple[str, ...] = ()
+    """Still shadowing when this returned — a problem needing a human. A delete
+    that failed is reported here, with its cause, rather than also as a separate
+    failure: one condition should produce one problem line, and the line that
+    matters says users are seeing the wrong menu, not that a call errored."""
 
-    Only the language variants *we* could have created are cleared: the Bot API
-    has no way to enumerate which languages a scope was set for, so a list left
-    under some other locale by an older deploy would survive. The language-less
-    variant is the one that actually shadows (it is what every locale falls back
-    to within a scope), and it is always cleared here.
-    """
-    failures: list[str] = []
-    for label, scope in UNMANAGED_GLOBAL_SCOPES:
-        for language in _PUSH_LANGUAGES:
-            try:
-                await bot.delete_my_commands(scope=scope, language_code=language)
-            except Exception as exc:
-                failures.append(f"clear {label}[{language or 'default'}]: {exc}")
-                logger.warning(
-                    "command_scope_clear_failed",
-                    target=label,
-                    language=language,
-                    error=str(exc),
-                )
-    return failures
+    cleared: tuple[str, ...] = ()
+    """Found non-empty and successfully emptied — fixed, worth saying out loud."""
+
+    unverified: tuple[str, ...] = ()
 
 
-async def _audit_unmanaged_scopes(bot: Bot) -> tuple[list[str], list[str]]:
-    """Read back the unmanaged global scopes. Returns ``(shadows, unverified)``.
+async def _reconcile_unmanaged_scopes(bot: Bot, *, clear: bool) -> UnmanagedScopeReport:
+    """Read the scopes the registry does not manage; optionally empty them.
 
-    A non-empty list here is a defect even though nothing in this codebase put
-    it there, because of how Telegram resolves scopes — see
-    :data:`UNMANAGED_GLOBAL_SCOPES`. This is the check whose absence let the
-    2026-08-08 case hide behind a green verifier: the old read-back inspected
-    only the scopes the registry manages, so a list one level *more specific*
-    than those was structurally invisible to it.
+    Read-then-delete rather than delete-unconditionally, because the read *is*
+    the audit and the steady state is "nothing to delete": 6 API calls per
+    startup instead of 12, with the deletes appearing only on the one run that
+    actually finds something. This file already bounds its read-back on purpose
+    (see :data:`_VERIFY_LANGUAGES_ADMIN`) and doubling every startup's traffic
+    to re-delete six empty scopes forever would have gone against that.
+
+    Nothing else writes these scopes, so the gap between the read and the delete
+    costs nothing; a list that appears in between is caught by the next startup.
+
+    Only the language variants *we* could have created are examined — the Bot
+    API cannot enumerate which languages a scope was set for. The language-less
+    variant is the one that shadows every locale, and it is always covered.
     """
     shadows: list[str] = []
+    cleared: list[str] = []
     unverified: list[str] = []
+
     for label, scope in UNMANAGED_GLOBAL_SCOPES:
         for language in _PUSH_LANGUAGES:
+            where = f"{label}[{language or 'default'}]"
             try:
                 live = await bot.get_my_commands(scope=scope, language_code=language)
             except Exception as exc:
-                unverified.append(f"{label}[{language or 'default'}]: {exc}")
+                unverified.append(f"{where}: {exc}")
                 logger.warning(
-                    "command_scope_audit_failed",
-                    target=label,
-                    language=language,
-                    error=str(exc),
+                    "command_scope_audit_failed", target=label, language=language, error=str(exc)
                 )
                 continue
-            if live:
-                names = ", ".join(f"/{cmd.command}" for cmd in live)
-                shadows.append(f"{label}[{language or 'default'}] holds {names}")
-    return shadows, unverified
+            if not live:
+                continue
+
+            found = f"{where} holds " + ", ".join(f"/{cmd.command}" for cmd in live)
+            if not clear:
+                shadows.append(found)
+                continue
+            try:
+                await bot.delete_my_commands(scope=scope, language_code=language)
+            except Exception as exc:
+                # Still shadowing: reporting it as merely a failed call would
+                # lose the fact that users are, right now, seeing the wrong menu.
+                shadows.append(f"{found} (delete failed: {exc})")
+                logger.warning(
+                    "command_scope_clear_failed", target=label, language=language, error=str(exc)
+                )
+                continue
+            cleared.append(found)
+            logger.info("command_scope_cleared", target=label, language=language)
+
+    return UnmanagedScopeReport(
+        shadows=tuple(shadows),
+        cleared=tuple(cleared),
+        unverified=tuple(unverified),
+    )
 
 
 async def detect_stale_scopes(
@@ -557,11 +571,6 @@ async def sync_bot_commands(
             if not target_failures:
                 pushed.append(target.label)
 
-        # After the pushes, before the read-back: a scope left by an older
-        # version outranks everything just pushed, so clearing it is part of
-        # publishing the registry, not an optional tidy-up.
-        failures.extend(await _clear_unmanaged_scopes(bot))
-
         if bot_config_repo is not None:
             deleted_ids, still_stale, cleanup_failures = await _cleanup_stale_scopes(
                 bot, admin_ids, bot_config_repo
@@ -578,18 +587,24 @@ async def sync_bot_commands(
 
     diffs: list[LiveCommandDiff] = []
     unverified: list[str] = []
-    shadows: list[str] = []
     if verify:
         for target in targets:
             target_diffs, target_unverified = await _verify_target(bot, target)
             diffs.extend(target_diffs)
             unverified.extend(target_unverified)
-        # Runs on read-only audits too, where it is the whole point: nothing
-        # cleared the scope, so reporting it is the only way anyone finds out.
-        shadows, shadow_unverified = await _audit_unmanaged_scopes(bot)
-        unverified.extend(shadow_unverified)
     else:
         notes.append("read-back verification skipped")
+
+    # Deliberately not gated on `verify` alone: this reads in order to know what
+    # to delete, so a pushing run cannot skip it without also skipping the fix.
+    # On a read-only run it is the whole point — nothing cleared the scope, and
+    # reporting it is the only way anyone finds out. A caller asking for neither
+    # gets neither, so "read-back verification skipped" stays true.
+    unmanaged = UnmanagedScopeReport()
+    if push or verify:
+        unmanaged = await _reconcile_unmanaged_scopes(bot, clear=push)
+        unverified.extend(unmanaged.unverified)
+        notes.extend(f"cleared shadowing scope: {entry}" for entry in unmanaged.cleared)
 
     report = CommandSyncReport(
         pushed=tuple(pushed),
@@ -598,7 +613,7 @@ async def sync_bot_commands(
         push_failures=tuple(failures),
         live_diffs=tuple(diffs),
         unverified=tuple(unverified),
-        shadow_scopes=tuple(shadows),
+        shadow_scopes=unmanaged.shadows,
         registry_audit=audit_registry(router) if router is not None else None,
         spec_violations=validate_specs(),
         notes=tuple(notes),
