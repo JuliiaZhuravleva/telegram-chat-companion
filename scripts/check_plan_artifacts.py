@@ -50,9 +50,12 @@ own numeric telemetry (token counts, durations) cannot produce a false hit. A
 line that does not parse is scanned as text rather than skipped: a malformed
 record must not become a silent pass.
 
-A single rule can be waived on a single line with an explicit marker, so a
-legitimate 10-digit number in prose does not force the id rule to be loosened
-for everyone::
+An oversized JSON document pasted into a ``.md`` write-up is caught too, since
+the size rules above only see values inside a parsed artifact.
+
+``telegram-id`` — and **only** that rule, see :data:`WAIVABLE_RULES` — can be
+waived with an explicit marker, so a legitimate 10-digit number in prose does not
+force the pattern to be loosened for everyone::
 
     Ran with a budget of 1000000000 tokens.  <!-- check-plan-artifacts: allow telegram-id -->
 
@@ -269,42 +272,64 @@ def scan_file(path: Path, root: Path) -> Iterator[Violation]:
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = text.splitlines()
 
-    if path.suffix in STRUCTURED_SUFFIXES:
-        found: Iterator[Violation] = scan_structured(text, rel)
-    else:
-        found = _scan_plain(lines, rel)
+    structured = path.suffix in STRUCTURED_SUFFIXES
+    found = scan_structured(text, rel) if structured else _scan_plain(text, lines, rel)
 
     for violation in found:
-        source = lines[violation.line - 1] if 0 < violation.line <= len(lines) else ""
+        # Where a waiver may be written. A `.jsonl` record and a plain-text line
+        # are both one line, so the marker sits on the offending line. A
+        # pretty-printed `.json` is ONE record spread over many lines and every
+        # violation in it is reported against line 1, so the marker is honoured
+        # anywhere in that file — looking only at line 1 would mean `{`, i.e. a
+        # waiver that can never be written. Only `telegram-id` is waivable, so
+        # the widened scope cannot reach a credential.
+        whole_doc = structured and not rel.endswith(".jsonl")
+        source = (
+            text
+            if whole_doc
+            else (lines[violation.line - 1] if 0 < violation.line <= len(lines) else "")
+        )
         if violation.rule in _allowed_rules(source):
             continue
         yield violation
 
 
-def _scan_plain(lines: list[str], path: str) -> Iterator[Violation]:
+def _embedded_payloads(text: str, path: str) -> Iterator[Violation]:
+    """Oversized JSON documents pasted into an unstructured file.
+
+    ``raw_decode`` parses one value and reports where it ended, so this covers a
+    pretty-printed payload spanning many lines as well as a single-line dump —
+    the first version only matched the latter, and a paste out of a log viewer
+    is just as likely to be indented.
+
+    Parsing (never length alone) is the test, so prose cannot trip it.
+    """
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"^[ \t]*[{\[]", text, re.MULTILINE):
+        start = match.end() - 1
+        try:
+            _, end = decoder.raw_decode(text, start)
+        except ValueError:
+            continue
+        size = end - start
+        if size <= MAX_VALUE_CHARS:
+            continue
+        yield Violation(
+            path=path,
+            line=text.count("\n", 0, start) + 1,
+            rule="captured-output",
+            detail=(
+                f"{size} chars of embedded JSON (limit {MAX_VALUE_CHARS}) — "
+                "raw agent output does not belong in a tracked artifact"
+            ),
+            excerpt=text[start : start + 80].replace("\n", "\\n") + "…",
+        )
+
+
+def _scan_plain(text: str, lines: list[str], path: str) -> Iterator[Violation]:
     """Markdown, .progress and anything else without a parseable structure."""
+    yield from _embedded_payloads(text, path)
     for line_no, line in enumerate(lines, 1):
-        # A wrapper payload pasted into a plan write-up lands here rather than in
-        # a JSON field, where the size rules cannot see it. Prose is never a
-        # JSON object, so parsing is what keeps this from firing on a long
-        # paragraph — length alone would.
-        stripped = line.strip()
-        if len(stripped) > MAX_VALUE_CHARS and stripped[:1] in {"{", "["}:
-            try:
-                json.loads(stripped)
-            except json.JSONDecodeError:
-                pass
-            else:
-                yield Violation(
-                    path=path,
-                    line=line_no,
-                    rule="captured-output",
-                    detail=(
-                        f"{len(stripped)} chars of embedded JSON (limit {MAX_VALUE_CHARS}) — "
-                        "raw agent output does not belong in a tracked artifact"
-                    ),
-                    excerpt=stripped[:80] + "…",
-                )
         yield from scan_text(line, path, line_no, "")
 
 

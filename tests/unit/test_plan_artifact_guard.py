@@ -387,3 +387,47 @@ def test_json_array_payload_in_markdown_is_caught(tmp_path: Path) -> None:
     payload = json.dumps([{"role": "assistant", "content": "x" * 2000}])
     path = write(tmp_path, "p.execution.md", f"Transcript:\n{payload}\n", marker='"role"')
     assert "captured-output" in rules_hit(path, tmp_path)
+
+
+def test_pretty_printed_payload_in_markdown_is_caught(tmp_path: Path) -> None:
+    """A paste out of a log viewer is indented as often as it is one line. The
+    first version of this rule only matched the single-line form."""
+    pretty = json.dumps({"is_error": True, "result": "x" * 2000}, indent=2)
+    path = write(tmp_path, "p.execution.md", f"The run failed:\n{pretty}\n", marker='"is_error"')
+    hits = rules_hit(path, tmp_path)
+    assert "captured-output" in hits
+
+
+def test_payload_violation_points_at_the_right_line(tmp_path: Path) -> None:
+    """The line number is what someone uses to go fix it."""
+    pretty = json.dumps({"is_error": True, "result": "x" * 2000}, indent=2)
+    path = write(tmp_path, "p.execution.md", f"intro\nmore intro\n{pretty}\n", marker='"is_error"')
+    payload = [v for v in scan_file(path, tmp_path) if v.rule == "captured-output"]
+    assert [v.line for v in payload] == [3]
+
+
+def test_small_json_snippet_in_markdown_is_allowed(tmp_path: Path) -> None:
+    """False-positive control: documenting a short example payload is normal in
+    a plan write-up and must stay legal."""
+    path = write(
+        tmp_path,
+        "p.execution.md",
+        'Example:\n{\n  "event": "item_done",\n  "item": "A-1"\n}\n',
+        marker='"item_done"',
+    )
+    assert rules_hit(path, tmp_path) == set()
+
+
+def test_waiver_works_in_a_pretty_printed_verdict(tmp_path: Path) -> None:
+    """Verdict sidecars are indented JSON — one record over many lines, so every
+    violation in them is reported against line 1. A waiver had to be findable
+    somewhere a human can actually write it."""
+    path = write(
+        tmp_path,
+        "p.execution.md.verdicts/A-1-1.json",
+        '{\n  "verdict": "PASS",\n'
+        '  "notes": "ran with 1000000000 tokens",\n'
+        '  "waiver": "check-plan-artifacts: allow telegram-id"\n}\n',
+        marker="allow telegram-id",
+    )
+    assert rules_hit(path, tmp_path) == set()
