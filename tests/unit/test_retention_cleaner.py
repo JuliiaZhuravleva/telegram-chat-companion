@@ -93,6 +93,14 @@ class TestWindows:
         assert MaintenanceSettings().chat_messages_days is not None
         assert MaintenanceSettings().chat_messages_days > 30  # type: ignore[operator]
 
+    def test_chat_memory_is_excluded_from_retention(self) -> None:
+        """ADR-0011: chat_memory rows must not be irrecoverably deleted by an
+        automatic sweep without a prior summary step, which this slice does not
+        build. Guards against a future re-addition (e.g. re-applying this plan's
+        superseded Revision-1 resolution) undoing that invariant silently."""
+        assert "chat_memory" not in RETENTION_TABLES
+        assert "chat_memory" not in _make_cleaner()._windows()
+
 
 # ---------------------------------------------------------------------------
 # run_once

@@ -75,7 +75,15 @@ class RetentionCleaner:
         return deleted
 
     def _windows(self) -> dict[str, timedelta]:
-        """Configured retention windows, skipping any set to None (= keep forever)."""
+        """Configured retention windows, skipping any set to None (= keep forever).
+
+        chat_memory (RAG long-term memory) is deliberately NOT listed here, and is
+        not in RETENTION_TABLES either. ADR-0011 establishes a data-preservation
+        invariant: memory rows must not be irrecoverably deleted without first
+        persisting a high-level summary, which this slice does not build.
+        Unbounded growth is an accepted, temporary trade-off until the S5/S6
+        decommission work (docs/plans/rag-revision-2026-08.md).
+        """
         config = self._config
         raw: dict[str, timedelta | None] = {
             "user_activity": (
