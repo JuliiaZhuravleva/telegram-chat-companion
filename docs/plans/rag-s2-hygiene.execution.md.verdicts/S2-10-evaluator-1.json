@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:55:55Z",
+  "role": "evaluator",
+  "item_id": "S2-10",
+  "verdict": "PASS",
+  "evidence": "Verified ed70195+17be181 diffs directly: EmbeddingBackfillWorker (backfill.py) mirrors RetentionCleaner lifecycle, store() persists embedding=None instead of dropping on provider failure, get_pending_embeddings/update_embedding added with correct NULL-guard SQL, search() already filters embedding IS NOT NULL so pending rows stay invisible until backfilled, config+main.py wiring present. Independently ran pytest tests/unit/test_embedding_backfill.py + test_rag_memory_service.py + test_config.py (52 passed), ruff check and mypy clean on all touched files -- matches specialist's claimed verification. Confirmed the one caller of RAGMemoryService.store() (_safe_rag_store) already ignores the return value, so the None->id return-type change is safe.",
+  "regression_risk": "low",
+  "notes": "Specialist's process note about ed70195 bundling this item's diff (recovery from a pre-commit stash-cycle bug) checked out via git show --stat; 17be181 is pure ruff-format on top. No integration/testcontainers test exists for the end-to-end NULL-row-becomes-searchable path (specialist flagged this as a QA routing hint, not a gap in this item's own scope) -- fine for P2 background-worker scope, but worth picking up if S2-11's data-preservation invariant gets a dedicated integration suite later."
+}

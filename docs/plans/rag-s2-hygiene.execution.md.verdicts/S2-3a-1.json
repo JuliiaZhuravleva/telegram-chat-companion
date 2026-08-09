@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:12:17Z",
+  "role": "specialist",
+  "item_id": "S2-3a",
+  "verdict": "PASS",
+  "cost_usd": 1.55,
+  "notes": "ADR-0009 splits KB sort key: SQL retrieval becomes similarity-primary (embedding <=> $2 ASC, salience DESC tiebreak), trim_facts_to_budget() gets a new stable salience-DESC sort for budget-cut priority. Annotated ADR-0003 Part 2 as superseded on this one point (schema/budget constants untouched). Implementation notes for S2-3b pin exact SQL/docstring edits and specify which 2 tests must be rewritten (+ which one needs no change).",
+  "result": {
+    "kind": "commit",
+    "ref": "868c2c0",
+    "verification": "docs/decisions/ADR-0009-kb-retrieval-vs-budget-trim-ordering.md committed at 868c2c0, decides SQL similarity-primary + trim salience-primary split; ADR-0003 annotated superseded-on-this-point at same commit"
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

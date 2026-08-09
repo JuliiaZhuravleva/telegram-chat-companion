@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T16:02:00Z",
+  "role": "specialist",
+  "item_id": "S2-11",
+  "verdict": "PASS",
+  "cost_usd": 1.41,
+  "notes": "ADR-0011 (docs/decisions/ADR-0011-memory-data-preservation-invariant.md, commit 2423ec6) records the invariant from Julia's [S2-6b] answer: chat_memory (and future chat_chunks) rows must not be irrecoverably deleted by an automatic/bulk process without a prior high-level summary; explicit carve-outs for never-stored rows (S2-1 dimension guard), user-directed single-record erasure (RAGMemoryService.delete(), currently dead code), non-prod DBs, and chat_facts/KB (different table, out of this item's title). Distinguished explicitly from rag-revision-2026-08.md §6's 'Digest/summary tier' non-goal (different purpose: retrieval feature vs. preservation artifact) so a future reader doesn't think §6 already settled this. Gates the S6 roadmap line ('chat_memory drop migration scheduled') and gives S2-6 (still pending, depends_on this item) exact guidance: no functional RETENTION_TABLES change needed (chat_memory was never in that dict — this corrects a stale two-layer-edit framing left over from the plan's superseded Revision-1 resolution), only a comment in _windows() citing ADR-0011 (snippet provided). Also flagged as tech debt, not fixed here: vestigial chat_memory.expires_at column, and rag-revision-2026-08.md's S6 row text not yet citing this ADR. PROCESS NOTE for PM: picked ADR-0011, not ADR-0010 — checked concurrent branch plan/admin-ux-and-summary-2026-08-09, which already used both ADR-0009 (manual-explicitness-override) and ADR-0010 (chat-panel-grouped-navigation) independently of this branch's own ADR-0009 (kb-retrieval-vs-budget-trim-ordering). No shared ADR-number allocator across concurrent plan branches -- both branches will collide on 0009 at merge regardless of what I do here; 0011 only avoids adding a third collision. Worth a lightweight registry/lock if concurrent plan branches doing ADR work becomes routine.",
+  "result": {
+    "kind": "commit",
+    "ref": "2423ec6",
+    "verification": "ADR-0011 committed as 2423ec6 (git show --stat confirms only the ADR file, 224 lines, in that commit); git status after commit shows no other files staged/modified by this session. Content cross-checked against src/services/maintenance/cleanup.py (_windows), src/database/repositories/maintenance.py (RETENTION_TABLES), src/database/repositories/memory.py (store/delete/expires_at), src/services/rag/memory.py (delete(), S2-1 dimension guard), docs/plans/rag-revision-2026-08.md §4.1/§5/§6, and the execution.md item history for S2-5a/S2-6/S2-10 to ground every factual claim (dead-code status of delete_expired()/RAGMemoryService.delete(), expires_at always NULL, chat_chunks not yet migrated)."
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

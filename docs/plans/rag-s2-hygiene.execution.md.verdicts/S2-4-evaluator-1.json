@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:09:53Z",
+  "role": "evaluator",
+  "item_id": "S2-4",
+  "verdict": "PASS",
+  "evidence": "git show 8f40636: _safe_embed_query() computes the query embedding once via a shared asyncio.Task awaited by both _timed_rag_search() and _timed_kb_facts(); updated test asserts generate_embedding.assert_called_once_with(text, chat_id=-100123) where two calls previously occurred, matching the item's exact verification criterion. chat_id is threaded through AIRouter.generate_embedding()/analyze_image() (cost-log only) and RAGMemoryService.search()/store()/handle_remember. Reproduced independently: 92/92 relevant unit tests pass, ruff clean, mypy clean on touched files.",
+  "regression_risk": "low",
+  "notes": "Deferred scope (media.py/sticker chat_id threading, AbuseFilter.check) is disclosed with sound rationale and flagged for PM as a possible follow-up item, not silently dropped -- consistent with the item's 'if cheap' qualifier."
+}

@@ -44,10 +44,18 @@ ai:
       provider: "gemini"
       model: "gemini-embedding-001"         # free/cheapest embedding model
       dimensions: 768
-      fallback:
-        - "openai"
-      fallback_models:
-        openai: "text-embedding-3-small"    # cheaper than text-embedding-3-large
+      # No fallback (S2-1, decided honestly-no-reserve over wiring one up):
+      # OpenAI has no comparable 768-dim embedding model. text-embedding-3-small
+      # supports a `dimensions` param, but truncating it changes the embedding
+      # space -- vectors would not be comparable to the ones already stored in
+      # chat_memory (vector(768), alembic/versions/003_rag_memory.py). A prior
+      # `fallback: [openai]` here was never a working reserve: fallback_models
+      # is parsed (src/config.py) but not read by the router, so a fallback
+      # call reused Gemini's model name against OpenAI's API and always 404'd.
+      # Revisit once a second 768-dim-native embedding provider exists. Until
+      # then, a Gemini outage degrades honestly -- memory store/search skip
+      # with a warning (src/services/rag/memory.py) instead of a fallback call
+      # that was guaranteed to fail.
 
     vision:
       provider: "gemini"
@@ -58,12 +66,14 @@ ai:
         openai: "gpt-5-nano"               # nano has multimodal, no need for gpt-5.2
       max_tokens: 200
 
-    relevancy_check:
-      provider: "openai"
-      model: "gpt-5-nano"                    # cheapest: ~$0.00002 per check
-      # No fallback configured — grok/deepseek/anthropic are planned, not implemented
-      max_tokens: 1024                        # gpt-5-nano uses reasoning tokens internally
-      temperature: 1.0                       # gpt-5-nano only supports 1.0
+    # relevancy_check task removed (S2-9, TD-058): AIRouter.generate_text() has no
+    # per-task routing parameter, so this section was never read -- provider,
+    # max_tokens and temperature here were all ignored. llm_judge.py addresses
+    # OpenAI directly via an explicit model="gpt-5-nano" override (the documented
+    # provider-addressing idiom, CLAUDE.md "Critical Patterns") and passes its own
+    # max_tokens=4096/temperature=1.0. Re-add once generate_text() gains real
+    # per-task routing (TD-058) -- until then a key here is a knob that does
+    # nothing.
 
     transcription:
       provider: "openai"
@@ -116,6 +126,16 @@ maintenance:
   # window as response_log — operational analytics, not history.
   decision_log_days: 90
   retrieval_log_days: 90
+
+# Background worker that retries embeddings for chat_memory rows whose
+# embedding failed to generate at write time (S2-10). A NULL embedding is
+# the natural "pending" marker -- no migration needed. Retries are
+# unconstrained: gemini-embedding-001 is free, so there is no cost pressure
+# to cap attempts the way the maintenance windows above cap storage.
+embedding_backfill:
+  enabled: true
+  interval_seconds: 3600
+  batch_limit: 20
 
 # Module Configuration
 # Set enabled: false to disable a module entirely

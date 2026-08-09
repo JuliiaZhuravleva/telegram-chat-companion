@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:28:54Z",
+  "role": "evaluator",
+  "item_id": "S2-3b",
+  "verdict": "PASS",
+  "evidence": "Commit 4935fbd matches ADR-0009's implementation notes exactly: knowledge.py ORDER BY flipped to embedding <=> $2 ASC, salience DESC (docstring cites ADR-0009); trim_facts_to_budget() adds the one-line stable salience-DESC sort before the char-cap loop with corrected docstring. Both ADR-flagged tests rewritten with reversed expectations (verified by inspection that the new integration assertion would fail under the old salience-primary ORDER BY, satisfying the plan's control requirement) plus the original scenario ported to a new trim_facts_to_budget() unit test and a stability test added. Independently ran: unit suite (87 passed), integration suite against real Postgres+pgvector (18 passed), ruff check (clean), mypy on both touched src files (no issues) -- all match specialist's claims. No changes to _KB_SEARCH_LIMIT/KB_BUDGET_TOKENS/MAX_FACT_CHARS, respecting ADR's explicit out-of-scope list.",
+  "regression_risk": "low",
+  "notes": "Scope and depends_on (S2-3a/ADR-0009) fully respected; diff touches only the two src files and three test files the ADR names. No follow-up needed."
+}

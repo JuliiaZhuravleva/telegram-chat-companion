@@ -31,9 +31,11 @@ from src.bot.middleware import (
 from src.config import Settings
 from src.database.repositories.bot_config import BotConfigRepository
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
+from src.services.ai.router import AIRouter
 from src.services.health.checker import HealthChecker
 from src.services.maintenance.cleanup import RetentionCleaner
 from src.services.modules.sticker.scheduler import StickerSetSyncScheduler
+from src.services.rag.backfill import EmbeddingBackfillWorker
 from src.utils import parse_admin_ids
 from src.utils.background import fire_and_forget
 
@@ -199,6 +201,15 @@ async def main() -> None:
     retention_cleaner = RetentionCleaner(pool=pool, config=settings.maintenance)
     await retention_cleaner.start()
 
+    # S2-10: retries embeddings for chat_memory rows that failed to embed at
+    # write time (RAGMemoryService.store() persists them with embedding=NULL
+    # instead of dropping them). Shares the AI router with request handling.
+    ai_router = await container.get(AIRouter)
+    embedding_backfill = EmbeddingBackfillWorker(
+        pool=pool, ai_router=ai_router, config=settings.embedding_backfill
+    )
+    await embedding_backfill.start()
+
     try:
         logger.info("Bot started, listening for messages...")
         await dp.start_polling(bot)
@@ -210,6 +221,7 @@ async def main() -> None:
         command_sync_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await command_sync_task
+        await embedding_backfill.stop()
         await retention_cleaner.stop()
         await sticker_sync.stop()
         await health_checker.stop()

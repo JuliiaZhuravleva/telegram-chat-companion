@@ -710,16 +710,74 @@ class TestTrimFactsToBudget:
         result = trim_facts_to_budget(facts)
         assert len(result) == 2
 
-    def test_preserves_retrieval_order_does_not_resort(self):
+    def test_sorts_by_salience_before_trimming(self):
+        """ADR-0009: retrieval arrives similarity-ordered; trim_facts_to_budget()
+        stable-sorts by salience DESC before applying the budget, so a
+        higher-salience fact moves ahead of a lower-salience one it arrived
+        after (supersedes the old "does not re-sort" contract)."""
         facts = [
             {"fact_text": "lower salience but first", "salience": 0.1},
             {"fact_text": "higher salience but second", "salience": 0.9},
         ]
         result = trim_facts_to_budget(facts)
         assert [f["fact_text"] for f in result] == [
-            "lower salience but first",
             "higher salience but second",
+            "lower salience but first",
         ]
+
+    def test_stable_sort_preserves_arrival_order_on_salience_tie(self):
+        facts = [
+            {"fact_text": "arrived first", "salience": 0.5},
+            {"fact_text": "arrived second", "salience": 0.5},
+        ]
+        result = trim_facts_to_budget(facts)
+        assert [f["fact_text"] for f in result] == ["arrived first", "arrived second"]
+
+    def test_null_salience_does_not_crash_the_sort(self):
+        """`chat_facts.salience` is nullable (migration 014: FLOAT DEFAULT 0.5,
+        no NOT NULL) and rows reach here as plain dicts, so the key exists with
+        value None -- `.get("salience", 0.5)` does NOT substitute the default.
+        Sorting then raised TypeError comparing None to float, in the reply
+        hot path. A NULL must sort as the 0.5 default instead."""
+        facts = [
+            {"fact_text": "null salience", "salience": None},
+            {"fact_text": "high salience", "salience": 0.9},
+            {"fact_text": "low salience", "salience": 0.1},
+        ]
+        result = trim_facts_to_budget(facts)
+        assert [f["fact_text"] for f in result] == [
+            "high salience",
+            "null salience",
+            "low salience",
+        ]
+
+    def test_zero_salience_is_not_rewritten_to_the_default(self):
+        """Guards the `or` trap: `f.get("salience") or 0.5` would turn a
+        legitimate 0.0 into 0.5 and float it above a 0.1 fact."""
+        facts = [
+            {"fact_text": "zero salience", "salience": 0.0},
+            {"fact_text": "low salience", "salience": 0.1},
+        ]
+        result = trim_facts_to_budget(facts)
+        assert [f["fact_text"] for f in result] == ["low salience", "zero salience"]
+
+    def test_higher_salience_survives_tight_budget_over_more_similar_fact(self):
+        """Ported from the retrieval-layer ADR-0003 Part 2 test
+        (`test_salience_wins_over_similarity`, now superseded by ADR-0009 at
+        the retrieval layer -- see
+        `tests/integration/test_knowledge_repository.py::test_similarity_wins_over_salience`).
+        The *intent* -- a curated higher-salience fact should survive a budget
+        cut ahead of a merely-more-similar one -- now belongs here, at the
+        budget-trim layer."""
+        max_size_text = "x" * MAX_FACT_CHARS
+        facts = [
+            {"fact_text": max_size_text, "salience": 0.1},  # arrives first (most similar)
+            {"fact_text": max_size_text, "salience": 0.9},  # arrives second, less similar
+        ]
+        # Tight budget: only one of the two (~150-token) facts fits.
+        result = trim_facts_to_budget(facts, budget_tokens=150)
+        assert len(result) == 1
+        assert result[0]["salience"] == 0.9
 
     def test_per_fact_content_capped_at_max_fact_chars(self):
         long_text = "y" * (MAX_FACT_CHARS + 100)

@@ -1,6 +1,12 @@
 """Tests for src.config — pure functions and Settings behavior."""
 
-from src.config import ModuleConfig, deep_merge, load_yaml_config
+from src.config import (
+    EmbeddingBackfillSettings,
+    ModuleConfig,
+    Settings,
+    deep_merge,
+    load_yaml_config,
+)
 from src.services.ai.capabilities import EXPENSIVE_MODELS
 
 
@@ -80,6 +86,57 @@ class TestLoadYamlConfig:
                 assert fb_model not in EXPENSIVE_MODELS, (
                     f"Task '{task_name}' fallback uses expensive model '{fb_model}'"
                 )
+
+    def test_embeddings_has_no_fallback(self):
+        """S2-1: embeddings has no fallback provider, declared honestly.
+
+        A prior ``fallback: [openai]`` here was never a working reserve --
+        ``fallback_models`` is parsed (``AITaskConfig``) but never read by
+        ``AIRouter``, so a fallback call reused Gemini's model name
+        (``gemini-embedding-001``) against OpenAI's API and always 404'd.
+        Regression guard: this must stay empty until a second 768-dim-native
+        embedding provider exists (see the comment in config/default.yml).
+        """
+        config = load_yaml_config()
+        embeddings_task = config["ai"]["tasks"]["embeddings"]
+        assert embeddings_task.get("fallback", []) == []
+        assert embeddings_task.get("fallback_models", {}) == {}
+
+    def test_relevancy_check_task_removed_as_dead_config(self):
+        """S2-9/TD-058: ``relevancy_check`` was never read by ``AIRouter.generate_text()``
+
+        (no per-task routing parameter -- provider/max_tokens/temperature were all
+        ignored, see ``config/default.yml``'s comment). Removed rather than left as a
+        knob that silently does nothing. Regression guard: don't let it creep back in
+        without also wiring ``generate_text()`` to route by task (TD-058).
+        """
+        config = load_yaml_config()
+        tasks = config.get("ai", {}).get("tasks", {})
+        assert "relevancy_check" not in tasks
+
+    def test_embedding_backfill_section_present_and_enabled(self):
+        """S2-10: the background worker is on by default in default.yml."""
+        config = load_yaml_config()
+        backfill = config["embedding_backfill"]
+        assert backfill["enabled"] is True
+        assert backfill["interval_seconds"] == 3600
+        assert backfill["batch_limit"] == 20
+
+
+class TestEmbeddingBackfillSettings:
+    """S2-10: defaults for the standalone settings class, and that Settings
+    wires it in under settings.embedding_backfill (mirrors MaintenanceSettings)."""
+
+    def test_defaults(self):
+        config = EmbeddingBackfillSettings()
+        assert config.enabled is True
+        assert config.interval_seconds == 3600
+        assert config.batch_limit == 20
+
+    def test_settings_exposes_embedding_backfill(self, make_settings):
+        settings: Settings = make_settings()
+        assert isinstance(settings.embedding_backfill, EmbeddingBackfillSettings)
+        assert settings.embedding_backfill.enabled is True
 
 
 class TestSettings:

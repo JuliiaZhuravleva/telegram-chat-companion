@@ -11,6 +11,14 @@ from src.services.ai.router import AIRouter
 
 logger = structlog.get_logger(__name__)
 
+# S2-1: chat_memory.embedding is vector(768) (alembic/versions/003_rag_memory.py).
+# Embeddings has no fallback provider (config/default.yml) after this item, so a
+# wrong-length vector should only happen on a provider bug or future config
+# drift -- kept as a cheap, explicit guard so a mismatch fails loud in
+# application code (with the offending provider/model logged) instead of as a
+# raw asyncpg error from pgvector's own dimension check.
+EXPECTED_EMBEDDING_DIMENSIONS = 768
+
 
 class RAGMemoryService:
     """Retrieval-Augmented Generation memory using pgvector.
@@ -24,9 +32,17 @@ class RAGMemoryService:
         memory_repo: MemoryRepository,
         ai_router: AIRouter,
         *,
-        min_similarity: float = 0.65,
+        min_similarity: float,
         max_results: int = 5,
     ) -> None:
+        """Construct the service.
+
+        ``min_similarity`` has no default here on purpose (S2-2): the config
+        YAML (``rag.min_similarity``, wired through ``settings.rag`` in
+        ``src/di.py``) is the single source of truth for the threshold. A
+        constructor default would silently diverge from it for any caller
+        that forgets to pass it explicitly (tests, future call sites).
+        """
         self._repo = memory_repo
         self._ai_router = ai_router
         self._min_similarity = min_similarity
@@ -47,25 +63,42 @@ class RAGMemoryService:
         chat_id: int,
         query: str,
         *,
+        query_embedding: list[float] | None = None,
         min_similarity: float | None = None,
         max_results: int | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories relevant to a query.
 
+        ``query_embedding``, if given, is used as-is instead of embedding
+        ``query`` again (S2-4): the pipeline computes one shared query
+        embedding for RAG + KB per turn and passes it here to avoid a
+        second ``generate_embedding()`` call for the same text. ``query``
+        is still required in that case (kept for logging) but not
+        re-embedded.
+
         Returns list of dicts with keys: id, content, similarity, metadata,
         created_at.
         """
-        try:
-            embedding_result = await self._ai_router.generate_embedding(query)
-        except Exception:
-            logger.warning("Failed to generate query embedding for RAG search")
-            return []
+        if query_embedding is not None:
+            embedding = query_embedding
+        else:
+            try:
+                embedding_result = await self._ai_router.generate_embedding(query, chat_id=chat_id)
+            except Exception:
+                logger.warning("Failed to generate query embedding for RAG search")
+                return []
+            embedding = embedding_result.embedding
 
         rows = await self._repo.search(
             chat_id=chat_id,
-            query_embedding=embedding_result.embedding,
-            min_similarity=min_similarity or self._min_similarity,
-            max_results=max_results or self._max_results,
+            query_embedding=embedding,
+            # `x or default` would silently fall back to the instance default
+            # for an explicit falsy override (min_similarity=0.0 is a valid
+            # "accept everything" threshold; max_results=0 is a valid "retrieve
+            # nothing this turn") — S2-2. Both arguments get the same treatment;
+            # applying it to only one of them is what review caught here.
+            min_similarity=(min_similarity if min_similarity is not None else self._min_similarity),
+            max_results=(max_results if max_results is not None else self._max_results),
         )
 
         return [
@@ -88,11 +121,44 @@ class RAGMemoryService:
         importance_score: float = 0.5,
         metadata: dict[str, Any] | None = None,
     ) -> int | None:
-        """Store a memory with its embedding. Returns memory ID or None on failure."""
+        """Store a memory with its embedding. Returns the memory ID.
+
+        S2-10: a failed embedding *call* (provider outage -- Gemini is the
+        only provider for embeddings since S2-1's honest no-fallback) no
+        longer drops the memory. Previously this meant silent, permanent
+        data loss: the content was never written at all. Now the row is
+        persisted with ``embedding=None`` (a NULL vector, invisible to
+        ``search()`` until filled in) and ``EmbeddingBackfillWorker``
+        retries it later -- satisfying the S2-11 data-preservation
+        invariant.
+
+        Returns ``None`` only for the wrong-dimensionality guard below
+        (S2-1) -- a provider/config bug distinct from an outage, where
+        refusing to store is the deliberate behavior, not something S2-10
+        changes.
+        """
         try:
-            embedding_result = await self._ai_router.generate_embedding(content)
+            embedding_result = await self._ai_router.generate_embedding(content, chat_id=chat_id)
         except Exception:
-            logger.warning("Failed to generate embedding for RAG store")
+            logger.warning("Failed to generate embedding for RAG store, storing as pending")
+            return await self._repo.store(
+                chat_id=chat_id,
+                content=content,
+                embedding=None,
+                source_message_id=source_message_id,
+                importance_score=importance_score,
+                metadata=metadata,
+            )
+
+        actual_dimensions = len(embedding_result.embedding)
+        if actual_dimensions != EXPECTED_EMBEDDING_DIMENSIONS:
+            logger.warning(
+                "Embedding has unexpected dimensionality, refusing to store",
+                expected=EXPECTED_EMBEDDING_DIMENSIONS,
+                actual=actual_dimensions,
+                provider=embedding_result.provider,
+                model=embedding_result.model,
+            )
             return None
 
         return await self._repo.store(

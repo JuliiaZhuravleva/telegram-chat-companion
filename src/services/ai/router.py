@@ -269,9 +269,16 @@ class AIRouter:
     async def generate_embedding(
         self,
         text: str,
+        *,
+        chat_id: int = 0,
         **kwargs: str | int,
     ) -> EmbeddingResult:
-        """Generate embedding using the configured provider with fallback."""
+        """Generate embedding using the configured provider with fallback.
+
+        ``chat_id`` (TD-009/S2-4) is cost-log context only -- forwarded to
+        ``_log_usage()``, never to the provider. Defaults to 0 (the existing
+        "unknown chat" sentinel) for callers with no chat context.
+        """
         task_config = self._settings.ai.tasks.get("embeddings")
         chain = self._get_provider_chain("embeddings")
 
@@ -289,6 +296,14 @@ class AIRouter:
 
             try:
                 provider = await self._get_provider(provider_name)
+                # S2-1: unlike generate_text(), this is not index-aware -- it
+                # always uses task_config.model regardless of position in the
+                # chain. Currently safe because config/default.yml declares no
+                # fallback for embeddings (chain is always length 1, gemini
+                # only): the previous fallback reused Gemini's model name
+                # against OpenAI's API and always 404'd. If a fallback
+                # provider is reintroduced here, mirror generate_text()'s
+                # "config model only for the primary provider" pattern first.
                 model = task_config.model if task_config else None
 
                 result = await provider.generate_embedding(
@@ -301,6 +316,7 @@ class AIRouter:
                         task_type="embedding",
                         provider=result.provider,
                         model=result.model,
+                        chat_id=chat_id,
                         tokens_input=result.tokens_input,
                     )
                 )
@@ -324,9 +340,15 @@ class AIRouter:
         self,
         image_data: bytes,
         prompt: str,
+        *,
+        chat_id: int = 0,
         **kwargs: Any,
     ) -> VisionResult:
-        """Analyze image using the configured provider with fallback."""
+        """Analyze image using the configured provider with fallback.
+
+        ``chat_id`` (TD-009/S2-4) is cost-log context only -- see
+        ``generate_embedding()``.
+        """
         chain = self._get_provider_chain("vision")
 
         if not chain:
@@ -353,6 +375,7 @@ class AIRouter:
                         task_type="vision",
                         provider=result.provider,
                         model=result.model,
+                        chat_id=chat_id,
                         tokens_input=result.tokens_input,
                         tokens_output=result.tokens_output,
                     )

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T16:05:57Z",
+  "role": "evaluator",
+  "item_id": "S2-6",
+  "verdict": "PASS",
+  "evidence": "git show 5ade826: comment in RetentionCleaner._windows() matches ADR-0011's implementation-notes snippet verbatim, citing the data-preservation invariant; regression test asserts chat_memory absent from both RETENTION_TABLES and _windows() output. Confirmed chat_memory is indeed absent from maintenance.py's RETENTION_TABLES (grep) and cleanup.py, and tests/unit/test_retention_cleaner.py passes 16/16 locally. No functional/runtime change, matching ADR-0011's explicit guidance that only a doc comment + test were required (chat_memory was never actually in RETENTION_TABLES, correcting the plan's stale Revision-1 framing).",
+  "regression_risk": "low",
+  "notes": ""
+}

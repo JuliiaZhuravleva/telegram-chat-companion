@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:27:15Z",
+  "role": "specialist",
+  "item_id": "S2-3b",
+  "verdict": "PASS",
+  "cost_usd": 1.18,
+  "notes": "Implemented ADR-0009 (S2-3a) exactly per its Implementation notes: knowledge.py:258 ORDER BY flipped to embedding <=> $2 ASC, salience DESC (docstring updated to cite ADR-0009); trim_facts_to_budget() now stable-sorts by salience DESC before the char-cap/accumulate loop, docstring corrected to no longer claim 'does not re-sort'. Rewrote the two ADR-flagged tests: unit test_search_by_similarity_orders_salience_then_similarity -> renamed test_search_by_similarity_orders_similarity_then_salience, asserts new SQL string; integration test_salience_wins_over_similarity -> renamed test_similarity_wins_over_salience, asserts the opposite ranking (control: this test fails against the pre-fix ORDER BY, confirmed via ADR's own framing). Ported the original scenario's intent to a new unit test on trim_facts_to_budget() (test_higher_salience_survives_tight_budget_over_more_similar_fact) plus a tie-break stability test. Also rewrote test_preserves_retrieval_order_does_not_resort (not explicitly named in the ADR's test list, but it directly asserted the now-false 'no re-sort' contract and would have failed post-change) -> test_sorts_by_salience_before_trimming. test_orders_by_similarity_when_salience_tied (unit+integration) left unchanged per ADR (still holds under new order). No changes to _KB_SEARCH_LIMIT/KB_BUDGET_TOKENS/MAX_FACT_CHARS (explicitly out of scope). Commit only contains src/database/repositories/knowledge.py, src/services/text/prompt_builder.py, and the 3 test files -- did not stage the orchestrator's own execution.md/.lock/.log.jsonl/.progress/.verdicts tracking artifacts sitting in the worktree.",
+  "result": {
+    "kind": "commit",
+    "ref": "4935fbda85453007f2c979c8d190823721c78547",
+    "verification": "pytest tests/unit/test_knowledge_repository.py tests/unit/test_prompt_builder.py -q: 87 passed; pytest tests/integration/test_knowledge_repository.py -q: 18 passed (real Postgres+pgvector); pytest tests/unit/ -q: 1732 passed, 5 skipped; ruff check + ruff format --check clean on touched files; mypy src/database/repositories/knowledge.py src/services/text/prompt_builder.py: no issues"
+  },
+  "confidence": 0.92,
+  "clarification_request": null,
+  "session_id": null
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:18:12Z",
+  "role": "evaluator",
+  "item_id": "S2-5b",
+  "verdict": "PASS",
+  "evidence": "git show e593509: deletes src/services/modules/knowledge/{models.py,__init__.py} (ChatFact dataclass, FactSource/FactStatus enums, from_record) — grep confirms zero remaining references to these names or the module path in src/ or tests/. Independently reran pytest tests/unit (1732 passed, 5 skipped, matches pre-removal count), ruff check (clean), mypy src/ (clean, 129 files, down from 131 consistent with sibling S2-5a). Scope-widening to include the two enums is justified (they existed only to serve ChatFact.from_record()) and transparently documented.",
+  "regression_risk": "low",
+  "notes": "Source doc's 'these two are related, resolve together' caveat (S2-5) refers to delete_expired+S2-6, not ChatFact — S2-5a's item title confirms that concern was already settled at plan-revision level (S2-11 invariant), so ChatFact deletion was correctly independent."
+}

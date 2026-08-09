@@ -384,9 +384,14 @@ class TestSearchBySimilarity:
         assert results[1]["similarity"] == pytest.approx(0.0)
 
     @pytest.mark.asyncio
-    async def test_salience_wins_over_similarity(self, repo: KnowledgeRepository) -> None:
-        """ADR-0003 Part 2 contract: ORDER BY salience DESC, similarity DESC --
-        a lower-similarity, higher-salience fact must rank first."""
+    async def test_similarity_wins_over_salience(self, repo: KnowledgeRepository) -> None:
+        """ADR-0009 contract: ORDER BY similarity DESC, salience DESC (tiebreak) --
+        a more-similar, lower-salience fact must rank first even against a much
+        higher-salience competitor. Supersedes ADR-0003 Part 2's opposite
+        contract (formerly `test_salience_wins_over_similarity`); the old
+        scenario's intent (salience deciding a survivor) now lives at the
+        budget-trim layer -- see
+        `tests/unit/test_prompt_builder.py::TestTrimFactsToBudget`."""
         chat_id = -910010
         await repo.upsert_fact(
             chat_id=chat_id,
@@ -409,8 +414,8 @@ class TestSearchBySimilarity:
             salience=0.9,
         )
         results = await repo.search_by_similarity(chat_id, _one_hot(0), limit=5)
-        assert results[0]["subject"] == "dissimilar-high-salience"
-        assert results[1]["subject"] == "very-similar-low-salience"
+        assert results[0]["subject"] == "very-similar-low-salience"
+        assert results[1]["subject"] == "dissimilar-high-salience"
 
     @pytest.mark.asyncio
     async def test_excludes_facts_without_embedding(self, repo: KnowledgeRepository) -> None:

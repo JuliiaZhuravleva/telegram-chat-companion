@@ -241,10 +241,12 @@ class KnowledgeRepository:
     ) -> list[dict[str, Any]]:
         """pgvector cosine-similarity search over active facts.
 
-        Ordered by **salience DESC, then similarity DESC** (ADR-0003 Part 2 --
-        retrieval order is this repository's concern; `trim_facts_to_budget()`
-        in `prompt_builder.py` (A5) does not re-sort). Only `status='active'
-        AND valid_to IS NULL` rows with a stored embedding are eligible.
+        Ordered by **similarity DESC, then salience DESC as a tiebreak** (ADR-0009
+        -- retrieval relevance decides what this round trip returns at all;
+        salience-driven budget-trim priority moved to `trim_facts_to_budget()`
+        in `prompt_builder.py`, which now stable-sorts by salience before
+        applying the token budget). Only `status='active' AND valid_to IS NULL`
+        rows with a stored embedding are eligible.
         """
         rows = await self._pool.fetch(
             """
@@ -255,7 +257,7 @@ class KnowledgeRepository:
               AND status = 'active'
               AND valid_to IS NULL
               AND embedding IS NOT NULL
-            ORDER BY salience DESC, embedding <=> $2 ASC
+            ORDER BY embedding <=> $2 ASC, salience DESC
             LIMIT $3
             """,
             chat_id,

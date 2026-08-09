@@ -220,7 +220,7 @@ async def test_get_active_facts_with_topic_filter(repo):
 
 
 @pytest.mark.asyncio
-async def test_search_by_similarity_orders_salience_then_similarity(repo):
+async def test_search_by_similarity_orders_similarity_then_salience(repo):
     repo_, pool = repo
     pool.fetch.return_value = [
         {"id": 1, "similarity": 0.9, "salience": 0.8},
@@ -231,7 +231,7 @@ async def test_search_by_similarity_orders_salience_then_similarity(repo):
 
     assert len(result) == 1
     sql, chat_id, query_embedding, limit = pool.fetch.call_args.args
-    assert "ORDER BY salience DESC, embedding <=> $2 ASC" in sql
+    assert "ORDER BY embedding <=> $2 ASC, salience DESC" in sql
     assert "status = 'active'" in sql
     assert "valid_to IS NULL" in sql
     assert "embedding IS NOT NULL" in sql

@@ -271,7 +271,7 @@ class TestGenerateText:
 
 
 class TestCentralizedLogging:
-    """Test that non-text operations are logged in the router."""
+    """Test that embedding generation is logged in the router."""
 
     @pytest.mark.asyncio
     async def test_no_crash_without_repo(self, mock_provider, make_router, mock_router_settings):
@@ -336,6 +336,49 @@ class TestCentralizedLogging:
         mock_repo.log.assert_awaited_once()
         call_kwargs = mock_repo.log.call_args
         assert call_kwargs.kwargs["task_type"] == "embedding"
+
+
+class TestGenerateEmbeddingNoFallback:
+    """S2-1: embeddings has no fallback provider (config/default.yml).
+
+    A prior ``fallback: [openai]`` was never a working reserve -- a fallback
+    attempt reused Gemini's model name against OpenAI's API and always
+    404'd. With the fallback removed from the chain, a Gemini failure must
+    raise a clear error and must never reach a second provider, even if one
+    happens to be registered/available.
+    """
+
+    @pytest.mark.asyncio
+    async def test_gemini_failure_raises_without_calling_other_providers(
+        self, mock_provider, make_router, mock_router_settings
+    ):
+        failing_gemini = mock_provider(
+            name="gemini",
+            supported_capabilities={"embeddings": True},
+            error=AIProviderError("gemini down", provider="gemini"),
+        )
+        openai_provider = mock_provider(
+            name="openai",
+            supported_capabilities={"embeddings": True},
+        )
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = []  # S2-1: no fallback declared for embeddings
+        task_config.model = "gemini-embedding-001"
+        mock_router_settings.ai.tasks = {"embeddings": task_config}
+
+        router, _ = make_router(mock_router_settings)
+        router._providers["gemini"] = failing_gemini
+        router._providers["openai"] = openai_provider
+
+        with pytest.raises(AIProviderError, match="All providers failed"):
+            await router.generate_embedding("test")
+
+        assert "generate_embedding" not in openai_provider.call_log
+
+
+class TestVisionAndTranscriptionLogging:
+    """Test that vision/transcription operations are logged in the router."""
 
     @pytest.mark.asyncio
     async def test_vision_logs_usage(self, mock_provider, mock_router_settings):
