@@ -75,10 +75,17 @@ class MemoryRepository:
         true top-k). Default ``None`` means "no bound", matching current
         production behavior; the only production caller
         (``TextProcessingPipeline._timed_rag_search``) does not pass it.
+
+        ``source_message_id`` is now selected alongside the existing columns
+        (S3-2): the eval harness needs it to match a retrieved memory back to
+        the case's ``expected_message_id_ranges`` for recall@k. Purely
+        additive to the SELECT list -- WHERE/ORDER/LIMIT are unchanged, and
+        the only production caller reads results by key, so an extra key is
+        invisible to it.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
-            SELECT id, content, metadata, importance_score,
+            SELECT id, content, metadata, importance_score, source_message_id,
                    1 - (embedding <=> $2) AS similarity,
                    created_at
             FROM chat_memory

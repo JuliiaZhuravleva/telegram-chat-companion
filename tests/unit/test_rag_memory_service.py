@@ -252,6 +252,59 @@ class TestSearchQueryEmbeddingPassthrough:
         router.generate_embedding.assert_awaited_once()
 
 
+class TestSearchResultIncludesSourceMessageId:
+    """S3-2: ``source_message_id`` is carried through from the repository
+    row into the dict ``search()`` returns.
+
+    Needed so the eval harness can match a retrieved memory back to a
+    case's ``expected_message_id_ranges`` for recall@k (S3-4) -- purely
+    additive, the production pipeline reads this dict by key and never
+    asked for this one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_source_message_id_is_passed_through(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = [
+            {
+                "id": 1,
+                "content": "we meet at 5pm",
+                "similarity": 0.9,
+                "metadata": None,
+                "created_at": datetime(2026, 5, 9, tzinfo=UTC),
+                "source_message_id": 42,
+            }
+        ]
+        service, _, _ = _make_service(repo=repo)
+
+        results = await service.search(chat_id=1, query="hi", query_embedding=[0.1] * 768)
+
+        assert results[0]["source_message_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_none_source_message_id_is_passed_through_as_none(self) -> None:
+        """A memory stored with no ``source_message_id`` (S2-10 pending-embedding
+        rows, or any store() call that omits it) must not be coerced into
+        something else here -- ``None`` means "no linked message", not
+        "unknown, guess"."""
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = [
+            {
+                "id": 1,
+                "content": "we meet at 5pm",
+                "similarity": 0.9,
+                "metadata": None,
+                "created_at": datetime(2026, 5, 9, tzinfo=UTC),
+                "source_message_id": None,
+            }
+        ]
+        service, _, _ = _make_service(repo=repo)
+
+        results = await service.search(chat_id=1, query="hi", query_embedding=[0.1] * 768)
+
+        assert results[0]["source_message_id"] is None
+
+
 class TestSearchMaxResultsOverride:
     """S2-7b: ``max_results`` passthrough, mirroring the ``min_similarity``
     override tests above -- same ``x or default`` pitfall shape (an

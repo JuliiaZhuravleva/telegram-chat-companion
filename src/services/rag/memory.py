@@ -123,6 +123,11 @@ class RAGMemoryService:
                 "similarity": float(row["similarity"]),
                 "metadata": row["metadata"],
                 "created_at": row["created_at"],
+                # S3-2: carried through so the eval harness can match a hit
+                # back to a case's expected_message_id_ranges. The pipeline
+                # (this dict's other consumer) reads by key and never asked
+                # for this one, so its behavior is unaffected.
+                "source_message_id": row["source_message_id"],
             }
             for row in rows
         ]
