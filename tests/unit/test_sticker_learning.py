@@ -15,7 +15,11 @@ from src.services.ai.base import (
 )
 from src.services.modules.sticker.dedup import compute_image_hash
 from src.services.modules.sticker.learning import StickerLearningService
-from src.services.modules.sticker.models import ReanalyzeResult, StickerRenderError
+from src.services.modules.sticker.models import (
+    ReanalyzeResult,
+    StickerLearningResult,
+    StickerRenderError,
+)
 from src.services.modules.sticker.motion import AnimationMotion
 from src.services.modules.sticker.renderer import RenderedSticker
 
@@ -113,6 +117,8 @@ async def test_learn_new_sticker_wires_explicitness_score(sticker_service):
     result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
 
     assert result.explicitness_score == 0.6
+    # ADR-0009 Decision 6: a fresh Vision analysis is never manual.
+    assert result.explicitness_is_manual is False
     save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
     assert save_kwargs["explicitness_score"] == 0.6
 
@@ -976,6 +982,7 @@ def _canonical_record(**overrides) -> dict:
         "description_embedding": [0.2] * 768,
         "image_hash": "0000000000000000",
         "explicitness_score": 0.3,
+        "explicitness_is_manual": False,
     }
     base.update(overrides)
     return base
@@ -1015,6 +1022,8 @@ class TestDuplicateDetection:
         # ADR-0008 Decision 7: explicitness_score is a Vision-derived column
         # too — copied verbatim from the canonical row, no new Vision call.
         assert result.explicitness_score == 0.3
+        # ADR-0009 Decision 6: canonical wasn't manually-scored -> duplicate isn't either.
+        assert result.explicitness_is_manual is False
 
         sticker_service._ai.analyze_image.assert_not_awaited()
         sticker_service._ai.generate_embedding.assert_not_awaited()
@@ -1025,6 +1034,7 @@ class TestDuplicateDetection:
         assert save_kwargs["duplicate_of_file_unique_id"] == "canonical-uid"
         assert save_kwargs["image_hash"] == target_hash
         assert save_kwargs["explicitness_score"] == 0.3
+        assert save_kwargs["explicitness_is_manual"] is False
 
         # Embedding copied via update_embedding(), not regenerated.
         sticker_service._repo.update_embedding.assert_awaited_once_with(
@@ -1101,6 +1111,42 @@ class TestDuplicateDetection:
         assert result.explicitness_score is None
         save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
         assert save_kwargs["explicitness_score"] is None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_copies_manual_flag_together_with_score(self, sticker_service):
+        """ADR-0009 Decision 6: a canonical row with a hand-vetted score
+        makes the new duplicate inherit BOTH the score and the manual flag
+        together — copying the score alone would silently reintroduce the
+        ADR's own bug one hop away (the duplicate's own first re-analysis
+        would then clobber it, since a bare INSERT defaults the flag back
+        to false)."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[
+                None,
+                _canonical_record(explicitness_score=0.9, explicitness_is_manual=True),
+            ]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        result = await sticker_service.learn(sticker=_make_sticker(), image_data=image_data)
+
+        assert result.explicitness_score == 0.9
+        assert result.explicitness_is_manual is True
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["explicitness_score"] == 0.9
+        assert save_kwargs["explicitness_is_manual"] is True
 
     @pytest.mark.asyncio
     async def test_no_matching_candidate_falls_through_to_vision(self, sticker_service):
@@ -1230,3 +1276,143 @@ class TestDuplicateDetection:
         assert result.duplicate_of == "root-uid"
         # The copy reads the ROOT's own record, not the intermediate row's.
         sticker_service._repo.get_by_file_unique_id.assert_awaited_with("root-uid")
+
+
+# ---------------------------------------------------------------------------
+# notify_admins — explicitness line + tolerance_level threading (A-1)
+# ---------------------------------------------------------------------------
+
+
+def _make_notify_bot() -> MagicMock:
+    bot = MagicMock()
+    sticker_msg = MagicMock()
+    sticker_msg.message_id = 1
+    bot.send_sticker = AsyncMock(return_value=sticker_msg)
+    desc_msg = MagicMock()
+    desc_msg.message_id = 2
+    bot.send_message = AsyncMock(return_value=desc_msg)
+    return bot
+
+
+class TestNotifyAdminsExplicitnessLine:
+    @pytest.mark.asyncio
+    async def test_scored_result_shows_pass_verdict_against_chat_tolerance(self, sticker_service):
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=0.3,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
+
+        text = bot.send_message.call_args.args[1]
+        assert "0.30" in text
+        assert "0.50" in text
+        assert "✅ пройдёт" in text
+
+    @pytest.mark.asyncio
+    async def test_unscored_result_shows_not_scored_never_a_verdict(self, sticker_service):
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=None,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=1.0)
+
+        text = bot.send_message.call_args.args[1]
+        assert "не оценён" in text
+        assert "✅" not in text
+        assert "❌" not in text
+
+    @pytest.mark.asyncio
+    async def test_uses_the_default_tolerance_level_kwarg_when_caller_omits_it(
+        self, sticker_service
+    ):
+        """media.py always threads the real chat's tolerance_level, but the
+        function-level default (ChatConfig's own 0.5 fallback) must still
+        produce a sane, non-crashing verdict for any other caller."""
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=0.4,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111])
+
+        text = bot.send_message.call_args.args[1]
+        assert "0.50" in text
+        assert "✅ пройдёт" in text
+
+    @pytest.mark.asyncio
+    async def test_manual_score_shows_manual_badge(self, sticker_service):
+        """A-4 / ADR-0009 Decision 6 edge case: a freshly-learned duplicate
+        can inherit a manual score+flag from its canonical row, so the
+        (вручную) badge can legitimately appear on its very first
+        notification -- threaded via StickerLearningResult.explicitness_is_manual."""
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=0.3,
+            explicitness_is_manual=True,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
+
+        text = bot.send_message.call_args.args[1]
+        assert "(вручную)" in text
+
+    @pytest.mark.asyncio
+    async def test_automatic_score_shows_no_manual_badge(self, sticker_service):
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=0.3,
+            explicitness_is_manual=False,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
+
+        text = bot.send_message.call_args.args[1]
+        assert "вручную" not in text
+
+    @pytest.mark.asyncio
+    async def test_no_description_omits_explicitness_line(self, sticker_service):
+        """Defensive gate mirroring admin_sticker.py's own: no visual
+        description at all -> no explicitness line, even if a score
+        somehow came back (shouldn't happen per ADR-0008 Decision 4, but
+        must not render a misleading line if it does)."""
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description=None,
+            explicitness_score=0.4,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111])
+
+        text = bot.send_message.call_args.args[1]
+        assert "Оценка откровенности" not in text

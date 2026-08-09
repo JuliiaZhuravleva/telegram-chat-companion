@@ -1,30 +1,52 @@
-"""Chat settings panel sub-router (B-1, ADR-0006; inherited-marker: B-2).
+"""Chat settings panel sub-router (B-1, ADR-0006; inherited-marker, grouped
+navigation: B-2, ADR-0010).
 
 Handles:
-- ``adm_pnl:*``       — chat picker (own dedicated picker, Decision 4)
-- ``adm_pnl_menu:*``  — per-chat panel render (``render_chat_panel``, Decision 1)
+- ``adm_pnl:*``       — chat picker (own dedicated picker, Decision 4; sorted
+  most-active-first by rolling-24h message count with a caption counter, C-1)
+- ``adm_pnl_menu:*``  — root section-list render (``render_chat_panel``,
+  ADR-0006 Decision 1 / ADR-0010 Decisions 1, 3, 6)
+- ``adm_pnl_grp:*``   — one field-owning group's screen
+  (``render_chat_panel_group``, ADR-0010 Decisions 1, 2, 4)
 - ``adm_pnl_tgl:*``   — generic bool-field toggle for fields with no existing
-  dedicated UI (Decision 3). The three KB/Reactions fields are link-only
-  (Decision 2) and are rejected here -- their write path stays
-  admin_kb.py's/admin_reactions.py's own toggle handlers, never duplicated.
+  dedicated UI (ADR-0006 Decision 3). The three KB/Reactions fields are
+  link-only (ADR-0006 Decision 2) and are rejected here -- their write path
+  stays admin_kb.py's/admin_reactions.py's own toggle handlers, never
+  duplicated. Re-renders the field's own group screen, not root
+  (ADR-0010 Decision 5).
 - ``adm_pnl_tol:*``   — dedicated single-field FSM edit flow for
   ``tolerance_level`` (ADR-0008 Decision 10). Independent of F-1's still-
   deferred generic non-BOOL editing; reuses
   ``AdminStates.awaiting_setting_value`` (grep-verified unused elsewhere).
+  Save re-renders the STICKERS group screen, not root (ADR-0010 Decision 5).
 - ``adm_pnl_tolcancel:*`` — escape hatch for that FSM flow: clears the
-  state and re-renders the panel (2026-08-07 review — commands also pass
-  through the input handler via ``~F.text.startswith("/")``).
+  state and re-renders the STICKERS group screen (2026-08-07 review —
+  commands also pass through the input handler via
+  ``~F.text.startswith("/")``; ADR-0010 Decision 5 for the re-render target).
+- ``/panel <query>``  — D-1 shortcut: opens a chat's panel directly by
+  ``t.me/...``/``t.me/c/...`` link or a title substring, skipping the
+  picker; several title matches render ``chat_panel_candidates_keyboard``
+  instead of guessing. A dedicated ``Command`` rather than a bare-text
+  handler, deliberately: this DM already has FSM text inputs (tolerance
+  above, sticker edit/score in admin_sticker.py) and a reply-to-sticker
+  handler, and the source PRD (item 5) explicitly calls out "handler on
+  arbitrary text" as a routing hazard. ``Command("panel")`` only ever
+  matches messages starting with exactly ``/panel``, so it cannot steal
+  input from any of them.
 
-``render_chat_panel`` is a pure ``(text, keyboard)`` function, parameterized
-by ``chat_id`` alone -- no ``CallbackQuery``/permission check inside, so a
-future in-chat entry point (PRD Цель 2) can call it verbatim with a
+``render_chat_panel``/``render_chat_panel_group`` are pure ``(text,
+keyboard)`` functions, parameterized by ``chat_id`` (and, for the latter,
+``group``) alone -- no ``CallbackQuery``/permission check inside, so a
+future in-chat entry point (PRD Цель 2) can call them verbatim with a
 different guard at its own call site. The permission check
 (``check_admin_direct`` + private-chat) happens once per callback handler,
-before ``render_chat_panel`` is invoked -- same split KB/Reactions already
+before either render function is invoked -- same split KB/Reactions already
 use for their own ``_render_*`` helpers.
 
-See docs/decisions/ADR-0006-chat-settings-panel-architecture.md and
-docs/decisions/ADR-0008-sticker-explicitness-tolerance.md (``adm_pnl_tol:``).
+See docs/decisions/ADR-0006-chat-settings-panel-architecture.md,
+docs/decisions/ADR-0008-sticker-explicitness-tolerance.md (``adm_pnl_tol:``)
+and docs/decisions/ADR-0010-chat-panel-grouped-navigation.md (grouped
+navigation, B-2).
 """
 
 from __future__ import annotations
@@ -33,23 +55,28 @@ from html import escape
 from typing import Any
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_chat_panel import (
-    chat_panel_keyboard,
+    chat_panel_candidates_keyboard,
+    chat_panel_group_keyboard,
     chat_panel_picker_keyboard,
+    chat_panel_root_keyboard,
     tolerance_cancel_keyboard,
 )
-from src.bot.settings_fields import FieldType, field_by_code
+from src.bot.settings_fields import FieldGroup, FieldType, field_by_code, group_label
 from src.bot.states.admin import AdminStates
 from src.bot.utils import check_admin_direct, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
+from src.utils.telegram import ChatReference, parse_chat_reference
 
 logger = structlog.get_logger(__name__)
 
@@ -85,11 +112,41 @@ _TOLERANCE_SAVED = {
     "en": "Tolerance level set to {value}",
 }
 
+# D-1 shortcut (/panel <query>)
+_SHORTCUT_USAGE = {
+    "ru": (
+        "Укажи ссылку на чат (t.me/…, t.me/c/…) или часть его названия:\n"
+        "<code>/panel название или ссылка</code>"
+    ),
+    "en": (
+        "Give a chat link (t.me/…, t.me/c/…) or part of its title:\n"
+        "<code>/panel name or link</code>"
+    ),
+}
+_SHORTCUT_NOT_FOUND = {
+    "ru": "Не нашёл такого чата в whitelist.",
+    "en": "No matching chat found in the whitelist.",
+}
+_SHORTCUT_CANDIDATES = {
+    "ru": "Нашлось несколько подходящих чатов, выбери нужный:",
+    "en": "Found several matching chats, pick one:",
+}
+
 # Decision 2: these three fields render as a link to the existing KB/
 # Reactions sub-panels; the generic toggle handler must refuse them even
 # though the A-1 registry marks them as ordinary FieldType.BOOL entries
 # (the registry is generic across consumers, it doesn't decide this).
 _LINK_ONLY_KEYS = frozenset({"kb_enabled", "reactions_enabled", "reactions_history_enabled"})
+
+# The four groups that own an ``adm_pnl_grp:`` screen (ADR-0010 Decisions 3/4).
+# KB and REACTIONS are groups in the registry but render as link rows, so no
+# button ever emits them here — a hand-crafted callback would otherwise get a
+# group screen showing kb_enabled as an ordinary toggle. The write path already
+# refuses those keys (_LINK_ONLY_KEYS below in handle_chat_panel_toggle); this
+# closes the rendering half so the two agree.
+_FIELD_OWNING_GROUPS = frozenset(
+    {FieldGroup.BEHAVIOR, FieldGroup.MODULES, FieldGroup.STICKERS, FieldGroup.RULES}
+)
 
 
 def _get_lang(raw: str | None) -> str:
@@ -129,11 +186,16 @@ async def render_chat_panel(
     lang: str,
     chat_id: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Render the panel's ``(text, keyboard)`` for a chat (ADR-0006 Decision 1).
+    """Render the root section-list screen (ADR-0010 Decisions 1, 3, 6).
+
+    Name/signature kept identical to the pre-B-2, flat-list version (Decision
+    6) so every existing call site -- ``handle_chat_panel_menu``,
+    ``_render_and_show_panel``, the tolerance-input handler -- needs no
+    change, and the ``adm_pnl_menu:`` callback keeps resolving here.
 
     ``row`` (the raw ``chat_settings`` columns) is threaded into
-    ``chat_panel_keyboard`` alongside the effective ``config`` so it can show
-    the "inherited from default" marker (B-2) -- the effective value alone
+    ``chat_panel_root_keyboard`` so it can show the "inherited from default"
+    marker (B-2) on the KB/Reactions link rows -- the effective value alone
     can't distinguish an explicit override from an inherited default.
     """
     row = await chat_settings_repo.get(chat_id)
@@ -148,13 +210,45 @@ async def render_chat_panel(
     label = escape(str(title)) if title else str(chat_id)
     text = f"{_PANEL_TITLE[lang]}\n\n{label} <code>{chat_id}</code>"
 
-    keyboard = chat_panel_keyboard(
+    keyboard = chat_panel_root_keyboard(
         lang,
         chat_id=chat_id,
-        config=config,
         row=row,
+        config=config,
         kb_status=kb_status,
         reactions_status=reactions_status,
+    )
+    return text, keyboard
+
+
+async def render_chat_panel_group(
+    chat_settings_repo: ChatSettingsRepository,
+    bot_config_repo: BotConfigRepository,  # noqa: ARG001 -- signature mirrors render_chat_panel's for call-site symmetry (ADR-0010 Decision 6); unused here since none of the 4 field-owning groups need the KB/Reactions fresh-read helper.
+    chat_config_service: ChatConfigService,
+    lang: str,
+    chat_id: int,
+    group: FieldGroup,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Render one field-owning group's screen (ADR-0010 Decisions 1, 4).
+
+    Breadcrumb header (the literal "«где я»" the item title asks for) plus
+    that group's field rows, lifted from the pre-B-2 flat keyboard. Only
+    called for the 4 field-owning groups (behavior/modules/stickers/rules);
+    KB/Reactions stay link-out rows on the root screen (ADR-0010 Decision 3).
+    """
+    row = await chat_settings_repo.get(chat_id)
+    config = await chat_config_service.get_config(chat_id)
+
+    title = row.get("chat_title") if row else None
+    label = escape(str(title)) if title else str(chat_id)
+    text = f"{_PANEL_TITLE[lang]} › {group_label(group, lang)}\n\n{label} <code>{chat_id}</code>"
+
+    keyboard = chat_panel_group_keyboard(
+        lang,
+        chat_id=chat_id,
+        group=group,
+        config=config,
+        row=row,
     )
     return text, keyboard
 
@@ -162,11 +256,15 @@ async def render_chat_panel(
 async def _render_picker(
     callback: CallbackQuery, admin_repo: AdminRepository, lang: str, page: int
 ) -> None:
-    chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
+    # C-1: most-active-first (msgs in the last rolling 24h), with a per-chat
+    # counter in the caption -- otherwise the order looks arbitrary. Own
+    # method (not the shared get_enabled_chats_page): KB/Reactions/whitelist
+    # pickers stay title-sorted, unaffected.
+    chats, total = await admin_repo.get_enabled_chats_page_by_activity(page, _PER_PAGE)
     total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
     if page >= total_pages:
         page = max(0, total_pages - 1)
-        chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
+        chats, total = await admin_repo.get_enabled_chats_page_by_activity(page, _PER_PAGE)
 
     text = _PICKER_TITLE[lang] if total else f"{_PANEL_TITLE[lang]}\n\n{_NO_CHATS[lang]}"
     keyboard = chat_panel_picker_keyboard(
@@ -187,6 +285,23 @@ async def _render_and_show_panel(
 ) -> None:
     text, keyboard = await render_chat_panel(
         chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    )
+    if isinstance(callback.message, Message):
+        await safe_edit_text(callback.message, text, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def _render_and_show_group(
+    callback: CallbackQuery,
+    chat_settings_repo: ChatSettingsRepository,
+    bot_config_repo: BotConfigRepository,
+    chat_config_service: ChatConfigService,
+    lang: str,
+    chat_id: int,
+    group: FieldGroup,
+) -> None:
+    """Re-render the group screen a mutation was made from (ADR-0010 Decision 5)."""
+    text, keyboard = await render_chat_panel_group(
+        chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id, group
     )
     if isinstance(callback.message, Message):
         await safe_edit_text(callback.message, text, reply_markup=keyboard, parse_mode="HTML")
@@ -253,6 +368,41 @@ async def handle_chat_panel_menu(
     )
 
 
+@router.callback_query(F.data.startswith("adm_pnl_grp:"))
+async def handle_chat_panel_group(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Show one field-owning group's settings screen (ADR-0010 Decisions 1, 2, 4)."""
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        chat_id = int(parts[2])
+        group = FieldGroup(parts[3])
+    except (ValueError, IndexError):
+        await callback.answer("Invalid data", show_alert=True)
+        return
+    if group not in _FIELD_OWNING_GROUPS:
+        await callback.answer(_INVALID_FIELD[lang], show_alert=True)
+        return
+
+    await callback.answer()
+    await _render_and_show_group(
+        callback, chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id, group
+    )
+
+
 @router.callback_query(F.data.startswith("adm_pnl_tgl:"))
 async def handle_chat_panel_toggle(
     callback: CallbackQuery,
@@ -309,8 +459,16 @@ async def handle_chat_panel_toggle(
     chat_config_service.invalidate(chat_id)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])
-    await _render_and_show_panel(
-        callback, chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    # ADR-0010 Decision 5: re-render the field's own group, not root -- the
+    # group is derived from the field spec, never a new parameter.
+    await _render_and_show_group(
+        callback,
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        lang,
+        chat_id,
+        field.group,
     )
 
 
@@ -414,8 +572,10 @@ async def handle_chat_panel_tolerance_input(
     chat_config_service.invalidate(chat_id)
 
     await message.reply(_TOLERANCE_SAVED[lang].format(value=f"{value:g}"))
-    text, keyboard = await render_chat_panel(
-        chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    # ADR-0010 Decision 5: re-render the STICKERS group screen the prompt
+    # came from, not root -- tolerance_level always lives on that group.
+    text, keyboard = await render_chat_panel_group(
+        chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id, FieldGroup.STICKERS
     )
     await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
 
@@ -454,6 +614,112 @@ async def handle_chat_panel_tolerance_cancel(
 
     await state.clear()
     await callback.answer(_TOLERANCE_CANCELLED[lang])
-    await _render_and_show_panel(
-        callback, chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+    # ADR-0010 Decision 5: same re-render target as a successful save.
+    await _render_and_show_group(
+        callback,
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        lang,
+        chat_id,
+        FieldGroup.STICKERS,
+    )
+
+
+# ── D-1: shortcut to a chat's panel by link/title ───────────────────────────
+
+
+async def _resolve_reference_chat_id(
+    ref: ChatReference,
+    bot: Bot,
+    chat_settings_repo: ChatSettingsRepository,
+) -> int | None:
+    """Resolve a parsed link/id reference to a whitelisted chat_id, or None.
+
+    ``ref.username`` needs one live ``bot.get_chat()`` call to become a
+    chat_id; ``ref.chat_id`` already is one. Either way, resolving *which*
+    chat a link points to is not the same as being allowed to see its
+    panel -- the whitelist check below is what the item's "доступ только
+    ...whitelist" requirement is actually about, so it runs unconditionally,
+    even for a chat_id parsed with no network call at all.
+    """
+    chat_id = ref.chat_id
+    if chat_id is None and ref.username is not None:
+        try:
+            chat = await bot.get_chat(f"@{ref.username}")
+        except Exception:
+            logger.debug("chat_panel_shortcut_username_lookup_failed", username=ref.username)
+            return None
+        chat_id = chat.id
+
+    if chat_id is None:
+        return None
+
+    row = await chat_settings_repo.get(chat_id)
+    if row is None or not row.get("enabled"):
+        return None
+    return chat_id
+
+
+# F.chat.type in the decorator, not a body check: a matched handler consumes
+# the update, so an admin typing /panel in a group would get silence and the
+# message would never reach the text pipeline (CLAUDE.md, aiogram gotchas).
+@router.message(Command("panel"), IsAdmin(), F.chat.type == "private")
+async def handle_chat_panel_shortcut(
+    message: Message,
+    bot: Bot,
+    admin_repo: FromDishka[AdminRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Open a chat's panel directly by link/title, skipping the picker (D-1).
+
+    ``IsAdmin`` gates the command itself; every match (link/username
+    resolution and the title search) is additionally filtered through
+    ``chat_settings.enabled = true``, so the shortcut can only ever reach a
+    whitelisted chat -- never a chat the admin merely knows a link to.
+    Ambiguous title matches render ``chat_panel_candidates_keyboard`` rather
+    than guessing (the item's own requirement). Inline mode (``@bot query``)
+    is explicitly out of scope -- see the source PRD's "Не входит в этот
+    план".
+    """
+    lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
+    parts = (message.text or "").split(maxsplit=1)
+    query = parts[1].strip() if len(parts) > 1 else ""
+    if not query:
+        await message.reply(_SHORTCUT_USAGE[lang], parse_mode="HTML")
+        return
+
+    ref = parse_chat_reference(query)
+    if ref is not None:
+        chat_id = await _resolve_reference_chat_id(ref, bot, chat_settings_repo)
+        if chat_id is None:
+            await message.reply(_SHORTCUT_NOT_FOUND[lang])
+            return
+        text, keyboard = await render_chat_panel(
+            chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+        )
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        return
+
+    # Doesn't look like a link/id -- title substring search instead.
+    candidates = await admin_repo.find_enabled_chats_by_title(query, limit=_PER_PAGE)
+    if not candidates:
+        await message.reply(_SHORTCUT_NOT_FOUND[lang])
+        return
+    if len(candidates) == 1:
+        text, keyboard = await render_chat_panel(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            lang,
+            candidates[0]["chat_id"],
+        )
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        return
+
+    await message.answer(
+        _SHORTCUT_CANDIDATES[lang],
+        reply_markup=chat_panel_candidates_keyboard(candidates, lang=lang),
     )

@@ -31,6 +31,14 @@ class StickerLearningResult:
     # (ADR-0008). None when unscored (analysis failed, or the model's
     # response didn't carry a valid value — reject-not-clamp, Decision 4).
     explicitness_score: float | None = None
+    # Whether explicitness_score was hand-set by an admin rather than
+    # produced by this analysis (ADR-0009 Decision 6). Always False on a
+    # fresh Vision analysis; copied from the canonical row on a
+    # duplicate-copy result, since manual status travels with the score it
+    # describes. notify_admins() renders directly from this dataclass (not a
+    # fresh DB read), so a duplicate's first notification can legitimately
+    # show the "(вручную)" badge.
+    explicitness_is_manual: bool = False
 
 
 @dataclass

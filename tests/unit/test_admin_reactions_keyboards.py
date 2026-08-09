@@ -6,6 +6,7 @@ from src.bot.keyboards.admin_reactions import (
     reactions_chat_picker_keyboard,
     reactions_menu_keyboard,
 )
+from src.bot.nav import PANEL_ORIGIN
 
 CHAT_ID = -1001234567890
 
@@ -73,8 +74,11 @@ class TestReactionsMenuKeyboard:
             "ru", chat_id=CHAT_ID, reactions_enabled=True, reactions_history_enabled=True
         )
         callbacks = _get_callbacks(kb)
-        assert f"adm_react_toggle:ru:{CHAT_ID}:reactions_enabled" in callbacks
-        assert f"adm_react_toggle:ru:{CHAT_ID}:reactions_history_enabled" in callbacks
+        # Short registry codes, not column names: the spelled-out payload was
+        # 60 of Telegram's 64 callback bytes, leaving no room for the origin.
+        assert f"adm_react_toggle:ru:{CHAT_ID}:rx" in callbacks
+        assert f"adm_react_toggle:ru:{CHAT_ID}:rh" in callbacks
+        assert all(len(cb.encode()) <= 64 for cb in callbacks)
 
     def test_back_button_returns_to_picker(self) -> None:
         kb = reactions_menu_keyboard(
@@ -94,3 +98,49 @@ class TestReactionsMenuKeyboard:
         assert not any(
             c.startswith("adm_react:") for c in callbacks if "toggle" in c or "menu" in c
         )
+
+
+class TestReactionsBackOrigin:
+    """Same entry-point bug as the KB submenu (reported 2026-08-09)."""
+
+    def _back_of(self, keyboard) -> str:
+        return keyboard.inline_keyboard[-1][0].callback_data
+
+    def test_from_panel_back_returns_to_that_chats_panel(self) -> None:
+        kb = reactions_menu_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            reactions_enabled=True,
+            reactions_history_enabled=True,
+            origin=PANEL_ORIGIN,
+        )
+        assert self._back_of(kb) == f"adm_pnl_menu:ru:{CHAT_ID}"
+
+    def test_from_own_picker_back_is_unchanged(self) -> None:
+        kb = reactions_menu_keyboard(
+            "ru", chat_id=CHAT_ID, reactions_enabled=True, reactions_history_enabled=True
+        )
+        assert self._back_of(kb) == "adm_react:ru:0"
+
+    def test_origin_survives_both_toggles(self) -> None:
+        kb = reactions_menu_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            reactions_enabled=True,
+            reactions_history_enabled=True,
+            origin=PANEL_ORIGIN,
+        )
+        toggles = [cb for cb in _get_callbacks(kb) if cb.startswith("adm_react_toggle:")]
+        assert len(toggles) == 2
+        assert all(cb.endswith(f":{PANEL_ORIGIN}") for cb in toggles), toggles
+
+    def test_payload_fits_64_bytes_with_a_long_chat_id(self) -> None:
+        kb = reactions_menu_keyboard(
+            "ru",
+            chat_id=-1009999000001234,
+            reactions_enabled=True,
+            reactions_history_enabled=True,
+            origin=PANEL_ORIGIN,
+        )
+        for cb in _get_callbacks(kb):
+            assert len(cb.encode()) <= 64, f"{cb} is {len(cb.encode())} bytes"

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:45:38Z",
+  "role": "specialist",
+  "item_id": "B-1",
+  "verdict": "PASS",
+  "cost_usd": 1.44,
+  "notes": "ADR-0010 (docs/decisions/ADR-0010-chat-panel-grouped-navigation.md): grouped chat-panel navigation schema, addendum to ADR-0006. Two-tier model — root screen (7 rows: 4 group buttons BEHAVIOR/MODULES/STICKERS/RULES + unchanged KB/Reactions link rows, Decision 3 keeps ADR-0006 Decision 2 verbatim + back) and one group screen per field-owning group (Decision 1). New callback prefix adm_pnl_grp:{lang}:{chat_id}:{group} (Decision 2, 38-byte budget checked). Group screen = breadcrumb '{panel_title} › {group_label}' (the literal 'где я' ask, Decision 4) + moved (not rewritten) per-field rows + single back row to adm_pnl_menu:. Decision 5: mutation re-render target (toggle, tolerance save/cancel) is derived from the field's own FieldGroup, zero new callback_data/FSM params -- gives 'predictable return' (B-2's title) for free. Decision 6: render_chat_panel keeps its existing name/signature for root (so D-1's already-planned adm_pnl_menu: deep link is unaffected) + new render_chat_panel_group. Decision 7 re-checks Telegram limits (bytes/rows/safe_edit_text double-tap handling, already-existing helper). Decision 8 flags a pre-existing, explicitly out-of-scope non-goal: KB/Reactions' own back button returns to their module's picker, not to this panel -- documented for Q-2's checklist so it isn't filed as a new bug. Implementation notes sections for B-2 (structure) and B-3 (root-screen status copy, left undetermined by design per the plan's own structure/copy split, mirroring ADR-0009 Decision 7's precedent for A-4 badge copy) and Q-2 (manual checklist coverage). Verified against current code: chat_panel_keyboard()/render_chat_panel (admin_chat_panel.py handlers+keyboards) and FieldGroup/fields_by_group() (settings_fields.py) read in full; field/group counts (25 fields, 6 groups, largest group MODULES=8) confirmed by running fields_by_group() directly, not assumed from docstrings. No application source touched (architect scope restriction honored) -- committed as 8c471c4, docs/ only.",
+  "result": {
+    "kind": "commit",
+    "ref": "8c471c4",
+    "verification": "docs/decisions/ADR-0010-chat-panel-grouped-navigation.md (354 lines) committed at 8c471c4; git status confirms only that file + the pre-existing envelope modification staged, no other in-flight worktree WIP swept in; git show --stat 8c471c4 confirms single-file diff"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

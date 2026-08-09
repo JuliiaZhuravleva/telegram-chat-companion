@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:51:02Z",
+  "role": "specialist",
+  "item_id": "E-1",
+  "verdict": "PASS",
+  "cost_usd": 3.68,
+  "notes": "Added /summary <n> (default 100, min 20, max 1000): garbage/out-of-range -> clear validation reply; n<20 -> polite 'read it yourself' refusal (owner's exact framing). count wired through to SummaryService.generate()/get_for_summary limit; forum-topic filter (message_thread_id) untouched and covered by a passthrough test. Added a conservative, clearly-commented char-budget safety net in SummaryService (no per-provider context-window table exists in this codebase) that trims to the most recent messages and logs a structlog warning on trim; header now reports the actually-summarized count instead of the raw request. Cost logging itself needed no change — log_usage() already logs real provider-returned token counts regardless of n (ADR: generate_text() does not auto-log). Pre-existing unrelated failure noted, NOT caused by this change and untouched by my diff: tests/unit/test_admin_sticker_dm_router_order.py::test_admin_private_known_sticker_hits_admin_check_not_media_learn (TypeError: MagicMock awaited in admin_sticker.py) — worth a follow-up ticket. E-2 (/summary500) depends on this and can now call SummaryService.generate(count=500) directly.",
+  "result": {
+    "kind": "commit",
+    "ref": "699069b969f17aa774fdab785bd9b2bf74515619",
+    "verification": "pytest tests/unit/test_summary.py tests/unit/test_commands_handler.py -q: 48 passed. Full tests/unit: 1848 passed, 5 skipped, 1 pre-existing unrelated failure (admin_sticker, untouched by this diff). ruff check src/ clean. mypy src/: Success, no issues in 131 source files."
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

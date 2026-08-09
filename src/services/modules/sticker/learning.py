@@ -26,6 +26,7 @@ from src.services.modules.sticker.models import (
     StickerSearchResult,
 )
 from src.services.modules.sticker.renderer import RenderedSticker, render_tgs, render_webm
+from src.services.modules.sticker.tolerance import format_explicitness_line
 
 logger = structlog.get_logger(__name__)
 
@@ -355,6 +356,8 @@ class StickerLearningService:
             failure_reason=_failure_reason,
             collage_png=vision_image if sticker_type != "static" else None,
             explicitness_score=explicitness_score,
+            # ADR-0009 Decision 6: a fresh Vision analysis is never manual.
+            explicitness_is_manual=False,
         )
 
     # ── Duplicate copy (ADR-0007) ───────────────────────────────────────
@@ -443,6 +446,12 @@ class StickerLearningService:
         # canonical row predates this feature (accepted, self-healing edge
         # case — see the ADR).
         explicitness_score = copied["explicitness_score"]
+        # ADR-0009 Decision 6: the manual-status flag travels WITH the score
+        # it describes — copying the score alone would silently reintroduce
+        # this ADR's own bug one hop away (a duplicate that inherited a
+        # hand-vetted score would get clobbered by its own first
+        # re-analysis, since a bare INSERT defaults the flag back to false).
+        explicitness_is_manual = bool(copied["explicitness_is_manual"])
 
         await self._repo.save_sticker(
             file_unique_id=file_unique_id,
@@ -462,6 +471,7 @@ class StickerLearningService:
             image_hash=image_hash,
             duplicate_of_file_unique_id=duplicate_of,
             explicitness_score=explicitness_score,
+            explicitness_is_manual=explicitness_is_manual,
         )
 
         embedding = copied["description_embedding"]
@@ -487,6 +497,7 @@ class StickerLearningService:
             collage_png=collage_png,
             duplicate_of=duplicate_of,
             explicitness_score=explicitness_score,
+            explicitness_is_manual=explicitness_is_manual,
         )
 
     # ── Admin re-analyze ─────────────────────────────────────────────
@@ -606,6 +617,7 @@ class StickerLearningService:
         *,
         notification_mode: str = "on",
         collage_png: bytes | None = None,
+        tolerance_level: float = 0.5,
     ) -> None:
         """Send new sticker notification to all admins.
 
@@ -613,6 +625,14 @@ class StickerLearningService:
             notification_mode: "off" (skip), "on" (sticker + text),
                                "detailed" (sticker + collage + text).
             collage_png: PNG bytes of the analysis collage (for detailed mode).
+            tolerance_level: The originating chat's resolved
+                ``ChatConfig.tolerance_level`` («уровень приличия», ADR-0008
+                / A-2 terminology) — the caller (``media.py``) already holds
+                the ``ChatConfig`` for the chat this sticker was just learned
+                from, so this is the one DM sticker card (A-1) that can
+                compare against a *real* chat's ceiling instead of the
+                global default. Defaults to the ``ChatConfig`` dataclass
+                fallback (``0.5``) only for callers that don't have one.
         """
         if notification_mode == "off":
             return
@@ -632,6 +652,20 @@ class StickerLearningService:
             )
         if sticker.set_name:
             description_parts.append(f"<b>Пак:</b> {html_lib.escape(sticker.set_name)}")
+        # A-1: same explicitness line as every other DM sticker card, only
+        # once there's a description at all (see admin_sticker.py's
+        # _build_detail_text for why — an un-analyzed sticker never reaches
+        # here anyway, this function already returned above on
+        # analysis_failed, so this mirrors that same not-analyzed-yet gate).
+        if result.visual_description:
+            description_parts.append(
+                format_explicitness_line(
+                    result.explicitness_score,
+                    tolerance_level,
+                    "ru",
+                    is_manual=result.explicitness_is_manual,
+                )
+            )
 
         # In detailed mode, enrich with RAG data from DB
         if notification_mode == "detailed":

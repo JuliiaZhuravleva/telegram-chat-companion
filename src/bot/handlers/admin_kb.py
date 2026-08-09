@@ -35,6 +35,7 @@ from src.bot.keyboards.admin_kb import (
     kb_organizer_picker_keyboard,
     kb_organizers_keyboard,
 )
+from src.bot.nav import parse_origin
 from src.bot.states.admin import AdminStates
 from src.bot.utils import check_admin_direct, resolve_display_name, safe_edit_text
 from src.database.repositories.admin import AdminRepository
@@ -191,6 +192,7 @@ async def _render_kb_menu(
     bot_config_repo: BotConfigRepository,
     lang: str,
     chat_id: int,
+    origin: str = "",
 ) -> None:
     kb_enabled = await _effective_kb_enabled(chat_settings_repo, bot_config_repo, chat_id)
 
@@ -198,7 +200,9 @@ async def _render_kb_menu(
         await safe_edit_text(
             callback.message,
             _KB_MENU_TITLE[lang],
-            reply_markup=kb_menu_keyboard(lang, chat_id=chat_id, kb_enabled=kb_enabled),
+            reply_markup=kb_menu_keyboard(
+                lang, chat_id=chat_id, kb_enabled=kb_enabled, origin=origin
+            ),
         )
 
 
@@ -208,6 +212,7 @@ async def _render_organizers(
     lang: str,
     chat_id: int,
     page: int,
+    origin: str = "",
 ) -> None:
     row = await chat_settings_repo.get(chat_id)
     organizer_ids = _parse_organizer_ids(row.get("kb_organizer_ids") if row else None)
@@ -224,7 +229,13 @@ async def _render_organizers(
 
     text = _ORGS_TITLE[lang] if total else f"{_ORGS_TITLE[lang]}\n\n{_ORGS_EMPTY[lang]}"
     keyboard = kb_organizers_keyboard(
-        page_items, lang=lang, chat_id=chat_id, page=page, total=total, per_page=_PER_PAGE
+        page_items,
+        lang=lang,
+        chat_id=chat_id,
+        page=page,
+        total=total,
+        per_page=_PER_PAGE,
+        origin=origin,
     )
 
     if isinstance(callback.message, Message):
@@ -237,12 +248,19 @@ async def _render_organizer_picker(
     lang: str,
     chat_id: int,
     page: int,
+    origin: str = "",
 ) -> None:
     """Render the B-2 participant picker page (candidates ranked by activity)."""
     candidates, total = await message_repo.get_top_active_users(chat_id, page, _PICKER_PER_PAGE)
     text = _PICKER_TITLE[lang] if total else _PICKER_EMPTY[lang]
     keyboard = kb_organizer_picker_keyboard(
-        candidates, lang=lang, chat_id=chat_id, page=page, total=total, per_page=_PICKER_PER_PAGE
+        candidates,
+        lang=lang,
+        chat_id=chat_id,
+        page=page,
+        total=total,
+        per_page=_PICKER_PER_PAGE,
+        origin=origin,
     )
 
     if isinstance(callback.message, Message):
@@ -304,7 +322,9 @@ async def handle_kb_menu(
         return
 
     await callback.answer()
-    await _render_kb_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id)
+    await _render_kb_menu(
+        callback, chat_settings_repo, bot_config_repo, lang, chat_id, parse_origin(parts, 3)
+    )
 
 
 @router.callback_query(F.data.startswith("adm_kb_toggle:"))
@@ -357,7 +377,9 @@ async def handle_kb_toggle(
     chat_config_service.invalidate(chat_id)
 
     await callback.answer(_TOGGLE_ON[lang] if new_value else _TOGGLE_OFF[lang])
-    await _render_kb_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id)
+    await _render_kb_menu(
+        callback, chat_settings_repo, bot_config_repo, lang, chat_id, parse_origin(parts, 3)
+    )
 
 
 # ── Organizers ────────────────────────────────────────────────────────────
@@ -389,7 +411,9 @@ async def handle_kb_organizers(
         return
 
     await callback.answer()
-    await _render_organizers(callback, chat_settings_repo, lang, chat_id, page)
+    await _render_organizers(
+        callback, chat_settings_repo, lang, chat_id, page, parse_origin(parts, 4)
+    )
 
 
 @router.callback_query(F.data.startswith("adm_kb_org_rm:"))
@@ -424,7 +448,7 @@ async def handle_kb_organizer_remove(
         await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
 
     await callback.answer()
-    await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0)
+    await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0, parse_origin(parts, 4))
 
 
 @router.callback_query(F.data.startswith("adm_kb_org_add:"))
@@ -451,6 +475,10 @@ async def handle_kb_organizer_add_prompt(
         await callback.answer("Invalid data", show_alert=True)
         return
 
+    # Only the "show participants" button needs the origin — the other way to
+    # finish this add (replying with a forwarded message) answers with plain
+    # text and no keyboard, so there is no Back target to preserve in state.
+    origin = parse_origin(parts, 3)
     await state.set_state(AdminStates.awaiting_kb_organizer)
     await state.update_data(kb_chat_id=chat_id, kb_lang=lang)
 
@@ -458,7 +486,7 @@ async def handle_kb_organizer_add_prompt(
     if isinstance(callback.message, Message):
         await callback.message.answer(
             _ADD_PROMPT[lang],
-            reply_markup=kb_org_add_prompt_keyboard(lang, chat_id=chat_id),
+            reply_markup=kb_org_add_prompt_keyboard(lang, chat_id=chat_id, origin=origin),
         )
 
 
@@ -489,7 +517,9 @@ async def handle_kb_organizer_list(
         return
 
     await callback.answer()
-    await _render_organizer_picker(callback, message_repo, lang, chat_id, page)
+    await _render_organizer_picker(
+        callback, message_repo, lang, chat_id, page, parse_origin(parts, 4)
+    )
 
 
 @router.callback_query(F.data.startswith("adm_kb_org_pick:"))
@@ -533,7 +563,7 @@ async def handle_kb_organizer_pick(
         await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
 
     await callback.answer()
-    await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0)
+    await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0, parse_origin(parts, 4))
 
 
 @router.message(AdminStates.awaiting_kb_organizer, F.chat.type == "private")

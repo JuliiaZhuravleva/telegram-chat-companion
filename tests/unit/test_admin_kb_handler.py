@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,6 +19,7 @@ from aiogram.types import (
 
 from src.bot.handlers.admin_kb import (
     _extract_username,
+    handle_kb_menu,
     handle_kb_organizer_add_prompt,
     handle_kb_organizer_add_reply,
     handle_kb_organizer_list,
@@ -25,6 +27,8 @@ from src.bot.handlers.admin_kb import (
     handle_kb_organizer_remove,
     handle_kb_toggle,
 )
+from src.bot.keyboards.admin_chat_panel import chat_panel_root_keyboard
+from src.models.chat_config import ChatConfig
 
 ADMIN_ID = 111
 CHAT_ID = -1001234567890
@@ -514,3 +518,51 @@ class TestHandleKbOrganizerPick:
         await handle_kb_organizer_pick(callback, chat_settings_repo, bot_config_repo, state)
 
         callback.message.edit_text.assert_awaited_once()
+
+
+class TestKbSubmenuOriginWiring:
+    """The producer/consumer stick together, not just each on its own.
+
+    The keyboard tests prove kb_menu_keyboard() honours an origin, and the
+    panel tests prove the link row emits one. Neither notices if the handler
+    reads the token from the wrong segment — which is the whole bug class
+    here, since every one of these payloads is positional.
+    """
+
+    @pytest.mark.asyncio
+    async def test_panel_link_round_trips_into_a_panel_back_button(self) -> None:
+        """Take the callback the panel actually renders, feed it to the real
+        handler, and read the Back button off what the handler drew."""
+        link = _row_for_kb_link(
+            chat_panel_root_keyboard(
+                "ru",
+                chat_id=CHAT_ID,
+                row=None,
+                config=replace(ChatConfig(chat_id=CHAT_ID)),
+                kb_status=True,
+                reactions_status=(False, True),
+            )
+        )
+        callback = _make_callback(link)
+
+        await handle_kb_menu(callback, _make_chat_settings_repo(), _make_bot_config_repo())
+
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+
+    @pytest.mark.asyncio
+    async def test_kb_pickers_own_link_still_goes_back_to_the_picker(self) -> None:
+        callback = _make_callback(f"adm_kb_menu:ru:{CHAT_ID}")
+
+        await handle_kb_menu(callback, _make_chat_settings_repo(), _make_bot_config_repo())
+
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[-1][0].callback_data == "adm_kb:ru:0"
+
+
+def _row_for_kb_link(keyboard) -> str:
+    for row in keyboard.inline_keyboard:
+        for btn in row:
+            if (btn.callback_data or "").startswith("adm_kb_menu:"):
+                return btn.callback_data
+    raise AssertionError("panel rendered no KB link row")

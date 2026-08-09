@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from html import escape as html_escape
 from typing import Any
@@ -160,9 +161,59 @@ _START_TEXT = {
 }
 
 _SUMMARY_DM_TEXT = {
-    "ru": "📋 /summary доступен только в групповых чатах.",
-    "en": "📋 /summary is only available in group chats.",
+    "ru": "📋 {command} доступен только в групповых чатах.",
+    "en": "📋 {command} is only available in group chats.",
 }
+
+# /summary <n> — E-1: optional message-count argument.
+_SUMMARY_DEFAULT_COUNT = 100
+_SUMMARY_MIN_COUNT = 20
+_SUMMARY_MAX_COUNT = 1000
+
+# /summary500 — E-2: the same summary at a fixed count, one word to type.
+# Deliberately a plain constant rather than a parsed suffix: aiogram matches
+# Command("summary500") exactly, so it never collides with Command("summary").
+_SUMMARY500_COUNT = 500
+
+_SUMMARY_TOO_FEW = {
+    "ru": (
+        "📋 Столько сообщений можно прочитать и самому. "
+        "Минимум для /summary — {min} (максимум {max})."
+    ),
+    "en": (
+        "📋 That few messages you can just read yourself. "
+        "/summary needs at least {min} (up to {max})."
+    ),
+}
+# The angle brackets are HTML entities on purpose: the bot's default parse_mode
+# is HTML, so a literal "<число …>" makes Telegram reject the whole sendMessage
+# with 'Unsupported start tag "число"' and the user gets no reply at all — the
+# validation message silently fails exactly when it is needed. Verified against
+# the live Bot API; a unit test cannot see it, because message.reply is mocked.
+_SUMMARY_INVALID_COUNT = {
+    "ru": "🤔 Не понял количество сообщений. Формат: /summary &lt;число от {min} до {max}&gt;.",
+    "en": "🤔 Couldn't parse the message count. Format: /summary &lt;number from {min} to {max}&gt;.",
+}
+
+_SUMMARY_COUNT_ARG_RE = re.compile(r"\d+")
+
+
+def _parse_summary_count(message_text: str | None) -> int | None:
+    """Parse the optional ``/summary <n>`` argument.
+
+    Returns ``None`` when no argument was given (caller applies the default).
+    Raises ``ValueError`` for anything that isn't a plain non-negative
+    integer (garbage input) — the caller turns that into a validation reply.
+    Range checks (min/max) are the caller's responsibility.
+    """
+    raw = (message_text or "").strip()
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    arg = parts[1].strip()
+    if not _SUMMARY_COUNT_ARG_RE.fullmatch(arg):
+        raise ValueError(arg)
+    return int(arg)
 
 
 def _build_feature_list(config: ChatConfig, language: str) -> str:
@@ -214,32 +265,37 @@ async def handle_help(message: Message, chat_config: ChatConfig) -> None:
     await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
 
 
-@router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))
-async def handle_summary(
+async def _reject_if_saving_disabled(message: Message, chat_config: ChatConfig, lang: str) -> bool:
+    """Answer and return True when this chat keeps no messages to summarize."""
+    if chat_config.save_messages:
+        return False
+    if lang == "ru":
+        await message.answer("Сохранение сообщений отключено для этого чата.")
+    else:
+        await message.answer("Message saving is disabled for this chat.")
+    return True
+
+
+async def _deliver_summary(
     message: Message,
-    chat_config: ChatConfig,
-    summary_service: FromDishka[SummaryService],
-    message_thread_id: int | None = None,
+    summary_service: SummaryService,
+    *,
+    count: int,
+    lang: str,
+    message_thread_id: int | None,
 ) -> None:
-    """Handle /summary command — generate chat summary.
+    """Render a summary of ``count`` messages, editing a placeholder in place.
 
-    In forum chats, summarizes only messages from the current topic.
+    Shared by /summary and /summary500 so the two cannot drift apart on
+    placeholder copy, forum-topic filtering or the too-long-to-edit fallback.
     """
-    if not chat_config.save_messages:
-        lang = chat_config.language
-        if lang == "ru":
-            await message.answer("Сохранение сообщений отключено для этого чата.")
-        else:
-            await message.answer("Message saving is disabled for this chat.")
-        return
-
-    lang = chat_config.language
     processing = "⏳ Генерирую саммари..." if lang == "ru" else "⏳ Generating summary..."
     placeholder = await message.answer(processing)
 
     # Topic-filtered summary in forum chats
     html = await summary_service.generate(
         message.chat.id,
+        count=count,
         language=lang,
         message_thread_id=message_thread_id,
     )
@@ -256,11 +312,100 @@ async def handle_summary(
         await placeholder.edit_text(fail_msg)
 
 
+@router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))
+async def handle_summary(
+    message: Message,
+    chat_config: ChatConfig,
+    summary_service: FromDishka[SummaryService],
+    message_thread_id: int | None = None,
+) -> None:
+    """Handle /summary command — generate chat summary.
+
+    Accepts an optional message-count argument: ``/summary <n>`` (default
+    ``_SUMMARY_DEFAULT_COUNT``, min ``_SUMMARY_MIN_COUNT``, max
+    ``_SUMMARY_MAX_COUNT``). In forum chats, summarizes only messages from
+    the current topic, regardless of the requested count.
+    """
+    lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
+
+    if await _reject_if_saving_disabled(message, chat_config, lang):
+        return
+
+    try:
+        requested_count = _parse_summary_count(message.text)
+    except ValueError:
+        await message.reply(
+            _SUMMARY_INVALID_COUNT[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
+        )
+        return
+
+    if requested_count is None:
+        count = _SUMMARY_DEFAULT_COUNT
+    elif requested_count < _SUMMARY_MIN_COUNT:
+        await message.reply(
+            _SUMMARY_TOO_FEW[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
+        )
+        return
+    elif requested_count > _SUMMARY_MAX_COUNT:
+        await message.reply(
+            _SUMMARY_INVALID_COUNT[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
+        )
+        return
+    else:
+        count = requested_count
+
+    await _deliver_summary(
+        message,
+        summary_service,
+        count=count,
+        lang=lang,
+        message_thread_id=message_thread_id,
+    )
+
+
+@router.message(Command("summary500"), F.chat.type.in_({"group", "supergroup"}))
+async def handle_summary500(
+    message: Message,
+    chat_config: ChatConfig,
+    summary_service: FromDishka[SummaryService],
+    message_thread_id: int | None = None,
+) -> None:
+    """Handle /summary500 — the /summary 500 shortcut as its own command (E-2).
+
+    Takes no argument: anything typed after the command is ignored, because
+    ``/summary500 300`` would be asking two different counts at once and the
+    parameterized form (``/summary 300``) already covers that.
+    """
+    lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
+
+    if await _reject_if_saving_disabled(message, chat_config, lang):
+        return
+
+    await _deliver_summary(
+        message,
+        summary_service,
+        count=_SUMMARY500_COUNT,
+        lang=lang,
+        message_thread_id=message_thread_id,
+    )
+
+
 @router.message(Command("summary"), F.chat.type == "private")
 async def handle_summary_dm(message: Message, chat_config: ChatConfig) -> None:
     """Handle /summary in a private (DM) chat — inform user it's group-only."""
     lang = chat_config.language if chat_config.language in _SUMMARY_DM_TEXT else "ru"
-    await message.answer(_SUMMARY_DM_TEXT[lang])
+    await message.answer(_SUMMARY_DM_TEXT[lang].format(command="/summary"))
+
+
+@router.message(Command("summary500"), F.chat.type == "private")
+async def handle_summary500_dm(message: Message, chat_config: ChatConfig) -> None:
+    """Handle /summary500 in a DM — same group-only notice as /summary.
+
+    Without this the update matches no handler at all and the command is a
+    silent no-op in DMs, which reads as the bot being broken.
+    """
+    lang = chat_config.language if chat_config.language in _SUMMARY_DM_TEXT else "ru"
+    await message.answer(_SUMMARY_DM_TEXT[lang].format(command="/summary500"))
 
 
 # ---------------------------------------------------------------------------

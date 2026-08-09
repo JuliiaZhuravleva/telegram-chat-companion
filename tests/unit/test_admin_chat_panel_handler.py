@@ -1,4 +1,5 @@
-"""Tests for the chat settings panel sub-router (B-1, ADR-0006)."""
+"""Tests for the chat settings panel sub-router (B-1, ADR-0006; grouped
+navigation, B-2, ADR-0010)."""
 
 from __future__ import annotations
 
@@ -7,16 +8,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.types import Message
+from magic_filter import MagicFilter
 
 from src.bot.handlers.admin_chat_panel import (
+    handle_chat_panel_group,
     handle_chat_panel_menu,
     handle_chat_panel_picker,
+    handle_chat_panel_shortcut,
     handle_chat_panel_toggle,
     handle_chat_panel_tolerance_cancel,
     handle_chat_panel_tolerance_input,
     handle_chat_panel_tolerance_prompt,
     render_chat_panel,
+    render_chat_panel_group,
 )
+from src.bot.settings_fields import FieldGroup
 from src.models.chat_config import ChatConfig
 
 ADMIN_ID = 111
@@ -71,7 +77,9 @@ def _make_chat_config_service(config: ChatConfig) -> MagicMock:
 
 def _make_admin_repo(chats: list[dict[str, object]] | None = None, total: int = 0) -> MagicMock:
     repo = MagicMock()
-    repo.get_enabled_chats_page = AsyncMock(return_value=(chats or [], total))
+    # C-1: the picker uses its own activity-sorted method, not the
+    # title-sorted one shared by KB/Reactions/whitelist.
+    repo.get_enabled_chats_page_by_activity = AsyncMock(return_value=(chats or [], total))
     return repo
 
 
@@ -144,7 +152,7 @@ class TestRenderChatPanel:
             btn
             for row_ in keyboard.inline_keyboard
             for btn in row_
-            if btn.callback_data == f"adm_kb_menu:ru:{CHAT_ID}"
+            if btn.callback_data == f"adm_kb_menu:ru:{CHAT_ID}:p"
         )
         assert "✅" in kb_btn.text  # fresh (True), not the stale cached False
 
@@ -152,15 +160,54 @@ class TestRenderChatPanel:
             btn
             for row_ in keyboard.inline_keyboard
             for btn in row_
-            if btn.callback_data == f"adm_react_menu:ru:{CHAT_ID}"
+            if btn.callback_data == f"adm_react_menu:ru:{CHAT_ID}:p"
         )
         # reactions_enabled fresh=True, reactions_history_enabled fresh=False
         assert react_btn.text.count("✅") == 1
         assert react_btn.text.count("⚫") == 1
 
     @pytest.mark.asyncio
+    async def test_root_has_no_individual_field_rows(self) -> None:
+        """B-2/ADR-0010: the root screen is the section list now -- field
+        rows (and their inherited marker) live on the group screen instead;
+        see TestRenderChatPanelGroup below."""
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        _, keyboard = await render_chat_panel(
+            chat_settings_repo, bot_config_repo, chat_config_service, "ru", CHAT_ID
+        )
+
+        callbacks = [btn.callback_data for row_ in keyboard.inline_keyboard for btn in row_]
+        assert not any(cb.startswith("adm_pnl_tgl:") for cb in callbacks)
+        assert f"adm_pnl_grp:ru:{CHAT_ID}:modules" in callbacks
+
+
+class TestRenderChatPanelGroup:
+    """ADR-0010 Decision 4: one screen per field-owning group."""
+
+    @pytest.mark.asyncio
+    async def test_breadcrumb_shows_group_label(self) -> None:
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        text, _ = await render_chat_panel_group(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            "ru",
+            CHAT_ID,
+            FieldGroup.STICKERS,
+        )
+
+        assert "›" in text
+        assert "Стикеры" in text
+
+    @pytest.mark.asyncio
     async def test_inherited_marker_threaded_from_raw_row(self) -> None:
-        """B-2: render_chat_panel must pass the raw row through to the
+        """B-2: render_chat_panel_group must pass the raw row through to the
         keyboard, not just the effective config -- a new field whose raw
         column is NULL gets the marker even though the effective value
         (from the global default) is a concrete bool.
@@ -176,8 +223,13 @@ class TestRenderChatPanel:
             _base_config(link_comments_enabled=True, relevancy_gate_enabled=False)
         )
 
-        _, keyboard = await render_chat_panel(
-            chat_settings_repo, bot_config_repo, chat_config_service, "ru", CHAT_ID
+        _, keyboard = await render_chat_panel_group(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            "ru",
+            CHAT_ID,
+            FieldGroup.MODULES,
         )
 
         lc_btn = next(
@@ -195,6 +247,23 @@ class TestRenderChatPanel:
             if btn.callback_data == f"adm_pnl_tgl:ru:{CHAT_ID}:rg"
         )
         assert "унаследовано" not in rg_btn.text
+
+    @pytest.mark.asyncio
+    async def test_back_row_returns_to_root_menu(self) -> None:
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        _, keyboard = await render_chat_panel_group(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            "ru",
+            CHAT_ID,
+            FieldGroup.RULES,
+        )
+
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
 
 
 class TestHandleChatPanelPicker:
@@ -278,6 +347,105 @@ class TestHandleChatPanelMenu:
 
         callback.message.edit_text.assert_awaited_once()
         assert callback.message.edit_text.call_args.kwargs.get("parse_mode") == "HTML"
+
+
+class TestHandleChatPanelGroup:
+    """ADR-0010 Decisions 1, 2, 4: ``adm_pnl_grp:`` opens one group's screen."""
+
+    @pytest.mark.parametrize("group", ["kb", "reactions"])
+    @pytest.mark.asyncio
+    async def test_link_only_groups_are_refused(self, group: str) -> None:
+        """No button emits these — the root screen renders KB/Reactions as link
+        rows — so reaching them here means a hand-crafted callback. Rendering
+        one would show kb_enabled as an ordinary toggle, contradicting the
+        write path, which already refuses those keys.
+        """
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:{group}")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+
+        await handle_chat_panel_group(
+            callback,
+            chat_settings_repo,
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        callback.message.edit_text.assert_not_awaited()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_a_field_owning_group_still_renders(self) -> None:
+        """Control for the check above — it must not refuse everything."""
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:modules")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+
+        await handle_chat_panel_group(
+            callback,
+            chat_settings_repo,
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        callback.message.edit_text.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_denies_non_admin(self) -> None:
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:modules", user_id=999)
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_chat_id_shows_alert(self) -> None:
+        callback = _make_callback("adm_pnl_grp:ru:notanumber:modules")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.answer.assert_awaited_once()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+        callback.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_group_shows_alert(self) -> None:
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:not_a_group")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.answer.assert_awaited_once()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+        callback.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_renders_group_screen_with_html_parse_mode(self) -> None:
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:stickers")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.message.edit_text.assert_awaited_once()
+        assert callback.message.edit_text.call_args.kwargs.get("parse_mode") == "HTML"
+        text = callback.message.edit_text.call_args.args[0]
+        assert "Стикеры" in text
 
 
 class TestHandleChatPanelToggle:
@@ -404,6 +572,26 @@ class TestHandleChatPanelToggle:
 
         callback.message.edit_text.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_re_renders_the_fields_own_group_not_root(self) -> None:
+        """ADR-0010 Decision 5: a toggle inside MODULES re-renders that group
+        screen, not the root section list -- "predictable return"."""
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag")  # rag_enabled, MODULES
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config(rag_enabled=False))
+
+        await handle_chat_panel_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        # The MODULES group screen's back row points to root, not the picker
+        # (which is where a root re-render's own back row would point).
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+        text = callback.message.edit_text.call_args.args[0]
+        assert "Модули" in text
+
 
 def _make_state(data: dict[str, object] | None = None) -> MagicMock:
     state = MagicMock()
@@ -422,6 +610,225 @@ def _make_message(text: str, user_id: int = ADMIN_ID) -> MagicMock:
     message.reply = AsyncMock()
     message.answer = AsyncMock()
     return message
+
+
+def _make_shortcut_message(
+    text: str, user_id: int = ADMIN_ID, chat_type: str = "private"
+) -> MagicMock:
+    message = MagicMock()
+    message.text = text
+    message.chat = MagicMock()
+    message.chat.type = chat_type
+    message.from_user = MagicMock()
+    message.from_user.id = user_id
+    message.reply = AsyncMock()
+    message.answer = AsyncMock()
+    return message
+
+
+def _make_shortcut_admin_repo(
+    lang: str = "ru", matches: list[dict[str, object]] | None = None
+) -> MagicMock:
+    repo = MagicMock()
+    repo.get_admin_language = AsyncMock(return_value=lang)
+    repo.find_enabled_chats_by_title = AsyncMock(return_value=matches or [])
+    return repo
+
+
+class TestHandleChatPanelShortcut:
+    """D-1: ``/panel <query>`` shortcut -- open a chat's panel by link/title,
+    skipping the picker."""
+
+    @pytest.mark.asyncio
+    async def test_no_query_shows_usage(self) -> None:
+        message = _make_shortcut_message("/panel")
+        admin_repo = _make_shortcut_admin_repo()
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+        admin_repo.find_enabled_chats_by_title.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_c_link_resolves_to_whitelisted_chat_opens_panel(self) -> None:
+        message = _make_shortcut_message("/panel https://t.me/c/1234567890")
+        admin_repo = _make_shortcut_admin_repo()
+        row = {"chat_id": -1001234567890, "chat_title": "Target", "enabled": True}
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(row),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_awaited_once()
+        assert "Target" in message.answer.call_args.args[0]
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_link_resolves_but_not_whitelisted_reports_not_found(self) -> None:
+        message = _make_shortcut_message("/panel https://t.me/c/1234567890")
+        admin_repo = _make_shortcut_admin_repo()
+        row = {"chat_id": -1001234567890, "chat_title": "Target", "enabled": False}
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(row),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_username_link_resolved_via_bot_get_chat(self) -> None:
+        message = _make_shortcut_message("/panel @mychat")
+        admin_repo = _make_shortcut_admin_repo()
+        row = {"chat_id": -555, "chat_title": "MyChat", "enabled": True}
+        bot = MagicMock()
+        resolved = MagicMock()
+        resolved.id = -555
+        bot.get_chat = AsyncMock(return_value=resolved)
+
+        await handle_chat_panel_shortcut(
+            message,
+            bot,
+            admin_repo,
+            _make_chat_settings_repo(row),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        bot.get_chat.assert_awaited_once_with("@mychat")
+        message.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_username_lookup_failure_reports_not_found(self) -> None:
+        message = _make_shortcut_message("/panel @ghost")
+        admin_repo = _make_shortcut_admin_repo()
+        bot = MagicMock()
+        bot.get_chat = AsyncMock(side_effect=Exception("chat not found"))
+
+        await handle_chat_panel_shortcut(
+            message,
+            bot,
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_title_search_single_match_opens_panel_directly(self) -> None:
+        message = _make_shortcut_message("/panel foo")
+        matches = [{"chat_id": -777, "chat_title": "Foobar", "chat_type": "group"}]
+        admin_repo = _make_shortcut_admin_repo(matches=matches)
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo({"chat_id": -777, "chat_title": "Foobar"}),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_awaited_once()
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_title_search_multiple_matches_shows_candidates(self) -> None:
+        message = _make_shortcut_message("/panel foo")
+        matches = [
+            {"chat_id": -1, "chat_title": "Foo One", "chat_type": "group"},
+            {"chat_id": -2, "chat_title": "Foo Two", "chat_type": "group"},
+        ]
+        admin_repo = _make_shortcut_admin_repo(matches=matches)
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_awaited_once()
+        keyboard = message.answer.call_args.kwargs["reply_markup"]
+        assert len(keyboard.inline_keyboard) == 2
+
+    @pytest.mark.asyncio
+    async def test_title_search_no_matches_reports_not_found(self) -> None:
+        message = _make_shortcut_message("/panel nonexistent")
+        admin_repo = _make_shortcut_admin_repo(matches=[])
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_group_chat_never_reaches_this_handler(self) -> None:
+        """The chat-type guard is a filter, not a body check.
+
+        Asserting "the function returns early" would pass just as well with
+        the old body guard, which was the actual defect: a matched handler
+        consumes the update, so /panel in a group was silently swallowed
+        before the text pipeline ever saw it. What matters is that the
+        filter rejects the message, so this checks the registered filters
+        against a group chat rather than calling the function.
+        """
+        from src.bot.handlers.admin_chat_panel import router
+
+        handler = next(
+            h for h in router.message.handlers if h.callback is handle_chat_panel_shortcut
+        )
+        group = _make_shortcut_message("/panel foo", chat_type="group")
+        private = _make_shortcut_message("/panel foo", chat_type="private")
+
+        def chat_type_filters_accept(msg) -> bool:
+            checked = 0
+            for f in handler.filters or ():
+                callback = getattr(f, "callback", f)
+                # aiogram wraps a MagicFilter as its bound .resolve method, so
+                # the filter object is reachable via __self__ — not by isinstance
+                # on the callback. Command()/IsAdmin() need runtime context and
+                # are deliberately skipped; only the chat-type magic is asserted.
+                if not isinstance(getattr(callback, "__self__", None), MagicFilter):
+                    continue
+                checked += 1
+                if not callback(msg):
+                    return False
+            assert checked == 1, f"expected exactly one MagicFilter, saw {checked}"
+            return True
+
+        assert chat_type_filters_accept(private) is True
+        assert chat_type_filters_accept(group) is False
 
 
 class TestHandleChatPanelTolerancePrompt:
@@ -468,6 +875,11 @@ class TestHandleChatPanelToleranceInput:
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "tolerance_level", 0.8)
         chat_config_service.invalidate.assert_called_once_with(CHAT_ID)
         message.answer.assert_awaited_once()
+        # ADR-0010 Decision 5: re-renders the STICKERS group screen, not root.
+        keyboard = message.answer.call_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+        text = message.answer.call_args.args[0]
+        assert "Стикеры" in text
 
     @pytest.mark.asyncio
     async def test_out_of_range_reprompts_without_writing(self) -> None:
@@ -533,6 +945,9 @@ class TestHandleChatPanelToleranceCancel:
 
         state.clear.assert_awaited_once()
         callback.answer.assert_awaited_once()
+        # ADR-0010 Decision 5: re-renders the STICKERS group screen, not root.
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     @pytest.mark.asyncio
     async def test_non_admin_cannot_cancel(self) -> None:

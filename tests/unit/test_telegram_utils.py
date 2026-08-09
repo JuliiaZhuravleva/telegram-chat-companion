@@ -12,6 +12,7 @@ from src.utils.telegram import (
     build_chat_url,
     detect_mime_type,
     download_telegram_file,
+    parse_chat_reference,
     typing_indicator,
 )
 
@@ -122,6 +123,83 @@ class TestBuildChatUrl:
     def test_unknown_chat_type_returns_none(self):
         assert build_chat_url(-100) is None
         assert build_chat_url(-100, chat_type=None) is None
+
+
+class TestParseChatReference:
+    """D-1 shortcut's link/id parser."""
+
+    def test_tme_c_link_round_trips_with_build_chat_url(self):
+        # build_chat_url(-1001234567890, "supergroup") == "https://t.me/c/1234567890"
+        ref = parse_chat_reference("https://t.me/c/1234567890")
+        assert ref is not None
+        assert ref.chat_id == -1001234567890
+        assert ref.username is None
+        # Round trip: feeding the resolved id back through build_chat_url
+        # reproduces the exact link that was parsed.
+        assert build_chat_url(ref.chat_id, chat_type="supergroup") == "https://t.me/c/1234567890"
+
+    def test_tme_c_link_channel_round_trips(self):
+        ref = parse_chat_reference("t.me/c/4200000000")
+        assert ref is not None
+        assert ref.chat_id == -1004200000000
+        assert build_chat_url(ref.chat_id, chat_type="channel") == "https://t.me/c/4200000000"
+
+    def test_tme_c_link_with_message_id_suffix(self):
+        ref = parse_chat_reference("https://t.me/c/1234567890/42")
+        assert ref == parse_chat_reference("https://t.me/c/1234567890")
+
+    def test_bare_negative_chat_id(self):
+        ref = parse_chat_reference("-1001234567890")
+        assert ref is not None
+        assert ref.chat_id == -1001234567890
+        assert ref.username is None
+
+    def test_bare_positive_number_is_not_a_chat_id(self):
+        # No legitimate whitelisted chat id is positive -- a plain positive
+        # number is far more likely to be a title (e.g. an event year).
+        assert parse_chat_reference("2024") is None
+
+    def test_at_username(self):
+        ref = parse_chat_reference("@mychat")
+        assert ref == parse_chat_reference("@mychat")
+        assert ref is not None
+        assert ref.username == "mychat"
+        assert ref.chat_id is None
+
+    def test_tme_username_link(self):
+        ref = parse_chat_reference("https://t.me/mychat")
+        assert ref is not None
+        assert ref.username == "mychat"
+        assert ref.chat_id is None
+
+    def test_tme_username_link_no_scheme(self):
+        ref = parse_chat_reference("t.me/mychat")
+        assert ref is not None
+        assert ref.username == "mychat"
+
+    def test_tme_username_link_with_message_id_suffix(self):
+        ref = parse_chat_reference("https://t.me/mychat/123")
+        assert ref is not None
+        assert ref.username == "mychat"
+
+    def test_reserved_tme_paths_are_not_usernames(self):
+        for path in ("s", "iv", "joinchat", "proxy", "addstickers", "share"):
+            assert parse_chat_reference(f"https://t.me/{path}/foo") is None, path
+
+    def test_private_invite_link_is_none(self):
+        # t.me/+<hash> is not resolvable without joining -- falls through so
+        # the caller treats it as a (harmless, zero-match) title search.
+        assert parse_chat_reference("https://t.me/+AbCdEf12345") is None
+
+    def test_plain_title_text_is_none(self):
+        assert parse_chat_reference("Мой любимый чат") is None
+
+    def test_empty_and_whitespace_only(self):
+        assert parse_chat_reference("") is None
+        assert parse_chat_reference("   ") is None
+
+    def test_strips_surrounding_whitespace(self):
+        assert parse_chat_reference("  @mychat  ") == parse_chat_reference("@mychat")
 
 
 class TestTypingIndicator:

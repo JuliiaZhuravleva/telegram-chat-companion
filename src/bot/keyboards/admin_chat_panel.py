@@ -22,7 +22,16 @@ marker (they always materialize a value, see ``settings_fields.py``'s module
 docstring) -- ``_is_inherited`` bakes that gate in so no call site can forget
 it.
 
-See docs/decisions/ADR-0006-chat-settings-panel-architecture.md.
+Per B-2 (ADR-0010, grouped navigation), the panel is two screens instead of
+one flat list: ``chat_panel_root_keyboard()`` renders the section list (4
+group buttons + the unchanged KB/Reactions link rows), and
+``chat_panel_group_keyboard()`` renders one field-owning group's fields --
+the same per-field row logic the old single ``chat_panel_keyboard()`` used
+(toggle / read-only / ``tolerance_level``'s dedicated edit flow), just scoped
+to one group instead of all four.
+
+See docs/decisions/ADR-0006-chat-settings-panel-architecture.md and
+docs/decisions/ADR-0010-chat-panel-grouped-navigation.md.
 """
 
 from __future__ import annotations
@@ -32,12 +41,24 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.nav import PANEL_ORIGIN
 from src.bot.settings_fields import FieldGroup, FieldSpec, FieldType, fields_by_group, group_label
 from src.models.chat_config import ChatConfig
 
 _BACK = {"ru": "◀️ Назад", "en": "◀️ Back"}
 _HISTORY_SHORT = {"ru": "История", "en": "History"}
 _INHERITED_MARK = {"ru": " · унаследовано", "en": " · inherited"}
+
+# B-3: the per-group status shown on the root screen's section buttons.
+# Two shapes, because the groups aren't alike: a group made of toggles says
+# how many are on, a group with no toggles at all (behavior) can only honestly
+# say how much is in it. Counting overrides instead was rejected — the
+# inherited marker is only truthful for non-legacy fields (see _is_inherited),
+# so an "N overridden" number would quietly lie for legacy-heavy groups.
+_GROUP_TOGGLES_ON = {"ru": "вкл {on}/{total}", "en": "on {on}/{total}"}
+_GROUP_SETTINGS_COUNT = {"ru": "{n} {word}", "en": "{n} {word}"}
+_RU_SETTINGS_FORMS = ("настройка", "настройки", "настроек")
+_EN_SETTINGS_FORMS = ("setting", "settings")
 
 # Button text is plain (Telegram doesn't apply parse_mode to captions), but
 # very long joined/free-text values still make for an unreadable row.
@@ -80,10 +101,16 @@ def chat_panel_picker_keyboard(
     for chat in chats:
         chat_id = chat.get("chat_id")
         title = str(chat.get("chat_title") or chat_id)[:35]
+        # C-1: message count is not an id (no Telegram bare-number autolink
+        # concern) -- shown so the activity-sorted order doesn't look
+        # arbitrary. Key is absent for callers that don't opt into
+        # activity sorting, so this stays a no-op suffix for them.
+        count = chat.get("message_count_24h")
+        text = f"{title} · {count}" if count is not None else title
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=title,
+                    text=text,
                     callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
                 ),
             ]
@@ -101,6 +128,29 @@ def chat_panel_picker_keyboard(
     rows.append(
         [InlineKeyboardButton(text=_BACK[lang], callback_data=f"adm_menu:{lang}")],
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chat_panel_candidates_keyboard(
+    chats: list[dict[str, object]], *, lang: str
+) -> InlineKeyboardMarkup:
+    """Disambiguation list for the D-1 shortcut's title search.
+
+    Several whitelisted chats matched the admin's query text, so list them
+    to tap instead of guessing which one was meant. No pagination (the
+    caller caps the search at a small limit) and no back row -- this
+    keyboard rides a fresh DM message the shortcut command sent, not a
+    screen with a "previous" state to return to. Row rendering (title,
+    falling back to the bare chat id when untitled) mirrors
+    ``chat_panel_picker_keyboard``'s.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat in chats:
+        chat_id = chat.get("chat_id")
+        title = str(chat.get("chat_title") or chat_id)[:35]
+        rows.append(
+            [InlineKeyboardButton(text=title, callback_data=f"adm_pnl_menu:{lang}:{chat_id}")]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -141,30 +191,62 @@ def _format_value(field: FieldSpec, value: object) -> str:
     return text
 
 
-def chat_panel_keyboard(
+def _settings_word(n: int, lang: str) -> str:
+    """Pluralize "settings" for the group-size summary (B-3)."""
+    if lang != "ru":
+        one, many = _EN_SETTINGS_FORMS
+        return one if n == 1 else many
+    one, few, many = _RU_SETTINGS_FORMS
+    if n % 100 // 10 == 1:
+        return many
+    last = n % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
+def _group_summary(fields: tuple[FieldSpec, ...], config: ChatConfig, lang: str) -> str:
+    """Short status for one section button on the root screen (B-3).
+
+    ADR-0010 Decision 3 left the formula open; this is it. Groups holding
+    toggles report how many are on, which is the thing an admin scans for.
+    Groups with no toggles report their size instead of an invented status.
+    """
+    toggles = [f for f in fields if f.type is FieldType.BOOL]
+    if toggles:
+        on = sum(1 for f in toggles if bool(getattr(config, f.key)))
+        return _GROUP_TOGGLES_ON[lang].format(on=on, total=len(toggles))
+    return _GROUP_SETTINGS_COUNT[lang].format(n=len(fields), word=_settings_word(len(fields), lang))
+
+
+def chat_panel_root_keyboard(
     lang: str,
     *,
     chat_id: int,
-    config: ChatConfig,
     row: dict[str, Any] | None,
+    config: ChatConfig,
     kb_status: bool,
     reactions_status: tuple[bool, bool],
 ) -> InlineKeyboardMarkup:
-    """Render every registry field, grouped, per ADR-0006 Decisions 2 and 3.
+    """Render the root section-list screen (ADR-0010 Decisions 1 and 3).
+
+    Four tappable group buttons (behavior/modules/stickers/rules, each
+    opening ``chat_panel_group_keyboard()``'s screen) replace the old flat
+    field list. KB/Reactions keep ADR-0006 Decision 2's link-out rows
+    unchanged -- they stay one tap away, not a 5th/6th group screen
+    (ADR-0010 Decision 3).
+
+    ``kb_status``/``reactions_status`` are fresh direct reads (see
+    ``render_chat_panel``'s ``_fresh_effective``), same as the pre-B-2
+    behavior. ``row`` is the *raw* ``chat_settings_repo.get(chat_id)`` row,
+    used only for the inherited-from-default marker on the KB/Reactions link
+    rows (``_is_inherited``) -- the 4 group buttons carry no per-field state
+    and need no marker.
 
     ``config`` is the effective ``ChatConfigService.get_config()`` value,
-    used for every field except the KB/Reactions link rows. Those two use
-    ``kb_status``/``reactions_status`` instead -- the caller resolves them
-    with a fresh direct read, bypassing the service's 60s cache. Their
-    existing toggle handlers (admin_kb.py/admin_reactions.py) now
-    self-invalidate on write (E-1), so this is defense in depth rather than
-    a required workaround.
-
-    ``row`` is the *raw* ``chat_settings_repo.get(chat_id)`` row (B-2) --
-    needed alongside ``config`` because the effective value alone can't tell
-    "explicitly set, happens to match the default" from "inherited." Used
-    only to compute the inherited-from-default marker (``_is_inherited``);
-    it never changes what value is displayed.
+    used only for the per-group status suffix (B-3, ``_group_summary``).
     """
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -175,7 +257,9 @@ def chat_panel_keyboard(
             text = f"{field.label_for(lang)}: {_status(kb_status)}{marker}"
             rows.append(
                 [
-                    InlineKeyboardButton(text=text, callback_data=f"adm_kb_menu:{lang}:{chat_id}"),
+                    InlineKeyboardButton(
+                        text=text, callback_data=f"adm_kb_menu:{lang}:{chat_id}:{PANEL_ORIGIN}"
+                    ),
                 ]
             )
             continue
@@ -200,31 +284,68 @@ def chat_panel_keyboard(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=text, callback_data=f"adm_react_menu:{lang}:{chat_id}"
+                        text=text, callback_data=f"adm_react_menu:{lang}:{chat_id}:{PANEL_ORIGIN}"
                     ),
                 ]
             )
             continue
 
-        rows.append([InlineKeyboardButton(text=group_label(group, lang), callback_data="noop")])
-        for field in fields:
-            value = getattr(config, field.key)
-            marker = _INHERITED_MARK[lang] if _is_inherited(field, row) else ""
-            if field.type is FieldType.BOOL:
-                text = f"{field.label_for(lang)}: {_status(bool(value))}{marker}"
-                callback_data = f"adm_pnl_tgl:{lang}:{chat_id}:{field.code}"
-            else:
-                text = f"{field.label_for(lang)}: {_format_value(field, value)}{marker}"
-                # ADR-0008 Decision 10: tolerance_level gets its own dedicated
-                # FSM edit flow (admin_chat_panel.py handler), independent of
-                # F-1's still-deferred generic non-BOOL editing -- every other
-                # non-BOOL field stays read-only ("noop") until F-1 lands.
-                callback_data = (
-                    f"adm_pnl_tol:{lang}:{chat_id}" if field.key == "tolerance_level" else "noop"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{group_label(group, lang)} · {_group_summary(fields, config, lang)}",
+                    callback_data=f"adm_pnl_grp:{lang}:{chat_id}:{group.value}",
                 )
-            rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
+            ]
+        )
 
     rows.append(
         [InlineKeyboardButton(text=_BACK[lang], callback_data=f"adm_pnl:{lang}:0")],
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def chat_panel_group_keyboard(
+    lang: str,
+    *,
+    chat_id: int,
+    group: FieldGroup,
+    config: ChatConfig,
+    row: dict[str, Any] | None,
+) -> InlineKeyboardMarkup:
+    """Render one field-owning group's screen (ADR-0010 Decision 4).
+
+    Lifted, not redesigned, from the pre-B-2 flat ``chat_panel_keyboard()``
+    loop body: only the scope (one group's fields instead of all four) and
+    the container changed -- toggle / read-only / ``tolerance_level``'s
+    dedicated edit-flow callback shapes and the inherited marker are
+    unchanged. Only called for the 4 field-owning groups (behavior/modules/
+    stickers/rules); KB/Reactions never reach here (ADR-0010 Decision 3).
+
+    ``config`` is the effective ``ChatConfigService.get_config()`` value.
+    ``row`` is the *raw* per-chat row, used only for ``_is_inherited``.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+
+    fields = next((group_fields for g, group_fields in fields_by_group() if g is group), ())
+    for field in fields:
+        value = getattr(config, field.key)
+        marker = _INHERITED_MARK[lang] if _is_inherited(field, row) else ""
+        if field.type is FieldType.BOOL:
+            text = f"{field.label_for(lang)}: {_status(bool(value))}{marker}"
+            callback_data = f"adm_pnl_tgl:{lang}:{chat_id}:{field.code}"
+        else:
+            text = f"{field.label_for(lang)}: {_format_value(field, value)}{marker}"
+            # ADR-0008 Decision 10: tolerance_level gets its own dedicated
+            # FSM edit flow (admin_chat_panel.py handler), independent of
+            # F-1's still-deferred generic non-BOOL editing -- every other
+            # non-BOOL field stays read-only ("noop") until F-1 lands.
+            callback_data = (
+                f"adm_pnl_tol:{lang}:{chat_id}" if field.key == "tolerance_level" else "noop"
+            )
+        rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
+
+    rows.append(
+        [InlineKeyboardButton(text=_BACK[lang], callback_data=f"adm_pnl_menu:{lang}:{chat_id}")],
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:14:14Z",
+  "role": "specialist",
+  "item_id": "A-3",
+  "verdict": "PASS",
+  "cost_usd": 2.57,
+  "notes": "Implemented ADR-0009 Decisions 3-6 exactly per its Implementation notes for A-3: migration 026 (sticker_knowledge.explicitness_is_manual BOOLEAN NOT NULL DEFAULT false, follows 024/025 op.execute() convention); save_sticker()'s ON CONFLICT SET clause changed to CASE WHEN sticker_knowledge.explicitness_is_manual THEN keep ELSE COALESCE(...) END, with explicitness_is_manual itself absent from SET (Postgres leaves unlisted columns untouched on UPDATE) so only the two new methods can flip it; added set_manual_explicitness_score()/reset_explicitness_to_auto(); added explicitness_is_manual to _VISION_DERIVED_COLUMNS + threaded copied['explicitness_is_manual'] through _save_duplicate()'s save_sticker() call and both StickerLearningResult return paths (normal analysis always False, duplicate-copy inherits). clear_analysis()/update_explicitness_score() (backfill writer) intentionally untouched per Decision 4's closing paragraph and impl note 6. Unit tests added/updated: repo-level (INSERT wiring, is_manual absent from SET clause, CASE text present, set_manual/reset methods) + learning-level (duplicate copies manual flag+score together, normal path always False). Existing test_save_sticker_explicitness_score_defaults_to_none updated for the new trailing bound param (shifted index, not a behavior change). Pre-existing unrelated failure noted, NOT caused by this change and out of A-3's scope: tests/unit/test_admin_sticker_dm_router_order.py::test_admin_private_known_sticker_hits_admin_check_not_media_learn fails on main/HEAD before my edits too (MagicMock issue in admin_sticker.py's _resolve_default_tolerance_level, an A-1 code path I never touch) — verified via git stash + rerun. Q-1 (qa) should proceed per ADR's 'Implementation notes for Q-1' (real-Postgres upsert CASE, duplicate two-hop case, reset-then-relearn, schema NOT NULL DEFAULT false assertion).",
+  "result": {
+    "kind": "commit",
+    "ref": "408b2b552546f61bd221364f570e94189c3d0a50",
+    "verification": "pytest tests/unit/test_sticker_repository.py tests/unit/test_sticker_learning.py -q: 96 passed; pytest tests/unit/ -q: 1746 passed, 1 pre-existing unrelated failure (test_admin_sticker_dm_router_order.py), 5 skipped; ruff check + mypy clean on stickers.py, learning.py, models.py, migration 026"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:37:06Z",
+  "role": "evaluator",
+  "item_id": "A-3",
+  "verdict": "PASS",
+  "evidence": "Verified commit 408b2b5 against ADR-0009 Decisions 3-6: migration 026 adds explicitness_is_manual BOOLEAN NOT NULL DEFAULT false exactly as specified; save_sticker()'s upsert CASE protects a manually-set score using sticker_knowledge.explicitness_is_manual (existing row's flag, not EXCLUDED), with the flag correctly absent from the SET clause; set_manual_explicitness_score()/reset_explicitness_to_auto() match Decision 5's NULL-both semantics; explicitness_is_manual added to _VISION_DERIVED_COLUMNS and threaded through learning.py's duplicate-copy path + StickerLearningResult per Decision 6; clear_analysis() confirmed untouched. Ran pytest tests/unit/test_sticker_repository.py test_sticker_learning.py myself: 98 passed, including SQL-text assertions for the CASE/SET-clause omission and duplicate-flag-propagation tests. ruff and mypy clean on all touched files.",
+  "regression_risk": "low",
+  "notes": "Scope correctly limited to A-3 (migration + upsert + two new repo methods + duplicate-copy threading); UI (A-4) and integration coverage (Q-1) correctly left for separate items, consistent with ADR-0009's own division of labor."
+}

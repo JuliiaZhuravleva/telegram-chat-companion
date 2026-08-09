@@ -20,25 +20,30 @@ import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka import AsyncContainer
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_sticker import (
+    _EXPLICITNESS_PRESETS,
     _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
     sticker_dm_check_keyboard,
+    sticker_explicitness_cancel_keyboard,
     sticker_reanalyze_retry_keyboard,
     sticker_set_detail_keyboard,
     sticker_sets_keyboard,
 )
-from src.bot.utils import check_admin_direct
+from src.bot.states.admin import AdminStates
+from src.bot.utils import check_admin_direct, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
+from src.services.modules.sticker.tolerance import format_explicitness_line
 from src.utils import parse_admin_ids
 from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
@@ -82,6 +87,24 @@ async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bo
 
 def _is_private(callback: CallbackQuery) -> bool:
     return isinstance(callback.message, Message) and callback.message.chat.type == "private"
+
+
+async def _resolve_default_tolerance_level(bot_config_repo: BotConfigRepository) -> float:
+    """Уровень приличия used as the comparison ceiling for DM sticker cards
+    that aren't tied to one specific chat (catalog browsing, DM sticker
+    check, re-analyze) — every card outside ``notify_admins()`` (which has
+    the real originating chat's ``ChatConfig.tolerance_level`` in scope).
+
+    Resolves the same two layers ``ChatConfigService`` would for a chat
+    that never set its own override: ``bot_config.default_tolerance_level``
+    if an admin has set one via the defaults screen, else the
+    ``ChatConfig.tolerance_level`` dataclass fallback (``0.5``, ADR-0008
+    Decision 1/8) — never a per-chat override, since no specific chat
+    applies here.
+    """
+    defaults = await bot_config_repo.get_defaults()
+    raw = defaults.get("tolerance_level")
+    return float(raw) if raw is not None else 0.5
 
 
 # Regex to extract file_unique_id from notification text (🆔 line)
@@ -333,12 +356,23 @@ async def handle_sticker_back(
 # ── Sticker detail ──────────────────────────────────────────────────────
 
 
-def _build_detail_text(sticker: dict[str, Any], file_unique_id: str, lang: str) -> str:
+def _build_detail_text(
+    sticker: dict[str, Any],
+    file_unique_id: str,
+    lang: str,
+    tolerance_level: float,
+) -> str:
     """Build the HTML detail body for a single sticker.
 
     Shared by the detail view and the post-clear re-render so both render the
     sticker identically — including the ⏳ not-analyzed badge when the visual
     description is absent.
+
+    ``tolerance_level`` (A-1): threaded in by every caller via
+    ``_resolve_default_tolerance_level()`` (or, for a card tied to a real
+    chat, that chat's own resolved ``ChatConfig.tolerance_level``) so the
+    оценка откровенности line's pass/fail verdict is computed the same way
+    everywhere.
     """
     lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
     if sticker["visual_description"]:
@@ -356,6 +390,20 @@ def _build_detail_text(sticker: dict[str, Any], file_unique_id: str, lang: str) 
     lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
     lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
     lines.append(f"<b>Video:</b> {sticker['is_video']}")
+    # Explicitness line (A-1) only once the sticker has been through vision
+    # analysis at all — an entirely un-analyzed sticker's explicitness_score
+    # is always NULL too (same vision call, ADR-0008 Decision 4), and the
+    # ⏳/⚠️ status badge above already covers that state; repeating "не
+    # оценён" here would just be noise on a card the PRD asked to keep tight.
+    if sticker["visual_description"]:
+        lines.append(
+            format_explicitness_line(
+                sticker.get("explicitness_score"),
+                tolerance_level,
+                lang,
+                is_manual=bool(sticker.get("explicitness_is_manual", False)),
+            )
+        )
     if sticker.get("admin_notes"):
         lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
     lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
@@ -391,7 +439,8 @@ async def handle_sticker_detail(
         await callback.answer("Sticker not found", show_alert=True)
         return
 
-    text = _build_detail_text(sticker, file_unique_id, lang)
+    tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+    text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
 
     if isinstance(callback.message, Message):
         # Clean up previous sticker message (if any) to prevent orphans
@@ -422,6 +471,7 @@ async def handle_sticker_detail(
             file_unique_id,
             lang=lang,
             set_name=sticker["set_name"],
+            explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
         )
         desc_msg = await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
 
@@ -511,13 +561,306 @@ async def handle_clear(
     # prompt. Matches the edit-in-place idiom used by handle_run_analysis.
     sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
     if sticker and isinstance(callback.message, Message):
-        text = _build_detail_text(sticker, file_unique_id, lang)
-        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker["set_name"])
+        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+        text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
+        keyboard = sticker_detail_keyboard(
+            file_unique_id,
+            lang=lang,
+            set_name=sticker["set_name"],
+            explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
+        )
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
 
     msg = "Анализ очищен" if lang == "ru" else "Analysis cleared"
     await callback.answer(msg, show_alert=True)
+
+
+# ── Manual explicitness override (A-4, ADR-0009) ────────────────────────
+
+_EXPLICITNESS_PROMPT = {
+    "ru": "Введите оценку откровенности стикера (0.0–1.0):",
+    "en": "Enter the sticker's explicitness score (0.0–1.0):",
+}
+_EXPLICITNESS_NO_ROW = {
+    "ru": "Стикер не найден в каталоге — оценка не изменена.",
+    "en": "Sticker not found in the catalog — score unchanged.",
+}
+_EXPLICITNESS_INVALID = {
+    "ru": "Нужно число от 0.0 до 1.0. Попробуйте ещё раз.",
+    "en": "Enter a number between 0.0 and 1.0. Try again.",
+}
+_EXPLICITNESS_SAVED = {
+    "ru": "Оценка откровенности установлена вручную: {value}",
+    "en": "Explicitness score manually set: {value}",
+}
+_EXPLICITNESS_CANCELLED = {"ru": "Отменено", "en": "Cancelled"}
+_EXPLICITNESS_RESET = {
+    "ru": "Сброшено к автоматической оценке (не оценён до следующего анализа)",
+    "en": "Reset to automatic (not scored until the next analysis)",
+}
+
+
+async def _render_and_show_detail(
+    callback: CallbackQuery,
+    sticker_repo: StickerRepository,
+    bot_config_repo: BotConfigRepository,
+    lang: str,
+    file_unique_id: str,
+) -> None:
+    """Re-render the sticker detail card in place (shared by the preset/
+    reset/cancel callbacks below) -- same edit-in-place idiom as
+    ``handle_clear``.
+    """
+    if not isinstance(callback.message, Message):
+        return
+    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
+    if not sticker:
+        return
+    tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+    text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
+    keyboard = sticker_detail_keyboard(
+        file_unique_id,
+        lang=lang,
+        set_name=sticker["set_name"],
+        explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
+    )
+    # safe_edit_text, not a blanket suppress(TelegramBadRequest): the DB write
+    # has already happened and the caller is about to announce success, so a
+    # re-render that fails for any *other* reason (message too long once a long
+    # visual_description and admin_notes are on the card, message gone) must
+    # surface rather than leave a stale card under a "saved" toast.
+    await safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("adm_stk_expset:"))
+async def handle_sticker_explicitness_preset(
+    callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+) -> None:
+    """Set a preset explicitness value with one tap (ADR-0009 Decision 7,
+    closing paragraph) -- the button already fixes a known-valid value, so
+    no FSM input is needed.
+
+    It still has to *clear* the FSM, though: the "✏️ Указать число" prompt is
+    sent as a new message, so the card above it keeps its preset buttons live.
+    An admin who opens the prompt and then taps a preset instead would leave
+    ``awaiting_sticker_score`` set, and the next plain DM text — a description
+    correction, say — would be eaten by the score-input handler (which also
+    outranks ``handle_admin_sticker_reply``'s ``StateFilter(None)``).
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    try:
+        value = _EXPLICITNESS_PRESETS[int(parts[3])]
+    except (ValueError, IndexError):
+        await callback.answer("Invalid preset", show_alert=True)
+        return
+
+    await state.clear()
+    if not await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
+        await callback.answer(_EXPLICITNESS_NO_ROW[lang], show_alert=True)
+        return
+    await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
+
+    msg = f"Оценка: {value:.2f} (вручную)" if lang == "ru" else f"Score: {value:.2f} (manual)"
+    await callback.answer(msg)
+
+
+@router.callback_query(F.data.startswith("adm_stk_expedit:"))
+async def handle_sticker_explicitness_edit_prompt(
+    callback: CallbackQuery,
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+) -> None:
+    """Prompt for a free-text explicitness value (ADR-0009 Decision 7).
+
+    Builds against ``AdminStates.awaiting_sticker_score`` rather than the
+    two already-spoken-for scaffold states (see the state's own docstring).
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    await state.set_state(AdminStates.awaiting_sticker_score)
+    await state.update_data(exp_file_unique_id=file_unique_id, exp_lang=lang)
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            _EXPLICITNESS_PROMPT[lang],
+            reply_markup=sticker_explicitness_cancel_keyboard(file_unique_id, lang=lang),
+        )
+
+
+@router.message(
+    AdminStates.awaiting_sticker_score,
+    F.chat.type == "private",
+    ~F.text.startswith("/"),
+)
+async def handle_sticker_explicitness_input(
+    message: Message,
+    state: FSMContext,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Validate and persist the manually-typed explicitness score
+    (ADR-0009 Decisions 5 and 7).
+
+    Reject-not-clamp on invalid input (same posture as
+    ``admin_chat_panel.py``'s tolerance FSM) -- re-prompts, state stays set.
+    Escape hatches: admin commands pass through untouched
+    (``~F.text.startswith("/")``), and the prompt carries a dedicated
+    cancel button.
+    """
+    data = await state.get_data()
+    file_unique_id = data.get("exp_file_unique_id")
+    lang = _get_lang(data.get("exp_lang"))
+    if not file_unique_id:
+        await state.clear()
+        return
+
+    if not await check_admin_direct(
+        bot_config_repo, message.from_user.id if message.from_user else None
+    ):
+        await state.clear()
+        return
+
+    raw = (message.text or "").strip().replace(",", ".")
+    try:
+        value = float(raw)
+    except ValueError:
+        await message.reply(
+            _EXPLICITNESS_INVALID[lang],
+            reply_markup=sticker_explicitness_cancel_keyboard(file_unique_id, lang=lang),
+        )
+        return
+    if not 0.0 <= value <= 1.0:
+        await message.reply(
+            _EXPLICITNESS_INVALID[lang],
+            reply_markup=sticker_explicitness_cancel_keyboard(file_unique_id, lang=lang),
+        )
+        return
+
+    await state.clear()
+    if not await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
+        await message.reply(_EXPLICITNESS_NO_ROW[lang])
+        return
+
+    await message.reply(_EXPLICITNESS_SAVED[lang].format(value=f"{value:.2f}"))
+
+    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
+    if sticker:
+        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+        text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
+        keyboard = sticker_detail_keyboard(
+            file_unique_id,
+            lang=lang,
+            set_name=sticker["set_name"],
+            explicitness_is_manual=True,
+        )
+        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("adm_stk_expcancel:"))
+async def handle_sticker_explicitness_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Escape hatch for ``awaiting_sticker_score`` -- the input handler
+    keeps the state set on invalid input (reject-not-clamp), so cancelling
+    must be reachable without typing a valid float. Turns the prompt bubble
+    into a fresh detail card, same idiom as
+    ``admin_chat_panel.handle_chat_panel_tolerance_cancel``.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    await state.clear()
+    await callback.answer(_EXPLICITNESS_CANCELLED[lang])
+    if file_unique_id:
+        await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
+
+
+@router.callback_query(F.data.startswith("adm_stk_expreset:"))
+async def handle_sticker_explicitness_reset(
+    callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+) -> None:
+    """Reset a manual score back to automatic (ADR-0009 Decision 5) -- NULLs
+    both the value and the flag; the card re-renders as "не оценён" until
+    the next (re-)analysis, reusing A-1's existing unscored rendering.
+
+    Clears the FSM for the same reason the preset buttons do: this row stays
+    tappable on a card sitting above an open "введите число" prompt.
+    """
+    if not _is_private(callback):
+        await callback.answer()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer("Not authorized", show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    file_unique_id = parts[2] if len(parts) > 2 else ""
+
+    if not file_unique_id:
+        await callback.answer("Missing sticker ID", show_alert=True)
+        return
+
+    await state.clear()
+    if not await sticker_repo.reset_explicitness_to_auto(file_unique_id):
+        await callback.answer(_EXPLICITNESS_NO_ROW[lang], show_alert=True)
+        return
+    await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
+    await callback.answer(_EXPLICITNESS_RESET[lang])
 
 
 # ── Localized failure-reason copy ───────────────────────────────────────
@@ -602,15 +945,31 @@ async def handle_run_analysis(
         updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
         desc_part = ""
         set_name: str | None = None
+        is_manual = False
         if updated:
             set_name = str(updated["set_name"]) if updated.get("set_name") else None
+            is_manual = bool(updated.get("explicitness_is_manual", False))
             raw_desc = updated.get("visual_description")
             if raw_desc:
                 desc_part = f"\n<b>Описание:</b> {html_lib.escape(str(raw_desc))}"
+                # A-1: same explicitness line as every other DM sticker card,
+                # only once the fresh analysis actually produced a description.
+                # A-4: a sticky manual override (ADR-0009 Decision 4) survives
+                # this re-analysis unchanged -- is_manual reflects that.
+                tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+                explicitness_line = format_explicitness_line(
+                    updated.get("explicitness_score"),
+                    tolerance_level,
+                    lang,
+                    is_manual=is_manual,
+                )
+                desc_part = f"{desc_part}\n{explicitness_line}"
         result_text = (
             f"✅ Анализ обновлён{desc_part}" if lang == "ru" else f"✅ Analysis updated{desc_part}"
         )
-        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=set_name)
+        keyboard = sticker_detail_keyboard(
+            file_unique_id, lang=lang, set_name=set_name, explicitness_is_manual=is_manual
+        )
     else:
         reason_key = result.reason or "empty"
         reason_copy = _REANALYZE_REASON_COPY.get(reason_key, _REANALYZE_REASON_COPY["empty"])
@@ -655,9 +1014,13 @@ async def handle_admin_sticker_check(
 
     existing = await sticker_repo.get_by_file_unique_id(sticker.file_unique_id)
     if existing:
-        text = _build_detail_text(existing, sticker.file_unique_id, lang)
+        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+        text = _build_detail_text(existing, sticker.file_unique_id, lang, tolerance_level)
         keyboard = sticker_detail_keyboard(
-            sticker.file_unique_id, lang=lang, set_name=existing["set_name"]
+            sticker.file_unique_id,
+            lang=lang,
+            set_name=existing["set_name"],
+            explicitness_is_manual=bool(existing.get("explicitness_is_manual", False)),
         )
         await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
         return
@@ -797,12 +1160,19 @@ async def handle_admin_sticker_dm_analyze(
         keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
     else:
         updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
-        result_text = (
-            _build_detail_text(updated, file_unique_id, lang)
-            if updated
-            else ("✅ Анализ завершён" if lang == "ru" else "✅ Analysis complete")
+        # ADR-0009 Decision 6 edge case: a freshly-learned duplicate can
+        # inherit an existing manual score+flag from its canonical row, so
+        # this first-ever card for the file can legitimately already show
+        # the "(вручную)" badge -- not a bug, see the ADR's own note.
+        is_manual = bool(updated.get("explicitness_is_manual", False)) if updated else False
+        if updated:
+            tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+            result_text = _build_detail_text(updated, file_unique_id, lang, tolerance_level)
+        else:
+            result_text = "✅ Анализ завершён" if lang == "ru" else "✅ Analysis complete"
+        keyboard = sticker_detail_keyboard(
+            file_unique_id, lang=lang, set_name=sticker.set_name, explicitness_is_manual=is_manual
         )
-        keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker.set_name)
 
     with contextlib.suppress(TelegramBadRequest):
         await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)

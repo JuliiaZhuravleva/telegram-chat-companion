@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:25:18Z",
+  "role": "evaluator",
+  "item_id": "C-1",
+  "verdict": "PASS",
+  "evidence": "git show c5cf372: new AdminRepository.get_enabled_chats_page_by_activity() is a single LEFT JOIN aggregate query (ORDER BY message_count_24h DESC, chat_title, chat_id; LIMIT/OFFSET), reusing migration 002's idx_chat_messages_chat_created index (verified present in alembic/versions/002_chat_messages.py). Handler wires the picker to the new method (both call sites), keyboard appends '· <count>' to the caption incl. zero, omitting the suffix when the key is absent. Ran pytest tests/unit/test_admin_repository.py tests/unit/test_admin_chat_panel_keyboards.py tests/unit/test_admin_chat_panel_handler.py -q myself: 115 passed, matching the claim; ruff check and mypy clean on the 3 touched src files.",
+  "regression_risk": "low",
+  "notes": "Shared title-sorted pickers (KB/Reactions/whitelist) intentionally left untouched via a dedicated method, matching PRD scope. Window (rolling 24h) and zero-count tie-break were open questions in the PRD; specialist's choice is reasonable and documented, not escalated -- low-stakes."
+}

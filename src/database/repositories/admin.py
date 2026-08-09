@@ -215,6 +215,85 @@ class AdminRepository:
         )
         return [dict(r) for r in rows], int(total)
 
+    async def get_enabled_chats_page_by_activity(
+        self, page: int, per_page: int = 10, window: timedelta = timedelta(hours=24)
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated enabled chats, most active first (C-1).
+
+        "Active" = message count in ``chat_messages`` within a rolling
+        ``window`` (default last 24h). One aggregate query (LEFT JOIN a
+        per-chat COUNT subquery, no N+1).
+
+        Note the subquery does **not** use ``idx_chat_messages_chat_created``,
+        despite an earlier version of this docstring claiming so: that index
+        leads on ``chat_id`` while the filter is on ``created_at`` alone, so
+        Postgres seq-scans (verified with EXPLAIN ANALYZE). Harmless at current
+        volume; TD-063 carries the row-count check that decides whether a
+        ``(created_at)`` index is worth adding. Ties (equal/zero message count, including
+        chats with none in the window) fall back to the same
+        ``chat_title NULLS LAST, chat_id`` order ``get_enabled_chats_page``
+        uses, so the ordering stays deterministic rather than looking random.
+
+        Each row carries an extra ``message_count_24h`` key (int) on top of
+        ``get_enabled_chats_page``'s ``chat_id``/``chat_title``/``chat_type``,
+        for the picker caption. This is a dedicated method rather than a
+        change to ``get_enabled_chats_page`` because that method is shared by
+        the KB/Reactions/whitelist pickers (title-sorted, out of C-1's scope)
+        -- keeping them separate avoids re-ordering pickers nobody asked to
+        change.
+        """
+        total = (
+            await self._pool.fetchval(
+                "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
+            )
+            or 0
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT cs.chat_id, cs.chat_title, cs.chat_type,
+                   COALESCE(mc.message_count, 0)::bigint AS message_count_24h
+            FROM chat_settings cs
+            LEFT JOIN (
+                SELECT chat_id, COUNT(*) AS message_count
+                FROM chat_messages
+                WHERE created_at > NOW() - $1::interval
+                GROUP BY chat_id
+            ) mc ON mc.chat_id = cs.chat_id
+            WHERE cs.enabled = true
+            ORDER BY message_count_24h DESC, cs.chat_title NULLS LAST, cs.chat_id
+            LIMIT $2 OFFSET $3
+            """,
+            window,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
+
+    async def find_enabled_chats_by_title(
+        self, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Whitelisted chats whose title contains ``query`` (case-insensitive, D-1).
+
+        Backs the chat-panel shortcut's title search: ``enabled = true`` is
+        the same whitelist boundary every other picker in this module
+        enforces, so the shortcut can never surface a chat outside it.
+        ``%``/``_``/``\\`` in ``query`` are escaped so admin-typed text can't
+        be reinterpreted as an ILIKE wildcard pattern.
+        """
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = await self._pool.fetch(
+            """
+            SELECT chat_id, chat_title, chat_type
+            FROM chat_settings
+            WHERE enabled = true AND chat_title ILIKE ('%' || $1 || '%') ESCAPE '\\'
+            ORDER BY chat_title NULLS LAST, chat_id
+            LIMIT $2
+            """,
+            escaped,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
     async def get_pending_attempts_page(
         self, page: int, per_page: int = 5
     ) -> tuple[list[dict[str, Any]], int]:

@@ -94,6 +94,13 @@ COMMANDS: tuple[CommandSpec, ...] = (
         description={"ru": "Саммари чата", "en": "Chat summary"},
     ),
     CommandSpec(
+        command="summary500",
+        # Same scope story as /summary: groups only, with a DM handler that
+        # exists solely to avoid a silent no-op.
+        scopes=frozenset({CommandScope.GROUPS}),
+        description={"ru": "Саммари по 500 сообщениям", "en": "Summary of 500 messages"},
+    ),
+    CommandSpec(
         command="kb",
         scopes=frozenset({CommandScope.GROUPS, CommandScope.PRIVATE, CommandScope.ADMIN}),
         description={"ru": "База знаний чата", "en": "Chat knowledge base"},
@@ -128,6 +135,15 @@ COMMANDS: tuple[CommandSpec, ...] = (
         command="costs",
         scopes=frozenset({CommandScope.ADMIN}),
         description={"ru": "Расходы на AI за 24ч", "en": "AI cost summary (24h)"},
+        admin_only=True,
+    ),
+    CommandSpec(
+        command="panel",
+        scopes=frozenset({CommandScope.ADMIN}),
+        description={
+            "ru": "Настройки чата по ссылке/названию",
+            "en": "Chat settings by link/title",
+        },
         admin_only=True,
     ),
 )

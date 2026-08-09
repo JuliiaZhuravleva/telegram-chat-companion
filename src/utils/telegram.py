@@ -7,8 +7,10 @@ Shared by voice, image, sticker, and admin panel handlers.
 from __future__ import annotations
 
 import mimetypes
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from io import BytesIO
 
 import structlog
@@ -50,6 +52,82 @@ def build_chat_url(
         return f"https://t.me/c/{str(abs(chat_id))[3:]}"
     if chat_type == "private" and chat_id > 0:
         return f"tg://user?id={chat_id}"
+    return None
+
+
+@dataclass(frozen=True)
+class ChatReference:
+    """A chat identifier parsed out of admin-supplied text (D-1 shortcut).
+
+    Exactly one field is set:
+
+    - ``chat_id`` — resolved directly from the text, no network call needed
+      (a ``t.me/c/<internal_id>`` link — the reverse of what ``build_chat_url``
+      produces for a supergroup/channel — or a bare chat id the admin pasted,
+      e.g. copied from a panel header's ``<code>{chat_id}</code>``).
+    - ``username`` — a ``t.me/<username>`` link or ``@username``; the caller
+      still needs one ``bot.get_chat()`` call to learn which chat this is.
+    """
+
+    chat_id: int | None = None
+    username: str | None = None
+
+
+# t.me/c/<internal_id>[/<message_id>] — build_chat_url's private-link form for
+# supergroups/channels. See its docstring for the -100 prefix/internal-id split.
+_TME_C_RE = re.compile(r"(?:https?://)?t\.me/c/(\d+)(?:/\d+)?/?$", re.IGNORECASE)
+# t.me/<username>[/<message_id>] — the public-link form. Telegram usernames are
+# 5-32 chars, start with a letter, then letters/digits/underscores.
+_TME_USERNAME_RE = re.compile(
+    r"(?:https?://)?t\.me/([A-Za-z][A-Za-z0-9_]{4,31})(?:/\d+)?/?$", re.IGNORECASE
+)
+_AT_USERNAME_RE = re.compile(r"^@([A-Za-z][A-Za-z0-9_]{4,31})$")
+# A bare chat id an admin might paste (e.g. copied from a panel header, or from
+# a forwarded message's raw id). Supergroup/channel ids are always negative, so
+# requiring the leading "-" keeps a plain numeric *title* query (rare, but
+# possible) from being misread as an id.
+_RAW_CHAT_ID_RE = re.compile(r"^-\d+$")
+
+# t.me path segments that are not usernames (private invite links, story/IV
+# viewers, sticker packs, ...) — matching one as a username would silently
+# "resolve" to nonsense instead of falling through to a title search.
+_TME_RESERVED_PATHS = frozenset({"c", "s", "iv", "joinchat", "proxy", "addstickers", "share"})
+
+
+def parse_chat_reference(text: str) -> ChatReference | None:
+    """Parse admin-supplied text into a chat reference (D-1 shortcut).
+
+    Returns ``None`` when ``text`` doesn't look like a chat link/id at all —
+    callers should fall back to a title search in that case. Recognizes:
+
+    - ``t.me/c/<internal_id>`` → ``chat_id`` (pure, no API call).
+    - a bare negative chat id (``-1001234567890``) → ``chat_id`` directly.
+    - ``t.me/<username>`` or ``@username`` → ``username`` (caller resolves
+      via ``bot.get_chat()``).
+
+    Private invite links (``t.me/+...``, ``t.me/joinchat/...``) are not
+    resolvable without joining and deliberately fall through to ``None``.
+    """
+    candidate = text.strip()
+    if not candidate:
+        return None
+
+    m = _TME_C_RE.search(candidate)
+    if m:
+        internal_id = m.group(1)
+        return ChatReference(chat_id=-int(f"100{internal_id}"))
+
+    if _RAW_CHAT_ID_RE.match(candidate):
+        return ChatReference(chat_id=int(candidate))
+
+    m = _AT_USERNAME_RE.match(candidate)
+    if m:
+        return ChatReference(username=m.group(1))
+
+    m = _TME_USERNAME_RE.search(candidate)
+    if m and m.group(1).lower() not in _TME_RESERVED_PATHS:
+        return ChatReference(username=m.group(1))
+
     return None
 
 

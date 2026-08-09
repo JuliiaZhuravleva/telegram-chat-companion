@@ -12,7 +12,10 @@ def repo():
     pool = MagicMock()
     pool.fetchrow = AsyncMock(return_value={"id": 1})
     pool.fetch = AsyncMock(return_value=[])
-    pool.execute = AsyncMock()
+    # asyncpg returns the command tag ("UPDATE 1"), and the manual-score
+    # writes now read the affected-row count off it. A bare AsyncMock returns
+    # a MagicMock here, which is not what production ever sees.
+    pool.execute = AsyncMock(return_value="UPDATE 1")
     return StickerRepository(pool)
 
 
@@ -255,7 +258,58 @@ async def test_save_sticker_explicitness_score_defaults_to_none(repo):
     await repo.save_sticker(file_unique_id="unique-1", file_id="file-1")
 
     bound_args = repo._pool.fetchrow.call_args.args[1:]
-    assert bound_args[-1] is None
+    # explicitness_score, explicitness_is_manual are the last two bound params.
+    assert bound_args[-2] is None
+    assert bound_args[-1] is False
+
+
+@pytest.mark.asyncio
+async def test_save_sticker_passes_explicitness_is_manual(repo):
+    """ADR-0009 Decision 4: explicitness_is_manual is wired through to the
+    INSERT (both the SQL text and the bound positional params)."""
+    repo._pool.fetchrow = AsyncMock(return_value={"id": 10})
+
+    await repo.save_sticker(
+        file_unique_id="unique-1",
+        file_id="file-1",
+        explicitness_score=0.9,
+        explicitness_is_manual=True,
+    )
+
+    sql = repo._pool.fetchrow.call_args.args[0]
+    assert "explicitness_is_manual" in sql
+    bound_args = repo._pool.fetchrow.call_args.args[1:]
+    assert bound_args[-1] is True
+
+
+@pytest.mark.asyncio
+async def test_save_sticker_explicitness_is_manual_absent_from_set_clause(repo):
+    """ADR-0009 Decision 4: explicitness_is_manual must NOT appear in the
+    ON CONFLICT ... DO UPDATE SET clause — Postgres leaves an unlisted
+    column untouched on UPDATE, so only the two dedicated methods
+    (set_manual_explicitness_score / reset_explicitness_to_auto) can ever
+    change it. Every write through save_sticker() must leave it as-is."""
+    repo._pool.fetchrow = AsyncMock(return_value={"id": 11})
+
+    await repo.save_sticker(file_unique_id="unique-1", file_id="file-1")
+
+    sql = repo._pool.fetchrow.call_args.args[0]
+    set_clause = sql[sql.index("DO UPDATE") :]
+    assert "explicitness_is_manual =" not in set_clause
+
+
+@pytest.mark.asyncio
+async def test_save_sticker_explicitness_score_case_protects_manual(repo):
+    """ADR-0009 Decision 4: the ON CONFLICT SET clause must check the
+    EXISTING row's own explicitness_is_manual flag (not the incoming value)
+    before allowing an overwrite."""
+    repo._pool.fetchrow = AsyncMock(return_value={"id": 12})
+
+    await repo.save_sticker(file_unique_id="unique-1", file_id="file-1")
+
+    sql = repo._pool.fetchrow.call_args.args[0]
+    assert "WHEN sticker_knowledge.explicitness_is_manual" in sql
+    assert "THEN sticker_knowledge.explicitness_score" in sql
 
 
 @pytest.mark.asyncio
@@ -290,3 +344,43 @@ async def test_update_explicitness_score(repo):
     assert "UPDATE sticker_knowledge" in sql
     assert repo._pool.execute.call_args.args[1] == "unique-1"
     assert repo._pool.execute.call_args.args[2] == 0.4
+
+
+@pytest.mark.asyncio
+async def test_set_manual_explicitness_score(repo):
+    """ADR-0009 Decision 5: sets both the score and the manual flag."""
+    await repo.set_manual_explicitness_score("unique-1", 0.8)
+
+    repo._pool.execute.assert_awaited_once()
+    sql = repo._pool.execute.call_args.args[0]
+    assert "UPDATE sticker_knowledge" in sql
+    assert "explicitness_score = $2" in sql
+    assert "explicitness_is_manual = true" in sql
+    assert repo._pool.execute.call_args.args[1] == "unique-1"
+    assert repo._pool.execute.call_args.args[2] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_manual_score_writes_report_whether_a_row_matched(repo):
+    """A stale card can name a sticker that no longer exists; the caller has
+    to be able to tell that apart from a successful write."""
+    assert await repo.set_manual_explicitness_score("unique-1", 0.8) is True
+    assert await repo.reset_explicitness_to_auto("unique-1") is True
+
+    repo._pool.execute = AsyncMock(return_value="UPDATE 0")
+    assert await repo.set_manual_explicitness_score("gone", 0.8) is False
+    assert await repo.reset_explicitness_to_auto("gone") is False
+
+
+@pytest.mark.asyncio
+async def test_reset_explicitness_to_auto(repo):
+    """ADR-0009 Decision 5: clears both fields to NULL/false, no remembered
+    prior automatic value."""
+    await repo.reset_explicitness_to_auto("unique-1")
+
+    repo._pool.execute.assert_awaited_once()
+    sql = repo._pool.execute.call_args.args[0]
+    assert "UPDATE sticker_knowledge" in sql
+    assert "explicitness_score = NULL" in sql
+    assert "explicitness_is_manual = false" in sql
+    assert repo._pool.execute.call_args.args[1] == "unique-1"

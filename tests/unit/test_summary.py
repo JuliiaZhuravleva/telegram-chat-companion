@@ -527,3 +527,112 @@ class TestSummaryMentionTokenAndCodeInteraction:
 
         assert "</code><b>pwn" not in result
         assert "&lt;/code&gt;&lt;b&gt;pwn" in result
+
+
+class TestSummaryCountParam:
+    """E-1: /summary <n> — count flows into the DB fetch limit, and the header
+    reflects the number of messages actually summarized, not the request
+    (e.g. requesting 500 when only 2 exist must not claim 500 were used).
+    """
+
+    @pytest.mark.asyncio
+    async def test_count_forwarded_as_fetch_limit(self, summary_service, message_repo) -> None:
+        await summary_service.generate(chat_id=-1, count=500, language="ru")
+
+        message_repo.get_for_summary.assert_awaited_once()
+        assert message_repo.get_for_summary.call_args.kwargs["limit"] == 500
+
+    @pytest.mark.asyncio
+    async def test_header_reflects_actual_fetched_count_not_requested_ru(
+        self, summary_service, ai_router, message_repo
+    ) -> None:
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(content="one"),
+            _make_message_row(content="two"),
+        ]
+        ai_router.generate_text.return_value = _make_text_result("A short summary.")
+
+        result = await summary_service.generate(chat_id=-1, count=500, language="ru")
+
+        assert "(2 сообщений)" in result
+        assert "500" not in result
+
+    @pytest.mark.asyncio
+    async def test_header_reflects_actual_fetched_count_en(
+        self, summary_service, ai_router, message_repo
+    ) -> None:
+        message_repo.get_for_summary.return_value = [_make_message_row(content="one")]
+        ai_router.generate_text.return_value = _make_text_result("A short summary.")
+
+        result = await summary_service.generate(chat_id=-1, count=500, language="en")
+
+        assert "(1 messages)" in result
+        assert "500" not in result
+
+
+class TestSummaryConversationTruncation:
+    """E-1: a conservative safety net protects the model call from a
+    pathologically large prompt now that /summary can request up to 1000
+    messages (see ``_MAX_CONVERSATION_CHARS`` — deliberately coarse, not a
+    tuned per-provider context-window limit).
+    """
+
+    @pytest.mark.asyncio
+    async def test_oversized_conversation_is_trimmed_to_recent_messages(
+        self, summary_service, ai_router, message_repo
+    ) -> None:
+        from src.services.modules import summary as summary_module
+
+        # get_for_summary returns rows newest-first (real query: ORDER BY
+        # created_at DESC), so index 0 here is the newest message and 999
+        # the oldest — matching what generate() assumes when it reverses
+        # the list into chronological order before building lines.
+        long_content = "x" * 1000
+        rows = [_make_message_row(user_id=1, content=f"{long_content}-{i}") for i in range(1000)]
+        message_repo.get_for_summary.return_value = rows
+        ai_router.generate_text.return_value = _make_text_result("Summary.")
+
+        await summary_service.generate(chat_id=-1, count=1000, language="ru")
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        assert len(prompt) < summary_module._MAX_CONVERSATION_CHARS + 100
+        # Newest message (row index 0) survives; the oldest (row index 999)
+        # is dropped to make room.
+        assert "-0" in prompt
+        assert "-999" not in prompt
+        # Truncation kept some but not all 1000 messages.
+        assert 0 < prompt.count("@@u0@@") < 1000
+
+    @pytest.mark.asyncio
+    async def test_truncation_logs_a_warning(
+        self, summary_service, ai_router, message_repo, monkeypatch
+    ) -> None:
+        from src.services.modules import summary as summary_module
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(summary_module, "logger", mock_logger)
+
+        long_content = "x" * 1000
+        rows = [_make_message_row(user_id=1, content=f"{long_content}-{i}") for i in range(1000)]
+        message_repo.get_for_summary.return_value = rows
+        ai_router.generate_text.return_value = _make_text_result("Summary.")
+
+        await summary_service.generate(chat_id=-1, count=1000, language="ru")
+
+        mock_logger.warning.assert_called_once()
+        assert mock_logger.warning.call_args.args[0] == "summary_conversation_truncated"
+
+    @pytest.mark.asyncio
+    async def test_small_conversation_is_not_truncated_and_no_warning(
+        self, summary_service, ai_router, monkeypatch
+    ) -> None:
+        from src.services.modules import summary as summary_module
+
+        mock_logger = MagicMock()
+        monkeypatch.setattr(summary_module, "logger", mock_logger)
+        ai_router.generate_text.return_value = _make_text_result("Summary.")
+
+        result = await summary_service.generate(chat_id=-1, count=100, language="ru")
+
+        mock_logger.warning.assert_not_called()
+        assert "(1 сообщений)" in result

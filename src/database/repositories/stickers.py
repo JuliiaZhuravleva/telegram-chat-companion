@@ -23,7 +23,24 @@ _VISION_DERIVED_COLUMNS = (
     # (NULL), the duplicate copies that NULL and stays fail-closed-hidden
     # too, consistent with Decision 3.
     "explicitness_score",
+    # ADR-0009 Decision 6: manual-status travels WITH the score it
+    # describes, never alone — copying the score without the flag would
+    # silently reintroduce this ADR's own bug one hop away (a duplicate
+    # that inherited a hand-vetted score would get clobbered by its own
+    # first re-analysis, since the flag would default back to false).
+    "explicitness_is_manual",
 )
+
+
+def _updated_any(status: str) -> bool:
+    """True when an asyncpg command tag reports at least one affected row.
+
+    asyncpg returns the raw tag ("UPDATE 1" / "UPDATE 0"); the count is the
+    last field. An unexpected shape is treated as "did something" so a parsing
+    surprise can never turn a successful write into a user-facing error.
+    """
+    tail = status.rsplit(" ", 1)[-1]
+    return tail != "0"
 
 
 class StickerRepository:
@@ -68,6 +85,7 @@ class StickerRepository:
         image_hash: str | None = None,
         duplicate_of_file_unique_id: str | None = None,
         explicitness_score: float | None = None,
+        explicitness_is_manual: bool = False,
     ) -> int:
         """Insert or update a sticker. Returns sticker ID.
 
@@ -82,12 +100,24 @@ class StickerRepository:
         share this one INSERT so their total_uses/last_used_at semantics
         never diverge.
 
-        ``explicitness_score`` (ADR-0008): overwritten unconditionally on
-        every call, same as ``emotion``/``character_or_meme`` — this is the
-        score of THIS analysis attempt (or the copied value on a duplicate),
-        never a value to preserve across re-analyzes. The one-off backfill
-        script does NOT go through this method (Decision 5: a narrow,
-        single-column UPDATE via ``update_explicitness_score`` instead).
+        ``explicitness_score`` (ADR-0008) / ``explicitness_is_manual``
+        (ADR-0009 Decision 4): on a fresh INSERT both are written as given —
+        a brand-new row has nothing to protect yet. On conflict,
+        ``explicitness_score`` is overwritten unconditionally (same as
+        ``emotion``/``character_or_meme``: the score of THIS analysis
+        attempt, or the copied value on a duplicate) **unless the existing
+        row's own ``explicitness_is_manual`` flag is set**, in which case the
+        manual value survives the write untouched. ``explicitness_is_manual``
+        itself is deliberately absent from the ``SET`` clause — Postgres
+        leaves an unlisted column untouched on UPDATE, so only the two
+        dedicated methods below (``set_manual_explicitness_score`` /
+        ``reset_explicitness_to_auto``) can ever change it; every write that
+        goes through this method (``learn()``'s normal path, ``reanalyze()``,
+        the duplicate-copy path) leaves it exactly as it was. The one-off
+        backfill script does NOT go through this method (ADR-0008 Decision
+        5: a narrow, single-column UPDATE via ``update_explicitness_score``
+        instead — its own target-set WHERE clause already structurally
+        excludes manually-scored rows, so it needs no awareness of the flag).
         """
         row = await self._pool.fetchrow(
             """
@@ -97,12 +127,13 @@ class StickerRepository:
                 visual_description, original_vision_description,
                 emotion, suggested_contexts, style_tags, character_or_meme,
                 usage_contexts, analysis_failed, analyzed_at, total_uses,
-                image_hash, duplicate_of_file_unique_id, explicitness_score
+                image_hash, duplicate_of_file_unique_id, explicitness_score,
+                explicitness_is_manual
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                 CASE WHEN $7::TEXT IS NOT NULL THEN NOW() END,
                 1,
-                $15, $16, $17
+                $15, $16, $17, $18
             )
             ON CONFLICT (file_unique_id) DO UPDATE
             SET file_id = EXCLUDED.file_id,
@@ -124,9 +155,13 @@ class StickerRepository:
                 END,
                 image_hash = COALESCE(EXCLUDED.image_hash, sticker_knowledge.image_hash),
                 duplicate_of_file_unique_id = EXCLUDED.duplicate_of_file_unique_id,
-                explicitness_score = COALESCE(
-                    EXCLUDED.explicitness_score, sticker_knowledge.explicitness_score
-                ),
+                explicitness_score = CASE
+                    WHEN sticker_knowledge.explicitness_is_manual
+                        THEN sticker_knowledge.explicitness_score
+                    ELSE COALESCE(
+                        EXCLUDED.explicitness_score, sticker_knowledge.explicitness_score
+                    )
+                END,
                 updated_at = NOW()
             RETURNING id
             """,
@@ -147,6 +182,7 @@ class StickerRepository:
             image_hash,
             duplicate_of_file_unique_id,
             explicitness_score,
+            explicitness_is_manual,
         )
         assert row is not None
         return int(row["id"])
@@ -216,6 +252,57 @@ class StickerRepository:
             file_unique_id,
             score,
         )
+
+    async def set_manual_explicitness_score(self, file_unique_id: str, score: float) -> bool:
+        """Admin-set score (ADR-0009 Decision 5, A-4's write path).
+
+        Sets ``explicitness_is_manual = true`` so ``save_sticker()``'s upsert
+        (Decision 4) protects it from the next re-analysis. Caller validates
+        ``[0.0, 1.0]`` before calling — reject-not-clamp, same posture as
+        ADR-0008 Decision 4 — this method does not re-validate, matching
+        ``update_explicitness_score()``'s existing shape (repo methods trust
+        the caller).
+
+        Returns False when no row matched — a stale card can carry a
+        ``file_unique_id`` that no longer exists, and without this the caller
+        would report a score it never stored (``handle_chat_panel_toggle``
+        already guards its own writes the same way).
+        """
+        status = await self._pool.execute(
+            """
+            UPDATE sticker_knowledge
+            SET explicitness_score = $2,
+                explicitness_is_manual = true,
+                updated_at = NOW()
+            WHERE file_unique_id = $1
+            """,
+            file_unique_id,
+            score,
+        )
+        return _updated_any(status)
+
+    async def reset_explicitness_to_auto(self, file_unique_id: str) -> bool:
+        """Clear both the value and the flag (ADR-0009 Decision 5).
+
+        NOT a revert to a remembered prior automatic value — there isn't
+        one, a single ``explicitness_score`` column only ever holds the
+        current value. The sticker becomes "не оценён" until the next
+        re-analysis (or admin re-analyze action) produces a fresh score.
+
+        Returns False when no row matched, same contract as
+        ``set_manual_explicitness_score``.
+        """
+        status = await self._pool.execute(
+            """
+            UPDATE sticker_knowledge
+            SET explicitness_score = NULL,
+                explicitness_is_manual = false,
+                updated_at = NOW()
+            WHERE file_unique_id = $1
+            """,
+            file_unique_id,
+        )
+        return _updated_any(status)
 
     async def update_embedding(
         self,
