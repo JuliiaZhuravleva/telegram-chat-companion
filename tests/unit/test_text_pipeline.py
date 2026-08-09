@@ -613,7 +613,8 @@ class TestPipelineKnowledgeBase:
             config=config,
         )
 
-        mocks["ai_router"].generate_embedding.assert_not_called()
+        # rag_enabled defaults True (S2-4: RAG alone still needs the shared
+        # query embedding), so only the KB-specific invariant is asserted.
         mocks["knowledge_repo"].search_by_similarity.assert_not_called()
 
     async def test_kb_enabled_calls_search_by_similarity(self, make_chat_config):
@@ -633,7 +634,10 @@ class TestPipelineKnowledgeBase:
         )
 
         assert result.should_respond is True
-        mocks["ai_router"].generate_embedding.assert_called_once_with("когда мероприятие?")
+        # S2-4: one shared embedding for RAG (default-enabled) + KB, not two.
+        mocks["ai_router"].generate_embedding.assert_called_once_with(
+            "когда мероприятие?", chat_id=-100123
+        )
         mocks["knowledge_repo"].search_by_similarity.assert_called_once()
         call_args = mocks["knowledge_repo"].search_by_similarity.call_args
         assert call_args.args[0] == -100123

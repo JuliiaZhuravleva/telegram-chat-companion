@@ -322,7 +322,9 @@ async def handle_remember(
     embedding: list[float] | None = None
     try:
         async with typing_indicator(bot, message.chat.id, message_thread_id):
-            embedding_result = await ai_router.generate_embedding(fact_text)
+            embedding_result = await ai_router.generate_embedding(
+                fact_text, chat_id=message.chat.id
+            )
         embedding = embedding_result.embedding
     except Exception:
         logger.warning("kb_remember_embedding_failed", chat_id=message.chat.id)

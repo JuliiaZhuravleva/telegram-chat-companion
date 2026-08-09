@@ -63,23 +63,35 @@ class RAGMemoryService:
         chat_id: int,
         query: str,
         *,
+        query_embedding: list[float] | None = None,
         min_similarity: float | None = None,
         max_results: int | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories relevant to a query.
 
+        ``query_embedding``, if given, is used as-is instead of embedding
+        ``query`` again (S2-4): the pipeline computes one shared query
+        embedding for RAG + KB per turn and passes it here to avoid a
+        second ``generate_embedding()`` call for the same text. ``query``
+        is still required in that case (kept for logging) but not
+        re-embedded.
+
         Returns list of dicts with keys: id, content, similarity, metadata,
         created_at.
         """
-        try:
-            embedding_result = await self._ai_router.generate_embedding(query)
-        except Exception:
-            logger.warning("Failed to generate query embedding for RAG search")
-            return []
+        if query_embedding is not None:
+            embedding = query_embedding
+        else:
+            try:
+                embedding_result = await self._ai_router.generate_embedding(query, chat_id=chat_id)
+            except Exception:
+                logger.warning("Failed to generate query embedding for RAG search")
+                return []
+            embedding = embedding_result.embedding
 
         rows = await self._repo.search(
             chat_id=chat_id,
-            query_embedding=embedding_result.embedding,
+            query_embedding=embedding,
             # `x or default` would silently fall back to the instance default
             # for an explicit falsy override (min_similarity=0.0 is a valid
             # "accept everything" threshold) — S2-2.
@@ -109,7 +121,7 @@ class RAGMemoryService:
     ) -> int | None:
         """Store a memory with its embedding. Returns memory ID or None on failure."""
         try:
-            embedding_result = await self._ai_router.generate_embedding(content)
+            embedding_result = await self._ai_router.generate_embedding(content, chat_id=chat_id)
         except Exception:
             logger.warning("Failed to generate embedding for RAG store")
             return None
