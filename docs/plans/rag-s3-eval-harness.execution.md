@@ -10,8 +10,8 @@ approved_at: '2026-08-09T21:37:25Z'
 approved_by: julia
 specialist_roster_source: ~/.claude/agents/specialist-*.md + <project>/.claude/agents/specialist-*.md
 execution:
-  status: approved
-  started_at: null
+  status: partial
+  started_at: '2026-08-09T21:38:37Z'
   completed_at: null
   current_batch: null
   task_list_id: rag-s3-eval-harness
@@ -20,36 +20,42 @@ items:
   title: Схема кейса (chat_id, вопрос, asked_at [обязателен], ожидаемые диапазоны message_id, страта, свободная заметка) + трекаемый синтетический шаблон в tests/fixtures/eval/ с выдуманными чатами; шаблон валидируется ТОЙ ЖЕ схемой, что и настоящий internal/eval/cases.json (один общий валидатор-модуль, чтобы не разошлись)
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 2h
   reasoning_effort: null
-  confidence: null
+  confidence: 0.9
   consult_session_id: c666c356-1a08-4705-a6f2-bedcf1a51777
-  specialist_session_id: null
+  specialist_session_id: 3b62d442-a71f-4eea-bac7-1388b4ffdd98
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-09T21:43:45Z'
+    executor: backend-dev
+    note: 'Added scripts/eval_schema.py: one pydantic EvalCase model (chat_id, question, asked_at [required, tz-aware], expected_message_id_ranges, stratum found|knowledge-update|answer-absent, note) used by both the tracked template tests/fixtures/eval/cases.json and the real (gitignored) internal/eval/cases.json — load_cases() is the single entry point both paths must use. Enforces: asked_at required+tz-aware (S3-3 needs it for the before-filter), expected_message_id_ranges empty iff stratum=answer-absent (S3-5 negative control), range end>=start. CLI (python3 scripts/eval_schema.py <file>...) for manual validation, mirrors scripts/check_plan_artifacts.py''s main() shape. Template has 4 fictional cases covering all 3 strata + a multi-range case. Downstream items should depend on this: S3-2''s eval_rag.py and S3-8''s tests (qa) should import EvalCase/load_cases from scripts/eval_schema.py rather than re-implementing parsing — flagging for PM/qa routing awareness. S3-8 (qa) still needs the recall@k/MRR arithmetic tests and the degradation control described in the plan; this item only covers the schema + template + schema''s own unit tests.'
+  result:
+    kind: commit
+    ref: b9ae19e9895cd19882bab9bb15bd48e67005d2df
+    verification: 'python3 -m pytest tests/unit/test_eval_schema.py -q: 19 passed; ruff check + ruff format --check clean on scripts/eval_schema.py, tests/unit/test_eval_schema.py, tests/fixtures/eval/; mypy scripts/eval_schema.py: Success (mypy strict, matches CI scope which only checks src/); CLI sanity: python3 scripts/eval_schema.py tests/fixtures/eval/cases.json -> OK, 4 cases, {found:2, knowledge-update:1, answer-absent:1}'
 - id: S3-3
   title: 'Необязательный time-bound before: datetime|None=None по НАСТОЯЩЕМУ пути поиска (MemoryRepository.search → RAGMemoryService.search): условие в WHERE ДО LIMIT, а не постфильтрация (она молча уменьшает k). None-check, не ''x or default'' (паттерн S2-2). Без миграции, по умолчанию None — поведение прода не меняется. Единственный прод-вызов: pipeline.py:491. Без ADR (аддитивно, обратно совместимо)'
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 1-1.5h
   reasoning_effort: null
-  confidence: null
+  confidence: 0.9
   consult_session_id: c666c356-1a08-4705-a6f2-bedcf1a51777
-  specialist_session_id: null
+  specialist_session_id: 94a0ff73-60cc-4d69-b81e-08d786acc4b1
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-09T21:47:46Z'
+    executor: backend-dev
+    note: 'Added optional before: datetime|None=None to MemoryRepository.search() and RAGMemoryService.search(), applied in WHERE ahead of LIMIT (not postfiltered). Default None, additive, no migration. Confirmed the only prod caller (TextProcessingPipeline._timed_rag_search, pipeline.py:491) does not pass it, so prod behavior is unchanged. Followed the S2-2 None-check convention (not ''x or default'') for the passthrough. Unit tests cover: service-level passthrough of explicit before and of the None default (must reach repo as None, not be swallowed), and repository-level call-args assertions (before is the last bind param, defaults to None). Did NOT write an integration test for the actual WHERE-before-LIMIT SQL ordering (that the time bound doesn''t consume a LIMIT slot before being applied) -- that needs a real Postgres+pgvector fixture with future-dated rows, same pattern as tests/integration/test_memory_repository_chat_scoping.py. Routing hint: qa should add that integration test before S3-2''s harness leans on this parameter for correctness, mirroring the chat-scoping test''s positive+negative-control structure.'
+  result:
+    kind: commit
+    ref: 8cbcdee
+    verification: 'pytest tests/unit/test_rag_memory_service.py -q: 21 passed; pytest tests/unit/ -q: 1958 passed, 5 skipped; ruff check src/database/repositories/memory.py src/services/rag/memory.py tests/unit/test_rag_memory_service.py: All checks passed; mypy src/: Success, no issues in 131 source files'
 - id: S3-2
   title: 'scripts/eval_rag.py дёргает настоящий RAGMemoryService.search() (тот же вход, что у пайплайна), а не переписанный SQL как в q5_replay.py; эмбеддинг запроса через настоящий провайдерский путь AIRouter(settings) (Dishka не нужен), БЕЗ сырого-HTTP-фолбэка (решено по [Q2]); seed-DSN = throwaway-контейнер rag-analysis-seed (порт 55434), обязательный аргумент CLI без дефолта — нельзя случайно навести на живую базу (решено по [Q1]). Побочно: флаг rag_backend на S5 переключается тут ровно как в проде'
   specialist: backend-dev
@@ -65,9 +71,12 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
+    ts: '2026-08-09T22:34:51Z'
+    executor: execute_plan.sh
+    note: specialist dispatch failed (claude -p exit 1, transient API error — connection
+      closed mid-response; api_error_status null, so neither auth nor quota) — see
+      <projects>/telegram-chat-companion.rag-s3-eval-harness-wt/docs/plans/rag-s3-eval-harness.execution.md.log.jsonl
+      dispatch_error; requeued to pending for resume
   result: null
 - id: S3-4
   title: 'Метрики: recall@k — первичная, MRR — вторичная; доля кейсов с пустой выдачей выше порога (аналог ''bot answers blind'', сегодня 7 из 11); распределение best-sim (перцентили) — собирается бесплатно тем же прогоном, на нём S6 будет калибровать порог'
@@ -167,7 +176,7 @@ items:
 budget:
   max_usd_per_item: 6.0
   max_usd_per_plan: 30.0
-  consumed_usd: 0.0
+  consumed_usd: 3.5522
 review_gate:
   why: []
   approve_action: /execute-plan <projects>/telegram-chat-companion.rag-s3-eval-harness-wt/docs/plans/rag-s3-eval-harness.execution.md
@@ -207,6 +216,17 @@ revision_number: 2
 last_revised_at: '2026-08-09T21:36:42Z'
 last_revised_by: pm-orchestrator
 ---
+
+
+
+
+
+
+
+
+
+
+
 
 
 
