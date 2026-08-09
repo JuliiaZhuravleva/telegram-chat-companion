@@ -224,12 +224,17 @@ class AdminRepository:
         ``window`` (default last 24h). One aggregate query (LEFT JOIN a
         per-chat COUNT subquery, no N+1).
 
-        Note the subquery does **not** use ``idx_chat_messages_chat_created``,
-        despite an earlier version of this docstring claiming so: that index
-        leads on ``chat_id`` while the filter is on ``created_at`` alone, so
-        Postgres seq-scans (verified with EXPLAIN ANALYZE). Harmless at current
-        volume; TD-063 carries the row-count check that decides whether a
-        ``(created_at)`` index is worth adding. Ties (equal/zero message count, including
+        The subquery does **not** range-seek ``idx_chat_messages_chat_created`` --
+        that index leads on ``chat_id`` while the filter is on ``created_at`` alone.
+        What it actually gets (measured on production 2026-08-10, 38k rows) is an
+        **Index Only Scan**: a full walk of that index with the ``created_at`` filter
+        applied, chosen because the index is ~26x smaller than the heap (1.2 MB vs
+        32 MB). 0.43 ms, 244 shared buffer hits, same plan via a generic prepared
+        plan. Dev picks a Seq Scan at 427 rows, so an EXPLAIN there answers a
+        different question -- do not measure this on dev. Cost tracks the index size,
+        not the table's, so a dedicated ``(created_at)`` index is not worth adding;
+        revisit near 500k rows (~5 years at the current ~255 msg/day). TD-063 closed.
+        Ties (equal/zero message count, including
         chats with none in the window) fall back to the same
         ``chat_title NULLS LAST, chat_id`` order ``get_enabled_chats_page``
         uses, so the ordering stays deterministic rather than looking random.
