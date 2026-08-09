@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T23:17:08Z",
+  "role": "specialist",
+  "item_id": "S3-7",
+  "verdict": "PASS",
+  "cost_usd": 2.7,
+  "notes": "Wrote docs/rag-eval-baseline.md: public-safe aggregates (strata counts, recall@k/MRR/blind-rate/negative-control-rate, best-sim percentiles, config version=commit 92e6285 (min_similarity=0.7, max_results=5, gemini-embedding-001), run date 2026-08-10) from a real S3-6 auto-harvest run (11 cases) replayed through the real search path (both rag-analysis-seed:55434 and rag-analysis-n8n:55435 containers were already up with data intact; harvested via scripts/harvest_auto_strata.py and replayed via scripts/eval_rag.py -- outputs written to internal/eval/cases_auto_harvest.json, gitignored, real chat content stays there). Reproduced the prior q5-replay.md finding (7/11 empty, blind_rate=0.636) through the real path. Per S3-6's own honesty boundary, recall@k/MRR are explicitly flagged in the doc as not meaningful for this floor (expected_message_id_ranges is an unverified wide placeholder) -- blind_rate is the primary number. No answer-absent or knowledge-update cases exist yet (need S3b golden set from Julia); documented as an open caveat. Widened scripts/check_plan_artifacts.py's tracked_plan_files() to also scan docs/rag-eval-baseline.md by default (EXTRA_TRACKED_PATHS) so the 'must pass the guard' requirement is enforced durably by the existing test_tracked_plan_artifacts_are_clean CI test, not just checked once at write time; added a focused unit test (real tmp git repo) for that widening. Did NOT edit .pre-commit-config.yaml's files: regex to match (blocked as a sensitive-file edit in this sandbox) -- local pre-commit hook still only fires on docs/plans/ for this doc; CI-level enforcement via the widened tracked_plan_files() is in place. A human should add '  files: ^(docs/plans/|docs/rag-eval-baseline\\.md$)' to the check-plan-artifacts hook in .pre-commit-config.yaml to close that local-hook gap. Verified scripts/check_plan_artifacts.py docs/rag-eval-baseline.md and the full guard run both report clean.",
+  "result": {
+    "kind": "commit",
+    "ref": "eecc0cd",
+    "verification": "pytest tests/unit/ (2003 passed, 5 skipped); pytest tests/unit/test_plan_artifact_guard.py (34 passed, incl. new test_tracked_plan_files_also_covers_the_baseline_doc); ruff check src/ scripts/ tests/ clean; mypy src/ clean (131 files); python3 scripts/check_plan_artifacts.py -> 'docs/plans artifacts clean (228 file(s) scanned)'"
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

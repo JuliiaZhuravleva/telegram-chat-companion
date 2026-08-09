@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T22:55:08Z",
+  "role": "specialist",
+  "item_id": "S3-5",
+  "verdict": "PASS",
+  "cost_usd": 0.35,
+  "notes": "No code delta required: S3-5's full scope is already implemented and PASS-verified by two prior items in this plan. (1) S3-1 (commit b9ae19e, scripts/eval_schema.py) defines Stratum = found|knowledge-update|answer-absent and a model_validator that REJECTS a non-empty expected_message_id_ranges on answer-absent and REJECTS an empty one on found/knowledge-update -- tests/fixtures/eval/cases.json (the tracked template) already carries one case per stratum, with the answer-absent case's note citing S3-5 by name. (2) S3-4 (commit 3a66523, scripts/eval_metrics.py) computes recall_at_k/mrr over found+knowledge-update cases and a SEPARATE negative_control_rate over answer-absent cases (never conflated with blind_rate), which is exactly S3-5's requirement: 'раздельно показывать нашли что просили и не выдумали когда нечего было находить'. S3-4's own specialist notes say this was done 'per S3-5', and its evaluator verdict confirms the same. I re-ran the full test suite (test_eval_schema.py + test_eval_metrics.py + test_eval_rag.py, 50 passed) plus ruff+mypy to confirm the existing implementation is still green -- did not find any gap in S3-5's stated scope to add code for. Routing hint for PM: S3-5 appears to have been fully absorbed by S3-1+S3-4's implementers reading the same source doc; worth checking S3-6/S3-7/S3-8 for similar overlap before dispatching, and marking S3-5 done-via-prior-item in the human plan doc (rag-s3-eval-harness.md) rather than needing a distinct commit.",
+  "result": {
+    "kind": "none",
+    "ref": null,
+    "verification": "pytest tests/unit/test_eval_schema.py tests/unit/test_eval_metrics.py tests/unit/test_eval_rag.py -q: 50 passed; ruff check clean on scripts/eval_schema.py, scripts/eval_metrics.py, scripts/eval_rag.py + their tests; mypy src/: Success, 131 files. git status confirms no working-tree changes were needed."
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

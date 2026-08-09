@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T22:44:49Z",
+  "role": "evaluator",
+  "item_id": "S3-2",
+  "verdict": "PASS",
+  "evidence": "git show 2a64b11 confirms scripts/eval_rag.py calls RAGMemoryService.search() (real path) with query_embedding from AIRouter(settings), no Dishka/raw-HTTP; dsn is a required CLI positional with no default; before=case.asked_at wired to S3-3's bound param; source_message_id addition is a clean additive SELECT. Ran pytest tests/unit/test_eval_rag.py tests/unit/test_rag_memory_service.py -q (33 passed), ruff check and mypy on touched files all clean, matching the specialist's claimed verification.",
+  "regression_risk": "low",
+  "notes": "rag_backend flag doesn't exist yet (S5 not implemented) -- the item's side-note about it switching 'exactly like prod' is a forward-looking design property (real service call picks it up automatically), not something to verify now. QA (S3-8) still owes integration-test coverage asserting source_message_id round-trips through a real pgvector container, as the specialist flagged."
+}

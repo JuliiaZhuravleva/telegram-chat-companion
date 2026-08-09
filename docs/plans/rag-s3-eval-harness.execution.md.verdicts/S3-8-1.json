@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T23:02:01Z",
+  "role": "specialist",
+  "item_id": "S3-8",
+  "verdict": "PASS",
+  "cost_usd": 2.31,
+  "notes": "S3-8 needed harness self-tests. Unit-level arithmetic (recall@k/MRR) and asked_at schema rejection were already covered by tests/unit/test_eval_{schema,metrics,rag}.py from S3-1..S3-4's own work -- those mock the search path entirely, so they can't exercise the item's two DB-level requirements: (1) S3-3's before-filter must be a real WHERE predicate, not a postfilter, verified non-vacuously via a future self-reference that ranks #1 by similarity before filtering (mirrors S2-7a's positive/negative-control pattern in test_memory_repository_chat_scoping.py); (2) the harness's recall@k must actually drop under a corrupted query vector and an empty index (real end-to-end run_eval()->compute_metrics() against pgvector, not mocked). Added tests/integration/test_eval_harness_integration.py (5 tests, reuses tests/integration/conftest.py's pgvector testcontainer). Empirically verified the negative-control fixture is discriminating: temporarily reverted MemoryRepository.search() to a naive postfilter-after-LIMIT shape, confirmed the positive test goes red (0 hits instead of the real answer), then restored the file byte-for-byte (sha256 verified) before running the full suite green and committing. ruff+mypy clean on the new file.",
+  "result": {
+    "kind": "commit",
+    "ref": "a1dab48",
+    "verification": "pytest tests/integration/test_eval_harness_integration.py -q --no-cov: 5 passed. Re-ran tests/unit/test_eval_{schema,metrics,rag}.py (50 passed, unaffected). ruff check + mypy clean on the new file. Manually confirmed the postfilter negative control is non-vacuous by reverting src/database/repositories/memory.py's before-clause to a Python postfilter, observing the positive test fail (0 results), then restoring the original file (sha256 match) -- CI's mypy src/ / lint jobs are unaffected since only a tests/ file changed."
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}
