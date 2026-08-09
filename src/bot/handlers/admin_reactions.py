@@ -28,6 +28,8 @@ from src.bot.keyboards.admin_reactions import (
     reactions_chat_picker_keyboard,
     reactions_menu_keyboard,
 )
+from src.bot.keyboards.nav import parse_origin
+from src.bot.settings_fields import field_by_code
 from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -160,6 +162,7 @@ async def _render_menu(
     lang: str,
     chat_id: int,
     bot_id_hint: int | None = None,
+    origin: str = "",
 ) -> None:
     reactions_enabled, reactions_history_enabled = await _resolve_toggles(
         chat_settings_repo, bot_config_repo, chat_id
@@ -178,6 +181,7 @@ async def _render_menu(
     text = f"{_MENU_TITLE[lang]}\n\n{status_line}"
     keyboard = reactions_menu_keyboard(
         lang,
+        origin=origin,
         chat_id=chat_id,
         reactions_enabled=reactions_enabled,
         reactions_history_enabled=reactions_history_enabled,
@@ -244,7 +248,13 @@ async def handle_reactions_menu(
 
     await callback.answer()
     await _render_menu(
-        callback, chat_settings_repo, bot_config_repo, lang, chat_id, kwargs.get("bot_id")
+        callback,
+        chat_settings_repo,
+        bot_config_repo,
+        lang,
+        chat_id,
+        kwargs.get("bot_id"),
+        parse_origin(parts, 3),
     )
 
 
@@ -284,10 +294,16 @@ async def handle_reactions_toggle(
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
     try:
         chat_id = int(parts[2])
-        field = parts[3]
+        raw_field = parts[3]
     except (ValueError, IndexError):
         await callback.answer("Invalid data", show_alert=True)
         return
+    # The keyboard now sends the registry's short code (rx/rh) to leave room
+    # for the origin token in the 64-byte payload; the full column name is
+    # still accepted so a keyboard rendered before that change keeps working.
+    spec = field_by_code(raw_field)
+    field = raw_field if raw_field in _TOGGLE_FIELDS else (spec.key if spec else "")
+    origin = parse_origin(parts, 4)
     if field not in _TOGGLE_FIELDS:
         await callback.answer(_INVALID_FIELD[lang], show_alert=True)
         return
@@ -306,10 +322,12 @@ async def handle_reactions_toggle(
         if bot_id is not None and not await is_bot_chat_admin(callback.bot, chat_id, bot_id):
             await callback.answer(_NOT_ADMIN_WARNING[lang], show_alert=True)
             await _render_menu(
-                callback, chat_settings_repo, bot_config_repo, lang, chat_id, bot_id_hint
+                callback, chat_settings_repo, bot_config_repo, lang, chat_id, bot_id_hint, origin
             )
             return
 
     toggle_copy = _TOGGLE_LABELS[field]["on" if new_value else "off"]
     await callback.answer(toggle_copy[lang])
-    await _render_menu(callback, chat_settings_repo, bot_config_repo, lang, chat_id, bot_id_hint)
+    await _render_menu(
+        callback, chat_settings_repo, bot_config_repo, lang, chat_id, bot_id_hint, origin
+    )

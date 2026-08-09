@@ -174,7 +174,7 @@ class TestChatPanelRootKeyboard:
             kb_status=True,
             reactions_status=(False, True),
         )
-        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
+        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}:p")
         assert btn is not None
         assert "✅" in btn.text
         # kb_enabled must never be reachable through the group-screen prefix.
@@ -192,7 +192,7 @@ class TestChatPanelRootKeyboard:
             kb_status=False,
             reactions_status=(True, False),
         )
-        btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}")
+        btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}:p")
         assert btn is not None
         assert btn.text.count("✅") == 1
         assert btn.text.count("⚫") == 1
@@ -365,7 +365,7 @@ class TestInheritedMarkerRoot:
             kb_status=True,
             reactions_status=(False, True),
         )
-        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
+        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}:p")
         assert btn is not None
         assert "унаследовано" in btn.text
 
@@ -378,7 +378,7 @@ class TestInheritedMarkerRoot:
             kb_status=True,
             reactions_status=(False, True),
         )
-        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
+        btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}:p")
         assert btn is not None
         assert "унаследовано" not in btn.text
 
@@ -393,7 +393,7 @@ class TestInheritedMarkerRoot:
             kb_status=False,
             reactions_status=(True, False),
         )
-        btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}")
+        btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}:p")
         assert btn is not None
         assert btn.text.count("унаследовано") == 1
         # The marked half is the history status, which comes after " / ".

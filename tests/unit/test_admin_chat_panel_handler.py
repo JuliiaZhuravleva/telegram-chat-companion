@@ -151,7 +151,7 @@ class TestRenderChatPanel:
             btn
             for row_ in keyboard.inline_keyboard
             for btn in row_
-            if btn.callback_data == f"adm_kb_menu:ru:{CHAT_ID}"
+            if btn.callback_data == f"adm_kb_menu:ru:{CHAT_ID}:p"
         )
         assert "✅" in kb_btn.text  # fresh (True), not the stale cached False
 
@@ -159,7 +159,7 @@ class TestRenderChatPanel:
             btn
             for row_ in keyboard.inline_keyboard
             for btn in row_
-            if btn.callback_data == f"adm_react_menu:ru:{CHAT_ID}"
+            if btn.callback_data == f"adm_react_menu:ru:{CHAT_ID}:p"
         )
         # reactions_enabled fresh=True, reactions_history_enabled fresh=False
         assert react_btn.text.count("✅") == 1

@@ -19,6 +19,8 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.keyboards.nav import back_callback, origin_suffix
+
 
 def kb_chat_picker_keyboard(
     chats: list[dict[str, object]],
@@ -63,36 +65,46 @@ def kb_chat_picker_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_menu_keyboard(lang: str, *, chat_id: int, kb_enabled: bool) -> InlineKeyboardMarkup:
+def kb_menu_keyboard(
+    lang: str, *, chat_id: int, kb_enabled: bool, origin: str = ""
+) -> InlineKeyboardMarkup:
     """Per-chat KB submenu: organizers + kb_enabled toggle.
 
     Toggle copy per docs/design/kb-copy-register.md §4 (reuses the
     notifications_keyboard boolean-toggle convention verbatim).
+
+    ``origin`` (see ``keyboards/nav.py``) decides where Back goes and is
+    carried into every button that leads to a screen which comes back
+    *here* — otherwise toggling or visiting organizers would silently reset
+    the return path the admin arrived on.
     """
     status = "✅" if kb_enabled else "⚫"
     label = "Сбор фактов" if lang == "ru" else "Fact collection"
     toggle_text = f"📚 {label}: {status}"
 
     orgs_text = "👥 Организаторы" if lang == "ru" else "👥 Organizers"
+    suffix = origin_suffix(origin)
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=orgs_text,
-                    callback_data=f"adm_kb_orgs:{lang}:{chat_id}:0",
+                    callback_data=f"adm_kb_orgs:{lang}:{chat_id}:0{suffix}",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text=toggle_text,
-                    callback_data=f"adm_kb_toggle:{lang}:{chat_id}",
+                    callback_data=f"adm_kb_toggle:{lang}:{chat_id}{suffix}",
                 ),
             ],
             [
                 InlineKeyboardButton(
                     text="◀️ Назад" if lang == "ru" else "◀️ Back",
-                    callback_data=f"adm_kb:{lang}:0",
+                    callback_data=back_callback(
+                        origin, lang=lang, chat_id=chat_id, default=f"adm_kb:{lang}:0"
+                    ),
                 ),
             ],
         ]
@@ -107,13 +119,18 @@ def kb_organizers_keyboard(
     page: int,
     total: int,
     per_page: int = 10,
+    origin: str = "",
 ) -> InlineKeyboardMarkup:
     """Paginated organizer list with per-row remove + add-organizer row.
 
     Per docs/design/kb-copy-register.md §5: tapping a row removes that
     organizer directly (no confirm dialog — low-blast-radius admin edit).
+
+    ``origin`` rides through every button here because they all lead back to
+    the KB submenu, whose Back target it decides (``keyboards/nav.py``).
     """
     rows: list[list[InlineKeyboardButton]] = []
+    suffix = origin_suffix(origin)
 
     for org in organizers:
         user_id = org.get("user_id")
@@ -122,7 +139,7 @@ def kb_organizers_keyboard(
             [
                 InlineKeyboardButton(
                     text=display_name,
-                    callback_data=f"adm_kb_org_rm:{lang}:{chat_id}:{user_id}",
+                    callback_data=f"adm_kb_org_rm:{lang}:{chat_id}:{user_id}{suffix}",
                 ),
             ]
         )
@@ -134,7 +151,7 @@ def kb_organizers_keyboard(
             nav.append(
                 InlineKeyboardButton(
                     text="◀️",
-                    callback_data=f"adm_kb_orgs:{lang}:{chat_id}:{page - 1}",
+                    callback_data=f"adm_kb_orgs:{lang}:{chat_id}:{page - 1}{suffix}",
                 )
             )
         nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
@@ -142,7 +159,7 @@ def kb_organizers_keyboard(
             nav.append(
                 InlineKeyboardButton(
                     text="▶️",
-                    callback_data=f"adm_kb_orgs:{lang}:{chat_id}:{page + 1}",
+                    callback_data=f"adm_kb_orgs:{lang}:{chat_id}:{page + 1}{suffix}",
                 )
             )
         rows.append(nav)
@@ -152,7 +169,7 @@ def kb_organizers_keyboard(
         [
             InlineKeyboardButton(
                 text=add_text,
-                callback_data=f"adm_kb_org_add:{lang}:{chat_id}",
+                callback_data=f"adm_kb_org_add:{lang}:{chat_id}{suffix}",
             ),
         ]
     )
@@ -161,14 +178,16 @@ def kb_organizers_keyboard(
         [
             InlineKeyboardButton(
                 text="◀️ Назад" if lang == "ru" else "◀️ Back",
-                callback_data=f"adm_kb_menu:{lang}:{chat_id}",
+                callback_data=f"adm_kb_menu:{lang}:{chat_id}{suffix}",
             ),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_org_add_prompt_keyboard(lang: str, *, chat_id: int) -> InlineKeyboardMarkup:
+def kb_org_add_prompt_keyboard(
+    lang: str, *, chat_id: int, origin: str = ""
+) -> InlineKeyboardMarkup:
     """Single-button footer on the add-organizer prompt (B-2 picker entry point).
 
     Offers "show participants" as an alternative to the forward/@username
@@ -181,7 +200,7 @@ def kb_org_add_prompt_keyboard(lang: str, *, chat_id: int) -> InlineKeyboardMark
             [
                 InlineKeyboardButton(
                     text=text,
-                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:0",
+                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:0{origin_suffix(origin)}",
                 ),
             ],
         ]
@@ -216,6 +235,7 @@ def kb_organizer_picker_keyboard(
     page: int,
     total: int,
     per_page: int = 5,
+    origin: str = "",
 ) -> InlineKeyboardMarkup:
     """Paginated participant picker for adding an organizer (B-2).
 
@@ -225,6 +245,7 @@ def kb_organizer_picker_keyboard(
     row (low-blast-radius: easy to undo via that same remove button).
     """
     rows: list[list[InlineKeyboardButton]] = []
+    suffix = origin_suffix(origin)
 
     for candidate in candidates:
         user_id = candidate.get("user_id")
@@ -232,7 +253,7 @@ def kb_organizer_picker_keyboard(
             [
                 InlineKeyboardButton(
                     text=_candidate_label(candidate),
-                    callback_data=f"adm_kb_org_pick:{lang}:{chat_id}:{user_id}",
+                    callback_data=f"adm_kb_org_pick:{lang}:{chat_id}:{user_id}{suffix}",
                 ),
             ]
         )
@@ -244,7 +265,7 @@ def kb_organizer_picker_keyboard(
             nav.append(
                 InlineKeyboardButton(
                     text="◀️",
-                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:{page - 1}",
+                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:{page - 1}{suffix}",
                 )
             )
         nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
@@ -252,7 +273,7 @@ def kb_organizer_picker_keyboard(
             nav.append(
                 InlineKeyboardButton(
                     text="▶️",
-                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:{page + 1}",
+                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:{page + 1}{suffix}",
                 )
             )
         rows.append(nav)
@@ -261,7 +282,7 @@ def kb_organizer_picker_keyboard(
         [
             InlineKeyboardButton(
                 text="◀️ Назад" if lang == "ru" else "◀️ Back",
-                callback_data=f"adm_kb_orgs:{lang}:{chat_id}:0",
+                callback_data=f"adm_kb_orgs:{lang}:{chat_id}:0{suffix}",
             ),
         ]
     )

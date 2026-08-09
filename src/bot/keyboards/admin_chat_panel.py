@@ -41,6 +41,7 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.keyboards.nav import PANEL_ORIGIN
 from src.bot.settings_fields import FieldGroup, FieldSpec, FieldType, fields_by_group, group_label
 from src.models.chat_config import ChatConfig
 
@@ -256,7 +257,9 @@ def chat_panel_root_keyboard(
             text = f"{field.label_for(lang)}: {_status(kb_status)}{marker}"
             rows.append(
                 [
-                    InlineKeyboardButton(text=text, callback_data=f"adm_kb_menu:{lang}:{chat_id}"),
+                    InlineKeyboardButton(
+                        text=text, callback_data=f"adm_kb_menu:{lang}:{chat_id}:{PANEL_ORIGIN}"
+                    ),
                 ]
             )
             continue
@@ -281,7 +284,7 @@ def chat_panel_root_keyboard(
             rows.append(
                 [
                     InlineKeyboardButton(
-                        text=text, callback_data=f"adm_react_menu:{lang}:{chat_id}"
+                        text=text, callback_data=f"adm_react_menu:{lang}:{chat_id}:{PANEL_ORIGIN}"
                     ),
                 ]
             )
