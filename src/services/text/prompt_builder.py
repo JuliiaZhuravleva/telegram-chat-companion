@@ -426,8 +426,20 @@ def trim_facts_to_budget(
     `sorted()` is stable. Per-fact `fact_text` is then pre-capped to
     `MAX_FACT_CHARS`, and facts are accumulated in that order until the budget
     is exhausted; the tail is dropped.
+
+    `chat_facts.salience` is nullable (`alembic/versions/014_chat_facts.py` --
+    `FLOAT DEFAULT 0.5`, no NOT NULL), and `search_by_similarity()` returns
+    rows as plain dicts, so the key is always present and may be `None`. A
+    bare `.get("salience", 0.5)` would not substitute the default in that case
+    and `sorted()` would raise `TypeError` comparing `None` to `float` -- in
+    the reply hot path. The explicit `is None` test (not `or`) is deliberate:
+    `or` would also rewrite a legitimate salience of `0.0` to `0.5`.
     """
-    facts = sorted(facts, key=lambda f: f.get("salience", 0.5), reverse=True)
+    facts = sorted(
+        facts,
+        key=lambda f: 0.5 if f.get("salience") is None else f["salience"],
+        reverse=True,
+    )
     trimmed: list[dict[str, Any]] = []
     used_tokens = 0
     for fact in facts:

@@ -733,6 +733,34 @@ class TestTrimFactsToBudget:
         result = trim_facts_to_budget(facts)
         assert [f["fact_text"] for f in result] == ["arrived first", "arrived second"]
 
+    def test_null_salience_does_not_crash_the_sort(self):
+        """`chat_facts.salience` is nullable (migration 014: FLOAT DEFAULT 0.5,
+        no NOT NULL) and rows reach here as plain dicts, so the key exists with
+        value None -- `.get("salience", 0.5)` does NOT substitute the default.
+        Sorting then raised TypeError comparing None to float, in the reply
+        hot path. A NULL must sort as the 0.5 default instead."""
+        facts = [
+            {"fact_text": "null salience", "salience": None},
+            {"fact_text": "high salience", "salience": 0.9},
+            {"fact_text": "low salience", "salience": 0.1},
+        ]
+        result = trim_facts_to_budget(facts)
+        assert [f["fact_text"] for f in result] == [
+            "high salience",
+            "null salience",
+            "low salience",
+        ]
+
+    def test_zero_salience_is_not_rewritten_to_the_default(self):
+        """Guards the `or` trap: `f.get("salience") or 0.5` would turn a
+        legitimate 0.0 into 0.5 and float it above a 0.1 fact."""
+        facts = [
+            {"fact_text": "zero salience", "salience": 0.0},
+            {"fact_text": "low salience", "salience": 0.1},
+        ]
+        result = trim_facts_to_budget(facts)
+        assert [f["fact_text"] for f in result] == ["low salience", "zero salience"]
+
     def test_higher_salience_survives_tight_budget_over_more_similar_fact(self):
         """Ported from the retrieval-layer ADR-0003 Part 2 test
         (`test_salience_wins_over_similarity`, now superseded by ADR-0009 at
