@@ -89,10 +89,16 @@ def chat_panel_picker_keyboard(
     for chat in chats:
         chat_id = chat.get("chat_id")
         title = str(chat.get("chat_title") or chat_id)[:35]
+        # C-1: message count is not an id (no Telegram bare-number autolink
+        # concern) -- shown so the activity-sorted order doesn't look
+        # arbitrary. Key is absent for callers that don't opt into
+        # activity sorting, so this stays a no-op suffix for them.
+        count = chat.get("message_count_24h")
+        text = f"{title} · {count}" if count is not None else title
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=title,
+                    text=text,
                     callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
                 ),
             ]

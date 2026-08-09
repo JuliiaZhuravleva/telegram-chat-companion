@@ -215,6 +215,55 @@ class AdminRepository:
         )
         return [dict(r) for r in rows], int(total)
 
+    async def get_enabled_chats_page_by_activity(
+        self, page: int, per_page: int = 10, window: timedelta = timedelta(hours=24)
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Paginated enabled chats, most active first (C-1).
+
+        "Active" = message count in ``chat_messages`` within a rolling
+        ``window`` (default last 24h). One aggregate query (LEFT JOIN a
+        per-chat COUNT subquery, no N+1) -- the subquery leans on the
+        existing ``idx_chat_messages_chat_created (chat_id, created_at DESC)``
+        index from migration 002. Ties (equal/zero message count, including
+        chats with none in the window) fall back to the same
+        ``chat_title NULLS LAST, chat_id`` order ``get_enabled_chats_page``
+        uses, so the ordering stays deterministic rather than looking random.
+
+        Each row carries an extra ``message_count_24h`` key (int) on top of
+        ``get_enabled_chats_page``'s ``chat_id``/``chat_title``/``chat_type``,
+        for the picker caption. This is a dedicated method rather than a
+        change to ``get_enabled_chats_page`` because that method is shared by
+        the KB/Reactions/whitelist pickers (title-sorted, out of C-1's scope)
+        -- keeping them separate avoids re-ordering pickers nobody asked to
+        change.
+        """
+        total = (
+            await self._pool.fetchval(
+                "SELECT COUNT(*) FROM chat_settings WHERE enabled = true",
+            )
+            or 0
+        )
+        rows = await self._pool.fetch(
+            """
+            SELECT cs.chat_id, cs.chat_title, cs.chat_type,
+                   COALESCE(mc.message_count, 0)::bigint AS message_count_24h
+            FROM chat_settings cs
+            LEFT JOIN (
+                SELECT chat_id, COUNT(*) AS message_count
+                FROM chat_messages
+                WHERE created_at > NOW() - $1::interval
+                GROUP BY chat_id
+            ) mc ON mc.chat_id = cs.chat_id
+            WHERE cs.enabled = true
+            ORDER BY message_count_24h DESC, cs.chat_title NULLS LAST, cs.chat_id
+            LIMIT $2 OFFSET $3
+            """,
+            window,
+            per_page,
+            page * per_page,
+        )
+        return [dict(r) for r in rows], int(total)
+
     async def get_pending_attempts_page(
         self, page: int, per_page: int = 5
     ) -> tuple[list[dict[str, Any]], int]:

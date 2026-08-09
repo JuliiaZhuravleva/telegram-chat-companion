@@ -2,7 +2,8 @@
 navigation: B-2, ADR-0010).
 
 Handles:
-- ``adm_pnl:*``       — chat picker (own dedicated picker, Decision 4)
+- ``adm_pnl:*``       — chat picker (own dedicated picker, Decision 4; sorted
+  most-active-first by rolling-24h message count with a caption counter, C-1)
 - ``adm_pnl_menu:*``  — root section-list render (``render_chat_panel``,
   ADR-0006 Decision 1 / ADR-0010 Decisions 1, 3, 6)
 - ``adm_pnl_grp:*``   — one field-owning group's screen
@@ -209,11 +210,15 @@ async def render_chat_panel_group(
 async def _render_picker(
     callback: CallbackQuery, admin_repo: AdminRepository, lang: str, page: int
 ) -> None:
-    chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
+    # C-1: most-active-first (msgs in the last rolling 24h), with a per-chat
+    # counter in the caption -- otherwise the order looks arbitrary. Own
+    # method (not the shared get_enabled_chats_page): KB/Reactions/whitelist
+    # pickers stay title-sorted, unaffected.
+    chats, total = await admin_repo.get_enabled_chats_page_by_activity(page, _PER_PAGE)
     total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
     if page >= total_pages:
         page = max(0, total_pages - 1)
-        chats, total = await admin_repo.get_enabled_chats_page(page, _PER_PAGE)
+        chats, total = await admin_repo.get_enabled_chats_page_by_activity(page, _PER_PAGE)
 
     text = _PICKER_TITLE[lang] if total else f"{_PANEL_TITLE[lang]}\n\n{_NO_CHATS[lang]}"
     keyboard = chat_panel_picker_keyboard(

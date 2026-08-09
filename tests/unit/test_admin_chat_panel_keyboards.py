@@ -57,6 +57,31 @@ class TestChatPanelPickerKeyboard:
         callbacks = _get_callbacks(kb)
         assert "adm_pnl:ru:1" in callbacks
 
+    def test_shows_message_count_in_caption_when_present(self):
+        """C-1: counter in the caption, so the activity order doesn't look
+        arbitrary."""
+        chats = [{"chat_id": 111, "chat_title": "Alpha", "message_count_24h": 42}]
+        kb = chat_panel_picker_keyboard(chats, lang="ru", page=0, total=1, per_page=10)
+        labels = _get_labels(kb)
+        assert "Alpha · 42" in labels
+
+    def test_shows_zero_count_explicitly(self):
+        """A zero count still renders (not hidden) -- it's the tie-break
+        signal, not an id, so no autolink concern."""
+        chats = [{"chat_id": 111, "chat_title": "Quiet", "message_count_24h": 0}]
+        kb = chat_panel_picker_keyboard(chats, lang="ru", page=0, total=1, per_page=10)
+        labels = _get_labels(kb)
+        assert "Quiet · 0" in labels
+
+    def test_omits_count_suffix_when_key_absent(self):
+        """Callers that don't opt into activity sorting (none currently, but
+        the keyboard must stay backward-compatible) get a bare title."""
+        chats = [{"chat_id": 111, "chat_title": "Alpha"}]
+        kb = chat_panel_picker_keyboard(chats, lang="ru", page=0, total=1, per_page=10)
+        labels = _get_labels(kb)
+        assert "Alpha" in labels
+        assert not any("·" in label for label in labels)
+
 
 class TestFormatValue:
     def test_str_list_joins_items(self):

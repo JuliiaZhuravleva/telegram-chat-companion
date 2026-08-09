@@ -75,7 +75,9 @@ def _make_chat_config_service(config: ChatConfig) -> MagicMock:
 
 def _make_admin_repo(chats: list[dict[str, object]] | None = None, total: int = 0) -> MagicMock:
     repo = MagicMock()
-    repo.get_enabled_chats_page = AsyncMock(return_value=(chats or [], total))
+    # C-1: the picker uses its own activity-sorted method, not the
+    # title-sorted one shared by KB/Reactions/whitelist.
+    repo.get_enabled_chats_page_by_activity = AsyncMock(return_value=(chats or [], total))
     return repo
 
 

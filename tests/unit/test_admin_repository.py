@@ -196,6 +196,77 @@ class TestGetEnabledChatsPage:
         assert chats == []
 
 
+class TestGetEnabledChatsPageByActivity:
+    """C-1: activity-sorted picker method (dedicated -- not shared with
+    the title-sorted KB/Reactions/whitelist pickers)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_chats_with_counts_and_total(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 2
+        pool.fetch.return_value = [
+            {"chat_id": -100, "chat_title": "Busy", "chat_type": "group", "message_count_24h": 42},
+            {"chat_id": -200, "chat_title": "Quiet", "chat_type": "group", "message_count_24h": 0},
+        ]
+
+        chats, total = await repo_.get_enabled_chats_page_by_activity(0, per_page=5)
+
+        assert total == 2
+        assert len(chats) == 2
+        assert chats[0]["message_count_24h"] == 42
+        assert chats[1]["message_count_24h"] == 0
+
+    @pytest.mark.asyncio
+    async def test_empty_result(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 0
+        pool.fetch.return_value = []
+
+        chats, total = await repo_.get_enabled_chats_page_by_activity(0)
+        assert total == 0
+        assert chats == []
+
+    @pytest.mark.asyncio
+    async def test_single_query_no_n_plus_1(self, repo):
+        """One fetch() call regardless of how many chats come back -- the
+        aggregate must be a single LEFT JOIN, not a per-chat lookup."""
+        repo_, pool = repo
+        pool.fetchval.return_value = 50
+        pool.fetch.return_value = [
+            {"chat_id": -i, "chat_title": f"Chat {i}", "chat_type": "group", "message_count_24h": i}
+            for i in range(10)
+        ]
+
+        await repo_.get_enabled_chats_page_by_activity(0, per_page=10)
+
+        pool.fetch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_passes_default_24h_window_and_pagination_params(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 0
+        pool.fetch.return_value = []
+
+        await repo_.get_enabled_chats_page_by_activity(page=2, per_page=10)
+
+        call_args = pool.fetch.call_args[0]
+        # (query, window, per_page, offset)
+        assert call_args[1] == timedelta(hours=24)
+        assert call_args[2] == 10
+        assert call_args[3] == 20  # page 2 * per_page 10
+
+    @pytest.mark.asyncio
+    async def test_accepts_custom_window(self, repo):
+        repo_, pool = repo
+        pool.fetchval.return_value = 0
+        pool.fetch.return_value = []
+
+        await repo_.get_enabled_chats_page_by_activity(0, window=timedelta(hours=1))
+
+        call_args = pool.fetch.call_args[0]
+        assert call_args[1] == timedelta(hours=1)
+
+
 class TestGetPendingAttemptsPage:
     @pytest.mark.asyncio
     async def test_returns_attempts_and_total(self, repo):
