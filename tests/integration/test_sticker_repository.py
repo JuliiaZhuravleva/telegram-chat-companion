@@ -160,6 +160,188 @@ class TestExplicitnessScoreUpsert:
         assert row["explicitness_score"] is None
 
 
+class TestManualExplicitnessScoreUpsert:
+    """ADR-0009 Decisions 4-6: a *manually* set explicitness_score is sticky
+    across re-analysis — the priority rule this ADR exists to add on top of
+    TestExplicitnessScoreUpsert's plain COALESCE behaviour above (which only
+    ever protects against a *missing* score, never against a fresh, real one).
+    Real Postgres, real save_sticker() upsert — Q-1 per ADR-0009's own
+    "Implementation notes for Q-1".
+    """
+
+    @pytest.mark.asyncio
+    async def test_manual_score_survives_reanalysis_producing_a_fresh_score(
+        self, repo: StickerRepository
+    ) -> None:
+        """Decision 4's CASE branch ignores EXCLUDED.explicitness_score
+        entirely once explicitness_is_manual is set — even a *successful*
+        re-analysis producing a real, different number must not overwrite a
+        manual value. This is exactly the case
+        TestExplicitnessScoreUpsert.test_fresh_valid_score_replaces_old does
+        NOT cover: that row is never manual, so the plain COALESCE branch
+        applies there, not this CASE."""
+        await repo.save_sticker(
+            file_unique_id="expl-man-001",
+            file_id="file-expl-man-001",
+            visual_description="Manually vetted sticker",
+        )
+        await repo.set_manual_explicitness_score("expl-man-001", 0.1)
+
+        # learn()'s normal re-analysis path: a full, successful Vision run
+        # producing a different, real score.
+        await repo.save_sticker(
+            file_unique_id="expl-man-001",
+            file_id="file-expl-man-001",
+            visual_description="Re-analyzed sticker",
+            explicitness_score=0.9,
+        )
+
+        row = await repo.get_by_file_unique_id("expl-man-001")
+        assert row is not None
+        assert row["explicitness_score"] == pytest.approx(0.1)
+        assert row["explicitness_is_manual"] is True
+
+    @pytest.mark.asyncio
+    async def test_manual_flag_itself_is_never_touched_by_save_sticker(
+        self, repo: StickerRepository
+    ) -> None:
+        """explicitness_is_manual is deliberately absent from save_sticker()'s
+        SET clause (Decision 4) — only set_manual_explicitness_score() /
+        reset_explicitness_to_auto() may change it. A non-manual row must stay
+        non-manual across repeated writes (Postgres leaves an unlisted column
+        untouched on UPDATE — this pins that behaviour, not just infers it)."""
+        await repo.save_sticker(file_unique_id="expl-nm-001", file_id="f-expl-nm-001")
+        await repo.save_sticker(
+            file_unique_id="expl-nm-001",
+            file_id="f-expl-nm-001",
+            explicitness_score=0.4,
+        )
+        row = await repo.get_by_file_unique_id("expl-nm-001")
+        assert row is not None
+        assert row["explicitness_is_manual"] is False
+        assert row["explicitness_score"] == pytest.approx(0.4)
+
+    @pytest.mark.asyncio
+    async def test_reset_to_auto_clears_both_columns(self, repo: StickerRepository) -> None:
+        """Decision 5: reset clears the value to NULL, not to a remembered
+        prior automatic number — there isn't one to remember."""
+        await repo.save_sticker(file_unique_id="expl-rst-001", file_id="f-expl-rst-001")
+        await repo.set_manual_explicitness_score("expl-rst-001", 0.6)
+
+        await repo.reset_explicitness_to_auto("expl-rst-001")
+
+        row = await repo.get_by_file_unique_id("expl-rst-001")
+        assert row is not None
+        assert row["explicitness_score"] is None
+        assert row["explicitness_is_manual"] is False
+
+    @pytest.mark.asyncio
+    async def test_reset_then_reanalysis_overwrites_with_fresh_score(
+        self, repo: StickerRepository
+    ) -> None:
+        """Confirms reset genuinely re-opens the write path (ADR-0009's
+        "Implementation notes for Q-1") rather than just flipping a flag
+        nothing then reads correctly: a subsequent save_sticker() call
+        (learn()'s normal path) must be free to write a brand-new score once
+        explicitness_is_manual is back to false."""
+        await repo.save_sticker(file_unique_id="expl-rst-002", file_id="f-expl-rst-002")
+        await repo.set_manual_explicitness_score("expl-rst-002", 0.6)
+        await repo.reset_explicitness_to_auto("expl-rst-002")
+
+        await repo.save_sticker(
+            file_unique_id="expl-rst-002",
+            file_id="f-expl-rst-002",
+            visual_description="Fresh vision analysis",
+            explicitness_score=0.3,
+        )
+
+        row = await repo.get_by_file_unique_id("expl-rst-002")
+        assert row is not None
+        assert row["explicitness_score"] == pytest.approx(0.3)
+        assert row["explicitness_is_manual"] is False
+
+    @pytest.mark.asyncio
+    async def test_duplicate_copy_inherits_manual_score_and_flag_together(
+        self, repo: StickerRepository
+    ) -> None:
+        """Decision 6: a duplicate sticker's INSERT must carry
+        explicitness_is_manual=True alongside the copied score — this is
+        learning.py's duplicate-copy save_sticker() call
+        (``copied["explicitness_is_manual"]``), exercised here at the
+        repository boundary against real Postgres since Q-1's scope is the
+        upsert/schema, not the Vision pipeline around it."""
+        await repo.save_sticker(
+            file_unique_id="expl-dup-canon",
+            file_id="f-expl-dup-canon",
+            visual_description="Canonical vetted sticker",
+        )
+        await repo.set_manual_explicitness_score("expl-dup-canon", 0.05)
+        canonical = await repo.get_by_file_unique_id("expl-dup-canon")
+        assert canonical is not None
+
+        # learning.py's duplicate-copy path: a brand-new file_unique_id,
+        # INSERTed with the canonical row's vision-derived columns copied
+        # verbatim, including explicitness_score AND explicitness_is_manual.
+        await repo.save_sticker(
+            file_unique_id="expl-dup-copy",
+            file_id="f-expl-dup-copy",
+            visual_description=canonical["visual_description"],
+            explicitness_score=canonical["explicitness_score"],
+            explicitness_is_manual=canonical["explicitness_is_manual"],
+            duplicate_of_file_unique_id="expl-dup-canon",
+        )
+
+        duplicate = await repo.get_by_file_unique_id("expl-dup-copy")
+        assert duplicate is not None
+        assert duplicate["explicitness_score"] == pytest.approx(0.05)
+        assert duplicate["explicitness_is_manual"] is True
+
+    @pytest.mark.asyncio
+    async def test_duplicate_with_inherited_manual_flag_survives_its_own_first_reanalysis(
+        self, repo: StickerRepository
+    ) -> None:
+        """The two-hop case the source plan's bug was really about (ADR-0009's
+        "Implementation notes for Q-1"): a duplicate that inherited a manual
+        score+flag must ALSO survive its own first re-analysis unchanged — not
+        just the canonical row's. Without Decision 6 (copying the flag
+        together with the value), the duplicate's freshly-INSERTed
+        explicitness_is_manual would default back to false and its first
+        re-analysis would silently clobber the inherited score, one hop
+        removed from the original bug this ADR exists to prevent."""
+        await repo.save_sticker(
+            file_unique_id="expl-dup2-canon",
+            file_id="f-expl-dup2-canon",
+            visual_description="Canonical vetted sticker",
+        )
+        await repo.set_manual_explicitness_score("expl-dup2-canon", 0.15)
+        canonical = await repo.get_by_file_unique_id("expl-dup2-canon")
+        assert canonical is not None
+
+        await repo.save_sticker(
+            file_unique_id="expl-dup2-copy",
+            file_id="f-expl-dup2-copy",
+            visual_description=canonical["visual_description"],
+            explicitness_score=canonical["explicitness_score"],
+            explicitness_is_manual=canonical["explicitness_is_manual"],
+            duplicate_of_file_unique_id="expl-dup2-canon",
+        )
+
+        # The duplicate's own first re-analysis (e.g. a dedup-hash rescan, or
+        # an admin "🔄 Запустить заново" on the copy itself) produces a
+        # different, real score.
+        await repo.save_sticker(
+            file_unique_id="expl-dup2-copy",
+            file_id="f-expl-dup2-copy",
+            visual_description="Re-analyzed duplicate",
+            explicitness_score=0.95,
+        )
+
+        duplicate = await repo.get_by_file_unique_id("expl-dup2-copy")
+        assert duplicate is not None
+        assert duplicate["explicitness_score"] == pytest.approx(0.15)
+        assert duplicate["explicitness_is_manual"] is True
+
+
 # ---------------------------------------------------------------------------
 # increment_usage
 # ---------------------------------------------------------------------------
