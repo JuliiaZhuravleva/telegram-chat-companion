@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T16:04:30Z",
+  "role": "evaluator",
+  "item_id": "Q-1",
+  "verdict": "PASS",
+  "evidence": "Independently ran the 45 tests in tests/integration/test_sticker_repository.py + test_migration_026_explicitness_manual_flag_schema.py against real Postgres (testcontainers) — all pass; confirmed by my own CASE-clause revert/restore (sha256-verified identical after restore) that exactly the 2 priority-rule tests fail on the pre-ADR-0009 COALESCE behavior; ruff check clean; test coverage matches all 4 bullets of ADR-0009's 'Implementation notes for Q-1' (manual survives reanalysis, duplicate inherits score+flag together and survives its own reanalysis, reset re-opens the write path, migration 026 NOT NULL DEFAULT false polarity) and A-3's actual save_sticker()/stickers.py implementation these tests exercise is confirmed done and matching.",
+  "regression_risk": "low",
+  "notes": "Commit is pathspec-limited to the two test files as claimed; no scope creep into src/. Nothing further needed."
+}

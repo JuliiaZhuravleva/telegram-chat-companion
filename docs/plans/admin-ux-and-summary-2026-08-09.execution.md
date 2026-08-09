@@ -145,7 +145,7 @@ items:
   title: 'Копирайт: подписи полей/групп и краткие статусы на корневом экране новой панели'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - B-2
   estimated_effort: ~1ч, низкий риск
@@ -157,7 +157,10 @@ items:
     ts: null
     executor: null
     note: null
-  result: null
+  result:
+    kind: commit
+    ref: 37391ce
+    verification: 'pytest tests/unit/test_admin_chat_panel_keyboards.py tests/unit/test_admin_chat_panel_handler.py: 85 passed; broken-control check confirmed the enabled-count assertion fails when the count is faked; ruff + mypy clean'
 - id: C-1
   title: Сортировать пикер чатов по числу сообщений за 24ч + счётчик в подписи (один агрегатный запрос, без N+1)
   specialist: backend-dev
@@ -228,7 +231,7 @@ items:
   title: 'Быстрая команда /summary500 (сводка по 500 сообщениям): регистрация в command_registry.py + меню команд (3 языковых варианта)'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - E-1
   estimated_effort: ~1ч, низкий риск
@@ -240,53 +243,64 @@ items:
     ts: '2026-08-09T11:39:42Z'
     executor: pm-orchestrator
     note: 'Разблокировано владельцем (E): нужна и быстрая команда вдобавок к параметру. /summary500 = сводка по 500 сообщениям. Обязательна спека в command_registry.py, иначе CI падает; три языковых варианта скоупа.'
-  result: null
+  result:
+    kind: commit
+    ref: ebc36be
+    verification: 'pytest tests/unit/test_commands_handler.py tests/unit/test_command_registry.py: 77 passed (registry scope snapshot updated); full suite 2056 passed; ruff + mypy clean'
 - id: Q-1
   title: 'Интеграционный тест: ручная оценка стикера переживает повторный анализ (расширить TestExplicitnessScoreUpsert, реальная схема Postgres)'
   specialist: qa
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - A-3
   estimated_effort: ~1ч, низкий риск
-  confidence: null
+  confidence: 0.95
   consult_session_id: 61c8b3a2-fffe-451e-bd7a-d240383c5c84
-  specialist_session_id: null
+  specialist_session_id: 8e7711c5-d1e9-4a5b-9000-12c71f9b5f6e
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: null
-  result: null
+    ts: '2026-08-09T16:03:06Z'
+    executor: qa
+    note: 'Extended tests/integration/test_sticker_repository.py::TestExplicitnessScoreUpsert with a new TestManualExplicitnessScoreUpsert class (6 tests, real Postgres via testcontainers) covering ADR-0009''s ''Implementation notes for Q-1'' exactly: (1) manual score survives a *successful* re-analysis with a fresh real score -- pins Decision 4''s CASE branch, distinct from the pre-existing test_fresh_valid_score_replaces_old which only exercises the non-manual COALESCE path; (2) explicitness_is_manual is never touched by save_sticker() on a non-manual row; (3) reset_explicitness_to_auto() clears both columns to NULL/false (Decision 5); (4) reset genuinely re-opens the write path -- a subsequent save_sticker() overwrites with a fresh score; (5) duplicate-copy path inherits both explicitness_score AND explicitness_is_manual together from a manually-scored canonical row (Decision 6); (6) that inherited-manual duplicate ALSO survives its own first re-analysis unchanged -- the two-hop case the source plan''s bug was really about. Also added tests/integration/test_migration_026_explicitness_manual_flag_schema.py (3 tests) mirroring test_migration_024_025_tolerance_schema.py''s pattern, asserting explicitness_is_manual is NOT NULL DEFAULT false (deliberately opposite polarity from its nullable sibling columns, per Decision 3 -- commented so a future reader doesn''t ''fix'' it to match). Sanity-verified the two priority-rule tests are not vacuous: temporarily reverted stickers.py''s CASE clause to the old unconditional COALESCE (simulating the pre-ADR-0009 bug), re-ran the new class -- exactly the 2 tests pinning the CASE branch failed (0.95 obtained vs 0.15 expected), the other 4 (which don''t depend on that branch) still passed as expected; restored the file (sha256 verified identical to original) before committing. All 45 tests in the two files pass (9 new TestManualExplicitnessScoreUpsert + schema tests + pre-existing). ruff check + ruff format clean on both files. mypy: 1 pre-existing unrelated error on test_sticker_repository.py:26 (unused type:ignore), confirmed via git stash to predate this change, not introduced by it. Committed 589d672 (pathspec-limited to the two test files only -- this is a shared worktree with other in-flight uncommitted plan/envelope bookkeeping files, none of which were touched).'
+  result:
+    kind: commit
+    ref: 589d6720c2be335b2b23650b6ff0d8f8ec0694a7
+    verification: 'pytest tests/integration/test_sticker_repository.py tests/integration/test_migration_026_explicitness_manual_flag_schema.py -q: 45 passed; ruff check + ruff format --check clean; mypy: 1 pre-existing unrelated error (confirmed via git stash, not from this change); regression-check: reverted stickers.py''s Decision-4 CASE clause to old COALESCE, confirmed exactly the 2 priority-rule tests fail, restored (sha256-verified) before commit'
 - id: Q-2
   title: Чек-лист ручного смоук-теста в личке понятным языком + подготовленные тестовые данные/фикстуры для минимального ручного прогона
   specialist: qa
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - A-4
   - B-2
   - C-1
   - D-1
   estimated_effort: ~1.5ч, низкий риск
-  confidence: null
+  confidence: 0.85
   consult_session_id: 61c8b3a2-fffe-451e-bd7a-d240383c5c84
-  specialist_session_id: null
+  specialist_session_id: 5312e3ed-6e4d-41b8-9660-7120a4832c50
   retry_count: 0
   last_update:
-    ts: '2026-08-09T11:39:57Z'
-    executor: pm-orchestrator
-    note: 'Новый пункт по ответу владельца (Q2): к ручному смоук-тесту приложить чек-лист понятным языком и заранее подготовленные тестовые данные, чтобы прогон требовал минимум раздумий. Покрывает карточку стикера (A-1/A-4), панель настроек (B-2), пикер чатов (C-1), шорткат (D-1).'
-  result: null
+    ts: '2026-08-09T16:17:42Z'
+    executor: qa
+    note: 'Wrote docs/plans/admin-ux-and-summary-2026-08-09.q2-live-checklist.md (plain-language manual smoke checklist covering A-4/B-2/C-1/D-1''s DM-only surfaces -- everything unit tests can''t reach: real Vision analyze calls, real preset/free-text/reset button+FSM sequences for sticker explicitness, real grouped-panel breadcrumb navigation, real picker ordering, real /panel link/id/title-search commands) plus a companion .sql fixture (docs/plans/admin-ux-and-summary-2026-08-09.q2-fixtures.sql) that seeds 3 fake whitelisted chats so C-1/B-2/D-1 are exercisable with zero real Telegram groups (verified by reading the actual repository code: get_enabled_chats_page_by_activity/find_enabled_chats_by_title/render_chat_panel(_group) never call the Telegram API, only chat_settings/chat_messages) -- only D-1''s @username branch needs a real chat and is explicitly marked optional/already-unit-covered. Sticker states use ONE real sticker sent live by the tester (not a faked file_id, which would silently fail answer_sticker) plus one tiny SQL UPDATE for the one state (analyzed-but-unscored) that''s awkward to hit live. Both artifacts were dry-run verified before committing: the fixture SQL was executed inside a BEGIN/ROLLBACK transaction against the actually-running dev Postgres container (companion-postgres) reusing the real repository queries verbatim, confirming exact expected ordering (50/5/0 message counts) and title-search results; parse_chat_reference() was imported and run directly against the checklist''s exact example inputs (t.me/c/9999000001, raw id, title) confirming they resolve exactly as the checklist claims. All expected UI strings (button labels, FSM prompts, error/success messages, breadcrumb format) were sourced from the actual current source (tolerance.py''s format_explicitness_line, admin_sticker.py/admin_chat_panel.py''s text constants), not guessed. Fake ids are deliberately format-valid supergroup-shaped placeholders (-1009999000NNN pattern) so they exercise the real parse/render code paths -- this trips the repo''s own check_plan_artifacts.py telegram-id heuristic (by design, since it can''t distinguish fake-but-valid-shaped from real), so each flagged line carries the documented ''check-plan-artifacts: allow telegram-id'' waiver marker; re-ran the hook standalone to confirm clean before committing. Committed pathspec-limited (only the 2 new files) to 079c697 -- did not touch the shared envelope/lock/verdicts bookkeeping files already dirty in this worktree.'
+  result:
+    kind: commit
+    ref: 079c697
+    verification: 'python3 scripts/check_plan_artifacts.py on both new files: clean. Fixture SQL dry-run inside BEGIN/ROLLBACK against the live companion-postgres container using the actual repository queries copy-pasted from admin.py: returned exactly the expected 50/5/0 message_count_24h ordering and 2/3 title-search match counts. parse_chat_reference() imported and run against the checklist''s literal example strings (t.me/c/<fake-id> -> <fake-id>, raw <fake-id> -> itself, ''Bravo'' -> None/falls through to title search) -- all matched the checklist''s claims exactly. No unit/integration test suite applicable (this item produces a QA process artifact, not application code).'
 budget:
   max_usd_per_item: 6.0
-  max_usd_per_plan: 30.0
-  consumed_usd: 24.1727
+  max_usd_per_plan: 34.0
+  consumed_usd: 32.1853
   warn_emitted: true
 review_gate:
   why:
   - 'item D-1: per-item cap bumped $6.00→$8.00 — budget-consult: No commit landed but git status shows substantial on-topic uncommitted work matching D-1''s scope: handler routing +135 lines, keyboard +23, admin repo +25 (with new repo tests), and a new telegram-utils helper +78 (with tests) — only the handler itself lacks matching tests, suggesting that''s the remaining gap. Budget (not turns, 76/150 used) was the binding constraint on an item PRD-estimated as medium-high risk/2.5-4.5h against only a $6 cap, so sizing was likely too tight; bumping to $8.00 total (~$3.20 more, in line with the ~$0.063/turn burn rate) should cover finishing handler tests + commit while staying under the 2x cap bound and leaving ~$8.9 of the plan''s $12.1 headroom for the other 6 items.'
   - 'budget cap reached: consumed $24.1727 of $30.0'
+  - plan budget cap changed $30.00→$34.00 (consumed $24.17) — --max-budget-override on dispatcher run 2026-08-09T15:57:26Z
+  - 'budget cap reached: consumed $32.1853 of $34.0'
   approve_action: /execute-plan docs/plans/admin-ux-and-summary-2026-08-09.execution.md
   reject_action: /plan-fixes docs/plans/admin-ux-and-summary-2026-08-09.md --revise docs/plans/admin-ux-and-summary-2026-08-09.execution.md
 safe_to_replay_from: null
@@ -339,6 +353,20 @@ revision_number: 2
 last_revised_at: '2026-08-09T11:42:07Z'
 last_revised_by: pm-orchestrator
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

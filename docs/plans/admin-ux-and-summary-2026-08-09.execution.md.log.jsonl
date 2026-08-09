@@ -52,3 +52,12 @@
 {"ts":"2026-08-09T15:51:09Z","event":"specialist_verdict","item":"E-1","verdict":"PASS","cost_usd":3.8095272000000007}
 {"ts":"2026-08-09T15:52:04Z","event":"evaluator","item":"E-1","verdict":"PASS","cost_usd":0.3278226}
 {"ts":"2026-08-09T15:52:05Z","event":"halt","item":"","verdict":"BUDGET","cost_usd":0.0}
+{"ts":"2026-08-09T15:57:26Z","event":"execute_plan_start","item":"","verdict":"","cost_usd":0.0}
+{"ts":"2026-08-09T15:57:26Z","event":"budget_warn","item":"","verdict":"","cost_usd":0.0}
+{"ts":"2026-08-09T15:57:27Z","event":"dispatch","item":"Q-1","verdict":"","cost_usd":0.0}
+{"ts":"2026-08-09T16:03:06Z","event":"specialist_verdict","item":"Q-1","verdict":"PASS","cost_usd":2.2260479999999996}
+{"ts":"2026-08-09T16:04:40Z","event":"evaluator","item":"Q-1","verdict":"PASS","cost_usd":0.5535593999999999}
+{"ts":"2026-08-09T16:04:41Z","event":"dispatch","item":"Q-2","verdict":"","cost_usd":0.0}
+{"ts":"2026-08-09T16:17:42Z","event":"specialist_verdict","item":"Q-2","verdict":"PASS","cost_usd":4.3452726}
+{"ts":"2026-08-09T16:19:58Z","event":"evaluator","item":"Q-2","verdict":"PASS","cost_usd":0.8877071999999999}
+{"ts":"2026-08-09T16:19:58Z","event":"halt","item":"","verdict":"BUDGET","cost_usd":0.0}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T16:17:36Z",
+  "role": "specialist",
+  "item_id": "Q-2",
+  "verdict": "PASS",
+  "cost_usd": 4.2,
+  "notes": "Wrote docs/plans/admin-ux-and-summary-2026-08-09.q2-live-checklist.md (plain-language manual smoke checklist covering A-4/B-2/C-1/D-1's DM-only surfaces -- everything unit tests can't reach: real Vision analyze calls, real preset/free-text/reset button+FSM sequences for sticker explicitness, real grouped-panel breadcrumb navigation, real picker ordering, real /panel link/id/title-search commands) plus a companion .sql fixture (docs/plans/admin-ux-and-summary-2026-08-09.q2-fixtures.sql) that seeds 3 fake whitelisted chats so C-1/B-2/D-1 are exercisable with zero real Telegram groups (verified by reading the actual repository code: get_enabled_chats_page_by_activity/find_enabled_chats_by_title/render_chat_panel(_group) never call the Telegram API, only chat_settings/chat_messages) -- only D-1's @username branch needs a real chat and is explicitly marked optional/already-unit-covered. Sticker states use ONE real sticker sent live by the tester (not a faked file_id, which would silently fail answer_sticker) plus one tiny SQL UPDATE for the one state (analyzed-but-unscored) that's awkward to hit live. Both artifacts were dry-run verified before committing: the fixture SQL was executed inside a BEGIN/ROLLBACK transaction against the actually-running dev Postgres container (companion-postgres) reusing the real repository queries verbatim, confirming exact expected ordering (50/5/0 message counts) and title-search results; parse_chat_reference() was imported and run directly against the checklist's exact example inputs (t.me/c/9999000001, raw id, title) confirming they resolve exactly as the checklist claims. All expected UI strings (button labels, FSM prompts, error/success messages, breadcrumb format) were sourced from the actual current source (tolerance.py's format_explicitness_line, admin_sticker.py/admin_chat_panel.py's text constants), not guessed. Fake ids are deliberately format-valid supergroup-shaped placeholders (-1009999000NNN pattern) so they exercise the real parse/render code paths -- this trips the repo's own check_plan_artifacts.py telegram-id heuristic (by design, since it can't distinguish fake-but-valid-shaped from real), so each flagged line carries the documented 'check-plan-artifacts: allow telegram-id' waiver marker; re-ran the hook standalone to confirm clean before committing. Committed pathspec-limited (only the 2 new files) to 079c697 -- did not touch the shared envelope/lock/verdicts bookkeeping files already dirty in this worktree.",
+  "result": {
+    "kind": "commit",
+    "ref": "079c697",
+    "verification": "python3 scripts/check_plan_artifacts.py on both new files: clean. Fixture SQL dry-run inside BEGIN/ROLLBACK against the live companion-postgres container using the actual repository queries copy-pasted from admin.py: returned exactly the expected 50/5/0 message_count_24h ordering and 2/3 title-search match counts. parse_chat_reference() imported and run against the checklist's literal example strings (t.me/c/9999000001 -> -1009999000001, raw -1009999000003 -> itself, 'Bravo' -> None/falls through to title search) -- all matched the checklist's claims exactly. No unit/integration test suite applicable (this item produces a QA process artifact, not application code)."
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

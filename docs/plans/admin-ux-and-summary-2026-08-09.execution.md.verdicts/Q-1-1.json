@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T16:02:59Z",
+  "role": "specialist",
+  "item_id": "Q-1",
+  "verdict": "PASS",
+  "cost_usd": 2.11,
+  "notes": "Extended tests/integration/test_sticker_repository.py::TestExplicitnessScoreUpsert with a new TestManualExplicitnessScoreUpsert class (6 tests, real Postgres via testcontainers) covering ADR-0009's 'Implementation notes for Q-1' exactly: (1) manual score survives a *successful* re-analysis with a fresh real score -- pins Decision 4's CASE branch, distinct from the pre-existing test_fresh_valid_score_replaces_old which only exercises the non-manual COALESCE path; (2) explicitness_is_manual is never touched by save_sticker() on a non-manual row; (3) reset_explicitness_to_auto() clears both columns to NULL/false (Decision 5); (4) reset genuinely re-opens the write path -- a subsequent save_sticker() overwrites with a fresh score; (5) duplicate-copy path inherits both explicitness_score AND explicitness_is_manual together from a manually-scored canonical row (Decision 6); (6) that inherited-manual duplicate ALSO survives its own first re-analysis unchanged -- the two-hop case the source plan's bug was really about. Also added tests/integration/test_migration_026_explicitness_manual_flag_schema.py (3 tests) mirroring test_migration_024_025_tolerance_schema.py's pattern, asserting explicitness_is_manual is NOT NULL DEFAULT false (deliberately opposite polarity from its nullable sibling columns, per Decision 3 -- commented so a future reader doesn't 'fix' it to match). Sanity-verified the two priority-rule tests are not vacuous: temporarily reverted stickers.py's CASE clause to the old unconditional COALESCE (simulating the pre-ADR-0009 bug), re-ran the new class -- exactly the 2 tests pinning the CASE branch failed (0.95 obtained vs 0.15 expected), the other 4 (which don't depend on that branch) still passed as expected; restored the file (sha256 verified identical to original) before committing. All 45 tests in the two files pass (9 new TestManualExplicitnessScoreUpsert + schema tests + pre-existing). ruff check + ruff format clean on both files. mypy: 1 pre-existing unrelated error on test_sticker_repository.py:26 (unused type:ignore), confirmed via git stash to predate this change, not introduced by it. Committed 589d672 (pathspec-limited to the two test files only -- this is a shared worktree with other in-flight uncommitted plan/envelope bookkeeping files, none of which were touched).",
+  "result": {
+    "kind": "commit",
+    "ref": "589d6720c2be335b2b23650b6ff0d8f8ec0694a7",
+    "verification": "pytest tests/integration/test_sticker_repository.py tests/integration/test_migration_026_explicitness_manual_flag_schema.py -q: 45 passed; ruff check + ruff format --check clean; mypy: 1 pre-existing unrelated error (confirmed via git stash, not from this change); regression-check: reverted stickers.py's Decision-4 CASE clause to old COALESCE, confirmed exactly the 2 priority-rule tests fail, restored (sha256-verified) before commit"
+  },
+  "confidence": 0.95,
+  "clarification_request": null,
+  "session_id": null
+}
