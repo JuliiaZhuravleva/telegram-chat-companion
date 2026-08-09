@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from html import escape as html_escape
 from typing import Any
@@ -164,6 +165,46 @@ _SUMMARY_DM_TEXT = {
     "en": "📋 /summary is only available in group chats.",
 }
 
+# /summary <n> — E-1: optional message-count argument.
+_SUMMARY_DEFAULT_COUNT = 100
+_SUMMARY_MIN_COUNT = 20
+_SUMMARY_MAX_COUNT = 1000
+
+_SUMMARY_TOO_FEW = {
+    "ru": (
+        "📋 Столько сообщений можно прочитать и самому. "
+        "Минимум для /summary — {min} (максимум {max})."
+    ),
+    "en": (
+        "📋 That few messages you can just read yourself. "
+        "/summary needs at least {min} (up to {max})."
+    ),
+}
+_SUMMARY_INVALID_COUNT = {
+    "ru": "🤔 Не понял количество сообщений. Формат: /summary <число от {min} до {max}>.",
+    "en": "🤔 Couldn't parse the message count. Format: /summary <number from {min} to {max}>.",
+}
+
+_SUMMARY_COUNT_ARG_RE = re.compile(r"\d+")
+
+
+def _parse_summary_count(message_text: str | None) -> int | None:
+    """Parse the optional ``/summary <n>`` argument.
+
+    Returns ``None`` when no argument was given (caller applies the default).
+    Raises ``ValueError`` for anything that isn't a plain non-negative
+    integer (garbage input) — the caller turns that into a validation reply.
+    Range checks (min/max) are the caller's responsibility.
+    """
+    raw = (message_text or "").strip()
+    parts = raw.split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    arg = parts[1].strip()
+    if not _SUMMARY_COUNT_ARG_RE.fullmatch(arg):
+        raise ValueError(arg)
+    return int(arg)
+
 
 def _build_feature_list(config: ChatConfig, language: str) -> str:
     """Build dynamic feature list based on enabled features."""
@@ -223,23 +264,50 @@ async def handle_summary(
 ) -> None:
     """Handle /summary command — generate chat summary.
 
-    In forum chats, summarizes only messages from the current topic.
+    Accepts an optional message-count argument: ``/summary <n>`` (default
+    ``_SUMMARY_DEFAULT_COUNT``, min ``_SUMMARY_MIN_COUNT``, max
+    ``_SUMMARY_MAX_COUNT``). In forum chats, summarizes only messages from
+    the current topic, regardless of the requested count.
     """
+    lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
+
     if not chat_config.save_messages:
-        lang = chat_config.language
         if lang == "ru":
             await message.answer("Сохранение сообщений отключено для этого чата.")
         else:
             await message.answer("Message saving is disabled for this chat.")
         return
 
-    lang = chat_config.language
+    try:
+        requested_count = _parse_summary_count(message.text)
+    except ValueError:
+        await message.reply(
+            _SUMMARY_INVALID_COUNT[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
+        )
+        return
+
+    if requested_count is None:
+        count = _SUMMARY_DEFAULT_COUNT
+    elif requested_count < _SUMMARY_MIN_COUNT:
+        await message.reply(
+            _SUMMARY_TOO_FEW[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
+        )
+        return
+    elif requested_count > _SUMMARY_MAX_COUNT:
+        await message.reply(
+            _SUMMARY_INVALID_COUNT[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
+        )
+        return
+    else:
+        count = requested_count
+
     processing = "⏳ Генерирую саммари..." if lang == "ru" else "⏳ Generating summary..."
     placeholder = await message.answer(processing)
 
     # Topic-filtered summary in forum chats
     html = await summary_service.generate(
         message.chat.id,
+        count=count,
         language=lang,
         message_thread_id=message_thread_id,
     )
