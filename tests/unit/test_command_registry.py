@@ -81,6 +81,7 @@ EXPECTED_SCOPES: dict[str, set[str]] = {
     "start": {"private", "admin"},
     "help": {"groups", "private", "admin"},
     "summary": {"groups"},
+    "summary500": {"groups"},  # E-2 shortcut: /summary 500 as its own command
     "kb": {"groups", "private", "admin"},
     "remember": set(),  # deliberately hidden — see the spec's hidden_reason
     "admin": {"admin"},

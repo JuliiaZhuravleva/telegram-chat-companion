@@ -161,14 +161,19 @@ _START_TEXT = {
 }
 
 _SUMMARY_DM_TEXT = {
-    "ru": "📋 /summary доступен только в групповых чатах.",
-    "en": "📋 /summary is only available in group chats.",
+    "ru": "📋 {command} доступен только в групповых чатах.",
+    "en": "📋 {command} is only available in group chats.",
 }
 
 # /summary <n> — E-1: optional message-count argument.
 _SUMMARY_DEFAULT_COUNT = 100
 _SUMMARY_MIN_COUNT = 20
 _SUMMARY_MAX_COUNT = 1000
+
+# /summary500 — E-2: the same summary at a fixed count, one word to type.
+# Deliberately a plain constant rather than a parsed suffix: aiogram matches
+# Command("summary500") exactly, so it never collides with Command("summary").
+_SUMMARY500_COUNT = 500
 
 _SUMMARY_TOO_FEW = {
     "ru": (
@@ -255,6 +260,53 @@ async def handle_help(message: Message, chat_config: ChatConfig) -> None:
     await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
 
 
+async def _reject_if_saving_disabled(message: Message, chat_config: ChatConfig, lang: str) -> bool:
+    """Answer and return True when this chat keeps no messages to summarize."""
+    if chat_config.save_messages:
+        return False
+    if lang == "ru":
+        await message.answer("Сохранение сообщений отключено для этого чата.")
+    else:
+        await message.answer("Message saving is disabled for this chat.")
+    return True
+
+
+async def _deliver_summary(
+    message: Message,
+    summary_service: SummaryService,
+    *,
+    count: int,
+    lang: str,
+    message_thread_id: int | None,
+) -> None:
+    """Render a summary of ``count`` messages, editing a placeholder in place.
+
+    Shared by /summary and /summary500 so the two cannot drift apart on
+    placeholder copy, forum-topic filtering or the too-long-to-edit fallback.
+    """
+    processing = "⏳ Генерирую саммари..." if lang == "ru" else "⏳ Generating summary..."
+    placeholder = await message.answer(processing)
+
+    # Topic-filtered summary in forum chats
+    html = await summary_service.generate(
+        message.chat.id,
+        count=count,
+        language=lang,
+        message_thread_id=message_thread_id,
+    )
+
+    if html:
+        try:
+            await placeholder.edit_text(html, parse_mode="HTML")
+        except Exception:
+            # If edit fails (e.g., message too long), send as new message
+            await placeholder.delete()
+            await message.answer(html, parse_mode="HTML")
+    else:
+        fail_msg = "Не удалось создать саммари." if lang == "ru" else "Failed to generate summary."
+        await placeholder.edit_text(fail_msg)
+
+
 @router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))
 async def handle_summary(
     message: Message,
@@ -271,11 +323,7 @@ async def handle_summary(
     """
     lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
 
-    if not chat_config.save_messages:
-        if lang == "ru":
-            await message.answer("Сохранение сообщений отключено для этого чата.")
-        else:
-            await message.answer("Message saving is disabled for this chat.")
+    if await _reject_if_saving_disabled(message, chat_config, lang):
         return
 
     try:
@@ -301,34 +349,58 @@ async def handle_summary(
     else:
         count = requested_count
 
-    processing = "⏳ Генерирую саммари..." if lang == "ru" else "⏳ Generating summary..."
-    placeholder = await message.answer(processing)
-
-    # Topic-filtered summary in forum chats
-    html = await summary_service.generate(
-        message.chat.id,
+    await _deliver_summary(
+        message,
+        summary_service,
         count=count,
-        language=lang,
+        lang=lang,
         message_thread_id=message_thread_id,
     )
 
-    if html:
-        try:
-            await placeholder.edit_text(html, parse_mode="HTML")
-        except Exception:
-            # If edit fails (e.g., message too long), send as new message
-            await placeholder.delete()
-            await message.answer(html, parse_mode="HTML")
-    else:
-        fail_msg = "Не удалось создать саммари." if lang == "ru" else "Failed to generate summary."
-        await placeholder.edit_text(fail_msg)
+
+@router.message(Command("summary500"), F.chat.type.in_({"group", "supergroup"}))
+async def handle_summary500(
+    message: Message,
+    chat_config: ChatConfig,
+    summary_service: FromDishka[SummaryService],
+    message_thread_id: int | None = None,
+) -> None:
+    """Handle /summary500 — the /summary 500 shortcut as its own command (E-2).
+
+    Takes no argument: anything typed after the command is ignored, because
+    ``/summary500 300`` would be asking two different counts at once and the
+    parameterized form (``/summary 300``) already covers that.
+    """
+    lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
+
+    if await _reject_if_saving_disabled(message, chat_config, lang):
+        return
+
+    await _deliver_summary(
+        message,
+        summary_service,
+        count=_SUMMARY500_COUNT,
+        lang=lang,
+        message_thread_id=message_thread_id,
+    )
 
 
 @router.message(Command("summary"), F.chat.type == "private")
 async def handle_summary_dm(message: Message, chat_config: ChatConfig) -> None:
     """Handle /summary in a private (DM) chat — inform user it's group-only."""
     lang = chat_config.language if chat_config.language in _SUMMARY_DM_TEXT else "ru"
-    await message.answer(_SUMMARY_DM_TEXT[lang])
+    await message.answer(_SUMMARY_DM_TEXT[lang].format(command="/summary"))
+
+
+@router.message(Command("summary500"), F.chat.type == "private")
+async def handle_summary500_dm(message: Message, chat_config: ChatConfig) -> None:
+    """Handle /summary500 in a DM — same group-only notice as /summary.
+
+    Without this the update matches no handler at all and the command is a
+    silent no-op in DMs, which reads as the bot being broken.
+    """
+    lang = chat_config.language if chat_config.language in _SUMMARY_DM_TEXT else "ru"
+    await message.answer(_SUMMARY_DM_TEXT[lang].format(command="/summary500"))
 
 
 # ---------------------------------------------------------------------------

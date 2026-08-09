@@ -7,10 +7,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.bot.handlers.commands import (
+    _SUMMARY500_COUNT,
     _SUMMARY_DEFAULT_COUNT,
     _SUMMARY_MAX_COUNT,
     _SUMMARY_MIN_COUNT,
     handle_summary,
+    handle_summary500,
+    handle_summary500_dm,
     handle_summary_dm,
 )
 
@@ -256,3 +259,80 @@ class TestHandleSummaryCount:
         service.generate.assert_not_awaited()
         msg.answer.assert_awaited_once()
         msg.reply.assert_not_awaited()
+
+
+class TestHandleSummary500:
+    """``/summary500`` (E-2): the fixed-count shortcut beside the parameter."""
+
+    @pytest.mark.asyncio
+    async def test_summarizes_exactly_500(self) -> None:
+        msg = _make_message(chat_type="group", text="/summary500")
+        msg.answer = AsyncMock(return_value=_make_placeholder())
+        cfg = _make_chat_config()
+        service = _make_summary_service()
+
+        await handle_summary500(msg, chat_config=cfg, summary_service=service)
+
+        service.generate.assert_awaited_once()
+        assert service.generate.call_args.kwargs["count"] == 500
+        assert _SUMMARY500_COUNT == 500
+
+    @pytest.mark.asyncio
+    async def test_trailing_argument_is_ignored_not_rejected(self) -> None:
+        """``/summary500 300`` asks two counts at once — we honour the command."""
+        msg = _make_message(chat_type="group", text="/summary500 300")
+        msg.answer = AsyncMock(return_value=_make_placeholder())
+        cfg = _make_chat_config()
+        service = _make_summary_service()
+
+        await handle_summary500(msg, chat_config=cfg, summary_service=service)
+
+        assert service.generate.call_args.kwargs["count"] == 500
+        msg.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_forum_topic_filter_is_preserved(self) -> None:
+        msg = _make_message(chat_type="supergroup", text="/summary500")
+        msg.answer = AsyncMock(return_value=_make_placeholder())
+        cfg = _make_chat_config()
+        service = _make_summary_service()
+
+        await handle_summary500(msg, chat_config=cfg, summary_service=service, message_thread_id=42)
+
+        assert service.generate.call_args.kwargs["message_thread_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_save_messages_disabled_short_circuits(self) -> None:
+        msg = _make_message(chat_type="group", text="/summary500")
+        cfg = _make_chat_config(save_messages=False)
+        service = _make_summary_service()
+
+        await handle_summary500(msg, chat_config=cfg, summary_service=service)
+
+        service.generate.assert_not_awaited()
+        msg.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dm_answers_group_only_naming_this_command(self) -> None:
+        """The notice must name /summary500, not the /summary it borrows copy from."""
+        msg = _make_message(text="/summary500")
+        cfg = _make_chat_config(language="ru")
+
+        await handle_summary500_dm(msg, chat_config=cfg)
+
+        msg.answer.assert_awaited_once()
+        text = msg.answer.call_args[0][0]
+        assert "/summary500" in text
+        assert "групповых" in text
+        assert "{command}" not in text
+
+    @pytest.mark.asyncio
+    async def test_dm_english_variant(self) -> None:
+        msg = _make_message(text="/summary500")
+        cfg = _make_chat_config(language="en")
+
+        await handle_summary500_dm(msg, chat_config=cfg)
+
+        text = msg.answer.call_args[0][0]
+        assert "/summary500" in text
+        assert "group" in text
