@@ -6,11 +6,11 @@ source_artifact:
   sha256: 60e3ca4fb61fa90844113e3ed02f96e04ab9048b10959e82caea401123357a2d
   type: session-analysis
 created_at: '2026-08-09T20:47:30Z'
-approved_at: null
-approved_by: null
+approved_at: '2026-08-09T21:37:25Z'
+approved_by: julia
 specialist_roster_source: ~/.claude/agents/specialist-*.md + <project>/.claude/agents/specialist-*.md
 execution:
-  status: draft
+  status: approved
   started_at: null
   completed_at: null
   current_batch: null
@@ -51,7 +51,7 @@ items:
     note: null
   result: null
 - id: S3-2
-  title: 'scripts/eval_rag.py дёргает настоящий RAGMemoryService.search() (тот же вход, что у пайплайна), а не переписанный SQL как в q5_replay.py; эмбеддинг запроса через настоящий провайдерский путь AIRouter(settings) (Dishka не нужен), не сырой HTTP; DSN — обязательный аргумент CLI без дефолта (нельзя случайно навести на живую базу). Побочно: флаг rag_backend на S5 переключается тут ровно как в проде'
+  title: 'scripts/eval_rag.py дёргает настоящий RAGMemoryService.search() (тот же вход, что у пайплайна), а не переписанный SQL как в q5_replay.py; эмбеддинг запроса через настоящий провайдерский путь AIRouter(settings) (Dishka не нужен), БЕЗ сырого-HTTP-фолбэка (решено по [Q2]); seed-DSN = throwaway-контейнер rag-analysis-seed (порт 55434), обязательный аргумент CLI без дефолта — нельзя случайно навести на живую базу (решено по [Q1]). Побочно: флаг rag_backend на S5 переключается тут ровно как в проде'
   specialist: backend-dev
   priority: P1
   status: pending
@@ -106,7 +106,7 @@ items:
     note: null
   result: null
 - id: S3-6
-  title: 'Авто-страта: эвристический harvest (регексп ''помнишь/напомни/что решили/…'') из q5_replay.py в харнесс как ГЕНЕРИРУЕМАЯ страта — измеримая цифра уже сегодня, до S3b. Границы честно: 11 кейсов, 4 с попаданием выше 0.7 → это ПОЛ, а не золотой набор; не отменяет S3b. NB: читает n8n-корпус (порт 55435), отдельный DSN от seed'
+  title: 'Авто-страта: эвристический harvest (регексп помнишь/напомни/что решили/…) из internal/analysis/q5_replay.py в харнесс как ГЕНЕРИРУЕМАЯ страта — измеримая цифра уже сегодня, до S3b. Границы честно: 11 кейсов, 4 с попаданием выше 0.7 → это ПОЛ, а не золотой набор; не отменяет S3b. NB: читает n8n-корпус (порт 55435), отдельный DSN от seed. Доступ к internal/ в этом воркти обеспечен — internal/analysis/q5_replay.py присутствует (worktree_carry), решено по [Q3]'
   specialist: backend-dev
   priority: P2
   status: pending
@@ -125,7 +125,7 @@ items:
     note: null
   result: null
 - id: S3-7
-  title: 'Записанная базовая линия как публично-безопасный артефакт: агрегаты (кол-во кейсов по стратам, recall@k, MRR, доля пустых, перцентили best-sim, версия конфига, дата прогона) — в трекаемый документ; покейсовые строки с цитатами/id — в internal/. Документ обязан проходить scripts/check_plan_artifacts.py. Рекомендуемое место — docs/ (долгоживущий справочник для S4–S6), см. вопрос [S3-7]'
+  title: 'Записанная базовая линия как публично-безопасный артефакт: агрегаты (кол-во кейсов по стратам, recall@k, MRR, доля пустых, перцентили best-sim, версия конфига, дата прогона) — в трекаемый документ docs/rag-eval-baseline.md (решено по [S3-7]: долгоживущий справочник под docs/, НЕ docs/plans/); покейсовые строки с цитатами/id — в internal/. Документ обязан проходить scripts/check_plan_artifacts.py'
   specialist: backend-dev
   priority: P2
   status: pending
@@ -173,12 +173,54 @@ review_gate:
   approve_action: /execute-plan <projects>/telegram-chat-companion.rag-s3-eval-harness-wt/docs/plans/rag-s3-eval-harness.execution.md
   reject_action: /plan-fixes docs/plans/rag-s3-eval-harness.md --revise <projects>/telegram-chat-companion.rag-s3-eval-harness-wt/docs/plans/rag-s3-eval-harness.execution.md
 safe_to_replay_from: null
-clarifying_questions:
-- '[Q1] Субстрат и DSN для базовой линии. Специалисты уточнили: нужны ДВЕ throwaway-БД — rag-analysis-seed (порт 55434, ~2918 строк chat_memory; на момент разбора контейнер был Up, а не Exited как записано в доке) для S3-2/S3-4/S3-5, и rag-analysis-n8n (порт 55435, bot_response_log/chat_messages) для авто-страты S3-6. Рекомендация: обе БД — обязательные аргументы CLI без дефолта (чтобы харнесс нельзя было случайно навести на живую базу), поднять и проверить данные обеих перед прогоном. Подтверждаем правило DSN-без-дефолта и снятие базовой линии с этих двух seed-контейнеров?'
-- '[Q2] Как харнесс эмбеддит запрос. Архитектор и backend-dev сходятся: AIRouter(settings) конструируется напрямую, без полного DI (Dishka не нужен) — эмбеддинг идёт настоящим провайдерским путём. Запасной вариант из доки (сырой HTTP плюс тест на форму вызова) — это вторая реимплементация настоящего пути, ровно та болезнь, ради которой затеян S3-2. Рекомендация: закрываем как через настоящий AIRouter, без HTTP-фолбэка. Согласна?'
-- '[Q3] Доступ этого воркта к гитигноренному internal/. Три специалиста независимо подтвердили: воркти ...rag-s3-eval-harness-wt не содержит папку internal/ (и CLAUDE.md) — они лежат только в основном чекауте. S3-6 обязан прочитать internal/analysis/q5_replay.py, чтобы перенести регексп-харвест; S3-2/S3-3 ссылаются на его строки. Без доступа backend-dev либо не видит исходник, либо переизобретает логику и расходится с корпусом, на котором посчитаны числа q5-replay. Решение: симлинкнуть/скопировать internal/ в этот воркти перед выполнением, или подтвердить, что песочница execute-режима читает абсолютные пути в основной чекаут?'
-- '[S3-7] Где живёт трекаемый документ базовой линии (открытый вопрос №3 доки). Прецедент репозитория (docs/architecture.md, docs/NORTH-STAR.md, docs/deployment.md — долгоживущие справочники прямо под docs/; docs/plans/*.md — точечные планы) и рамка самой доки (базовая линия — оправдательный артефакт для S4–S6, мультислайсовый) указывают на docs/. Рекомендация: docs/rag-eval-baseline.md, не docs/plans/. Ок?'
+clarifying_questions: []
+human_feedback:
+- ts: '2026-08-09T20:54:33Z'
+  by: julia
+  text: 'ANSWER [Q1]: Да'
+  applies_to: null
+  status: addressed
+  addressed_at: '2026-08-09T21:35:46Z'
+  addressed_by: pm-orchestrator
+- ts: '2026-08-09T20:54:57Z'
+  by: julia
+  text: 'ANSWER [Q2]: да'
+  applies_to: null
+  status: addressed
+  addressed_at: '2026-08-09T21:35:50Z'
+  addressed_by: pm-orchestrator
+- ts: '2026-08-09T20:56:43Z'
+  by: julia
+  text: 'ANSWER [S3-7]: ок'
+  applies_to: S3-7
+  status: addressed
+  addressed_at: '2026-08-09T21:35:53Z'
+  addressed_by: pm-orchestrator
+- ts: '2026-08-09T21:29:48Z'
+  by: julia
+  text: 'ANSWER [Q3]: ок'
+  applies_to: null
+  status: addressed
+  addressed_at: '2026-08-09T21:35:57Z'
+  addressed_by: pm-orchestrator
+revision_number: 2
+last_revised_at: '2026-08-09T21:36:42Z'
+last_revised_by: pm-orchestrator
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -234,8 +276,15 @@ clarifying_questions:
 ## Не входит в этот план
 Золотой набор (S3b, за Julia), сбор реальных запросов из прод-логов, калибровка порогов (S6),
 оценка качества генерации ответа, гейт в CI (инструмент остаётся ручным скриптом). Приоритеты
-и роутинг задач проставлены автоматически по разбору и консультациям со специалистами; спорные
-решения вынесены в блок «нужно решить» ниже.
+и роутинг задач проставлены автоматически по разбору и консультациям со специалистами.
+
+## Решения (все подтверждены)
+Четыре открытых вопроса прошлой версии плана закрыты: замер снимается с отдельных одноразовых
+копий данных, а не с живой базы, причём путь к ним задаётся вручную — так нельзя случайно
+замерить по проду; запрос обрабатывается тем же рабочим путём, что и в проде, без обходного
+варианта; базовая линия сохраняется отдельным долгоживущим документом в открытой части
+репозитория (детали с цитатами — в приватной части); исходные материалы для авто-базовой-линии
+уже доступны в рабочей копии. Открытых вопросов к утверждению больше нет.
 
 ## Оценка
 ~13–15 часов работ суммарно; потолок бюджета — $30 на план ($6 на пункт), 8 пунктов.
