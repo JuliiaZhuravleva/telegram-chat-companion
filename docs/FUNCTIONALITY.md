@@ -322,8 +322,15 @@ From [src/models/chat_config.py](src/models/chat_config.py) and `config/default.
 | `text_generation` | gemini | `gemini-3-flash-preview` | openai (`gpt-5-nano`) → deepseek (`deepseek-v3.2`) |
 | `embeddings` | gemini | `gemini-embedding-001` (768 d, free) | *(no fallback — S2-1: no comparable 768-dim OpenAI model without truncating the embedding space)* |
 | `vision` | gemini | `gemini-3-flash-preview` | openai (`gpt-5-nano`) → grok (`grok-2-vision-1212`) |
-| `relevancy_check` | openai | `gpt-5-nano` (temp=1.0, max_tokens=1024) | deepseek (`deepseek-v3.2`) |
 | `transcription` | openai | `whisper-1` | *(no fallback — only provider)* |
+
+`RelevancyGate`'s LLM judge (`llm_judge.py`) is not a routed task: `generate_text()` has no
+per-task parameter, so it rides `text_generation`'s chain and addresses OpenAI directly via
+an explicit `model="gpt-5-nano"` override (CLAUDE.md's documented provider-addressing idiom —
+"pass `model=…` to target a specific provider, non-matching providers 404 and fall through"),
+passing its own `max_tokens=4096`/`temperature=1.0`. A `relevancy_check` section in
+`config/default.yml` used to suggest otherwise; it was dead (never read) and was removed in
+S2-9 — see TD-058 for giving `generate_text()` real per-task routing.
 
 **Cost policy** (per `capabilities.py` + CLAUDE.md): defaults MUST be cheapest tier. Expensive models (`gpt-5.2`, `gemini-3-pro`, `claude-opus`, `grok-4`, `o4-mini`) are marked in `EXPENSIVE_MODELS` and are only used with explicit caller opt-in. The single standing exception is sticker description merging (`o4-mini`), which is approved because admin-authored notes are rare and merging benefits from reasoning capacity.
 

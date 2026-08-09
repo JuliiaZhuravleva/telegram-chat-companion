@@ -66,12 +66,14 @@ ai:
         openai: "gpt-5-nano"               # nano has multimodal, no need for gpt-5.2
       max_tokens: 200
 
-    relevancy_check:
-      provider: "openai"
-      model: "gpt-5-nano"                    # cheapest: ~$0.00002 per check
-      # No fallback configured — grok/deepseek/anthropic are planned, not implemented
-      max_tokens: 1024                        # gpt-5-nano uses reasoning tokens internally
-      temperature: 1.0                       # gpt-5-nano only supports 1.0
+    # relevancy_check task removed (S2-9, TD-058): AIRouter.generate_text() has no
+    # per-task routing parameter, so this section was never read -- provider,
+    # max_tokens and temperature here were all ignored. llm_judge.py addresses
+    # OpenAI directly via an explicit model="gpt-5-nano" override (the documented
+    # provider-addressing idiom, CLAUDE.md "Critical Patterns") and passes its own
+    # max_tokens=4096/temperature=1.0. Re-add once generate_text() gains real
+    # per-task routing (TD-058) -- until then a key here is a knob that does
+    # nothing.
 
     transcription:
       provider: "openai"

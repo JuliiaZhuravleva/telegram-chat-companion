@@ -96,6 +96,18 @@ class TestLoadYamlConfig:
         assert embeddings_task.get("fallback", []) == []
         assert embeddings_task.get("fallback_models", {}) == {}
 
+    def test_relevancy_check_task_removed_as_dead_config(self):
+        """S2-9/TD-058: ``relevancy_check`` was never read by ``AIRouter.generate_text()``
+
+        (no per-task routing parameter -- provider/max_tokens/temperature were all
+        ignored, see ``config/default.yml``'s comment). Removed rather than left as a
+        knob that silently does nothing. Regression guard: don't let it creep back in
+        without also wiring ``generate_text()`` to route by task (TD-058).
+        """
+        config = load_yaml_config()
+        tasks = config.get("ai", {}).get("tasks", {})
+        assert "relevancy_check" not in tasks
+
 
 class TestSettings:
     """Tests for the Settings class."""
