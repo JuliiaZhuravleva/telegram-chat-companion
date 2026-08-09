@@ -16,11 +16,18 @@ on correct work gets switched off rather than fixed.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
 
-from scripts.check_plan_artifacts import RULES, main, scan_file
+from scripts.check_plan_artifacts import (
+    EXTRA_TRACKED_PATHS,
+    RULES,
+    main,
+    scan_file,
+    tracked_plan_files,
+)
 
 
 def write(tmp_path: Path, name: str, text: str, *, marker: str) -> Path:
@@ -229,6 +236,44 @@ def test_every_rule_has_an_adversarial_fixture() -> None:
     """A rule nobody tests is a rule nobody knows still fires."""
     covered = {"credential", "home-path", "telegram-id"}
     assert {name for name, _, _ in RULES} == covered
+
+
+def test_tracked_plan_files_also_covers_the_baseline_doc(tmp_path: Path) -> None:
+    """docs/rag-eval-baseline.md (S3-7) carries the same risk as docs/plans/ --
+    real chat content feeds both -- so the default (no explicit paths) scan
+    target must include it, not just docs/plans/.
+
+    A real git repo, not a scan_file() call directly: the thing under test is
+    ``tracked_plan_files()``'s git invocation, and a fixture that skipped git
+    would prove nothing about it. ``--template=`` + ``core.hooksPath=/dev/null``
+    avoid inheriting the developer's global git config (CLAUDE.md gotcha --
+    a stray hook here would make this test flaky/slow, not just wrong).
+    """
+    assert EXTRA_TRACKED_PATHS == ("docs/rag-eval-baseline.md",), (
+        "keep this in sync with .pre-commit-config.yaml's check-plan-artifacts `files:` regex"
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "--template=", "-q"],
+        cwd=repo,
+        check=True,
+        env={"HOME": str(tmp_path)},
+    )
+    subprocess.run(
+        ["git", "config", "--local", "core.hooksPath", "/dev/null"],
+        cwd=repo,
+        check=True,
+    )
+    (repo / "docs" / "plans").mkdir(parents=True)
+    (repo / "docs" / "plans" / "p.execution.md").write_text("status: done\n")
+    (repo / "docs" / "rag-eval-baseline.md").write_text("# baseline\n")
+    (repo / "docs" / "unrelated.md").write_text("not in scope\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+
+    found = {p.relative_to(repo).as_posix() for p in tracked_plan_files(repo)}
+    assert found == {"docs/plans/p.execution.md", "docs/rag-eval-baseline.md"}
 
 
 def test_exit_codes_distinguish_clean_from_dirty(
