@@ -84,10 +84,3 @@ class MemoryRepository:
             memory_id,
             chat_id,
         )
-
-    async def delete_expired(self) -> int:
-        """Delete expired memories. Returns count of deleted rows."""
-        result = await self._pool.execute(
-            "DELETE FROM chat_memory WHERE expires_at IS NOT NULL AND expires_at < NOW()"
-        )
-        return int(result.split()[-1])
