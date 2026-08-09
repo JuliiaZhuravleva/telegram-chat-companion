@@ -17,6 +17,11 @@ from src.models.chat_config import ChatConfig
 CHAT_ID = -1001234567890
 
 
+def _cfg(**overrides) -> ChatConfig:
+    """Effective config for the root screen's per-group status text (B-3)."""
+    return replace(ChatConfig(chat_id=CHAT_ID), **overrides)
+
+
 def _get_callbacks(keyboard):
     return [
         btn.callback_data for row in keyboard.inline_keyboard for btn in row if btn.callback_data
@@ -116,7 +121,12 @@ class TestChatPanelRootKeyboard:
 
     def test_group_buttons_link_to_group_screens(self):
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
         )
         callbacks = _get_callbacks(kb)
         for group in (
@@ -127,19 +137,29 @@ class TestChatPanelRootKeyboard:
         ):
             assert f"adm_pnl_grp:ru:{CHAT_ID}:{group.value}" in callbacks
 
-    def test_group_buttons_carry_plain_labels(self):
-        """B-2 ships plain group_label() text; per-group status is B-3's job."""
+    def test_group_buttons_start_with_their_label(self):
+        """B-3 appends a status suffix; the label still leads the button."""
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
         )
         labels = _get_labels(kb)
-        assert group_label(FieldGroup.MODULES, "ru") in labels
+        assert any(text.startswith(group_label(FieldGroup.MODULES, "ru")) for text in labels)
 
     def test_no_individual_field_rows_on_root(self):
         """The old flat list is gone -- no field's toggle/tolerance callback
         shows up on the root screen, only the 4 group buttons."""
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
         )
         callbacks = _get_callbacks(kb)
         assert not any(cb.startswith("adm_pnl_tgl:") for cb in callbacks)
@@ -147,7 +167,12 @@ class TestChatPanelRootKeyboard:
 
     def test_kb_group_renders_link_row_not_a_toggle(self):
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=True, reactions_status=(False, True)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=True,
+            reactions_status=(False, True),
         )
         btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
         assert btn is not None
@@ -160,7 +185,12 @@ class TestChatPanelRootKeyboard:
 
     def test_reactions_group_renders_combined_link_row(self):
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(True, False)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(True, False),
         )
         btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}")
         assert btn is not None
@@ -169,21 +199,39 @@ class TestChatPanelRootKeyboard:
 
     def test_back_button_returns_to_picker(self):
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
         )
         assert kb.inline_keyboard[-1][0].callback_data == "adm_pnl:ru:0"
 
     def test_english_labels(self):
         kb = chat_panel_root_keyboard(
-            "en", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+            "en",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
         )
         labels = _get_labels(kb)
-        assert group_label(FieldGroup.MODULES, "en") in labels
+        assert any(text.startswith(group_label(FieldGroup.MODULES, "en")) for text in labels)
+        # B-3's status suffix must be localized too, not left in Russian.
+        assert any("on 0/8" in text or "on " in text for text in labels)
+        assert not any("вкл" in text or "настро" in text for text in labels)
 
     def test_seven_rows_total(self):
         """4 group buttons + KB link + Reactions link + back (ADR-0010 Decision 3)."""
         kb = chat_panel_root_keyboard(
-            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
         )
         assert len(kb.inline_keyboard) == 7
 
@@ -255,6 +303,56 @@ class TestChatPanelGroupKeyboard:
         assert len(kb.inline_keyboard) == 9
 
 
+class TestRootGroupStatus:
+    """B-3: the per-group status suffix on the root screen's section buttons."""
+
+    def _root(self, lang="ru", **cfg_overrides):
+        return chat_panel_root_keyboard(
+            lang,
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(**cfg_overrides),
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+
+    def _group_text(self, kb, group: FieldGroup) -> str:
+        btn = _row_for(kb, f"adm_pnl_grp:ru:{CHAT_ID}:{group.value}")
+        assert btn is not None
+        return btn.text
+
+    def test_toggle_group_counts_only_enabled(self):
+        """Flipping one toggle off must move the count by exactly one."""
+        before = self._group_text(self._root(rag_enabled=True), FieldGroup.MODULES)
+        after = self._group_text(self._root(rag_enabled=False), FieldGroup.MODULES)
+        assert before != after
+        on_before = int(before.rsplit("вкл ", 1)[1].split("/")[0])
+        on_after = int(after.rsplit("вкл ", 1)[1].split("/")[0])
+        assert on_before - on_after == 1
+
+    def test_toggle_group_total_counts_bools_only(self):
+        """Stickers holds 3 toggles + 4 numeric fields — the total is 3, not 7."""
+        text = self._group_text(self._root(), FieldGroup.STICKERS)
+        assert text.endswith("/3")
+
+    def test_group_without_toggles_reports_its_size(self):
+        """Behavior has no BOOL fields, so 'on N/0' would be nonsense."""
+        text = self._group_text(self._root(), FieldGroup.BEHAVIOR)
+        assert "вкл" not in text
+        assert "5 настроек" in text
+
+    def test_russian_plural_forms(self):
+        from src.bot.keyboards.admin_chat_panel import _settings_word
+
+        assert _settings_word(1, "ru") == "настройка"
+        assert _settings_word(3, "ru") == "настройки"
+        assert _settings_word(5, "ru") == "настроек"
+        assert _settings_word(11, "ru") == "настроек"  # 11 is not "одиннадцать настройка"
+        assert _settings_word(21, "ru") == "настройка"
+        assert _settings_word(1, "en") == "setting"
+        assert _settings_word(2, "en") == "settings"
+
+
 class TestInheritedMarkerRoot:
     """B-2: "inherited from default" suffix on the KB/Reactions link rows."""
 
@@ -263,6 +361,7 @@ class TestInheritedMarkerRoot:
             "ru",
             chat_id=CHAT_ID,
             row={"kb_enabled": None},
+            config=_cfg(),
             kb_status=True,
             reactions_status=(False, True),
         )
@@ -275,6 +374,7 @@ class TestInheritedMarkerRoot:
             "ru",
             chat_id=CHAT_ID,
             row={"kb_enabled": True},
+            config=_cfg(),
             kb_status=True,
             reactions_status=(False, True),
         )
@@ -289,6 +389,7 @@ class TestInheritedMarkerRoot:
             "ru",
             chat_id=CHAT_ID,
             row={"reactions_enabled": True, "reactions_history_enabled": None},
+            config=_cfg(),
             kb_status=False,
             reactions_status=(True, False),
         )

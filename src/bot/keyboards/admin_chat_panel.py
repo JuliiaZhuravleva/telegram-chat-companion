@@ -48,6 +48,17 @@ _BACK = {"ru": "◀️ Назад", "en": "◀️ Back"}
 _HISTORY_SHORT = {"ru": "История", "en": "History"}
 _INHERITED_MARK = {"ru": " · унаследовано", "en": " · inherited"}
 
+# B-3: the per-group status shown on the root screen's section buttons.
+# Two shapes, because the groups aren't alike: a group made of toggles says
+# how many are on, a group with no toggles at all (behavior) can only honestly
+# say how much is in it. Counting overrides instead was rejected — the
+# inherited marker is only truthful for non-legacy fields (see _is_inherited),
+# so an "N overridden" number would quietly lie for legacy-heavy groups.
+_GROUP_TOGGLES_ON = {"ru": "вкл {on}/{total}", "en": "on {on}/{total}"}
+_GROUP_SETTINGS_COUNT = {"ru": "{n} {word}", "en": "{n} {word}"}
+_RU_SETTINGS_FORMS = ("настройка", "настройки", "настроек")
+_EN_SETTINGS_FORMS = ("setting", "settings")
+
 # Button text is plain (Telegram doesn't apply parse_mode to captions), but
 # very long joined/free-text values still make for an unreadable row.
 _MAX_VALUE_LEN = 40
@@ -179,11 +190,42 @@ def _format_value(field: FieldSpec, value: object) -> str:
     return text
 
 
+def _settings_word(n: int, lang: str) -> str:
+    """Pluralize "settings" for the group-size summary (B-3)."""
+    if lang != "ru":
+        one, many = _EN_SETTINGS_FORMS
+        return one if n == 1 else many
+    one, few, many = _RU_SETTINGS_FORMS
+    if n % 100 // 10 == 1:
+        return many
+    last = n % 10
+    if last == 1:
+        return one
+    if 2 <= last <= 4:
+        return few
+    return many
+
+
+def _group_summary(fields: tuple[FieldSpec, ...], config: ChatConfig, lang: str) -> str:
+    """Short status for one section button on the root screen (B-3).
+
+    ADR-0010 Decision 3 left the formula open; this is it. Groups holding
+    toggles report how many are on, which is the thing an admin scans for.
+    Groups with no toggles report their size instead of an invented status.
+    """
+    toggles = [f for f in fields if f.type is FieldType.BOOL]
+    if toggles:
+        on = sum(1 for f in toggles if bool(getattr(config, f.key)))
+        return _GROUP_TOGGLES_ON[lang].format(on=on, total=len(toggles))
+    return _GROUP_SETTINGS_COUNT[lang].format(n=len(fields), word=_settings_word(len(fields), lang))
+
+
 def chat_panel_root_keyboard(
     lang: str,
     *,
     chat_id: int,
     row: dict[str, Any] | None,
+    config: ChatConfig,
     kb_status: bool,
     reactions_status: tuple[bool, bool],
 ) -> InlineKeyboardMarkup:
@@ -202,8 +244,8 @@ def chat_panel_root_keyboard(
     rows (``_is_inherited``) -- the 4 group buttons carry no per-field state
     and need no marker.
 
-    Root buttons carry no per-group status text yet -- that's B-3's job
-    (ADR-0010 Decision 3 deliberately leaves the status formula open).
+    ``config`` is the effective ``ChatConfigService.get_config()`` value,
+    used only for the per-group status suffix (B-3, ``_group_summary``).
     """
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -248,7 +290,7 @@ def chat_panel_root_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=group_label(group, lang),
+                    text=f"{group_label(group, lang)} · {_group_summary(fields, config, lang)}",
                     callback_data=f"adm_pnl_grp:{lang}:{chat_id}:{group.value}",
                 )
             ]

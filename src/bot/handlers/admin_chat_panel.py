@@ -172,7 +172,7 @@ async def _fresh_effective(
 async def render_chat_panel(
     chat_settings_repo: ChatSettingsRepository,
     bot_config_repo: BotConfigRepository,
-    chat_config_service: ChatConfigService,  # noqa: ARG001 -- kept for call-site/interface stability (ADR-0010 Decision 6); B-3 will consume it for root-screen status text.
+    chat_config_service: ChatConfigService,
     lang: str,
     chat_id: int,
 ) -> tuple[str, InlineKeyboardMarkup]:
@@ -189,6 +189,7 @@ async def render_chat_panel(
     can't distinguish an explicit override from an inherited default.
     """
     row = await chat_settings_repo.get(chat_id)
+    config = await chat_config_service.get_config(chat_id)
     kb_status = await _fresh_effective(row, bot_config_repo, "kb_enabled", False)
     reactions_status = (
         await _fresh_effective(row, bot_config_repo, "reactions_enabled", False),
@@ -203,6 +204,7 @@ async def render_chat_panel(
         lang,
         chat_id=chat_id,
         row=row,
+        config=config,
         kb_status=kb_status,
         reactions_status=reactions_status,
     )
