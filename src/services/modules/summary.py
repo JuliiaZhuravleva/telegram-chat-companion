@@ -181,11 +181,23 @@ class SummaryService:
         message_count = len(lines)
 
         if len(conversation) > _MAX_CONVERSATION_CHARS:
-            # Drop the oldest lines first — lines are chronological (oldest
+            # Keep the newest lines that fit — lines are chronological (oldest
             # first), and recency matters more for a summary than the very
-            # start of a long window.
-            while lines and len("\n".join(lines)) > _MAX_CONVERSATION_CHARS:
-                lines.pop(0)
+            # start of a long window. Walk backwards accumulating lengths
+            # rather than re-joining after each drop: this branch exists for
+            # pathological input (1000 messages, some very long), which is
+            # exactly where an O(n²) re-join would hurt, and it runs on the
+            # request path with the user watching a "⏳" placeholder.
+            kept: list[str] = []
+            total = 0
+            for line in reversed(lines):
+                added = len(line) + (1 if kept else 0)  # +1 for the joining \n
+                if total + added > _MAX_CONVERSATION_CHARS:
+                    break
+                kept.append(line)
+                total += added
+            kept.reverse()
+            lines = kept
             conversation = "\n".join(lines)
             message_count = len(lines)
             logger.warning(
