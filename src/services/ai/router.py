@@ -289,6 +289,14 @@ class AIRouter:
 
             try:
                 provider = await self._get_provider(provider_name)
+                # S2-1: unlike generate_text(), this is not index-aware -- it
+                # always uses task_config.model regardless of position in the
+                # chain. Currently safe because config/default.yml declares no
+                # fallback for embeddings (chain is always length 1, gemini
+                # only): the previous fallback reused Gemini's model name
+                # against OpenAI's API and always 404'd. If a fallback
+                # provider is reintroduced here, mirror generate_text()'s
+                # "config model only for the primary provider" pattern first.
                 model = task_config.model if task_config else None
 
                 result = await provider.generate_embedding(

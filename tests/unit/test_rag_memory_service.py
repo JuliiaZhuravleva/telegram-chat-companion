@@ -120,3 +120,46 @@ class TestRepositorySearchRequiresThreshold:
         repo = MemoryRepository(pool)
         with pytest.raises(TypeError):
             await repo.search(1, [0.1] * 768)  # type: ignore[call-arg]
+
+
+class TestEmbeddingDimensionGuard:
+    """S2-1: cheap length guard before write.
+
+    ``chat_memory.embedding`` is ``vector(768)``
+    (``alembic/versions/003_rag_memory.py``). With the OpenAI fallback gone
+    (S2-1), a dimension mismatch should only happen on a provider bug or
+    future config drift, but ``RAGMemoryService.store()`` must still refuse
+    to hand a wrong-length vector to the repository -- fail loud in
+    application code (logged) rather than reach asyncpg/pgvector's own
+    dimension check.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wrong_dimension_embedding_is_not_stored(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        router = AsyncMock()
+        router.generate_embedding.return_value = EmbeddingResult(
+            embedding=[0.1] * 1536,  # e.g. an OpenAI-text-embedding-3-small shape
+            model="mock-embed",
+            provider="mock",
+            dimensions=1536,
+        )
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        memory_id = await service.store(chat_id=1, content="hi")
+
+        assert memory_id is None
+        repo.store.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_correct_dimension_embedding_is_stored(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.store.return_value = 42
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()  # 768-dim
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        memory_id = await service.store(chat_id=1, content="hi")
+
+        assert memory_id == 42
+        repo.store.assert_awaited_once()

@@ -11,6 +11,14 @@ from src.services.ai.router import AIRouter
 
 logger = structlog.get_logger(__name__)
 
+# S2-1: chat_memory.embedding is vector(768) (alembic/versions/003_rag_memory.py).
+# Embeddings has no fallback provider (config/default.yml) after this item, so a
+# wrong-length vector should only happen on a provider bug or future config
+# drift -- kept as a cheap, explicit guard so a mismatch fails loud in
+# application code (with the offending provider/model logged) instead of as a
+# raw asyncpg error from pgvector's own dimension check.
+EXPECTED_EMBEDDING_DIMENSIONS = 768
+
 
 class RAGMemoryService:
     """Retrieval-Augmented Generation memory using pgvector.
@@ -104,6 +112,17 @@ class RAGMemoryService:
             embedding_result = await self._ai_router.generate_embedding(content)
         except Exception:
             logger.warning("Failed to generate embedding for RAG store")
+            return None
+
+        actual_dimensions = len(embedding_result.embedding)
+        if actual_dimensions != EXPECTED_EMBEDDING_DIMENSIONS:
+            logger.warning(
+                "Embedding has unexpected dimensionality, refusing to store",
+                expected=EXPECTED_EMBEDDING_DIMENSIONS,
+                actual=actual_dimensions,
+                provider=embedding_result.provider,
+                model=embedding_result.model,
+            )
             return None
 
         return await self._repo.store(

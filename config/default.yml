@@ -44,10 +44,18 @@ ai:
       provider: "gemini"
       model: "gemini-embedding-001"         # free/cheapest embedding model
       dimensions: 768
-      fallback:
-        - "openai"
-      fallback_models:
-        openai: "text-embedding-3-small"    # cheaper than text-embedding-3-large
+      # No fallback (S2-1, decided honestly-no-reserve over wiring one up):
+      # OpenAI has no comparable 768-dim embedding model. text-embedding-3-small
+      # supports a `dimensions` param, but truncating it changes the embedding
+      # space -- vectors would not be comparable to the ones already stored in
+      # chat_memory (vector(768), alembic/versions/003_rag_memory.py). A prior
+      # `fallback: [openai]` here was never a working reserve: fallback_models
+      # is parsed (src/config.py) but not read by the router, so a fallback
+      # call reused Gemini's model name against OpenAI's API and always 404'd.
+      # Revisit once a second 768-dim-native embedding provider exists. Until
+      # then, a Gemini outage degrades honestly -- memory store/search skip
+      # with a warning (src/services/rag/memory.py) instead of a fallback call
+      # that was guaranteed to fail.
 
     vision:
       provider: "gemini"

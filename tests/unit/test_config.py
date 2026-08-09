@@ -81,6 +81,21 @@ class TestLoadYamlConfig:
                     f"Task '{task_name}' fallback uses expensive model '{fb_model}'"
                 )
 
+    def test_embeddings_has_no_fallback(self):
+        """S2-1: embeddings has no fallback provider, declared honestly.
+
+        A prior ``fallback: [openai]`` here was never a working reserve --
+        ``fallback_models`` is parsed (``AITaskConfig``) but never read by
+        ``AIRouter``, so a fallback call reused Gemini's model name
+        (``gemini-embedding-001``) against OpenAI's API and always 404'd.
+        Regression guard: this must stay empty until a second 768-dim-native
+        embedding provider exists (see the comment in config/default.yml).
+        """
+        config = load_yaml_config()
+        embeddings_task = config["ai"]["tasks"]["embeddings"]
+        assert embeddings_task.get("fallback", []) == []
+        assert embeddings_task.get("fallback_models", {}) == {}
+
 
 class TestSettings:
     """Tests for the Settings class."""

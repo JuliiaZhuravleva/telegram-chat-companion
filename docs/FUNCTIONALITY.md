@@ -320,7 +320,7 @@ From [src/models/chat_config.py](src/models/chat_config.py) and `config/default.
 | Task | Primary | Model | Fallback chain |
 |---|---|---|---|
 | `text_generation` | gemini | `gemini-3-flash-preview` | openai (`gpt-5-nano`) → deepseek (`deepseek-v3.2`) |
-| `embeddings` | gemini | `gemini-embedding-001` (768 d, free) | openai (`text-embedding-3-small`) |
+| `embeddings` | gemini | `gemini-embedding-001` (768 d, free) | *(no fallback — S2-1: no comparable 768-dim OpenAI model without truncating the embedding space)* |
 | `vision` | gemini | `gemini-3-flash-preview` | openai (`gpt-5-nano`) → grok (`grok-2-vision-1212`) |
 | `relevancy_check` | openai | `gpt-5-nano` (temp=1.0, max_tokens=1024) | deepseek (`deepseek-v3.2`) |
 | `transcription` | openai | `whisper-1` | *(no fallback — only provider)* |
