@@ -30,10 +30,10 @@ per the roadmap analysis) is expected at
 ``postgresql://r:r@127.0.0.1:55434/companion`` -- pass that DSN explicitly,
 it is deliberately not hardcoded here.
 
-This module only produces per-case raw retrieval results (``CaseResult``);
-recall@k / MRR / empty-rate arithmetic is S3-4's job. Keeping
-``run_eval() -> list[CaseResult]`` stable is what lets S3-4 build metrics
-on top of this without another pass over the search path.
+This module produces per-case raw retrieval results (``CaseResult``);
+recall@k / MRR / blind-rate / best-sim-percentile arithmetic lives in
+``scripts/eval_metrics.py`` (S3-4), built on ``run_eval()``'s stable
+``list[CaseResult]`` contract without another pass over the search path.
 """
 
 from __future__ import annotations
@@ -47,6 +47,7 @@ from typing import Any
 
 import structlog
 
+from scripts.eval_metrics import compute_metrics, format_metrics
 from scripts.eval_schema import EvalCase, EvalCaseFileError, load_cases
 from src.config import Settings
 from src.database.connection import close_pool, create_pool
@@ -219,6 +220,9 @@ async def main(argv: list[str] | None = None) -> int:
 
         results = await run_eval(cases, service=service, ai_router=ai_router)
         _print_results(results)
+        metrics = compute_metrics(results, k=service.max_results)
+        print()
+        print(format_metrics(metrics))
     finally:
         await close_pool(pool)
 
