@@ -418,14 +418,16 @@ def trim_facts_to_budget(
 ) -> list[dict[str, Any]]:
     """Drop lowest-priority KB facts that would exceed the token budget.
 
-    Facts are assumed to already be ordered by salience DESC, then
-    pgvector-similarity-to-current-context DESC -- that ordering is
-    `KnowledgeRepository.search_by_similarity()`'s contract (ADR-0003 Part 2);
-    this function does not re-sort. Per-fact `fact_text` is pre-capped to
-    `MAX_FACT_CHARS`, then facts are accumulated in retrieval order until the
-    budget is exhausted; the tail is dropped (no `min_recency`-style override
-    -- salience ordering already encodes priority).
+    Facts arrive ordered by similarity DESC (`KnowledgeRepository.search_by_similarity()`'s
+    retrieval contract, ADR-0009) -- relevance to the query, not budget priority.
+    This function owns budget-trim priority: it stable-sorts by salience DESC
+    first, so a higher-salience fact survives a cut ahead of a merely-more-similar
+    one; equal-salience facts keep their incoming (similarity) order since
+    `sorted()` is stable. Per-fact `fact_text` is then pre-capped to
+    `MAX_FACT_CHARS`, and facts are accumulated in that order until the budget
+    is exhausted; the tail is dropped.
     """
+    facts = sorted(facts, key=lambda f: f.get("salience", 0.5), reverse=True)
     trimmed: list[dict[str, Any]] = []
     used_tokens = 0
     for fact in facts:

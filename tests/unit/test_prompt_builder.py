@@ -710,16 +710,46 @@ class TestTrimFactsToBudget:
         result = trim_facts_to_budget(facts)
         assert len(result) == 2
 
-    def test_preserves_retrieval_order_does_not_resort(self):
+    def test_sorts_by_salience_before_trimming(self):
+        """ADR-0009: retrieval arrives similarity-ordered; trim_facts_to_budget()
+        stable-sorts by salience DESC before applying the budget, so a
+        higher-salience fact moves ahead of a lower-salience one it arrived
+        after (supersedes the old "does not re-sort" contract)."""
         facts = [
             {"fact_text": "lower salience but first", "salience": 0.1},
             {"fact_text": "higher salience but second", "salience": 0.9},
         ]
         result = trim_facts_to_budget(facts)
         assert [f["fact_text"] for f in result] == [
-            "lower salience but first",
             "higher salience but second",
+            "lower salience but first",
         ]
+
+    def test_stable_sort_preserves_arrival_order_on_salience_tie(self):
+        facts = [
+            {"fact_text": "arrived first", "salience": 0.5},
+            {"fact_text": "arrived second", "salience": 0.5},
+        ]
+        result = trim_facts_to_budget(facts)
+        assert [f["fact_text"] for f in result] == ["arrived first", "arrived second"]
+
+    def test_higher_salience_survives_tight_budget_over_more_similar_fact(self):
+        """Ported from the retrieval-layer ADR-0003 Part 2 test
+        (`test_salience_wins_over_similarity`, now superseded by ADR-0009 at
+        the retrieval layer -- see
+        `tests/integration/test_knowledge_repository.py::test_similarity_wins_over_salience`).
+        The *intent* -- a curated higher-salience fact should survive a budget
+        cut ahead of a merely-more-similar one -- now belongs here, at the
+        budget-trim layer."""
+        max_size_text = "x" * MAX_FACT_CHARS
+        facts = [
+            {"fact_text": max_size_text, "salience": 0.1},  # arrives first (most similar)
+            {"fact_text": max_size_text, "salience": 0.9},  # arrives second, less similar
+        ]
+        # Tight budget: only one of the two (~150-token) facts fits.
+        result = trim_facts_to_budget(facts, budget_tokens=150)
+        assert len(result) == 1
+        assert result[0]["salience"] == 0.9
 
     def test_per_fact_content_capped_at_max_fact_chars(self):
         long_text = "y" * (MAX_FACT_CHARS + 100)
