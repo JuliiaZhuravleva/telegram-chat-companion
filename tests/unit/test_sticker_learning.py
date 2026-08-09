@@ -1357,6 +1357,46 @@ class TestNotifyAdminsExplicitnessLine:
         assert "✅ пройдёт" in text
 
     @pytest.mark.asyncio
+    async def test_manual_score_shows_manual_badge(self, sticker_service):
+        """A-4 / ADR-0009 Decision 6 edge case: a freshly-learned duplicate
+        can inherit a manual score+flag from its canonical row, so the
+        (вручную) badge can legitimately appear on its very first
+        notification -- threaded via StickerLearningResult.explicitness_is_manual."""
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=0.3,
+            explicitness_is_manual=True,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
+
+        text = bot.send_message.call_args.args[1]
+        assert "(вручную)" in text
+
+    @pytest.mark.asyncio
+    async def test_automatic_score_shows_no_manual_badge(self, sticker_service):
+        sticker_service._repo.save_notification = AsyncMock()
+        bot = _make_notify_bot()
+        sticker = _make_sticker()
+        result = StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-123",
+            visual_description="a cat",
+            explicitness_score=0.3,
+            explicitness_is_manual=False,
+        )
+
+        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
+
+        text = bot.send_message.call_args.args[1]
+        assert "вручную" not in text
+
+    @pytest.mark.asyncio
     async def test_no_description_omits_explicitness_line(self, sticker_service):
         """Defensive gate mirroring admin_sticker.py's own: no visual
         description at all -> no explicitness line, even if a score

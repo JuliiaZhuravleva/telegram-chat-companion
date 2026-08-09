@@ -30,6 +30,8 @@ def format_explicitness_line(
     explicitness_score: float | None,
     tolerance_level: float,
     lang: str = "ru",
+    *,
+    is_manual: bool = False,
 ) -> str:
     """One-line summary for every admin-facing DM sticker card (A-1).
 
@@ -45,6 +47,14 @@ def format_explicitness_line(
     pending the ADR-0008 backfill script) always renders as "not scored"
     and never a fabricated pass/fail — mirrors ``is_within_tolerance()``'s
     fail-closed contract instead of re-deriving it here.
+
+    ``is_manual`` (ADR-0009/A-4): appends a "(вручную)"/"(manual)" marker
+    when the score was hand-set by an admin (``explicitness_is_manual``)
+    rather than produced by the vision pipeline. Only rendered alongside an
+    actual score — a reset always NULLs both fields together (Decision 5),
+    so ``is_manual=True`` with ``explicitness_score=None`` shouldn't occur,
+    but the badge is intentionally omitted in the unscored branch either
+    way to avoid a nonsensical "не оценён (вручную)".
     """
     if lang == "ru":
         label = "Оценка откровенности"
@@ -55,9 +65,10 @@ def format_explicitness_line(
             if is_within_tolerance(explicitness_score, tolerance_level)
             else "❌ не пройдёт"
         )
+        badge = " (вручную)" if is_manual else ""
         return (
             f"<b>{label}:</b> {explicitness_score:.2f} · "
-            f"уровень приличия чата {tolerance_level:.2f} · {verdict}"
+            f"уровень приличия чата {tolerance_level:.2f} · {verdict}{badge}"
         )
 
     label = "Explicitness score"
@@ -66,6 +77,8 @@ def format_explicitness_line(
     verdict = (
         "✅ passes" if is_within_tolerance(explicitness_score, tolerance_level) else "❌ blocked"
     )
+    badge = " (manual)" if is_manual else ""
     return (
-        f"<b>{label}:</b> {explicitness_score:.2f} · chat ceiling {tolerance_level:.2f} · {verdict}"
+        f"<b>{label}:</b> {explicitness_score:.2f} · chat ceiling {tolerance_level:.2f} · "
+        f"{verdict}{badge}"
     )

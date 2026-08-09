@@ -20,15 +20,23 @@ from src.bot.handlers.admin_sticker import (
     handle_run_analysis,
     handle_sticker_back,
     handle_sticker_detail,
+    handle_sticker_explicitness_cancel,
+    handle_sticker_explicitness_edit_prompt,
+    handle_sticker_explicitness_input,
+    handle_sticker_explicitness_preset,
+    handle_sticker_explicitness_reset,
 )
 from src.bot.keyboards.admin_sticker import (
+    _EXPLICITNESS_PRESETS,
     _status_badge,
     sticker_clear_confirm_keyboard,
     sticker_detail_keyboard,
     sticker_dm_check_keyboard,
+    sticker_explicitness_cancel_keyboard,
     sticker_reanalyze_retry_keyboard,
     sticker_set_detail_keyboard,
 )
+from src.bot.states.admin import AdminStates
 from src.services.modules.sticker.models import ReanalyzeResult, StickerLearningResult
 from src.utils.telegram import TelegramFileError
 
@@ -1722,3 +1730,351 @@ class TestHandleStickerDetailExplicitnessLine:
         assert "0.30" in text
         assert "0.60" in text
         assert "✅ пройдёт" in text
+
+
+# ---------------------------------------------------------------------------
+# _build_detail_text — is_manual badge threading (A-4 / ADR-0009)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDetailTextManualBadge:
+    def test_manual_flag_shows_badge(self) -> None:
+        sticker = {
+            **_SAMPLE_STICKER,
+            "explicitness_score": 0.3,
+            "explicitness_is_manual": True,
+        }
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "(вручную)" in text
+
+    def test_no_manual_flag_no_badge(self) -> None:
+        sticker = {
+            **_SAMPLE_STICKER,
+            "explicitness_score": 0.3,
+            "explicitness_is_manual": False,
+        }
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "вручную" not in text
+
+    def test_missing_manual_key_treated_as_automatic(self) -> None:
+        sticker = {k: v for k, v in _SAMPLE_STICKER.items() if k != "explicitness_is_manual"}
+        sticker["explicitness_score"] = 0.3
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "вручную" not in text
+
+
+# ---------------------------------------------------------------------------
+# sticker_detail_keyboard — explicitness rows (A-4 / ADR-0009)
+# ---------------------------------------------------------------------------
+
+
+class TestStickerDetailKeyboardExplicitness:
+    def test_preset_buttons_present(self) -> None:
+        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        for idx in range(len(_EXPLICITNESS_PRESETS)):
+            assert f"adm_stk_expset:ru:AgADvh4AAlkbCFI:{idx}" in callbacks
+
+    def test_edit_button_present(self) -> None:
+        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "adm_stk_expedit:ru:AgADvh4AAlkbCFI" in callbacks
+
+    def test_reset_button_hidden_when_not_manual(self) -> None:
+        kb = sticker_detail_keyboard(
+            "AgADvh4AAlkbCFI", lang="ru", set_name="s", explicitness_is_manual=False
+        )
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert not any((c or "").startswith("adm_stk_expreset:") for c in callbacks)
+
+    def test_reset_button_shown_when_manual(self) -> None:
+        kb = sticker_detail_keyboard(
+            "AgADvh4AAlkbCFI", lang="ru", set_name="s", explicitness_is_manual=True
+        )
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "adm_stk_expreset:ru:AgADvh4AAlkbCFI" in callbacks
+
+    def test_back_button_still_last_row(self) -> None:
+        """New explicitness rows must not push the back button out of its
+        always-last-row contract other handlers rely on (e.g. tests indexing
+        kb.inline_keyboard[-1])."""
+        kb = sticker_detail_keyboard(
+            "AgADvh4AAlkbCFI", lang="ru", set_name="test_set", explicitness_is_manual=True
+        )
+        back_btn = kb.inline_keyboard[-1][0]
+        assert back_btn.callback_data == "adm_stk_back:ru:test_set:0"
+
+
+class TestStickerExplicitnessCancelKeyboard:
+    def test_single_cancel_button_ru(self) -> None:
+        kb = sticker_explicitness_cancel_keyboard("AgADvh4AAlkbCFI", lang="ru")
+        assert len(kb.inline_keyboard) == 1
+        btn = kb.inline_keyboard[0][0]
+        assert "Отмена" in btn.text
+        assert btn.callback_data == "adm_stk_expcancel:ru:AgADvh4AAlkbCFI"
+
+    def test_single_cancel_button_en(self) -> None:
+        kb = sticker_explicitness_cancel_keyboard("AgADvh4AAlkbCFI", lang="en")
+        btn = kb.inline_keyboard[0][0]
+        assert "Cancel" in btn.text
+
+
+# ---------------------------------------------------------------------------
+# handle_sticker_explicitness_preset (A-4)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStickerExplicitnessPreset:
+    @pytest.mark.asyncio()
+    async def test_sets_preset_value_and_rerenders(self) -> None:
+        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:2")  # idx 2 -> 0.5
+        sticker_repo = _make_sticker_repo(
+            sticker={**_SAMPLE_STICKER, "explicitness_score": 0.5, "explicitness_is_manual": True}
+        )
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.5)
+        cb.message.edit_text.assert_awaited_once()
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        assert "adm_stk_expreset:ru:AgADvh4AAlkbCFI" in callbacks
+
+    @pytest.mark.asyncio()
+    async def test_invalid_preset_index_no_write(self) -> None:
+        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:99")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized(self) -> None:
+        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:0", user_id=99999)
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# handle_sticker_explicitness_edit_prompt / _input / _cancel (A-4)
+# ---------------------------------------------------------------------------
+
+
+def _make_exp_state(data: dict[str, object] | None = None) -> MagicMock:
+    state = MagicMock()
+    state.set_state = AsyncMock()
+    state.update_data = AsyncMock()
+    state.get_data = AsyncMock(return_value=data or {})
+    state.clear = AsyncMock()
+    return state
+
+
+def _make_exp_message(text: str, user_id: int = 12345) -> MagicMock:
+    message = MagicMock()
+    message.text = text
+    message.from_user = MagicMock()
+    message.from_user.id = user_id
+    message.reply = AsyncMock()
+    message.answer = AsyncMock()
+    return message
+
+
+class TestHandleStickerExplicitnessEditPrompt:
+    @pytest.mark.asyncio()
+    async def test_sets_state_and_prompts(self) -> None:
+        cb = _make_callback("adm_stk_expedit:ru:AgADvh4AAlkbCFI")
+        bot_config_repo = _make_bot_config_repo()
+        state = _make_exp_state()
+
+        await handle_sticker_explicitness_edit_prompt(cb, bot_config_repo, state)
+
+        state.set_state.assert_awaited_once_with(AdminStates.awaiting_sticker_score)
+        state.update_data.assert_awaited_once_with(
+            exp_file_unique_id="AgADvh4AAlkbCFI", exp_lang="ru"
+        )
+        cb.message.answer.assert_awaited_once()
+        assert cb.message.answer.call_args.kwargs.get("reply_markup") is not None
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized(self) -> None:
+        cb = _make_callback("adm_stk_expedit:ru:AgADvh4AAlkbCFI", user_id=99999)
+        bot_config_repo = _make_bot_config_repo("12345")
+        state = _make_exp_state()
+
+        await handle_sticker_explicitness_edit_prompt(cb, bot_config_repo, state)
+
+        state.set_state.assert_not_awaited()
+
+
+class TestHandleStickerExplicitnessInput:
+    @pytest.mark.asyncio()
+    async def test_valid_value_writes_and_clears_state(self) -> None:
+        message = _make_exp_message("0.42")
+        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
+        sticker_repo = _make_sticker_repo(
+            sticker={**_SAMPLE_STICKER, "explicitness_score": 0.42, "explicitness_is_manual": True}
+        )
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_awaited_once()
+        sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.42)
+        message.reply.assert_awaited_once()
+        message.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_comma_decimal_accepted(self) -> None:
+        """RU keyboards commonly produce a comma decimal separator -- same
+        posture as admin_chat_panel.py's tolerance input."""
+        message = _make_exp_message("0,7")
+        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+
+        sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.7)
+
+    @pytest.mark.asyncio()
+    async def test_out_of_range_reprompts_without_writing(self) -> None:
+        message = _make_exp_message("1.5")
+        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_not_awaited()
+        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+        assert message.reply.call_args.kwargs.get("reply_markup") is not None
+
+    @pytest.mark.asyncio()
+    async def test_non_numeric_reprompts_without_writing(self) -> None:
+        message = _make_exp_message("not a number")
+        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_not_awaited()
+        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_missing_fsm_data_clears_state_and_noops(self) -> None:
+        message = _make_exp_message("0.5")
+        state = _make_exp_state({})
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_awaited_once()
+        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_clears_state_without_writing(self) -> None:
+        message = _make_exp_message("0.5", user_id=99999)
+        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_awaited_once()
+        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+
+
+class TestHandleStickerExplicitnessCancel:
+    @pytest.mark.asyncio()
+    async def test_clears_state_and_rerenders_detail(self) -> None:
+        cb = _make_callback("adm_stk_expcancel:ru:AgADvh4AAlkbCFI")
+        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_cancel(cb, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_awaited_once()
+        cb.message.edit_text.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_clear(self) -> None:
+        cb = _make_callback("adm_stk_expcancel:ru:AgADvh4AAlkbCFI", user_id=99999)
+        state = _make_exp_state()
+        sticker_repo = _make_sticker_repo()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_sticker_explicitness_cancel(cb, state, sticker_repo, bot_config_repo)
+
+        state.clear.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# handle_sticker_explicitness_reset (A-4 / ADR-0009 Decision 5)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStickerExplicitnessReset:
+    @pytest.mark.asyncio()
+    async def test_resets_and_rerenders_as_unscored(self) -> None:
+        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI")
+        reset_sticker = {
+            **_SAMPLE_STICKER,
+            "explicitness_score": None,
+            "explicitness_is_manual": False,
+        }
+        sticker_repo = _make_sticker_repo(sticker=reset_sticker)
+        sticker_repo.reset_explicitness_to_auto = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.reset_explicitness_to_auto.assert_awaited_once_with("AgADvh4AAlkbCFI")
+        cb.message.edit_text.assert_awaited_once()
+        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+        # Reset button itself must disappear now that the sticker is no
+        # longer manually scored (nothing left to revert).
+        assert not any((c or "").startswith("adm_stk_expreset:") for c in callbacks)
+
+    @pytest.mark.asyncio()
+    async def test_not_authorized_does_not_reset(self) -> None:
+        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI", user_id=99999)
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock()
+        bot_config_repo = _make_bot_config_repo("12345")
+
+        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.reset_explicitness_to_auto.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_missing_sticker_id_shows_alert(self) -> None:
+        cb = _make_callback("adm_stk_expreset:ru:")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock()
+        bot_config_repo = _make_bot_config_repo()
+
+        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo)
+
+        sticker_repo.reset_explicitness_to_auto.assert_not_awaited()
+        assert cb.answer.call_args.kwargs.get("show_alert") is True

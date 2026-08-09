@@ -659,7 +659,12 @@ class StickerLearningService:
         # analysis_failed, so this mirrors that same not-analyzed-yet gate).
         if result.visual_description:
             description_parts.append(
-                format_explicitness_line(result.explicitness_score, tolerance_level, "ru")
+                format_explicitness_line(
+                    result.explicitness_score,
+                    tolerance_level,
+                    "ru",
+                    is_manual=result.explicitness_is_manual,
+                )
             )
 
         # In detailed mode, enrich with RAG data from DB

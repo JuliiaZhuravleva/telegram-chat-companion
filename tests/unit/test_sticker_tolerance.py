@@ -75,3 +75,39 @@ class TestFormatExplicitnessLine:
     def test_default_lang_is_russian(self) -> None:
         line = format_explicitness_line(0.1, 0.5)
         assert "Оценка откровенности" in line
+
+
+# ── format_explicitness_line — is_manual badge (A-4 / ADR-0009) ─────────────
+
+
+class TestFormatExplicitnessLineManualBadge:
+    def test_manual_badge_shown_ru(self) -> None:
+        line = format_explicitness_line(0.4, 0.5, "ru", is_manual=True)
+        assert "(вручную)" in line
+
+    def test_manual_badge_shown_en(self) -> None:
+        line = format_explicitness_line(0.4, 0.5, "en", is_manual=True)
+        assert "(manual)" in line
+
+    def test_no_badge_when_not_manual(self) -> None:
+        line = format_explicitness_line(0.4, 0.5, "ru", is_manual=False)
+        assert "вручную" not in line
+
+    def test_default_is_manual_is_false(self) -> None:
+        line = format_explicitness_line(0.4, 0.5, "ru")
+        assert "вручную" not in line
+
+    def test_unscored_never_shows_manual_badge(self) -> None:
+        """Invariant (Decision 5): reset always NULLs both fields together,
+        so is_manual=True with explicitness_score=None shouldn't occur --
+        but even if it did, the unscored branch must never render the
+        nonsensical "не оценён (вручную)"."""
+        line = format_explicitness_line(None, 0.5, "ru", is_manual=True)
+        assert "вручную" not in line
+        assert "не оценён" in line
+
+    def test_manual_badge_does_not_affect_verdict(self) -> None:
+        failing = format_explicitness_line(0.9, 0.5, "ru", is_manual=True)
+        assert "❌" in failing
+        assert "не пройдёт" in failing
+        assert "(вручную)" in failing

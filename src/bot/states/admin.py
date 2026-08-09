@@ -15,6 +15,14 @@ class AdminStates(StatesGroup):
     # Sticker management: waiting for new description
     awaiting_sticker_edit = State()
 
+    # Sticker management: waiting for a manually-typed explicitness score
+    # (ADR-0009 Decision 7 / A-4). Deliberately a fresh state rather than
+    # reusing awaiting_sticker_edit (docstring above already means "waiting
+    # for a new description" -- a different flow on the same router) or
+    # awaiting_setting_value (now owned by admin_chat_panel.py's per-chat
+    # tolerance FSM) -- Decision 7's cosmetic-alternative escape hatch.
+    awaiting_sticker_score = State()
+
     # Sticker wizard: waiting for sticker to analyze
     awaiting_sticker = State()
 

@@ -9,6 +9,12 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+# Preset explicitness values (A-4 / ADR-0009 Decision 7, closing paragraph):
+# a preset tap writes a known-valid value directly, no FSM round-trip. Index
+# into this tuple (not the raw float) rides in callback_data -- shorter and
+# avoids any float-formatting/parsing mismatch between button and handler.
+_EXPLICITNESS_PRESETS: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+
 
 def sticker_sets_keyboard(
     sets: list[dict[str, object]],
@@ -176,8 +182,15 @@ def sticker_detail_keyboard(
     *,
     lang: str,
     set_name: str | None = None,
+    explicitness_is_manual: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Detail view for a single sticker."""
+    """Detail view for a single sticker.
+
+    ``explicitness_is_manual`` (A-4 / ADR-0009 Decision 5): gates the
+    "reset to automatic" row -- shown only when there's a manual override to
+    revert. Resetting an already-automatic score would just NULL it out for
+    no benefit the admin asked for.
+    """
     rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
@@ -191,7 +204,30 @@ def sticker_detail_keyboard(
                 callback_data=f"adm_stk_clr_ask:{lang}:{file_unique_id}",
             ),
         ],
+        [
+            InlineKeyboardButton(
+                text=f"{value:.2f}",
+                callback_data=f"adm_stk_expset:{lang}:{file_unique_id}:{idx}",
+            )
+            for idx, value in enumerate(_EXPLICITNESS_PRESETS)
+        ],
+        [
+            InlineKeyboardButton(
+                text="✏️ Указать число" if lang == "ru" else "✏️ Enter a number",
+                callback_data=f"adm_stk_expedit:{lang}:{file_unique_id}",
+            ),
+        ],
     ]
+
+    if explicitness_is_manual:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="↩️ Сбросить к авто" if lang == "ru" else "↩️ Reset to automatic",
+                    callback_data=f"adm_stk_expreset:{lang}:{file_unique_id}",
+                ),
+            ]
+        )
 
     # Back button: sticker message cleanup is handled via DB lookup in handlers
     back_data = f"adm_stk_back:{lang}:{set_name}:0" if set_name else f"adm_stk_sets:{lang}:0"
@@ -206,6 +242,30 @@ def sticker_detail_keyboard(
     )
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def sticker_explicitness_cancel_keyboard(
+    file_unique_id: str,
+    *,
+    lang: str,
+) -> InlineKeyboardMarkup:
+    """Single-button escape hatch attached to the explicitness-score FSM
+    prompt (A-4 / ADR-0009 Decision 7) -- mirrors
+    ``admin_chat_panel.tolerance_cancel_keyboard``'s shape for this sibling
+    per-sticker flow. Without it, invalid input (reject-not-clamp) would
+    leave the admin stuck until a valid float arrived.
+    """
+    label = "✖️ Отмена" if lang == "ru" else "✖️ Cancel"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=label,
+                    callback_data=f"adm_stk_expcancel:{lang}:{file_unique_id}",
+                ),
+            ],
+        ]
+    )
 
 
 def sticker_dm_check_keyboard(
