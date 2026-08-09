@@ -20,7 +20,7 @@ items:
   title: 'Единый источник порога сходства: YAML — единственный источник истины; убрать дефолты 0.65 из конструктора и метода репозитория (и починить x or default → x if x is not None else default при консолидации)'
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 1h
   confidence: null
@@ -28,9 +28,9 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
-    executor: pm-orchestrator
-    note: 'Ревизия 1: Julia — «один источник, YAML». YAML (config/default.yml) остаётся единственным местом значения порога; дублирующие дефолты 0.65 в конструкторе сервиса и методе репозитория убрать (сделать аргумент обязательным либо тянуть из конфига). RAGSettings.min_similarity читает YAML — competing хардкод не оставлять. При консолидации починить x or default → x if x is not None else default, иначе явный min_similarity=0.0 снова молча перезатрётся.'
+    ts: '2026-08-09T15:48:26Z'
+    executor: specialist-backend-dev
+    note: dispatched
   result: null
 - id: S2-6
   title: 'chat_memory: очистку по возрасту в этом слайсе НЕ включаем — данные не удаляем без предварительной сводки (инвариант S2-11). Правка = комментарий в _windows(), помечающий намеренное исключение chat_memory и ссылающийся на ADR'
@@ -53,7 +53,7 @@ items:
   title: 'ADR-0003: решить порядок сортировки KB (развести ранжирование выдачи и обрезку под бюджет)'
   specialist: architect
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 45m
   confidence: null
@@ -61,7 +61,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:48:50Z'
     executor: pm-orchestrator
     note: 'Ревизия 1: Julia согласна с разводкой двух ключей сортировки — ранжирование выдачи по похожести и ранжирование для обрезки под бюджет по важности (salience). Решение архитектора (S2-3a: переписать пункт ADR-0003 Part 2) до правки SQL (S2-3b). Наивный флип ORDER BY ломает и обрезку под бюджет, и зелёный тест test_salience_wins_over_similarity — поэтому именно два ключа.'
   result: null
@@ -69,7 +69,7 @@ items:
   title: 'Фолбэк эмбеддингов (вариант а): честно снять резерв — убрать openai из цепочки embeddings, задокументировать отсутствие 768-мерного резерва; лёгкий guard длины вектора перед записью оставить как дешёвую защиту'
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - S2-2
   estimated_effort: 3h
@@ -78,7 +78,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:48:54Z'
     executor: pm-orchestrator
     note: 'Ревизия 1: Julia выбрала вариант (а) — убрать openai из цепочки embeddings, оставить gemini-only, задокументировать отсутствие 768-мерного резерва. Валидация размерности (нужная в основном для варианта б) больше не критична, но лёгкий guard длины вектора перед записью оставляем как дешёвую защиту (негативный контроль из разбора). Дополнительное пожелание Julia — фоновый дозапис упавших эмбеддингов — вынесено в новый пункт S2-10 (depends_on S2-1), чтобы вариант (а) не приводил к безвозвратной потере памяти при недоступности Gemini.'
   result: null
@@ -86,7 +86,7 @@ items:
   title: 'KB: применить решённый порядок сортировки в SQL + переписать ADR-заблокированный тест'
   specialist: backend-dev
   priority: P1
-  status: pending
+  status: done
   depends_on:
   - S2-3a
   estimated_effort: 1h
@@ -95,7 +95,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:48:56Z'
     executor: null
     note: null
   result: null
@@ -103,7 +103,7 @@ items:
   title: Один эмбеддинг запроса на ход для RAG и KB + проброс chat_id в логи стоимости (TD-009)
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - S2-1
   estimated_effort: 2h
@@ -112,7 +112,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:03Z'
     executor: null
     note: null
   result: null
@@ -120,7 +120,7 @@ items:
   title: 'delete_expired(): удалить как мёртвый код — ноль вызовов; инвариант сохранности (S2-11) окончательно закрывает развилку в пользу удаления (destructive-механизмы chat_memory в этом слайсе не подключаем)'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 20m
   confidence: null
@@ -128,7 +128,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:09Z'
     executor: null
     note: 'Ревизия 2 (консультация architect): удаление подтверждено и усилено. (1) Инвариант сохранности S2-11 разрешает прежнюю развилку delete_expired vs retention-по-возрасту в пользу удаления — ни один destructive-механизм chat_memory в этом слайсе не подключается. (2) expires_at нигде в src/ не пишется (INSERT в MemoryRepository.store() не содержит колонки), все строки NULL — delete_expired удалил бы 0 строк даже сейчас, живого риска нет. (3) Текущая форма (слепой DELETE ... WHERE expires_at < NOW()) не годится для будущего summary-gated удаления (нужно предусловие «сводка сохранена», а не голый TTL) — хранить мёртвую функцию «на будущее» смысла нет, будущий механизм проектируется заново против ADR S2-11. depends_on остаётся [].'
   result: null
@@ -136,7 +136,7 @@ items:
   title: Удалить мёртвый код ChatFact (не используется вне своего модуля)
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 15m
   confidence: null
@@ -144,7 +144,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:12Z'
     executor: null
     note: null
   result: null
@@ -152,7 +152,7 @@ items:
   title: Интеграционный тест chat-scoping (privacy-инвариант) с обязательным негативным контролем
   specialist: qa
   priority: P1
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 1.5h
   confidence: null
@@ -160,7 +160,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:00Z'
     executor: null
     note: null
   result: null
@@ -168,7 +168,7 @@ items:
   title: Юнит-покрытие RAGMemoryService (поведение при падении эмбеддинга, проброс порога/лимита)
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - S2-1
   - S2-2
@@ -178,7 +178,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:15Z'
     executor: null
     note: null
   result: null
@@ -186,7 +186,7 @@ items:
   title: '/kb view: проверять kb_enabled (фильтр/ранний ответ с текстом, не тихий return)'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 1h
   confidence: null
@@ -194,7 +194,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:18Z'
     executor: null
     note: null
   result: null
@@ -202,7 +202,7 @@ items:
   title: 'relevancy_check (вариант а): удалить мёртвую секцию конфига + переномеровать дублирующую запись TD-039 (роутер) на следующий свободный номер в _tech-debt.md; правку сигнатуры generate_text() вынести отдельным PR позже'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 1h
   confidence: null
@@ -210,7 +210,7 @@ items:
   specialist_session_id: null
   retry_count: 0
   last_update:
-    ts: null
+    ts: '2026-08-09T15:49:23Z'
     executor: pm-orchestrator
     note: 'Ревизия 1: Julia подтвердила вариант (а) — удалить вводящую в заблуждение секцию relevancy_check из config/default.yml (дёшево, в общем PR). Правку роутера (параметр задачи в generate_text(), затрагивает все 5 вызовов в 4 файлах — вариант б) НЕ делаем в этом слайсе, выносим отдельным PR позже (возможно, с коротким ADR). Дополнительно (ответ на Q2): в _tech-debt.md номер TD-039 занят дважды (автоблэклист бытовых слов и роутинг generate_text) — при выполнении переномеровать запись про роутер на следующий свободный номер, чтобы ссылки на TD-039 не были двусмысленными. Правку _tech-debt.md делает исполнитель этого пункта, не PM.'
   result: null
@@ -224,13 +224,21 @@ items:
   estimated_effort: 4.5h
   confidence: null
   consult_session_id: 756ee269-b593-4d25-9743-0d375b523f5c
-  specialist_session_id: null
+  specialist_session_id: 3f47597e-4eff-49d9-bd2e-6f26eeab43a8
   retry_count: 0
   last_update:
-    ts: null
-    executor: pm-orchestrator
-    note: 'Скоуп (консультация backend-dev, ревизия 1): (1) миграция НЕ нужна — chat_memory.embedding уже nullable vector(768), а search() фильтрует embedding IS NOT NULL, поэтому строка с NULL-эмбеддингом = естественный маркер pending и инертна к поиску; едет в общем PR. (2) Предусловие в этом же скоупе: сейчас RAGMemoryService.store() при падении эмбеддинга вообще не пишет строку (ловит исключение, warning, return None до _repo.store); нужно расширить error-path, чтобы строка сохранялась с embedding=None. Единственный вызывающий (_safe_rag_store) игнорирует возврат — контракт не меняется. (3) Инфру не изобретать: EmbeddingBackfillWorker зеркалит RetentionCleaner 1:1 (pool+config, start/stop/_run_loop, синглтон в main.py) + мелкий конфиг-блок по образцу MaintenanceSettings (enabled/interval_seconds/batch). (4) Политика ретраев (дефолт, ADR не нужен): повторять без ограничения по попыткам (gemini-embedding-001 бесплатен), warning после N подряд неудачных проходов; пересмотреть, когда приземлится retention S2-6. Кэйденс — часовой как у обслуживания; логирование — structlog, без отдельной таблицы. depends_on S2-1 (оба трогают memory.py, идти после).'
+    ts: '2026-08-09T15:45:23Z'
+    executor: execute_plan.sh
+    note: Your previous session was interrupted by the per-item budget cap, not by a review. Check what you already changed and committed (git status / git log), finish only what is left, and submit your verdict — you are resuming with a smaller budget, so do not redo finished work.
   result: null
+  budget_checkpoint:
+    count: 1
+    spent_usd: 3.2411
+    session_id: 3f47597e-4eff-49d9-bd2e-6f26eeab43a8
+    source: budget_death
+    state: resuming
+    ts: '2026-08-09T15:43:20Z'
+  max_usd_override: 4.0
 - id: S2-11
   title: 'ADR-инвариант сохранности данных памяти: строки памяти (chat_memory и будущий chat_chunks) нельзя безвозвратно удалять, не сохранив предварительно высокоуровневую сводку; реализацию самой сводки сейчас не делаем (отдельный ADR, только фиксация решения)'
   specialist: architect
@@ -248,11 +256,13 @@ items:
     note: 'Ревизия 2 (ответ Julia [S2-6b] + повторная консультация architect, session 2cc86a83): зафиксировать инвариант отдельным ADR в docs/decisions/. Номер — следующий свободный (по оценке ADR-0009, но на диске уже есть коллизии ADR-0003/0004 из параллельных worktrees, поэтому перед записью проверить git log --all по docs/decisions/). ADR табличо-независимый: описывает «данные памяти» — данные, единственная запись о разговоре которых сама строка и которые не восстановимы из chat_messages; текущий скоуп chat_memory, форвард-скоуп явно называет планируемую таблицу chat_chunks (S4, у неё свой GC на роадмапе). Явный Non-goal: пайплайн сохранения сводки этим ADR НЕ проектируется и НЕ планируется — отложен (Julia: «не обязательно прямо сейчас»); проектируется в момент вывода таблицы из эксплуатации (S5–S6) или когда удаление реально понадобится. Только запись решения, ~0.5ч, риск низкий.'
   result: null
 budget:
-  max_usd_per_item: 2.0
-  max_usd_per_plan: 20.0
-  consumed_usd: 0.0
+  max_usd_per_item: 4.0
+  max_usd_per_plan: 45.0
+  consumed_usd: 28.263
 review_gate:
-  why: []
+  why:
+  - 'item S2-10: per-item cap bumped $2.00→$4.00 — budget-consult: No commit yet, but git status/diff on the worktree shows the full 4-point scope from the consult note already landed uncommitted: new src/services/rag/backfill.py (147 lines, mirrors RetentionCleaner as specified) + tests/unit/test_embedding_backfill.py (234 lines), plus matching edits to config.py/main.py/repositories/memory.py/rag/memory.py for the null-embedding store path; running the affected unit tests gives 52 passed with 89-95% coverage on the new/changed modules. limit_hit=budget with turns_used only 78/150 confirms a sizing miss (4.5h estimated item vs $2 cap), not thrashing, and plan headroom ($16.8 of $20) easily covers finishing (commit + lint/mypy + envelope note); remainder of the current cap is negative so resume_with_remainder doesn''t fit, hence bump to the 2x-original ceiling.'
+  - 'plan budget cap changed $20.00→$45.00 (consumed $3.61) — restoring after the envelope reverted to its committed state during S2-10 run 1: 11 done items, both caps and consumed_usd were lost; work commits intact'
   approve_action: /execute-plan <projects>/telegram-chat-companion.rag-s2-hygiene-wt/docs/plans/rag-s2-hygiene.execution.md --resume
   reject_action: /plan-fixes docs/plans/rag-s2-hygiene.md --revise <projects>/telegram-chat-companion.rag-s2-hygiene-wt/docs/plans/rag-s2-hygiene.execution.md
 safe_to_replay_from: null
@@ -322,6 +332,26 @@ revision_number: 3
 last_revised_at: '2026-08-09T13:53:06Z'
 last_revised_by: pm-orchestrator
 ---
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
