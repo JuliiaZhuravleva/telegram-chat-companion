@@ -32,6 +32,17 @@ _VISION_DERIVED_COLUMNS = (
 )
 
 
+def _updated_any(status: str) -> bool:
+    """True when an asyncpg command tag reports at least one affected row.
+
+    asyncpg returns the raw tag ("UPDATE 1" / "UPDATE 0"); the count is the
+    last field. An unexpected shape is treated as "did something" so a parsing
+    surprise can never turn a successful write into a user-facing error.
+    """
+    tail = status.rsplit(" ", 1)[-1]
+    return tail != "0"
+
+
 class StickerRepository:
     """Data access layer for sticker intelligence."""
 
@@ -242,7 +253,7 @@ class StickerRepository:
             score,
         )
 
-    async def set_manual_explicitness_score(self, file_unique_id: str, score: float) -> None:
+    async def set_manual_explicitness_score(self, file_unique_id: str, score: float) -> bool:
         """Admin-set score (ADR-0009 Decision 5, A-4's write path).
 
         Sets ``explicitness_is_manual = true`` so ``save_sticker()``'s upsert
@@ -251,8 +262,13 @@ class StickerRepository:
         ADR-0008 Decision 4 — this method does not re-validate, matching
         ``update_explicitness_score()``'s existing shape (repo methods trust
         the caller).
+
+        Returns False when no row matched — a stale card can carry a
+        ``file_unique_id`` that no longer exists, and without this the caller
+        would report a score it never stored (``handle_chat_panel_toggle``
+        already guards its own writes the same way).
         """
-        await self._pool.execute(
+        status = await self._pool.execute(
             """
             UPDATE sticker_knowledge
             SET explicitness_score = $2,
@@ -263,16 +279,20 @@ class StickerRepository:
             file_unique_id,
             score,
         )
+        return _updated_any(status)
 
-    async def reset_explicitness_to_auto(self, file_unique_id: str) -> None:
+    async def reset_explicitness_to_auto(self, file_unique_id: str) -> bool:
         """Clear both the value and the flag (ADR-0009 Decision 5).
 
         NOT a revert to a remembered prior automatic value — there isn't
         one, a single ``explicitness_score`` column only ever holds the
         current value. The sticker becomes "не оценён" until the next
         re-analysis (or admin re-analyze action) produces a fresh score.
+
+        Returns False when no row matched, same contract as
+        ``set_manual_explicitness_score``.
         """
-        await self._pool.execute(
+        status = await self._pool.execute(
             """
             UPDATE sticker_knowledge
             SET explicitness_score = NULL,
@@ -282,6 +302,7 @@ class StickerRepository:
             """,
             file_unique_id,
         )
+        return _updated_any(status)
 
     async def update_embedding(
         self,

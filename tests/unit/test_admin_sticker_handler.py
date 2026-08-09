@@ -40,6 +40,22 @@ from src.bot.states.admin import AdminStates
 from src.services.modules.sticker.models import ReanalyzeResult, StickerLearningResult
 from src.utils.telegram import TelegramFileError
 
+
+def _state() -> MagicMock:
+    """FSMContext stand-in for the explicitness handlers.
+
+    The preset and reset buttons stay tappable on a card sitting above an
+    open "введите число" prompt, so both must clear the state they did not
+    open — see the tests at the bottom of this file.
+    """
+    state = MagicMock()
+    state.clear = AsyncMock()
+    state.set_state = AsyncMock()
+    state.update_data = AsyncMock()
+    state.get_data = AsyncMock(return_value={})
+    return state
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -1831,10 +1847,10 @@ class TestHandleStickerExplicitnessPreset:
         sticker_repo = _make_sticker_repo(
             sticker={**_SAMPLE_STICKER, "explicitness_score": 0.5, "explicitness_is_manual": True}
         )
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo, _state())
 
         sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.5)
         cb.message.edit_text.assert_awaited_once()
@@ -1846,10 +1862,10 @@ class TestHandleStickerExplicitnessPreset:
     async def test_invalid_preset_index_no_write(self) -> None:
         cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:99")
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo, _state())
 
         sticker_repo.set_manual_explicitness_score.assert_not_awaited()
         assert cb.answer.call_args.kwargs.get("show_alert") is True
@@ -1858,10 +1874,10 @@ class TestHandleStickerExplicitnessPreset:
     async def test_not_authorized(self) -> None:
         cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:0", user_id=99999)
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo("12345")
 
-        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo, _state())
 
         sticker_repo.set_manual_explicitness_score.assert_not_awaited()
 
@@ -1925,7 +1941,7 @@ class TestHandleStickerExplicitnessInput:
         sticker_repo = _make_sticker_repo(
             sticker={**_SAMPLE_STICKER, "explicitness_score": 0.42, "explicitness_is_manual": True}
         )
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
@@ -1942,7 +1958,7 @@ class TestHandleStickerExplicitnessInput:
         message = _make_exp_message("0,7")
         state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
@@ -1954,7 +1970,7 @@ class TestHandleStickerExplicitnessInput:
         message = _make_exp_message("1.5")
         state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
@@ -1968,7 +1984,7 @@ class TestHandleStickerExplicitnessInput:
         message = _make_exp_message("not a number")
         state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
@@ -1981,7 +1997,7 @@ class TestHandleStickerExplicitnessInput:
         message = _make_exp_message("0.5")
         state = _make_exp_state({})
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
         await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
@@ -1994,7 +2010,7 @@ class TestHandleStickerExplicitnessInput:
         message = _make_exp_message("0.5", user_id=99999)
         state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
         sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo("12345")
 
         await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
@@ -2043,10 +2059,10 @@ class TestHandleStickerExplicitnessReset:
             "explicitness_is_manual": False,
         }
         sticker_repo = _make_sticker_repo(sticker=reset_sticker)
-        sticker_repo.reset_explicitness_to_auto = AsyncMock()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo, _state())
 
         sticker_repo.reset_explicitness_to_auto.assert_awaited_once_with("AgADvh4AAlkbCFI")
         cb.message.edit_text.assert_awaited_once()
@@ -2060,10 +2076,10 @@ class TestHandleStickerExplicitnessReset:
     async def test_not_authorized_does_not_reset(self) -> None:
         cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI", user_id=99999)
         sticker_repo = _make_sticker_repo()
-        sticker_repo.reset_explicitness_to_auto = AsyncMock()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo("12345")
 
-        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo, _state())
 
         sticker_repo.reset_explicitness_to_auto.assert_not_awaited()
 
@@ -2071,10 +2087,74 @@ class TestHandleStickerExplicitnessReset:
     async def test_missing_sticker_id_shows_alert(self) -> None:
         cb = _make_callback("adm_stk_expreset:ru:")
         sticker_repo = _make_sticker_repo()
-        sticker_repo.reset_explicitness_to_auto = AsyncMock()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
         bot_config_repo = _make_bot_config_repo()
 
-        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo, _state())
 
         sticker_repo.reset_explicitness_to_auto.assert_not_awaited()
         assert cb.answer.call_args.kwargs.get("show_alert") is True
+
+
+class TestExplicitnessFsmIsNotLeaked:
+    """Review finding, 2026-08-09: the preset and reset rows stay tappable on
+    the card above an open "введите число" prompt. If they leave
+    ``awaiting_sticker_score`` set, the admin's next plain DM message is eaten
+    by the score-input handler — which also outranks the description-reply
+    flow's ``StateFilter(None)``, so correcting a sticker description becomes
+    impossible until a valid float is typed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_preset_clears_a_state_it_did_not_open(self) -> None:
+        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:2")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
+        state = _state()
+
+        await handle_sticker_explicitness_preset(cb, sticker_repo, _make_bot_config_repo(), state)
+
+        state.clear.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reset_clears_a_state_it_did_not_open(self) -> None:
+        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
+        state = _state()
+
+        await handle_sticker_explicitness_reset(cb, sticker_repo, _make_bot_config_repo(), state)
+
+        state.clear.assert_awaited_once()
+
+
+class TestExplicitnessMissingRow:
+    """A stale card names a sticker that is gone: report it, don't claim success."""
+
+    @pytest.mark.asyncio
+    async def test_preset_on_a_vanished_sticker_reports_instead_of_confirming(self) -> None:
+        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:2")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=False)
+
+        await handle_sticker_explicitness_preset(
+            cb, sticker_repo, _make_bot_config_repo(), _state()
+        )
+
+        answer = cb.answer.call_args
+        assert answer.kwargs.get("show_alert") is True
+        assert "не найден" in answer.args[0]
+        # and it must not claim a score was set
+        assert "0." not in answer.args[0]
+
+    @pytest.mark.asyncio
+    async def test_reset_on_a_vanished_sticker_reports_instead_of_confirming(self) -> None:
+        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI")
+        sticker_repo = _make_sticker_repo()
+        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=False)
+
+        await handle_sticker_explicitness_reset(cb, sticker_repo, _make_bot_config_repo(), _state())
+
+        answer = cb.answer.call_args
+        assert answer.kwargs.get("show_alert") is True
+        assert "не найден" in answer.args[0]

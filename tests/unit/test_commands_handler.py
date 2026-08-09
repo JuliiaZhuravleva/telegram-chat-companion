@@ -336,3 +336,56 @@ class TestHandleSummary500:
         text = msg.answer.call_args[0][0]
         assert "/summary500" in text
         assert "group" in text
+
+
+class TestCopyIsHtmlSafe:
+    """Guards a whole bug class, not one string.
+
+    The bot sets DefaultBotProperties(parse_mode=HTML), so every reply is
+    parsed as HTML. `/summary abc` used to answer with "Формат: /summary
+    <число от 20 до 1000>." — Telegram rejects that entire sendMessage with
+    'Unsupported start tag "число"', so the user got no reply at all, exactly
+    when they needed one. Confirmed against the live Bot API on 2026-08-09;
+    the handler tests could not see it because message.reply is an AsyncMock.
+
+    Any `<` that opens what Telegram would read as a tag must therefore be
+    either a real formatting tag or an entity.
+    """
+
+    _ALLOWED_TAGS = {"b", "i", "u", "s", "a", "code", "pre", "tg-spoiler", "blockquote"}
+
+    def _offending_tags(self, text: str) -> list[str]:
+        import re as _re
+
+        # Telegram starts a tag at '<' followed by a letter (any script) and
+        # stops at whitespace or '>'; anything else stays literal text.
+        return [
+            m
+            for m in _re.findall(r"<\s*/?\s*([^\s>/]+)", text)
+            if m.lower() not in self._ALLOWED_TAGS
+        ]
+
+    def test_every_summary_copy_string_parses_as_html(self) -> None:
+        from src.bot.handlers import commands as mod
+
+        bad: dict[str, list[str]] = {}
+        for name in dir(mod):
+            if not name.startswith("_SUMMARY"):
+                continue
+            value = getattr(mod, name)
+            if not isinstance(value, dict):
+                continue
+            for lang, text in value.items():
+                if not isinstance(text, str):
+                    continue
+                offenders = self._offending_tags(text)
+                if offenders:
+                    bad[f"{name}[{lang}]"] = offenders
+        assert not bad, f"copy would be rejected by Telegram's HTML parser: {bad}"
+
+    def test_the_guard_itself_catches_the_original_string(self) -> None:
+        """Negative control: the exact copy that shipped must be flagged."""
+        original = "🤔 Не понял количество сообщений. Формат: /summary <число от 20 до 1000>."
+        assert self._offending_tags(original) == ["число"]
+        assert self._offending_tags("Формат: /summary <number from 20 to 1000>.") == ["number"]
+        assert self._offending_tags("<b>bold</b> and <code>x</code>") == []

@@ -228,6 +228,24 @@ Flagged here so it is not mistaken for a bug introduced by this ADR, and so Q-2'
 describes it as expected (tap "📚 База знаний" from the chat panel → its own "◀️ Назад" returns to the KB
 picker, not the chat panel — use `adm_pnl:` / the picker to get back to a specific chat's panel).
 
+### Superseded 2026-08-09 — option (a) was implemented after all
+
+The owner hit this within hours of B-2 landing and reported it as a bug, which is the answer to the
+question this decision left open: once the panel became the per-chat hub, "Back lands in a different
+section's chat list" stopped reading as an accepted trade-off and started reading as broken. Option (a)
+above is what shipped — an origin token in `callback_data` (`src/bot/keyboards/nav.py`), threaded through
+every button in the KB/Reactions submenus that leads to a screen returning to them. Entering from this
+panel now returns here; entering from a section's own picker still returns there; an absent or unknown
+token reads as the old default, so keyboards rendered before the change degrade rather than break.
+
+Two things this decision got right and are worth keeping in mind: it is indeed a change to
+`admin_kb.py`/`admin_reactions.py`'s navigation model rather than something this panel can fix alone, and
+`nav.py` hardcodes `adm_pnl_menu:` — a prefix owned by this module — so the three sub-panels are now
+coupled through one file. A test asserts that literal still matches the live router prefix.
+
+Q-2's checklist was updated in the same change: the step that would have recorded the old behavior as
+expected now exercises both entry points instead.
+
 ---
 
 ## Consequences

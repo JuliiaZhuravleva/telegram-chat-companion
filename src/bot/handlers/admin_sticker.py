@@ -582,6 +582,10 @@ _EXPLICITNESS_PROMPT = {
     "ru": "Введите оценку откровенности стикера (0.0–1.0):",
     "en": "Enter the sticker's explicitness score (0.0–1.0):",
 }
+_EXPLICITNESS_NO_ROW = {
+    "ru": "Стикер не найден в каталоге — оценка не изменена.",
+    "en": "Sticker not found in the catalog — score unchanged.",
+}
 _EXPLICITNESS_INVALID = {
     "ru": "Нужно число от 0.0 до 1.0. Попробуйте ещё раз.",
     "en": "Enter a number between 0.0 and 1.0. Try again.",
@@ -630,10 +634,18 @@ async def handle_sticker_explicitness_preset(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
 ) -> None:
     """Set a preset explicitness value with one tap (ADR-0009 Decision 7,
-    closing paragraph) -- no FSM involved, the button already fixes a
-    known-valid value.
+    closing paragraph) -- the button already fixes a known-valid value, so
+    no FSM input is needed.
+
+    It still has to *clear* the FSM, though: the "✏️ Указать число" prompt is
+    sent as a new message, so the card above it keeps its preset buttons live.
+    An admin who opens the prompt and then taps a preset instead would leave
+    ``awaiting_sticker_score`` set, and the next plain DM text — a description
+    correction, say — would be eaten by the score-input handler (which also
+    outranks ``handle_admin_sticker_reply``'s ``StateFilter(None)``).
     """
     if not _is_private(callback):
         await callback.answer()
@@ -658,7 +670,10 @@ async def handle_sticker_explicitness_preset(
         await callback.answer("Invalid preset", show_alert=True)
         return
 
-    await sticker_repo.set_manual_explicitness_score(file_unique_id, value)
+    await state.clear()
+    if not await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
+        await callback.answer(_EXPLICITNESS_NO_ROW[lang], show_alert=True)
+        return
     await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
 
     msg = f"Оценка: {value:.2f} (вручную)" if lang == "ru" else f"Score: {value:.2f} (manual)"
@@ -754,7 +769,9 @@ async def handle_sticker_explicitness_input(
         return
 
     await state.clear()
-    await sticker_repo.set_manual_explicitness_score(file_unique_id, value)
+    if not await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
+        await message.reply(_EXPLICITNESS_NO_ROW[lang])
+        return
 
     await message.reply(_EXPLICITNESS_SAVED[lang].format(value=f"{value:.2f}"))
 
@@ -808,10 +825,14 @@ async def handle_sticker_explicitness_reset(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
 ) -> None:
     """Reset a manual score back to automatic (ADR-0009 Decision 5) -- NULLs
     both the value and the flag; the card re-renders as "не оценён" until
     the next (re-)analysis, reusing A-1's existing unscored rendering.
+
+    Clears the FSM for the same reason the preset buttons do: this row stays
+    tappable on a card sitting above an open "введите число" prompt.
     """
     if not _is_private(callback):
         await callback.answer()
@@ -830,7 +851,10 @@ async def handle_sticker_explicitness_reset(
         await callback.answer("Missing sticker ID", show_alert=True)
         return
 
-    await sticker_repo.reset_explicitness_to_auto(file_unique_id)
+    await state.clear()
+    if not await sticker_repo.reset_explicitness_to_auto(file_unique_id):
+        await callback.answer(_EXPLICITNESS_NO_ROW[lang], show_alert=True)
+        return
     await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
     await callback.answer(_EXPLICITNESS_RESET[lang])
 

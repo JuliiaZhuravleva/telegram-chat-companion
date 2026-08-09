@@ -12,7 +12,10 @@ def repo():
     pool = MagicMock()
     pool.fetchrow = AsyncMock(return_value={"id": 1})
     pool.fetch = AsyncMock(return_value=[])
-    pool.execute = AsyncMock()
+    # asyncpg returns the command tag ("UPDATE 1"), and the manual-score
+    # writes now read the affected-row count off it. A bare AsyncMock returns
+    # a MagicMock here, which is not what production ever sees.
+    pool.execute = AsyncMock(return_value="UPDATE 1")
     return StickerRepository(pool)
 
 
@@ -355,6 +358,18 @@ async def test_set_manual_explicitness_score(repo):
     assert "explicitness_is_manual = true" in sql
     assert repo._pool.execute.call_args.args[1] == "unique-1"
     assert repo._pool.execute.call_args.args[2] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_manual_score_writes_report_whether_a_row_matched(repo):
+    """A stale card can name a sticker that no longer exists; the caller has
+    to be able to tell that apart from a successful write."""
+    assert await repo.set_manual_explicitness_score("unique-1", 0.8) is True
+    assert await repo.reset_explicitness_to_auto("unique-1") is True
+
+    repo._pool.execute = AsyncMock(return_value="UPDATE 0")
+    assert await repo.set_manual_explicitness_score("gone", 0.8) is False
+    assert await repo.reset_explicitness_to_auto("gone") is False
 
 
 @pytest.mark.asyncio

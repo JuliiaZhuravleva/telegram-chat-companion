@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiogram.types import Message
+from magic_filter import MagicFilter
 
 from src.bot.handlers.admin_chat_panel import (
     handle_chat_panel_group,
@@ -756,22 +757,42 @@ class TestHandleChatPanelShortcut:
         message.answer.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_group_chat_is_ignored(self) -> None:
-        message = _make_shortcut_message("/panel foo", chat_type="group")
-        admin_repo = _make_shortcut_admin_repo()
+    async def test_group_chat_never_reaches_this_handler(self) -> None:
+        """The chat-type guard is a filter, not a body check.
 
-        await handle_chat_panel_shortcut(
-            message,
-            MagicMock(),
-            admin_repo,
-            _make_chat_settings_repo(None),
-            _make_bot_config_repo(),
-            _make_chat_config_service(_base_config()),
+        Asserting "the function returns early" would pass just as well with
+        the old body guard, which was the actual defect: a matched handler
+        consumes the update, so /panel in a group was silently swallowed
+        before the text pipeline ever saw it. What matters is that the
+        filter rejects the message, so this checks the registered filters
+        against a group chat rather than calling the function.
+        """
+        from src.bot.handlers.admin_chat_panel import router
+
+        handler = next(
+            h for h in router.message.handlers if h.callback is handle_chat_panel_shortcut
         )
+        group = _make_shortcut_message("/panel foo", chat_type="group")
+        private = _make_shortcut_message("/panel foo", chat_type="private")
 
-        message.answer.assert_not_awaited()
-        message.reply.assert_not_awaited()
-        admin_repo.get_admin_language.assert_not_awaited()
+        def chat_type_filters_accept(msg) -> bool:
+            checked = 0
+            for f in handler.filters or ():
+                callback = getattr(f, "callback", f)
+                # aiogram wraps a MagicFilter as its bound .resolve method, so
+                # the filter object is reachable via __self__ — not by isinstance
+                # on the callback. Command()/IsAdmin() need runtime context and
+                # are deliberately skipped; only the chat-type magic is asserted.
+                if not isinstance(getattr(callback, "__self__", None), MagicFilter):
+                    continue
+                checked += 1
+                if not callback(msg):
+                    return False
+            assert checked == 1, f"expected exactly one MagicFilter, saw {checked}"
+            return True
+
+        assert chat_type_filters_accept(private) is True
+        assert chat_type_filters_accept(group) is False
 
 
 class TestHandleChatPanelTolerancePrompt:

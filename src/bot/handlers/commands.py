@@ -185,9 +185,14 @@ _SUMMARY_TOO_FEW = {
         "/summary needs at least {min} (up to {max})."
     ),
 }
+# The angle brackets are HTML entities on purpose: the bot's default parse_mode
+# is HTML, so a literal "<число …>" makes Telegram reject the whole sendMessage
+# with 'Unsupported start tag "число"' and the user gets no reply at all — the
+# validation message silently fails exactly when it is needed. Verified against
+# the live Bot API; a unit test cannot see it, because message.reply is mocked.
 _SUMMARY_INVALID_COUNT = {
-    "ru": "🤔 Не понял количество сообщений. Формат: /summary <число от {min} до {max}>.",
-    "en": "🤔 Couldn't parse the message count. Format: /summary <number from {min} to {max}>.",
+    "ru": "🤔 Не понял количество сообщений. Формат: /summary &lt;число от {min} до {max}&gt;.",
+    "en": "🤔 Couldn't parse the message count. Format: /summary &lt;number from {min} to {max}&gt;.",
 }
 
 _SUMMARY_COUNT_ARG_RE = re.compile(r"\d+")

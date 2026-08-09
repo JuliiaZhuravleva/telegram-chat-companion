@@ -648,7 +648,10 @@ async def _resolve_reference_chat_id(
     return chat_id
 
 
-@router.message(Command("panel"), IsAdmin())
+# F.chat.type in the decorator, not a body check: a matched handler consumes
+# the update, so an admin typing /panel in a group would get silence and the
+# message would never reach the text pipeline (CLAUDE.md, aiogram gotchas).
+@router.message(Command("panel"), IsAdmin(), F.chat.type == "private")
 async def handle_chat_panel_shortcut(
     message: Message,
     bot: Bot,
@@ -668,9 +671,6 @@ async def handle_chat_panel_shortcut(
     is explicitly out of scope -- see the source PRD's "Не входит в этот
     план".
     """
-    if message.chat.type != "private":
-        return
-
     lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
     parts = (message.text or "").split(maxsplit=1)
     query = parts[1].strip() if len(parts) > 1 else ""
