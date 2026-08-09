@@ -110,7 +110,9 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 
 ### Commands
 - `/help` — dynamic feature list based on enabled modules
-- `/summary` — AI-generated chat summary
+- `/summary [n]` — AI-generated chat summary; the optional count covers the last `n`
+  messages (default 100, from 20 up to 1000)
+- `/summary500` — the same summary over 500 messages, as one word
 - `/remember` — save a fact from a replied-to message into the chat's knowledge base
 - `/kb` — browse the facts remembered for this chat
 
@@ -118,7 +120,10 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 - **Knowledge base** — per-chat facts the bot remembers and reuses as context; curated by chat organizers from the admin panel
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
-- **Sticker intelligence** — learn and use stickers contextually
+- **Sticker intelligence** — learn and use stickers contextually. Each sticker carries an
+  explicitness score and each chat a ceiling, so a sticker is only sent where it fits; the
+  admin card shows both and the resulting verdict, and an admin can set a sticker's score by
+  hand — a manual score is kept, not overwritten by the next automatic analysis
 - **Reactions** — records who added or removed which reaction, and can answer with a reaction instead of words when it decides not to speak. Opt-in per chat, with a separate switch for the history; **requires the bot to be a chat administrator**, as Telegram sends no reaction updates otherwise — the admin panel shows that status live
 - **Link comments** — extract and comment on YouTube/TikTok links
 - **Custom rules** — keyword triggers, spam detection, regex matching
@@ -131,7 +136,10 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
   option: behaviour, modules, stickers, rules, plus links into the knowledge-base and
   reactions sub-panels. Options a chat has not overridden are marked *inherited*, so it
   is always clear whether a value is the chat's own or comes from the global layer.
-  Approving a new chat offers a direct link into its settings.
+  Approving a new chat offers a direct link into its settings. The chat picker lists the
+  most active chats first (messages in the last 24h, with the count in the caption), and
+  `/panel <link or title>` jumps straight to one chat's panel — ambiguous titles offer a
+  list to pick from, and only whitelisted chats are reachable either way.
 - **Global settings** — the values applied to every chat that has no value of its own,
   existing chats included; a chat's own setting always wins.
 - Whitelist, custom rules, sticker management, usage statistics, spend, health and
