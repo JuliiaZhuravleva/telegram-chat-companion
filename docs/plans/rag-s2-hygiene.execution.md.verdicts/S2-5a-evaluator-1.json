@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:13:26Z",
+  "role": "evaluator",
+  "item_id": "S2-5a",
+  "verdict": "PASS",
+  "evidence": "git show 0905a53f confirms clean 7-line removal of MemoryRepository.delete_expired(), matching the item's dead-code claim; grep -rn delete_expired src/ tests/ returns zero hits confirming no call sites; search() still filters expired rows independently (verified in memory.py), so no read-time behavior change; ruff check clean and 13 memory-scoped unit tests pass. Deletion (vs wiring up) is correctly justified by the S2-11 data-preservation invariant decided in consultation (expires_at is never written in src/, so delete_expired would delete 0 rows anyway) — scope correctly excludes S2-6's separate _windows() comment work.",
+  "regression_risk": "low",
+  "notes": "S2-6 (depends_on S2-11) and S2-11 itself remain pending — unrelated to this item's correctness, just noting the fork's other half is still open."
+}

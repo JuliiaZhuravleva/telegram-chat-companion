@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:26:47Z",
+  "role": "evaluator",
+  "item_id": "S2-8",
+  "verdict": "PASS",
+  "evidence": "git show f61b32c: both handle_kb_view_dm/group now check chat_config.kb_enabled early with an explicit message.answer(_KB_DISABLED) before fetching facts, not a silent return; ran pytest tests/unit/test_commands_kb.py -q (19 passed), ruff and mypy clean; new tests confirm disabled text is returned, secret facts never leak, and get_active_facts is not called.",
+  "regression_risk": "low",
+  "notes": "Scope matches item exactly (only the two /kb view handlers named in S2-8). Specialist's flagged gap (handle_kb_view_page pagination callback lacks a kb_enabled check) is correctly out of scope for this item but worth a follow-up if pagination buttons can outlive a KB-disable toggle."
+}

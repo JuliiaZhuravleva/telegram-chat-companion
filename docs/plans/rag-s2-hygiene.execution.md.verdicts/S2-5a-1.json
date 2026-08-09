@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:12:16Z",
+  "role": "specialist",
+  "item_id": "S2-5a",
+  "verdict": "PASS",
+  "cost_usd": 0.83,
+  "notes": "Deleted MemoryRepository.delete_expired() (src/database/repositories/memory.py) — confirmed zero call sites repo-wide (grep src/ and tests/) before removal. No behavior change: search() already filters expired rows independently via 'expires_at IS NULL OR expires_at > NOW()'. No unit test added — this is pure dead-code removal with no new behavior to regress-test and no existing test referenced the method. Note for PM: S2-6 (chat_memory retention comment) is a separate depends_on-free item now per plan revision — not touched here.",
+  "result": {
+    "kind": "commit",
+    "ref": "0905a53f04b2472a29372742154a2ab2584ee474",
+    "verification": "pytest tests/unit (1732 passed, 5 skipped); ruff check src/ clean; mypy src/ clean (131 files)"
+  },
+  "confidence": 0.97,
+  "clarification_request": null,
+  "session_id": null
+}

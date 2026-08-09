@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T16:05:17Z",
+  "role": "specialist",
+  "item_id": "S2-6",
+  "verdict": "PASS",
+  "cost_usd": 0.89,
+  "notes": "Per ADR-0011's explicit S2-6 implementation notes (chat_memory was never in RETENTION_TABLES, so no functional two-layer edit needed -- corrects the plan's stale Revision-1 framing): added a doc-comment in RetentionCleaner._windows() citing ADR-0011's data-preservation invariant, and a regression test (test_chat_memory_is_excluded_from_retention) asserting chat_memory is absent from both RETENTION_TABLES and _windows() output. Verified the test is not vacuous: it passes on unmodified code (nothing to regress against, since Revision-1's age-based resolution was superseded before any code landed) but fails when chat_memory is experimentally re-added to RETENTION_TABLES, confirming it would catch a future accidental re-addition. No runtime behavior change, as ADR-0011 mandates for this item.",
+  "result": {
+    "kind": "commit",
+    "ref": "5ade826",
+    "verification": "pytest tests/unit/test_retention_cleaner.py: 16 passed (was 15). Full pytest tests/unit/: 1759 passed, 5 skipped (was 1758). ruff check + ruff format --check on both touched files: clean. mypy src/: no issues, 130 files."
+  },
+  "confidence": 0.95,
+  "clarification_request": null,
+  "session_id": null
+}

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:35:50Z",
+  "role": "evaluator",
+  "item_id": "S2-7a",
+  "verdict": "PASS",
+  "evidence": "Ran tests/integration/test_memory_repository_chat_scoping.py independently (2 passed, real pgvector via testcontainers); negative-control SQL matches MemoryRepository.search() with only chat_id=$1 removed and params correctly renumbered. Independently reproduced the required control-validity check by neutralizing the chat_id predicate in src/database/repositories/memory.py: the positive test fails with a genuine cross-chat leak (['chat A','chat B'] vs expected ['chat A']), not a datatype/SQL error, then reverted cleanly (git diff clean, ruff clean). Fixture uses identical one-hot embeddings across chats, correctly forcing similarity collision so the filter is the only thing keeping data separated. Scope matches item (repository-level only); S2-7b exists separately for RAGMemoryService unit coverage.",
+  "regression_risk": "low",
+  "notes": "Note for future reviewers: a naive 'delete the WHERE chat_id=$1 AND line' mutation (leaving $1 unreferenced in SQL but still passed positionally) crashes with asyncpg.IndeterminateDatatypeError rather than leaking -- not a flaw in this test, just a reminder that the meaningful mutation for manual re-verification is neutralizing the predicate (e.g. tautology), not blindly deleting text."
+}

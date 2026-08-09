@@ -10,9 +10,9 @@ approved_at: '2026-08-09T13:54:04Z'
 approved_by: julia
 specialist_roster_source: ~/.claude/agents/specialist-*.md + <project>/.claude/agents/specialist-*.md
 execution:
-  status: approved
-  started_at: null
-  completed_at: null
+  status: done
+  started_at: '2026-08-09T15:52:19Z'
+  completed_at: '2026-08-09T16:06:03Z'
   current_batch: null
   task_list_id: rag-s2-hygiene
 items:
@@ -36,19 +36,22 @@ items:
   title: 'chat_memory: очистку по возрасту в этом слайсе НЕ включаем — данные не удаляем без предварительной сводки (инвариант S2-11). Правка = комментарий в _windows(), помечающий намеренное исключение chat_memory и ссылающийся на ADR'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - S2-11
   estimated_effort: 15m
-  confidence: null
+  confidence: 0.95
   consult_session_id: 756ee269-b593-4d25-9743-0d375b523f5c
-  specialist_session_id: null
+  specialist_session_id: 9b10da10-5e7a-4bce-ac56-490c3b9577bd
   retry_count: 0
   last_update:
-    ts: null
-    executor: pm-orchestrator
-    note: 'Ревизия 2 (ответ Julia [S2-6b] + консультация architect): прежнее решение «retention по возрасту сейчас» отменено. Инвариант сохранности (S2-11) требует не удалять данные памяти без предварительной высокоуровневой сводки, а сводку мы сейчас не строим (Julia: «не обязательно прямо сейчас»). Поэтому chat_memory НЕ добавляем ни в _windows(), ни в RETENTION_TABLES, и delete_expired не подключаем. Область сокращается с «реализовать политику» до «отложить + задокументировать»: короткий комментарий в _windows() (src/services/maintenance/cleanup.py), помечающий намеренное исключение chat_memory и ссылающийся на ADR (S2-11), чтобы будущий читатель не вернул таблицу в очистку, не прочитав ограничение. Риск потери данных сейчас нулевой: expires_at нигде в src/ не пишется (все строки NULL), delete_expired удалил бы 0 строк даже при вызове — ADR предупредительный. depends_on S2-11 (нужен номер ADR для ссылки). Неограниченный рост таблицы до вывода из эксплуатации в S5–S6 — принятый компромисс (Julia приоритизировала сохранность данных). Исполнитель backend-dev, ~15м, может ехать в одном PR с S2-5a.'
-  result: null
+    ts: '2026-08-09T16:05:23Z'
+    executor: backend-dev
+    note: 'Per ADR-0011''s explicit S2-6 implementation notes (chat_memory was never in RETENTION_TABLES, so no functional two-layer edit needed -- corrects the plan''s stale Revision-1 framing): added a doc-comment in RetentionCleaner._windows() citing ADR-0011''s data-preservation invariant, and a regression test (test_chat_memory_is_excluded_from_retention) asserting chat_memory is absent from both RETENTION_TABLES and _windows() output. Verified the test is not vacuous: it passes on unmodified code (nothing to regress against, since Revision-1''s age-based resolution was superseded before any code landed) but fails when chat_memory is experimentally re-added to RETENTION_TABLES, confirming it would catch a future accidental re-addition. No runtime behavior change, as ADR-0011 mandates for this item.'
+  result:
+    kind: commit
+    ref: 5ade826
+    verification: 'pytest tests/unit/test_retention_cleaner.py: 16 passed (was 15). Full pytest tests/unit/: 1759 passed, 5 skipped (was 1758). ruff check + ruff format --check on both touched files: clean. mypy src/: no issues, 130 files.'
 - id: S2-3a
   title: 'ADR-0003: решить порядок сортировки KB (развести ранжирование выдачи и обрезку под бюджет)'
   specialist: architect
@@ -218,51 +221,58 @@ items:
   title: 'Фоновый бэкофилл эмбеддингов: воркер дозаписывает embedding для строк chat_memory, чей эмбеддинг упал в момент записи (новое пожелание Julia к варианту а S2-1)'
   specialist: backend-dev
   priority: P2
-  status: pending
+  status: done
   depends_on:
   - S2-1
   estimated_effort: 4.5h
-  confidence: null
+  confidence: 0.85
   consult_session_id: 756ee269-b593-4d25-9743-0d375b523f5c
   specialist_session_id: 3f47597e-4eff-49d9-bd2e-6f26eeab43a8
   retry_count: 0
   last_update:
-    ts: '2026-08-09T15:45:23Z'
-    executor: execute_plan.sh
-    note: Your previous session was interrupted by the per-item budget cap, not by a review. Check what you already changed and committed (git status / git log), finish only what is left, and submit your verdict — you are resuming with a smaller budget, so do not redo finished work.
-  result: null
+    ts: '2026-08-09T15:54:45Z'
+    executor: backend-dev
+    note: 'Implemented per Julia''s [S2-1] follow-up + the plan''s Revision-1 scope note: EmbeddingBackfillWorker (src/services/rag/backfill.py, mirrors RetentionCleaner''s start/stop/run_once lifecycle, constructed directly in main.py per the ADR ''process-lifetime singletons via dp[]/main(), not Dishka'') retries chat_memory rows whose embedding is NULL. RAGMemoryService.store() (src/services/rag/memory.py) now persists content with embedding=None instead of dropping it when generate_embedding() raises (S2-1 made Gemini the only embeddings provider, so an outage previously meant silent permanent data loss) -- the wrong-dimensionality guard path is untouched (still refuses to store, deliberate S2-1 behavior, out of this item''s scope per the plan note). MemoryRepository gained get_pending_embeddings()/update_embedding(); store()''s embedding param is now Optional. No migration: NULL is the natural pending marker, matching the plan''s scope note. New EmbeddingBackfillSettings (config.py + config/default.yml: enabled/interval_seconds/batch_limit, mirrors MaintenanceSettings) wired into main.py''s startup/shutdown alongside health_checker/sticker_sync/retention_cleaner. Retries are uncapped (embeddings are free), per scope. Rewrote S2-7b''s TestStoreEmbeddingFailure (behavior it asserted -- drop-on-failure -- is exactly what this item changes) and added tests/unit/test_embedding_backfill.py (worker run_once: fills on success, leaves pending on provider failure/wrong-dimension/repo-write-failure, one-bad-row-does-not-stop-batch, batch_limit forwarding, lifecycle start/stop; plus repository-level tests for get_pending_embeddings/update_embedding/store(embedding=None) against a mocked pool) and config regression tests for the new settings section. IMPORTANT PROCESS NOTE for PM: this item''s actual code (src/config.py, src/database/repositories/memory.py, src/services/rag/memory.py, src/services/rag/backfill.py, src/main.py, config/default.yml + most of the tests) landed already-committed in ed70195 (''restore envelope bookkeeping lost to a pre-commit stash cycle'') -- a prior recovery pass on this same item bundled my uncommitted S2-10 diff into its own commit rather than S2-10 having its own. I verified the bundled content matches this design exactly (git show --stat ed70195) and only had a trivial ruff-format touch-up left (commit 17be181, test files only). Not a re-do; flagging so the PM doesn''t expect a dedicated S2-10 commit in git log. Routing hint: no browser/live QA done -- this is a background worker with no direct handler/UI surface, and reliably triggering a real Gemini outage isn''t practical in manual QA; if qa wants integration coverage it would be a testcontainers test asserting a NULL-embedding row becomes searchable after EmbeddingBackfillWorker.run_once() against real Postgres (mirrors S2-7a''s chat-scoping integration test).'
+  result:
+    kind: commit
+    ref: 17be181
+    verification: 'pytest tests/unit/ -q --no-cov: 1758 passed, 5 skipped (up from 1743 pre-item, consistent with the 15 new/changed tests: 12 in test_embedding_backfill.py, 2 rewritten + 0 net-new in test_rag_memory_service.py''s TestStoreEmbeddingFailure, 3 new in test_config.py). ruff check src/ + the touched test files: clean. ruff format --check on all 8 touched/added files: already formatted. mypy src/: no issues, 130 files.'
   budget_checkpoint:
     count: 1
     spent_usd: 3.2411
     session_id: 3f47597e-4eff-49d9-bd2e-6f26eeab43a8
     source: budget_death
-    state: resuming
+    state: resolved
     ts: '2026-08-09T15:43:20Z'
-  max_usd_override: 4.0
+  max_usd_override: 7.0
 - id: S2-11
   title: 'ADR-инвариант сохранности данных памяти: строки памяти (chat_memory и будущий chat_chunks) нельзя безвозвратно удалять, не сохранив предварительно высокоуровневую сводку; реализацию самой сводки сейчас не делаем (отдельный ADR, только фиксация решения)'
   specialist: architect
   priority: P2
-  status: pending
+  status: done
   depends_on: []
   estimated_effort: 30m
-  confidence: null
+  confidence: 0.85
   consult_session_id: 2cc86a83-dace-4f68-b7a8-3b0f6762aff8
-  specialist_session_id: null
+  specialist_session_id: 3e5b5912-79aa-4e48-a6b6-df2746be8edf
   retry_count: 0
   last_update:
-    ts: null
-    executor: null
-    note: 'Ревизия 2 (ответ Julia [S2-6b] + повторная консультация architect, session 2cc86a83): зафиксировать инвариант отдельным ADR в docs/decisions/. Номер — следующий свободный (по оценке ADR-0009, но на диске уже есть коллизии ADR-0003/0004 из параллельных worktrees, поэтому перед записью проверить git log --all по docs/decisions/). ADR табличо-независимый: описывает «данные памяти» — данные, единственная запись о разговоре которых сама строка и которые не восстановимы из chat_messages; текущий скоуп chat_memory, форвард-скоуп явно называет планируемую таблицу chat_chunks (S4, у неё свой GC на роадмапе). Явный Non-goal: пайплайн сохранения сводки этим ADR НЕ проектируется и НЕ планируется — отложен (Julia: «не обязательно прямо сейчас»); проектируется в момент вывода таблицы из эксплуатации (S5–S6) или когда удаление реально понадобится. Только запись решения, ~0.5ч, риск низкий.'
-  result: null
+    ts: '2026-08-09T16:02:09Z'
+    executor: architect
+    note: 'ADR-0011 (docs/decisions/ADR-0011-memory-data-preservation-invariant.md, commit 2423ec6) records the invariant from Julia''s [S2-6b] answer: chat_memory (and future chat_chunks) rows must not be irrecoverably deleted by an automatic/bulk process without a prior high-level summary; explicit carve-outs for never-stored rows (S2-1 dimension guard), user-directed single-record erasure (RAGMemoryService.delete(), currently dead code), non-prod DBs, and chat_facts/KB (different table, out of this item''s title). Distinguished explicitly from rag-revision-2026-08.md §6''s ''Digest/summary tier'' non-goal (different purpose: retrieval feature vs. preservation artifact) so a future reader doesn''t think §6 already settled this. Gates the S6 roadmap line (''chat_memory drop migration scheduled'') and gives S2-6 (still pending, depends_on this item) exact guidance: no functional RETENTION_TABLES change needed (chat_memory was never in that dict — this corrects a stale two-layer-edit framing left over from the plan''s superseded Revision-1 resolution), only a comment in _windows() citing ADR-0011 (snippet provided). Also flagged as tech debt, not fixed here: vestigial chat_memory.expires_at column, and rag-revision-2026-08.md''s S6 row text not yet citing this ADR. PROCESS NOTE for PM: picked ADR-0011, not ADR-0010 — checked concurrent branch plan/admin-ux-and-summary-2026-08-09, which already used both ADR-0009 (manual-explicitness-override) and ADR-0010 (chat-panel-grouped-navigation) independently of this branch''s own ADR-0009 (kb-retrieval-vs-budget-trim-ordering). No shared ADR-number allocator across concurrent plan branches -- both branches will collide on 0009 at merge regardless of what I do here; 0011 only avoids adding a third collision. Worth a lightweight registry/lock if concurrent plan branches doing ADR work becomes routine.'
+  result:
+    kind: commit
+    ref: 2423ec6
+    verification: ADR-0011 committed as 2423ec6 (git show --stat confirms only the ADR file, 224 lines, in that commit); git status after commit shows no other files staged/modified by this session. Content cross-checked against src/services/maintenance/cleanup.py (_windows), src/database/repositories/maintenance.py (RETENTION_TABLES), src/database/repositories/memory.py (store/delete/expires_at), src/services/rag/memory.py (delete(), S2-1 dimension guard), docs/plans/rag-revision-2026-08.md §4.1/§5/§6, and the execution.md item history for S2-5a/S2-6/S2-10 to ground every factual claim (dead-code status of delete_expired()/RAGMemoryService.delete(), expires_at always NULL, chat_chunks not yet migrated).
 budget:
   max_usd_per_item: 4.0
   max_usd_per_plan: 45.0
-  consumed_usd: 28.263
+  consumed_usd: 32.9802
 review_gate:
   why:
   - 'item S2-10: per-item cap bumped $2.00→$4.00 — budget-consult: No commit yet, but git status/diff on the worktree shows the full 4-point scope from the consult note already landed uncommitted: new src/services/rag/backfill.py (147 lines, mirrors RetentionCleaner as specified) + tests/unit/test_embedding_backfill.py (234 lines), plus matching edits to config.py/main.py/repositories/memory.py/rag/memory.py for the null-embedding store path; running the affected unit tests gives 52 passed with 89-95% coverage on the new/changed modules. limit_hit=budget with turns_used only 78/150 confirms a sizing miss (4.5h estimated item vs $2 cap), not thrashing, and plan headroom ($16.8 of $20) easily covers finishing (commit + lint/mypy + envelope note); remainder of the current cap is negative so resume_with_remainder doesn''t fit, hence bump to the 2x-original ceiling.'
   - 'plan budget cap changed $20.00→$45.00 (consumed $3.61) — restoring after the envelope reverted to its committed state during S2-10 run 1: 11 done items, both caps and consumed_usd were lost; work commits intact'
+  - 'item S2-10: per-item cap bumped $4.00→$7.00 — override was set to 4.0 against the reverted base cap of 2.0, leaving only 0.76 to finish; with checkpoint count already 1 a second death is a hard halt, and the work (backfill.py + tests, 52 passing) sits uncommitted'
   approve_action: /execute-plan <projects>/telegram-chat-companion.rag-s2-hygiene-wt/docs/plans/rag-s2-hygiene.execution.md --resume
   reject_action: /plan-fixes docs/plans/rag-s2-hygiene.md --revise <projects>/telegram-chat-companion.rag-s2-hygiene-wt/docs/plans/rag-s2-hygiene.execution.md
 safe_to_replay_from: null
@@ -332,6 +342,18 @@ revision_number: 3
 last_revised_at: '2026-08-09T13:53:06Z'
 last_revised_by: pm-orchestrator
 ---
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
