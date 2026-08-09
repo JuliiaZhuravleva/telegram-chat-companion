@@ -1,4 +1,5 @@
-"""Tests for the chat settings panel's keyboards (B-1, ADR-0006)."""
+"""Tests for the chat settings panel's keyboards (B-1, ADR-0006; grouped
+navigation, B-2, ADR-0010)."""
 
 from __future__ import annotations
 
@@ -6,8 +7,9 @@ from dataclasses import replace
 
 from src.bot.keyboards.admin_chat_panel import (
     _format_value,
-    chat_panel_keyboard,
+    chat_panel_group_keyboard,
     chat_panel_picker_keyboard,
+    chat_panel_root_keyboard,
 )
 from src.bot.settings_fields import FIELDS_BY_KEY, FieldGroup, group_label
 from src.models.chat_config import ChatConfig
@@ -84,87 +86,56 @@ class TestFormatValue:
         assert len(text) == 40
 
 
-class TestChatPanelKeyboard:
-    def _config(self, **overrides) -> ChatConfig:
-        return replace(ChatConfig(chat_id=CHAT_ID), **overrides)
+class TestChatPanelRootKeyboard:
+    """ADR-0010 Decisions 1 and 3: section list, not a flat field scroll."""
 
-    def test_bool_field_gets_toggle_row(self):
-        config = self._config(rag_enabled=True)
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(False, True),
+    def test_group_buttons_link_to_group_screens(self):
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
         )
-        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
-        assert btn is not None
-        assert "✅" in btn.text
-
-    def test_non_bool_field_is_read_only_noop(self):
-        config = self._config(system_prompt="Be nice")
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(False, True),
-        )
-        labels = _get_labels(kb)
-        assert any("Be nice" in label for label in labels)
-        # system_prompt's row must not be wired to the generic toggle handler.
-        sp_rows = [btn for row in kb.inline_keyboard for btn in row if "Be nice" in btn.text]
-        assert all(btn.callback_data == "noop" for btn in sp_rows)
-
-    def test_group_headers_present(self):
-        config = self._config()
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(False, True),
-        )
-        labels = _get_labels(kb)
+        callbacks = _get_callbacks(kb)
         for group in (
             FieldGroup.BEHAVIOR,
             FieldGroup.MODULES,
             FieldGroup.STICKERS,
             FieldGroup.RULES,
         ):
-            assert group_label(group, "ru") in labels
+            assert f"adm_pnl_grp:ru:{CHAT_ID}:{group.value}" in callbacks
+
+    def test_group_buttons_carry_plain_labels(self):
+        """B-2 ships plain group_label() text; per-group status is B-3's job."""
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+        )
+        labels = _get_labels(kb)
+        assert group_label(FieldGroup.MODULES, "ru") in labels
+
+    def test_no_individual_field_rows_on_root(self):
+        """The old flat list is gone -- no field's toggle/tolerance callback
+        shows up on the root screen, only the 4 group buttons."""
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+        )
+        callbacks = _get_callbacks(kb)
+        assert not any(cb.startswith("adm_pnl_tgl:") for cb in callbacks)
+        assert not any(cb.startswith("adm_pnl_tol:") for cb in callbacks)
 
     def test_kb_group_renders_link_row_not_a_toggle(self):
-        config = self._config(kb_enabled=False)  # deliberately stale/irrelevant
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=True,
-            reactions_status=(False, True),
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=True, reactions_status=(False, True)
         )
         btn = _row_for(kb, f"adm_kb_menu:ru:{CHAT_ID}")
         assert btn is not None
         assert "✅" in btn.text
-        # kb_enabled must never be reachable through the generic toggle prefix.
+        # kb_enabled must never be reachable through the group-screen prefix.
         assert not any(
-            (cb or "").startswith("adm_pnl_tgl:") and cb.endswith(":kb")
+            (cb or "").startswith("adm_pnl_grp:") and cb.endswith(":kb")
             for cb in _get_callbacks(kb)
         )
 
     def test_reactions_group_renders_combined_link_row(self):
-        config = self._config()
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(True, False),
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(True, False)
         )
         btn = _row_for(kb, f"adm_react_menu:ru:{CHAT_ID}")
         assert btn is not None
@@ -172,119 +143,100 @@ class TestChatPanelKeyboard:
         assert btn.text.count("⚫") == 1
 
     def test_back_button_returns_to_picker(self):
-        config = self._config()
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(False, True),
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
         )
         assert kb.inline_keyboard[-1][0].callback_data == "adm_pnl:ru:0"
 
     def test_english_labels(self):
-        config = self._config()
-        kb = chat_panel_keyboard(
-            "en",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(False, True),
+        kb = chat_panel_root_keyboard(
+            "en", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
         )
         labels = _get_labels(kb)
         assert group_label(FieldGroup.MODULES, "en") in labels
 
+    def test_seven_rows_total(self):
+        """4 group buttons + KB link + Reactions link + back (ADR-0010 Decision 3)."""
+        kb = chat_panel_root_keyboard(
+            "ru", chat_id=CHAT_ID, row=None, kb_status=False, reactions_status=(False, True)
+        )
+        assert len(kb.inline_keyboard) == 7
 
-class TestInheritedMarker:
-    """B-2: "inherited from default" suffix, only for ``not legacy`` rows."""
+
+class TestChatPanelGroupKeyboard:
+    """ADR-0010 Decision 4: one screen per field-owning group."""
 
     def _config(self, **overrides) -> ChatConfig:
         return replace(ChatConfig(chat_id=CHAT_ID), **overrides)
 
-    def test_new_field_marked_when_raw_is_null(self):
-        # link_comments_enabled ("lc") is legacy=False.
-        config = self._config(link_comments_enabled=True)
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row={"link_comments_enabled": None},
-            kb_status=False,
-            reactions_status=(False, True),
-        )
-        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
-        assert btn is not None
-        assert "унаследовано" in btn.text
-
-    def test_new_field_not_marked_when_raw_is_explicit(self):
-        config = self._config(link_comments_enabled=True)
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row={"link_comments_enabled": True},
-            kb_status=False,
-            reactions_status=(False, True),
-        )
-        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
-        assert btn is not None
-        assert "унаследовано" not in btn.text
-
-    def test_new_field_not_marked_when_row_missing_entirely(self):
-        # No chat_settings row at all is still "not explicitly set" -- but
-        # exercised separately from row=None to document the row-is-None
-        # default used by every other test in this module means "inherited".
-        config = self._config(link_comments_enabled=False)
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row=None,
-            kb_status=False,
-            reactions_status=(False, True),
-        )
-        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
-        assert btn is not None
-        assert "унаследовано" in btn.text
-
-    def test_legacy_field_never_marked_even_if_raw_is_null(self):
-        # rag_enabled ("rag") is legacy=True -- must never show the marker,
-        # even in the (shouldn't-happen) case its column reads NULL.
+    def test_bool_field_gets_toggle_row(self):
         config = self._config(rag_enabled=True)
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row={"rag_enabled": None},
-            kb_status=False,
-            reactions_status=(False, True),
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.MODULES, config=config, row=None
         )
         btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
         assert btn is not None
-        assert "унаследовано" not in btn.text
+        assert "✅" in btn.text
 
-    def test_non_bool_new_field_marked(self):
-        # rules_mode ("rm") is legacy=False and non-BOOL.
-        config = self._config(rules_mode="strict")
-        kb = chat_panel_keyboard(
-            "ru",
-            chat_id=CHAT_ID,
-            config=config,
-            row={"rules_mode": None},
-            kb_status=False,
-            reactions_status=(False, True),
+    def test_non_bool_field_is_read_only_noop(self):
+        config = self._config(system_prompt="Be nice")
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.BEHAVIOR, config=config, row=None
         )
         labels = _get_labels(kb)
-        assert any("strict" in label and "унаследовано" in label for label in labels)
+        assert any("Be nice" in label for label in labels)
+        # system_prompt's row must not be wired to the generic toggle handler.
+        sp_rows = [btn for row in kb.inline_keyboard for btn in row if "Be nice" in btn.text]
+        assert all(btn.callback_data == "noop" for btn in sp_rows)
+
+    def test_tolerance_field_gets_dedicated_edit_flow(self):
+        config = self._config(tolerance_level=0.5)
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.STICKERS, config=config, row=None
+        )
+        assert _row_for(kb, f"adm_pnl_tol:ru:{CHAT_ID}") is not None
+
+    def test_scoped_to_requested_group_only(self):
+        """A MODULES screen must not leak BEHAVIOR/STICKERS/RULES fields."""
+        config = self._config(rag_enabled=True, system_prompt="Be nice")
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.MODULES, config=config, row=None
+        )
+        labels = _get_labels(kb)
+        assert not any("Be nice" in label for label in labels)
+
+    def test_back_button_returns_to_root_menu(self):
+        config = self._config()
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.RULES, config=config, row=None
+        )
+        assert kb.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+
+    def test_english_labels(self):
+        config = self._config()
+        kb = chat_panel_group_keyboard(
+            "en", chat_id=CHAT_ID, group=FieldGroup.MODULES, config=config, row=None
+        )
+        labels = _get_labels(kb)
+        assert any(label.startswith("RAG memory") for label in labels)
+
+    def test_row_count_matches_group_field_count_plus_back(self):
+        """MODULES (largest group) is 8 field rows + 1 back row (ADR-0010
+        Decision 4's row-count check)."""
+        config = self._config()
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.MODULES, config=config, row=None
+        )
+        assert len(kb.inline_keyboard) == 9
+
+
+class TestInheritedMarkerRoot:
+    """B-2: "inherited from default" suffix on the KB/Reactions link rows."""
 
     def test_kb_link_row_marked_when_raw_is_null(self):
-        config = self._config()
-        kb = chat_panel_keyboard(
+        kb = chat_panel_root_keyboard(
             "ru",
             chat_id=CHAT_ID,
-            config=config,
             row={"kb_enabled": None},
             kb_status=True,
             reactions_status=(False, True),
@@ -294,11 +246,9 @@ class TestInheritedMarker:
         assert "унаследовано" in btn.text
 
     def test_kb_link_row_not_marked_when_raw_is_explicit(self):
-        config = self._config()
-        kb = chat_panel_keyboard(
+        kb = chat_panel_root_keyboard(
             "ru",
             chat_id=CHAT_ID,
-            config=config,
             row={"kb_enabled": True},
             kb_status=True,
             reactions_status=(False, True),
@@ -310,11 +260,9 @@ class TestInheritedMarker:
     def test_reactions_link_row_marks_each_half_independently(self):
         # reactions_enabled explicitly set, reactions_history_enabled
         # inherited -- the marker must attach to only its own half.
-        config = self._config()
-        kb = chat_panel_keyboard(
+        kb = chat_panel_root_keyboard(
             "ru",
             chat_id=CHAT_ID,
-            config=config,
             row={"reactions_enabled": True, "reactions_history_enabled": None},
             kb_status=False,
             reactions_status=(True, False),
@@ -326,3 +274,78 @@ class TestInheritedMarker:
         before, _, after = btn.text.partition(" / ")
         assert "унаследовано" not in before
         assert "унаследовано" in after
+
+
+class TestInheritedMarkerGroup:
+    """B-2: "inherited from default" suffix, only for ``not legacy`` rows."""
+
+    def _config(self, **overrides) -> ChatConfig:
+        return replace(ChatConfig(chat_id=CHAT_ID), **overrides)
+
+    def test_new_field_marked_when_raw_is_null(self):
+        # link_comments_enabled ("lc") is legacy=False, group MODULES.
+        config = self._config(link_comments_enabled=True)
+        kb = chat_panel_group_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            group=FieldGroup.MODULES,
+            config=config,
+            row={"link_comments_enabled": None},
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
+        assert btn is not None
+        assert "унаследовано" in btn.text
+
+    def test_new_field_not_marked_when_raw_is_explicit(self):
+        config = self._config(link_comments_enabled=True)
+        kb = chat_panel_group_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            group=FieldGroup.MODULES,
+            config=config,
+            row={"link_comments_enabled": True},
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
+        assert btn is not None
+        assert "унаследовано" not in btn.text
+
+    def test_new_field_not_marked_when_row_missing_entirely(self):
+        # No chat_settings row at all is still "not explicitly set" -- but
+        # exercised separately from row=None to document the row-is-None
+        # default used by every other test in this module means "inherited".
+        config = self._config(link_comments_enabled=False)
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.MODULES, config=config, row=None
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:lc")
+        assert btn is not None
+        assert "унаследовано" in btn.text
+
+    def test_legacy_field_never_marked_even_if_raw_is_null(self):
+        # rag_enabled ("rag") is legacy=True, group MODULES -- must never
+        # show the marker, even in the (shouldn't-happen) case its column
+        # reads NULL.
+        config = self._config(rag_enabled=True)
+        kb = chat_panel_group_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            group=FieldGroup.MODULES,
+            config=config,
+            row={"rag_enabled": None},
+        )
+        btn = _row_for(kb, f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
+        assert btn is not None
+        assert "унаследовано" not in btn.text
+
+    def test_non_bool_new_field_marked(self):
+        # rules_mode ("rm") is legacy=False, non-BOOL, group RULES.
+        config = self._config(rules_mode="strict")
+        kb = chat_panel_group_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            group=FieldGroup.RULES,
+            config=config,
+            row={"rules_mode": None},
+        )
+        labels = _get_labels(kb)
+        assert any("strict" in label and "унаследовано" in label for label in labels)

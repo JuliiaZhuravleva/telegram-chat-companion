@@ -1,4 +1,5 @@
-"""Tests for the chat settings panel sub-router (B-1, ADR-0006)."""
+"""Tests for the chat settings panel sub-router (B-1, ADR-0006; grouped
+navigation, B-2, ADR-0010)."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import pytest
 from aiogram.types import Message
 
 from src.bot.handlers.admin_chat_panel import (
+    handle_chat_panel_group,
     handle_chat_panel_menu,
     handle_chat_panel_picker,
     handle_chat_panel_toggle,
@@ -16,7 +18,9 @@ from src.bot.handlers.admin_chat_panel import (
     handle_chat_panel_tolerance_input,
     handle_chat_panel_tolerance_prompt,
     render_chat_panel,
+    render_chat_panel_group,
 )
+from src.bot.settings_fields import FieldGroup
 from src.models.chat_config import ChatConfig
 
 ADMIN_ID = 111
@@ -159,8 +163,47 @@ class TestRenderChatPanel:
         assert react_btn.text.count("⚫") == 1
 
     @pytest.mark.asyncio
+    async def test_root_has_no_individual_field_rows(self) -> None:
+        """B-2/ADR-0010: the root screen is the section list now -- field
+        rows (and their inherited marker) live on the group screen instead;
+        see TestRenderChatPanelGroup below."""
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        _, keyboard = await render_chat_panel(
+            chat_settings_repo, bot_config_repo, chat_config_service, "ru", CHAT_ID
+        )
+
+        callbacks = [btn.callback_data for row_ in keyboard.inline_keyboard for btn in row_]
+        assert not any(cb.startswith("adm_pnl_tgl:") for cb in callbacks)
+        assert f"adm_pnl_grp:ru:{CHAT_ID}:modules" in callbacks
+
+
+class TestRenderChatPanelGroup:
+    """ADR-0010 Decision 4: one screen per field-owning group."""
+
+    @pytest.mark.asyncio
+    async def test_breadcrumb_shows_group_label(self) -> None:
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        text, _ = await render_chat_panel_group(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            "ru",
+            CHAT_ID,
+            FieldGroup.STICKERS,
+        )
+
+        assert "›" in text
+        assert "Стикеры" in text
+
+    @pytest.mark.asyncio
     async def test_inherited_marker_threaded_from_raw_row(self) -> None:
-        """B-2: render_chat_panel must pass the raw row through to the
+        """B-2: render_chat_panel_group must pass the raw row through to the
         keyboard, not just the effective config -- a new field whose raw
         column is NULL gets the marker even though the effective value
         (from the global default) is a concrete bool.
@@ -176,8 +219,13 @@ class TestRenderChatPanel:
             _base_config(link_comments_enabled=True, relevancy_gate_enabled=False)
         )
 
-        _, keyboard = await render_chat_panel(
-            chat_settings_repo, bot_config_repo, chat_config_service, "ru", CHAT_ID
+        _, keyboard = await render_chat_panel_group(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            "ru",
+            CHAT_ID,
+            FieldGroup.MODULES,
         )
 
         lc_btn = next(
@@ -195,6 +243,23 @@ class TestRenderChatPanel:
             if btn.callback_data == f"adm_pnl_tgl:ru:{CHAT_ID}:rg"
         )
         assert "унаследовано" not in rg_btn.text
+
+    @pytest.mark.asyncio
+    async def test_back_row_returns_to_root_menu(self) -> None:
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        _, keyboard = await render_chat_panel_group(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            "ru",
+            CHAT_ID,
+            FieldGroup.RULES,
+        )
+
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
 
 
 class TestHandleChatPanelPicker:
@@ -278,6 +343,69 @@ class TestHandleChatPanelMenu:
 
         callback.message.edit_text.assert_awaited_once()
         assert callback.message.edit_text.call_args.kwargs.get("parse_mode") == "HTML"
+
+
+class TestHandleChatPanelGroup:
+    """ADR-0010 Decisions 1, 2, 4: ``adm_pnl_grp:`` opens one group's screen."""
+
+    @pytest.mark.asyncio
+    async def test_denies_non_admin(self) -> None:
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:modules", user_id=999)
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_chat_id_shows_alert(self) -> None:
+        callback = _make_callback("adm_pnl_grp:ru:notanumber:modules")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.answer.assert_awaited_once()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+        callback.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_invalid_group_shows_alert(self) -> None:
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:not_a_group")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.answer.assert_awaited_once()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+        callback.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_renders_group_screen_with_html_parse_mode(self) -> None:
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:stickers")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config())
+
+        await handle_chat_panel_group(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        callback.message.edit_text.assert_awaited_once()
+        assert callback.message.edit_text.call_args.kwargs.get("parse_mode") == "HTML"
+        text = callback.message.edit_text.call_args.args[0]
+        assert "Стикеры" in text
 
 
 class TestHandleChatPanelToggle:
@@ -404,6 +532,26 @@ class TestHandleChatPanelToggle:
 
         callback.message.edit_text.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_re_renders_the_fields_own_group_not_root(self) -> None:
+        """ADR-0010 Decision 5: a toggle inside MODULES re-renders that group
+        screen, not the root section list -- "predictable return"."""
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag")  # rag_enabled, MODULES
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+        bot_config_repo = _make_bot_config_repo()
+        chat_config_service = _make_chat_config_service(_base_config(rag_enabled=False))
+
+        await handle_chat_panel_toggle(
+            callback, chat_settings_repo, bot_config_repo, chat_config_service
+        )
+
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        # The MODULES group screen's back row points to root, not the picker
+        # (which is where a root re-render's own back row would point).
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+        text = callback.message.edit_text.call_args.args[0]
+        assert "Модули" in text
+
 
 def _make_state(data: dict[str, object] | None = None) -> MagicMock:
     state = MagicMock()
@@ -468,6 +616,11 @@ class TestHandleChatPanelToleranceInput:
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "tolerance_level", 0.8)
         chat_config_service.invalidate.assert_called_once_with(CHAT_ID)
         message.answer.assert_awaited_once()
+        # ADR-0010 Decision 5: re-renders the STICKERS group screen, not root.
+        keyboard = message.answer.call_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+        text = message.answer.call_args.args[0]
+        assert "Стикеры" in text
 
     @pytest.mark.asyncio
     async def test_out_of_range_reprompts_without_writing(self) -> None:
@@ -533,6 +686,9 @@ class TestHandleChatPanelToleranceCancel:
 
         state.clear.assert_awaited_once()
         callback.answer.assert_awaited_once()
+        # ADR-0010 Decision 5: re-renders the STICKERS group screen, not root.
+        keyboard = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        assert keyboard.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     @pytest.mark.asyncio
     async def test_non_admin_cannot_cancel(self) -> None:
