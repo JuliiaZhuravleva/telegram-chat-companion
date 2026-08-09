@@ -264,6 +264,31 @@ class AdminRepository:
         )
         return [dict(r) for r in rows], int(total)
 
+    async def find_enabled_chats_by_title(
+        self, query: str, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Whitelisted chats whose title contains ``query`` (case-insensitive, D-1).
+
+        Backs the chat-panel shortcut's title search: ``enabled = true`` is
+        the same whitelist boundary every other picker in this module
+        enforces, so the shortcut can never surface a chat outside it.
+        ``%``/``_``/``\\`` in ``query`` are escaped so admin-typed text can't
+        be reinterpreted as an ILIKE wildcard pattern.
+        """
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = await self._pool.fetch(
+            """
+            SELECT chat_id, chat_title, chat_type
+            FROM chat_settings
+            WHERE enabled = true AND chat_title ILIKE ('%' || $1 || '%') ESCAPE '\\'
+            ORDER BY chat_title NULLS LAST, chat_id
+            LIMIT $2
+            """,
+            escaped,
+            limit,
+        )
+        return [dict(r) for r in rows]
+
     async def get_pending_attempts_page(
         self, page: int, per_page: int = 5
     ) -> tuple[list[dict[str, Any]], int]:

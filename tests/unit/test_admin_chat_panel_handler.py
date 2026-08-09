@@ -13,6 +13,7 @@ from src.bot.handlers.admin_chat_panel import (
     handle_chat_panel_group,
     handle_chat_panel_menu,
     handle_chat_panel_picker,
+    handle_chat_panel_shortcut,
     handle_chat_panel_toggle,
     handle_chat_panel_tolerance_cancel,
     handle_chat_panel_tolerance_input,
@@ -572,6 +573,205 @@ def _make_message(text: str, user_id: int = ADMIN_ID) -> MagicMock:
     message.reply = AsyncMock()
     message.answer = AsyncMock()
     return message
+
+
+def _make_shortcut_message(
+    text: str, user_id: int = ADMIN_ID, chat_type: str = "private"
+) -> MagicMock:
+    message = MagicMock()
+    message.text = text
+    message.chat = MagicMock()
+    message.chat.type = chat_type
+    message.from_user = MagicMock()
+    message.from_user.id = user_id
+    message.reply = AsyncMock()
+    message.answer = AsyncMock()
+    return message
+
+
+def _make_shortcut_admin_repo(
+    lang: str = "ru", matches: list[dict[str, object]] | None = None
+) -> MagicMock:
+    repo = MagicMock()
+    repo.get_admin_language = AsyncMock(return_value=lang)
+    repo.find_enabled_chats_by_title = AsyncMock(return_value=matches or [])
+    return repo
+
+
+class TestHandleChatPanelShortcut:
+    """D-1: ``/panel <query>`` shortcut -- open a chat's panel by link/title,
+    skipping the picker."""
+
+    @pytest.mark.asyncio
+    async def test_no_query_shows_usage(self) -> None:
+        message = _make_shortcut_message("/panel")
+        admin_repo = _make_shortcut_admin_repo()
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+        admin_repo.find_enabled_chats_by_title.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_c_link_resolves_to_whitelisted_chat_opens_panel(self) -> None:
+        message = _make_shortcut_message("/panel https://t.me/c/1234567890")
+        admin_repo = _make_shortcut_admin_repo()
+        row = {"chat_id": -1001234567890, "chat_title": "Target", "enabled": True}
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(row),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_awaited_once()
+        assert "Target" in message.answer.call_args.args[0]
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_link_resolves_but_not_whitelisted_reports_not_found(self) -> None:
+        message = _make_shortcut_message("/panel https://t.me/c/1234567890")
+        admin_repo = _make_shortcut_admin_repo()
+        row = {"chat_id": -1001234567890, "chat_title": "Target", "enabled": False}
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(row),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_username_link_resolved_via_bot_get_chat(self) -> None:
+        message = _make_shortcut_message("/panel @mychat")
+        admin_repo = _make_shortcut_admin_repo()
+        row = {"chat_id": -555, "chat_title": "MyChat", "enabled": True}
+        bot = MagicMock()
+        resolved = MagicMock()
+        resolved.id = -555
+        bot.get_chat = AsyncMock(return_value=resolved)
+
+        await handle_chat_panel_shortcut(
+            message,
+            bot,
+            admin_repo,
+            _make_chat_settings_repo(row),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        bot.get_chat.assert_awaited_once_with("@mychat")
+        message.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_username_lookup_failure_reports_not_found(self) -> None:
+        message = _make_shortcut_message("/panel @ghost")
+        admin_repo = _make_shortcut_admin_repo()
+        bot = MagicMock()
+        bot.get_chat = AsyncMock(side_effect=Exception("chat not found"))
+
+        await handle_chat_panel_shortcut(
+            message,
+            bot,
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_title_search_single_match_opens_panel_directly(self) -> None:
+        message = _make_shortcut_message("/panel foo")
+        matches = [{"chat_id": -777, "chat_title": "Foobar", "chat_type": "group"}]
+        admin_repo = _make_shortcut_admin_repo(matches=matches)
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo({"chat_id": -777, "chat_title": "Foobar"}),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_awaited_once()
+        message.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_title_search_multiple_matches_shows_candidates(self) -> None:
+        message = _make_shortcut_message("/panel foo")
+        matches = [
+            {"chat_id": -1, "chat_title": "Foo One", "chat_type": "group"},
+            {"chat_id": -2, "chat_title": "Foo Two", "chat_type": "group"},
+        ]
+        admin_repo = _make_shortcut_admin_repo(matches=matches)
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_awaited_once()
+        keyboard = message.answer.call_args.kwargs["reply_markup"]
+        assert len(keyboard.inline_keyboard) == 2
+
+    @pytest.mark.asyncio
+    async def test_title_search_no_matches_reports_not_found(self) -> None:
+        message = _make_shortcut_message("/panel nonexistent")
+        admin_repo = _make_shortcut_admin_repo(matches=[])
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.reply.assert_awaited_once()
+        message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_group_chat_is_ignored(self) -> None:
+        message = _make_shortcut_message("/panel foo", chat_type="group")
+        admin_repo = _make_shortcut_admin_repo()
+
+        await handle_chat_panel_shortcut(
+            message,
+            MagicMock(),
+            admin_repo,
+            _make_chat_settings_repo(None),
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        message.answer.assert_not_awaited()
+        message.reply.assert_not_awaited()
+        admin_repo.get_admin_language.assert_not_awaited()
 
 
 class TestHandleChatPanelTolerancePrompt:

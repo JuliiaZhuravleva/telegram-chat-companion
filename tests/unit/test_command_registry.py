@@ -86,6 +86,7 @@ EXPECTED_SCOPES: dict[str, set[str]] = {
     "admin": {"admin"},
     "settings": {"admin"},
     "costs": {"admin"},
+    "panel": {"admin"},  # D-1 shortcut: open a chat's panel by link/title
 }
 
 
@@ -132,7 +133,7 @@ def test_discovery_finds_the_known_handlers() -> None:
     stored, discovery would silently return {} and every audit above would
     pass vacuously."""
     found = discover_handler_commands(main_router)
-    assert set(found) >= {"start", "help", "summary", "kb", "remember", "admin", "costs"}
+    assert set(found) >= {"start", "help", "summary", "kb", "remember", "admin", "costs", "panel"}
     assert found["admin"].admin_gated is True
     assert found["start"].admin_gated is False
     # /summary has two handlers (group + DM), both discovered

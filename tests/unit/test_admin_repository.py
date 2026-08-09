@@ -267,6 +267,40 @@ class TestGetEnabledChatsPageByActivity:
         assert call_args[1] == timedelta(hours=1)
 
 
+class TestFindEnabledChatsByTitle:
+    """D-1 shortcut's title-search method."""
+
+    @pytest.mark.asyncio
+    async def test_returns_matches(self, repo):
+        repo_, pool = repo
+        pool.fetch.return_value = [
+            {"chat_id": -100, "chat_title": "Foo Bar", "chat_type": "group"},
+        ]
+
+        result = await repo_.find_enabled_chats_by_title("foo")
+
+        assert result == [{"chat_id": -100, "chat_title": "Foo Bar", "chat_type": "group"}]
+
+    @pytest.mark.asyncio
+    async def test_escapes_ilike_wildcards(self, repo):
+        repo_, pool = repo
+        pool.fetch.return_value = []
+
+        await repo_.find_enabled_chats_by_title("50%_off\\")
+
+        escaped_query = pool.fetch.call_args[0][1]
+        assert escaped_query == "50\\%\\_off\\\\"
+
+    @pytest.mark.asyncio
+    async def test_passes_limit(self, repo):
+        repo_, pool = repo
+        pool.fetch.return_value = []
+
+        await repo_.find_enabled_chats_by_title("x", limit=3)
+
+        assert pool.fetch.call_args[0][2] == 3
+
+
 class TestGetPendingAttemptsPage:
     @pytest.mark.asyncio
     async def test_returns_attempts_and_total(self, repo):

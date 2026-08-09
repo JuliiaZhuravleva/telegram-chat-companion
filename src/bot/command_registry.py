@@ -130,6 +130,15 @@ COMMANDS: tuple[CommandSpec, ...] = (
         description={"ru": "Расходы на AI за 24ч", "en": "AI cost summary (24h)"},
         admin_only=True,
     ),
+    CommandSpec(
+        command="panel",
+        scopes=frozenset({CommandScope.ADMIN}),
+        description={
+            "ru": "Настройки чата по ссылке/названию",
+            "en": "Chat settings by link/title",
+        },
+        admin_only=True,
+    ),
 )
 
 SPECS_BY_COMMAND: dict[str, CommandSpec] = {spec.command: spec for spec in COMMANDS}

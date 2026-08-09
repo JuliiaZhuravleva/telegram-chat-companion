@@ -119,6 +119,29 @@ def chat_panel_picker_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def chat_panel_candidates_keyboard(
+    chats: list[dict[str, object]], *, lang: str
+) -> InlineKeyboardMarkup:
+    """Disambiguation list for the D-1 shortcut's title search.
+
+    Several whitelisted chats matched the admin's query text, so list them
+    to tap instead of guessing which one was meant. No pagination (the
+    caller caps the search at a small limit) and no back row -- this
+    keyboard rides a fresh DM message the shortcut command sent, not a
+    screen with a "previous" state to return to. Row rendering (title,
+    falling back to the bare chat id when untitled) mirrors
+    ``chat_panel_picker_keyboard``'s.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for chat in chats:
+        chat_id = chat.get("chat_id")
+        title = str(chat.get("chat_title") or chat_id)[:35]
+        rows.append(
+            [InlineKeyboardButton(text=title, callback_data=f"adm_pnl_menu:{lang}:{chat_id}")]
+        )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _status(value: bool) -> str:
     return "✅" if value else "⚫"
 

@@ -23,6 +23,16 @@ Handles:
   state and re-renders the STICKERS group screen (2026-08-07 review —
   commands also pass through the input handler via
   ``~F.text.startswith("/")``; ADR-0010 Decision 5 for the re-render target).
+- ``/panel <query>``  — D-1 shortcut: opens a chat's panel directly by
+  ``t.me/...``/``t.me/c/...`` link or a title substring, skipping the
+  picker; several title matches render ``chat_panel_candidates_keyboard``
+  instead of guessing. A dedicated ``Command`` rather than a bare-text
+  handler, deliberately: this DM already has FSM text inputs (tolerance
+  above, sticker edit/score in admin_sticker.py) and a reply-to-sticker
+  handler, and the source PRD (item 5) explicitly calls out "handler on
+  arbitrary text" as a routing hazard. ``Command("panel")`` only ever
+  matches messages starting with exactly ``/panel``, so it cannot steal
+  input from any of them.
 
 ``render_chat_panel``/``render_chat_panel_group`` are pure ``(text,
 keyboard)`` functions, parameterized by ``chat_id`` (and, for the latter,
@@ -45,12 +55,15 @@ from html import escape
 from typing import Any
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_chat_panel import (
+    chat_panel_candidates_keyboard,
     chat_panel_group_keyboard,
     chat_panel_picker_keyboard,
     chat_panel_root_keyboard,
@@ -63,6 +76,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
+from src.utils.telegram import ChatReference, parse_chat_reference
 
 logger = structlog.get_logger(__name__)
 
@@ -96,6 +110,26 @@ _TOLERANCE_CANCELLED = {"ru": "Ввод отменён.", "en": "Input cancelled
 _TOLERANCE_SAVED = {
     "ru": "Уровень приличия установлен: {value}",
     "en": "Tolerance level set to {value}",
+}
+
+# D-1 shortcut (/panel <query>)
+_SHORTCUT_USAGE = {
+    "ru": (
+        "Укажи ссылку на чат (t.me/…, t.me/c/…) или часть его названия:\n"
+        "<code>/panel название или ссылка</code>"
+    ),
+    "en": (
+        "Give a chat link (t.me/…, t.me/c/…) or part of its title:\n"
+        "<code>/panel name or link</code>"
+    ),
+}
+_SHORTCUT_NOT_FOUND = {
+    "ru": "Не нашёл такого чата в whitelist.",
+    "en": "No matching chat found in the whitelist.",
+}
+_SHORTCUT_CANDIDATES = {
+    "ru": "Нашлось несколько подходящих чатов, выбери нужный:",
+    "en": "Found several matching chats, pick one:",
 }
 
 # Decision 2: these three fields render as a link to the existing KB/
@@ -574,4 +608,103 @@ async def handle_chat_panel_tolerance_cancel(
         lang,
         chat_id,
         FieldGroup.STICKERS,
+    )
+
+
+# ── D-1: shortcut to a chat's panel by link/title ───────────────────────────
+
+
+async def _resolve_reference_chat_id(
+    ref: ChatReference,
+    bot: Bot,
+    chat_settings_repo: ChatSettingsRepository,
+) -> int | None:
+    """Resolve a parsed link/id reference to a whitelisted chat_id, or None.
+
+    ``ref.username`` needs one live ``bot.get_chat()`` call to become a
+    chat_id; ``ref.chat_id`` already is one. Either way, resolving *which*
+    chat a link points to is not the same as being allowed to see its
+    panel -- the whitelist check below is what the item's "доступ только
+    ...whitelist" requirement is actually about, so it runs unconditionally,
+    even for a chat_id parsed with no network call at all.
+    """
+    chat_id = ref.chat_id
+    if chat_id is None and ref.username is not None:
+        try:
+            chat = await bot.get_chat(f"@{ref.username}")
+        except Exception:
+            logger.debug("chat_panel_shortcut_username_lookup_failed", username=ref.username)
+            return None
+        chat_id = chat.id
+
+    if chat_id is None:
+        return None
+
+    row = await chat_settings_repo.get(chat_id)
+    if row is None or not row.get("enabled"):
+        return None
+    return chat_id
+
+
+@router.message(Command("panel"), IsAdmin())
+async def handle_chat_panel_shortcut(
+    message: Message,
+    bot: Bot,
+    admin_repo: FromDishka[AdminRepository],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Open a chat's panel directly by link/title, skipping the picker (D-1).
+
+    ``IsAdmin`` gates the command itself; every match (link/username
+    resolution and the title search) is additionally filtered through
+    ``chat_settings.enabled = true``, so the shortcut can only ever reach a
+    whitelisted chat -- never a chat the admin merely knows a link to.
+    Ambiguous title matches render ``chat_panel_candidates_keyboard`` rather
+    than guessing (the item's own requirement). Inline mode (``@bot query``)
+    is explicitly out of scope -- see the source PRD's "Не входит в этот
+    план".
+    """
+    if message.chat.type != "private":
+        return
+
+    lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
+    parts = (message.text or "").split(maxsplit=1)
+    query = parts[1].strip() if len(parts) > 1 else ""
+    if not query:
+        await message.reply(_SHORTCUT_USAGE[lang], parse_mode="HTML")
+        return
+
+    ref = parse_chat_reference(query)
+    if ref is not None:
+        chat_id = await _resolve_reference_chat_id(ref, bot, chat_settings_repo)
+        if chat_id is None:
+            await message.reply(_SHORTCUT_NOT_FOUND[lang])
+            return
+        text, keyboard = await render_chat_panel(
+            chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id
+        )
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        return
+
+    # Doesn't look like a link/id -- title substring search instead.
+    candidates = await admin_repo.find_enabled_chats_by_title(query, limit=_PER_PAGE)
+    if not candidates:
+        await message.reply(_SHORTCUT_NOT_FOUND[lang])
+        return
+    if len(candidates) == 1:
+        text, keyboard = await render_chat_panel(
+            chat_settings_repo,
+            bot_config_repo,
+            chat_config_service,
+            lang,
+            candidates[0]["chat_id"],
+        )
+        await message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        return
+
+    await message.answer(
+        _SHORTCUT_CANDIDATES[lang],
+        reply_markup=chat_panel_candidates_keyboard(candidates, lang=lang),
     )
