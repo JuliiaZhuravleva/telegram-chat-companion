@@ -24,9 +24,17 @@ class RAGMemoryService:
         memory_repo: MemoryRepository,
         ai_router: AIRouter,
         *,
-        min_similarity: float = 0.65,
+        min_similarity: float,
         max_results: int = 5,
     ) -> None:
+        """Construct the service.
+
+        ``min_similarity`` has no default here on purpose (S2-2): the config
+        YAML (``rag.min_similarity``, wired through ``settings.rag`` in
+        ``src/di.py``) is the single source of truth for the threshold. A
+        constructor default would silently diverge from it for any caller
+        that forgets to pass it explicitly (tests, future call sites).
+        """
         self._repo = memory_repo
         self._ai_router = ai_router
         self._min_similarity = min_similarity
@@ -64,7 +72,10 @@ class RAGMemoryService:
         rows = await self._repo.search(
             chat_id=chat_id,
             query_embedding=embedding_result.embedding,
-            min_similarity=min_similarity or self._min_similarity,
+            # `x or default` would silently fall back to the instance default
+            # for an explicit falsy override (min_similarity=0.0 is a valid
+            # "accept everything" threshold) — S2-2.
+            min_similarity=(min_similarity if min_similarity is not None else self._min_similarity),
             max_results=max_results or self._max_results,
         )
 

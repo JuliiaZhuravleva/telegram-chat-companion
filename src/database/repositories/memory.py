@@ -47,10 +47,16 @@ class MemoryRepository:
         chat_id: int,
         query_embedding: list[float],
         *,
-        min_similarity: float = 0.65,
+        min_similarity: float,
         max_results: int = 5,
     ) -> list[asyncpg.Record]:
-        """Search memories by cosine similarity."""
+        """Search memories by cosine similarity.
+
+        ``min_similarity`` has no default (S2-2): the config YAML is the
+        single source of truth for the threshold, and this repository method
+        must not be able to silently apply a different one than
+        ``RAGMemoryService`` (its only caller) resolves it to.
+        """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
             SELECT id, content, metadata, importance_score,
