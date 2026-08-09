@@ -233,7 +233,7 @@ picker, not the chat panel — use `adm_pnl:` / the picker to get back to a spec
 The owner hit this within hours of B-2 landing and reported it as a bug, which is the answer to the
 question this decision left open: once the panel became the per-chat hub, "Back lands in a different
 section's chat list" stopped reading as an accepted trade-off and started reading as broken. Option (a)
-above is what shipped — an origin token in `callback_data` (`src/bot/keyboards/nav.py`), threaded through
+above is what shipped — an origin token in `callback_data` (`src/bot/nav.py`), threaded through
 every button in the KB/Reactions submenus that leads to a screen returning to them. Entering from this
 panel now returns here; entering from a section's own picker still returns there; an absent or unknown
 token reads as the old default, so keyboards rendered before the change degrade rather than break.

@@ -35,7 +35,7 @@ from src.bot.keyboards.admin_kb import (
     kb_organizer_picker_keyboard,
     kb_organizers_keyboard,
 )
-from src.bot.keyboards.nav import parse_origin
+from src.bot.nav import parse_origin
 from src.bot.states.admin import AdminStates
 from src.bot.utils import check_admin_direct, resolve_display_name, safe_edit_text
 from src.database.repositories.admin import AdminRepository

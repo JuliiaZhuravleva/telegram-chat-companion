@@ -38,7 +38,7 @@ from src.bot.keyboards.admin_sticker import (
     sticker_sets_keyboard,
 )
 from src.bot.states.admin import AdminStates
-from src.bot.utils import check_admin_direct
+from src.bot.utils import check_admin_direct, safe_edit_text
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
@@ -625,8 +625,12 @@ async def _render_and_show_detail(
         set_name=sticker["set_name"],
         explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
     )
-    with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    # safe_edit_text, not a blanket suppress(TelegramBadRequest): the DB write
+    # has already happened and the caller is about to announce success, so a
+    # re-render that fails for any *other* reason (message too long once a long
+    # visual_description and admin_notes are on the card, message gone) must
+    # surface rather than leave a stale card under a "saved" toast.
+    await safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=keyboard)
 
 
 @router.callback_query(F.data.startswith("adm_stk_expset:"))

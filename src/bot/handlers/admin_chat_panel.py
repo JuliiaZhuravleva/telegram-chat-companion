@@ -138,6 +138,16 @@ _SHORTCUT_CANDIDATES = {
 # (the registry is generic across consumers, it doesn't decide this).
 _LINK_ONLY_KEYS = frozenset({"kb_enabled", "reactions_enabled", "reactions_history_enabled"})
 
+# The four groups that own an ``adm_pnl_grp:`` screen (ADR-0010 Decisions 3/4).
+# KB and REACTIONS are groups in the registry but render as link rows, so no
+# button ever emits them here — a hand-crafted callback would otherwise get a
+# group screen showing kb_enabled as an ordinary toggle. The write path already
+# refuses those keys (_LINK_ONLY_KEYS below in handle_chat_panel_toggle); this
+# closes the rendering half so the two agree.
+_FIELD_OWNING_GROUPS = frozenset(
+    {FieldGroup.BEHAVIOR, FieldGroup.MODULES, FieldGroup.STICKERS, FieldGroup.RULES}
+)
+
 
 def _get_lang(raw: str | None) -> str:
     return raw if raw in ("ru", "en") else "ru"
@@ -382,6 +392,9 @@ async def handle_chat_panel_group(
         group = FieldGroup(parts[3])
     except (ValueError, IndexError):
         await callback.answer("Invalid data", show_alert=True)
+        return
+    if group not in _FIELD_OWNING_GROUPS:
+        await callback.answer(_INVALID_FIELD[lang], show_alert=True)
         return
 
     await callback.answer()

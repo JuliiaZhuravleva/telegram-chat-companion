@@ -222,9 +222,14 @@ class AdminRepository:
 
         "Active" = message count in ``chat_messages`` within a rolling
         ``window`` (default last 24h). One aggregate query (LEFT JOIN a
-        per-chat COUNT subquery, no N+1) -- the subquery leans on the
-        existing ``idx_chat_messages_chat_created (chat_id, created_at DESC)``
-        index from migration 002. Ties (equal/zero message count, including
+        per-chat COUNT subquery, no N+1).
+
+        Note the subquery does **not** use ``idx_chat_messages_chat_created``,
+        despite an earlier version of this docstring claiming so: that index
+        leads on ``chat_id`` while the filter is on ``created_at`` alone, so
+        Postgres seq-scans (verified with EXPLAIN ANALYZE). Harmless at current
+        volume; TD-063 carries the row-count check that decides whether a
+        ``(created_at)`` index is worth adding. Ties (equal/zero message count, including
         chats with none in the window) fall back to the same
         ``chat_title NULLS LAST, chat_id`` order ``get_enabled_chats_page``
         uses, so the ordering stays deterministic rather than looking random.

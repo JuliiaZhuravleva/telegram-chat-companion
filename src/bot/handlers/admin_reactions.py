@@ -28,7 +28,7 @@ from src.bot.keyboards.admin_reactions import (
     reactions_chat_picker_keyboard,
     reactions_menu_keyboard,
 )
-from src.bot.keyboards.nav import parse_origin
+from src.bot.nav import parse_origin
 from src.bot.settings_fields import field_by_code
 from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
 from src.database.repositories.admin import AdminRepository

@@ -16,7 +16,7 @@ from src.bot.keyboards.admin_kb import (
     kb_organizer_picker_keyboard,
     kb_organizers_keyboard,
 )
-from src.bot.keyboards.nav import PANEL_ORIGIN
+from src.bot.nav import PANEL_ORIGIN
 
 CHAT_ID = -1001234567890
 

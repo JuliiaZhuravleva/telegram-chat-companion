@@ -19,7 +19,7 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.bot.keyboards.nav import back_callback, origin_suffix
+from src.bot.nav import back_callback, origin_suffix
 
 
 def kb_chat_picker_keyboard(
@@ -73,7 +73,7 @@ def kb_menu_keyboard(
     Toggle copy per docs/design/kb-copy-register.md §4 (reuses the
     notifications_keyboard boolean-toggle convention verbatim).
 
-    ``origin`` (see ``keyboards/nav.py``) decides where Back goes and is
+    ``origin`` (see ``bot/nav.py``) decides where Back goes and is
     carried into every button that leads to a screen which comes back
     *here* — otherwise toggling or visiting organizers would silently reset
     the return path the admin arrived on.
@@ -127,7 +127,7 @@ def kb_organizers_keyboard(
     organizer directly (no confirm dialog — low-blast-radius admin edit).
 
     ``origin`` rides through every button here because they all lead back to
-    the KB submenu, whose Back target it decides (``keyboards/nav.py``).
+    the KB submenu, whose Back target it decides (``bot/nav.py``).
     """
     rows: list[list[InlineKeyboardButton]] = []
     suffix = origin_suffix(origin)

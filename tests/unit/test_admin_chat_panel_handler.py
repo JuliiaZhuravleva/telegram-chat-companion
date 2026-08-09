@@ -352,6 +352,42 @@ class TestHandleChatPanelMenu:
 class TestHandleChatPanelGroup:
     """ADR-0010 Decisions 1, 2, 4: ``adm_pnl_grp:`` opens one group's screen."""
 
+    @pytest.mark.parametrize("group", ["kb", "reactions"])
+    @pytest.mark.asyncio
+    async def test_link_only_groups_are_refused(self, group: str) -> None:
+        """No button emits these — the root screen renders KB/Reactions as link
+        rows — so reaching them here means a hand-crafted callback. Rendering
+        one would show kb_enabled as an ordinary toggle, contradicting the
+        write path, which already refuses those keys.
+        """
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:{group}")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+
+        await handle_chat_panel_group(
+            callback,
+            chat_settings_repo,
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        callback.message.edit_text.assert_not_awaited()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_a_field_owning_group_still_renders(self) -> None:
+        """Control for the check above — it must not refuse everything."""
+        callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:modules")
+        chat_settings_repo = _make_chat_settings_repo({"chat_title": "Chat"})
+
+        await handle_chat_panel_group(
+            callback,
+            chat_settings_repo,
+            _make_bot_config_repo(),
+            _make_chat_config_service(_base_config()),
+        )
+
+        callback.message.edit_text.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_denies_non_admin(self) -> None:
         callback = _make_callback(f"adm_pnl_grp:ru:{CHAT_ID}:modules", user_id=999)

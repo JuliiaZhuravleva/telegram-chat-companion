@@ -13,7 +13,7 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from src.bot.keyboards.nav import back_callback, origin_suffix
+from src.bot.nav import back_callback, origin_suffix
 from src.bot.settings_fields import FIELDS_BY_KEY
 
 
@@ -78,7 +78,7 @@ def reactions_menu_keyboard(
     The toggles address their field by the settings registry's short code
     (``rx``/``rh``) rather than the full column name: spelled out, this
     payload was 60 of Telegram's 64 callback bytes, leaving no room for the
-    ``origin`` token that decides where Back goes (``keyboards/nav.py``).
+    ``origin`` token that decides where Back goes (``bot/nav.py``).
     The handler still accepts the old long form so a keyboard rendered
     before this change keeps working.
     """
