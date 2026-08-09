@@ -127,6 +127,16 @@ maintenance:
   decision_log_days: 90
   retrieval_log_days: 90
 
+# Background worker that retries embeddings for chat_memory rows whose
+# embedding failed to generate at write time (S2-10). A NULL embedding is
+# the natural "pending" marker -- no migration needed. Retries are
+# unconstrained: gemini-embedding-001 is free, so there is no cost pressure
+# to cap attempts the way the maintenance windows above cap storage.
+embedding_backfill:
+  enabled: true
+  interval_seconds: 3600
+  batch_limit: 20
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:

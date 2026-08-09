@@ -1,4 +1,4 @@
-"""Tests for src.services.rag.memory — RAGMemoryService (S2-2, S2-7b).
+"""Tests for src.services.rag.memory — RAGMemoryService (S2-2, S2-7b, S2-10).
 
 S2-2 classes cover the single-source-of-truth consolidation for the RAG
 similarity threshold: the constructor/repository ``min_similarity``
@@ -7,13 +7,20 @@ defaults (0.65, diverging from the 0.7 that's actually live via
 None else default`` bug in the per-call override is fixed.
 
 S2-7b classes cover the rest of ``RAGMemoryService``'s own behavior that
-S2-2 explicitly left out: what ``search()``/``store()`` do when embedding
-generation fails (currently: log a warning and return ``[]``/``None``
-without ever reaching the repository), the ``max_results`` passthrough
-(mirroring the ``min_similarity`` override tests), and the S2-4
-``query_embedding`` passthrough (a shared embedding skips a second
-``generate_embedding()`` call). Repository-level chat-scoping (privacy
-invariant) is S2-7a's, in ``tests/integration/``.
+S2-2 explicitly left out: what ``search()`` does when embedding generation
+fails (log a warning and return ``[]`` without ever reaching the
+repository), the ``max_results`` passthrough (mirroring the
+``min_similarity`` override tests), and the S2-4 ``query_embedding``
+passthrough (a shared embedding skips a second ``generate_embedding()``
+call). Repository-level chat-scoping (privacy invariant) is S2-7a's, in
+``tests/integration/``.
+
+``TestStoreEmbeddingFailure`` was originally an S2-7b class asserting
+``store()`` returned ``None`` and never reached the repository on embedding
+failure; S2-10 changed that behavior (persist with ``embedding=None``
+instead of dropping the memory) so the class was rewritten in place --
+see ``tests/unit/test_embedding_backfill.py`` for the worker that fills
+those NULLs back in.
 """
 
 from __future__ import annotations
@@ -271,31 +278,49 @@ class TestSearchMaxResultsOverride:
 
 
 class TestStoreEmbeddingFailure:
-    """S2-7b: ``store()`` when embedding generation fails.
+    """S2-10: ``store()`` when embedding generation fails.
 
-    Mirrors ``TestSearchEmbeddingFailure`` -- a failed embedding must not
-    reach the repository, and the memory is simply not persisted (the
-    caller, ``_safe_rag_store``, already ignores the return value).
+    Supersedes the old S2-7b behavior (returned ``None`` and never touched
+    the repository, permanently losing the memory on a provider outage).
+    S2-1's honest no-fallback made Gemini the only embeddings provider, so
+    an outage now persists the row with ``embedding=None`` (a "pending"
+    marker) instead of dropping it -- ``EmbeddingBackfillWorker`` fills it
+    in later (S2-11 data-preservation invariant).
     """
 
     @pytest.mark.asyncio
-    async def test_embedding_failure_returns_none(self) -> None:
+    async def test_embedding_failure_still_persists_with_null_embedding(self) -> None:
         repo = AsyncMock(spec=MemoryRepository)
+        repo.store.return_value = 7
         router = AsyncMock()
         router.generate_embedding.side_effect = RuntimeError("all providers failed")
         service, _, _ = _make_service(repo=repo, router=router)
 
         memory_id = await service.store(chat_id=1, content="hi")
 
-        assert memory_id is None
+        assert memory_id == 7
+        repo.store.assert_awaited_once()
+        assert repo.store.call_args.kwargs["embedding"] is None
+        assert repo.store.call_args.kwargs["chat_id"] == 1
+        assert repo.store.call_args.kwargs["content"] == "hi"
 
     @pytest.mark.asyncio
-    async def test_embedding_failure_does_not_reach_repository(self) -> None:
+    async def test_embedding_failure_forwards_optional_fields_to_repository(self) -> None:
         repo = AsyncMock(spec=MemoryRepository)
+        repo.store.return_value = 8
         router = AsyncMock()
         router.generate_embedding.side_effect = RuntimeError("all providers failed")
         service, _, _ = _make_service(repo=repo, router=router)
 
-        await service.store(chat_id=1, content="hi")
+        await service.store(
+            chat_id=1,
+            content="hi",
+            source_message_id=99,
+            importance_score=0.9,
+            metadata={"k": "v"},
+        )
 
-        repo.store.assert_not_awaited()
+        call_kwargs = repo.store.call_args.kwargs
+        assert call_kwargs["source_message_id"] == 99
+        assert call_kwargs["importance_score"] == 0.9
+        assert call_kwargs["metadata"] == {"k": "v"}

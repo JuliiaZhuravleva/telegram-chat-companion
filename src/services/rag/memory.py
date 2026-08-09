@@ -119,12 +119,34 @@ class RAGMemoryService:
         importance_score: float = 0.5,
         metadata: dict[str, Any] | None = None,
     ) -> int | None:
-        """Store a memory with its embedding. Returns memory ID or None on failure."""
+        """Store a memory with its embedding. Returns the memory ID.
+
+        S2-10: a failed embedding *call* (provider outage -- Gemini is the
+        only provider for embeddings since S2-1's honest no-fallback) no
+        longer drops the memory. Previously this meant silent, permanent
+        data loss: the content was never written at all. Now the row is
+        persisted with ``embedding=None`` (a NULL vector, invisible to
+        ``search()`` until filled in) and ``EmbeddingBackfillWorker``
+        retries it later -- satisfying the S2-11 data-preservation
+        invariant.
+
+        Returns ``None`` only for the wrong-dimensionality guard below
+        (S2-1) -- a provider/config bug distinct from an outage, where
+        refusing to store is the deliberate behavior, not something S2-10
+        changes.
+        """
         try:
             embedding_result = await self._ai_router.generate_embedding(content, chat_id=chat_id)
         except Exception:
-            logger.warning("Failed to generate embedding for RAG store")
-            return None
+            logger.warning("Failed to generate embedding for RAG store, storing as pending")
+            return await self._repo.store(
+                chat_id=chat_id,
+                content=content,
+                embedding=None,
+                source_message_id=source_message_id,
+                importance_score=importance_score,
+                metadata=metadata,
+            )
 
         actual_dimensions = len(embedding_result.embedding)
         if actual_dimensions != EXPECTED_EMBEDDING_DIMENSIONS:
