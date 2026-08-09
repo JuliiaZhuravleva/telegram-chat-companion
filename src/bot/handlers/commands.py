@@ -57,7 +57,7 @@ _REMEMBER_SUCCESS_NO_EMBED = {
         "it is only visible via /kb."
     ),
 }
-_REMEMBER_KB_DISABLED = {
+_KB_DISABLED = {
     "ru": "📚 База знаний отключена для этого чата. Включите её в админ-панели.",
     "en": "📚 The knowledge base is disabled for this chat. Enable it from the admin panel.",
 }
@@ -291,7 +291,7 @@ async def handle_remember(
         return
 
     if not chat_config.kb_enabled:
-        await message.reply(_REMEMBER_KB_DISABLED[lang])
+        await message.reply(_KB_DISABLED[lang])
         return
 
     user_id = message.from_user.id if message.from_user else None
@@ -447,6 +447,11 @@ async def handle_kb_view_dm(
 ) -> None:
     """``/kb`` in DM: bold-title, topic-sectioned, paginated (5/page)."""
     lang = chat_config.language if chat_config.language in _KB_EMPTY_DM else "ru"
+
+    if not chat_config.kb_enabled:
+        await message.answer(_KB_DISABLED[lang])
+        return
+
     facts = await knowledge_repo.get_active_facts(message.chat.id)
 
     if not facts:
@@ -465,6 +470,11 @@ async def handle_kb_view_group(
 ) -> None:
     """``/kb`` in group: terse flat list, no provenance, paginated (8/page)."""
     lang = chat_config.language if chat_config.language in _KB_EMPTY_GROUP else "ru"
+
+    if not chat_config.kb_enabled:
+        await message.answer(_KB_DISABLED[lang])
+        return
+
     facts = await knowledge_repo.get_active_facts(message.chat.id)
 
     if not facts:
