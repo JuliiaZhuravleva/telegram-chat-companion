@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:33:11Z",
+  "role": "specialist",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "cost_usd": 0.4,
+  "notes": "A-2 (ADR-0009: manual sticker score priority + terminology addendum to ADR-0008) was already fully written, committed (c797c1c), and independently specialist+evaluator PASS-verified in an earlier session on this envelope (see .verdicts/A-2-1.json + A-2-evaluator-1.json, ts ~14:06-14:07Z) -- but the envelope's item status/result was never patched to reflect it, same staleness pattern as A-1 (interrupted run before the envelope-patch step). This dispatch re-verified rather than re-authored: confirmed c797c1c is on HEAD (git cat-file -e), contains only docs/decisions/ADR-0009-manual-explicitness-override.md (382 lines, no application source touched -- architect scope restriction honored), and matches the working tree byte-for-byte (git diff HEAD -- <path> empty). Spot-checked that A-3's since-landed implementation (commit 408b2b5) actually followed the ADR: migration 026_sticker_explicitness_manual_flag.py exists (Decision 3), stickers.py contains the prescribed CASE-on-existing-flag upsert clause and both set_manual_explicitness_score()/reset_explicitness_to_auto() methods (Decisions 4-5), explicitness_is_manual is threaded into _VISION_DERIVED_COLUMNS (Decision 6). No code changes made this session; did not touch the in-progress A-4 WIP present in the working tree (src/bot/handlers/admin_sticker.py, keyboards/admin_sticker.py, states/admin.py, learning.py, tolerance.py + tests, all uncommitted, out of architect scope regardless).",
+  "result": {
+    "kind": "commit",
+    "ref": "c797c1c",
+    "verification": "docs/decisions/ADR-0009-manual-explicitness-override.md (382 lines) committed at c797c1c, verified present on HEAD and identical to working tree; downstream A-3 implementation (408b2b5) cross-checked against Decisions 3-6 and matches."
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

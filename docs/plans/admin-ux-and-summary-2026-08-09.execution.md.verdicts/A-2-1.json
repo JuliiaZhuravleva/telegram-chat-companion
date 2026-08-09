@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:06:13Z",
+  "role": "specialist",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "cost_usd": 1.93,
+  "notes": "ADR-0009 (addendum to ADR-0008): (1) ratifies A-1's terminology (сticker=оценка откровенности, chat=уровень приличия) and its default-vs-real-chat tolerance split for catalog-wide DM views; (2) new sticker_knowledge.explicitness_is_manual BOOLEAN NOT NULL DEFAULT false (flat per-row fact, migration-020 pitfall doesn't apply — not part of the ChatConfig 3-layer merge); (3) priority rule expressed as a single SQL CASE in save_sticker()'s upsert, not a Python branch, so a manual score survives learn()/reanalyze() unconditionally until explicitly reset; (4) reset-to-auto = NULL both score+flag (no hidden 'remembered' value), reusing A-1's existing not-scored rendering + the existing re-analyze button; (5) flags the duplicate-copy path must copy explicitness_is_manual alongside explicitness_score (else a hand-vetted score on a duplicate silently reclobbers on ITS first re-analysis — a 1-hop-removed recurrence of the bug this ADR exists to prevent), incl. StickerLearningResult/notify_admins threading for that edge case; (6) routes A-4's FSM to the still-unused awaiting_sticker_edit scaffold instead of awaiting_setting_value, which ADR-0008 D-10 found unused but A-1's sibling plan has since wired to the per-chat tolerance flow. Implementation notes sectioned per downstream item (A-3/A-4/Q-1), migration numbered 026 (depends_on 025).",
+  "result": {
+    "kind": "commit",
+    "ref": "c797c1c",
+    "verification": "docs/decisions/ADR-0009-manual-explicitness-override.md committed at c797c1c (382 lines); grep-verified against live code (save_sticker upsert COALESCE at stickers.py:127-129, _VISION_DERIVED_COLUMNS duplicate-copy path learning.py:419-466, AdminStates scaffold states admin.py, format_explicitness_line tolerance.py, _resolve_default_tolerance_level admin_sticker.py:88-103) before every decision was written; no application source touched (architect scope restriction)."
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

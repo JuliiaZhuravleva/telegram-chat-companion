@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:16:05Z",
+  "role": "evaluator",
+  "item_id": "A-3",
+  "verdict": "PASS",
+  "evidence": "Verified commit 408b2b5 against ADR-0009 Decisions 3-6: migration 026 adds explicitness_is_manual (NOT NULL DEFAULT false, matches decision 3 exactly); save_sticker()'s ON CONFLICT SET clause uses the exact CASE from Decision 4, with the flag correctly absent from SET; new set_manual_explicitness_score()/reset_explicitness_to_auto() methods match Decision 5's SQL verbatim; explicitness_is_manual added to _VISION_DERIVED_COLUMNS and threaded through duplicate-copy path and both StickerLearningResult return paths per Decision 6. Independently ran pytest tests/unit/test_sticker_repository.py tests/unit/test_sticker_learning.py (96 passed, matches claim), confirmed the pre-existing test_admin_sticker_dm_router_order.py failure is untouched by this commit's diff (file not in commit's changed-files list), and ruff+mypy clean on all touched files.",
+  "regression_risk": "low",
+  "notes": "Implementation notes for A-3 followed to the letter, including the explicit 'no change to clear_analysis()/update_explicitness_score()' instruction. A-4 (UI) and Q-1 (integration tests) are correctly deferred as separate items per the ADR."
+}

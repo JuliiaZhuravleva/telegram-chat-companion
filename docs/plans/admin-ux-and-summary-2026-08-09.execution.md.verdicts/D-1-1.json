@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:39:34Z",
+  "role": "specialist",
+  "item_id": "D-1",
+  "verdict": "PASS",
+  "cost_usd": 8.2,
+  "notes": "New admin-only /panel <query> command (Command+IsAdmin, registered in command_registry.py) opens a whitelisted chat's panel directly via render_chat_panel(): t.me/c/<id> links resolve purely (parse_chat_reference in src/utils/telegram.py, next to build_chat_url per the source item's own suggestion, round-trip tested against it), t.me/<username>/@username resolve via one bot.get_chat() call, everything else falls back to a chat_title ILIKE substring search (AdminRepository.find_enabled_chats_by_title, wildcard-escaped). Multiple title matches render chat_panel_candidates_keyboard (D-1's 'список кандидатов при неоднозначности'); every path -- link, username, title -- is filtered through chat_settings.enabled=true before rendering, so the shortcut cannot reveal a non-whitelisted chat even when a link resolves to a real one. Deliberately a dedicated slash command, not a bare-text handler, per the source PRD's own 'безопасный роутинг' concern (this DM already runs FSM text inputs for tolerance/sticker-edit/sticker-score plus a reply-to-sticker handler) -- Command('panel') only ever matches exact /panel prefix, no StateFilter/exclusion-list needed. Inline mode (@bot query) confirmed out of scope by both the item title and the source plan's 'Не входит в этот план'. Forwarded-message entry (mentioned as 'возможно' in the source's item 5 detail) was dropped from scope: the envelope's actual item title only asks for link/name, and the human-approved plan brief's D-1 line says only 'по ссылке или названию'. Unit tests: 12 new parser tests (round-trip against build_chat_url, reserved t.me paths, invite links, username forms) + 3 repo tests (match/escape/limit) + 9 handler tests (usage, link+whitelisted, link+not-whitelisted, username resolve success/failure, title single/multiple/zero match, non-private no-op) + 2 command-registry snapshot updates (deliberate per that test's own convention). This was a retry dispatch (previous attempt exhausted its per-item budget mid-session after all code+tests were written but before verdict submission) -- all files were intact in the uncommitted working tree; this session verified, re-ran the full suite, committed, and is submitting the verdict now. No qa follow-up needed beyond what Q-2 (manual smoke checklist) already scopes for D-1 -- pure unit-mockable logic (regex parsing, one aggregate SQL query, handler branching), no new schema/migration for an integration suite to exercise.",
+  "result": {
+    "kind": "commit",
+    "ref": "3716e61d839141dcf7cdd0ba10168226bbdedf56",
+    "verification": "pytest tests/unit/test_telegram_utils.py tests/unit/test_admin_repository.py tests/unit/test_command_registry.py tests/unit/test_admin_chat_panel_handler.py tests/unit/test_admin_chat_panel_keyboards.py -q: 212 passed; full tests/unit/: 1831 passed, 5 skipped, 1 pre-existing unrelated failure (test_admin_sticker_dm_router_order.py, documented pre-existing in A-3/A-4/B-2/C-1 handoffs); ruff check src/ clean; ruff format --check clean on all touched files; mypy src/ clean (131 files)"
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

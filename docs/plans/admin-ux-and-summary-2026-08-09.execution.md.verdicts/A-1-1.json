@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T13:57:13Z",
+  "role": "specialist",
+  "item_id": "A-1",
+  "verdict": "PASS",
+  "cost_usd": 6.5,
+  "notes": "Added shared format_explicitness_line() (tolerance.py) and wired it into every DM sticker card: _build_detail_text() (detail view / post-clear re-render / DM catalog check), handle_run_analysis()'s result text, and notify_admins() (new-sticker notification, ADR-0008/A-2 terminology: sticker=\"оценка откровенности\", chat ceiling=\"уровень приличия\"). Design decision (PRD left the exact chat-context open): catalog-wide DM views (browsing sets, DM sticker check, re-analyze) have no specific chat in scope, so they compare against the bot-config default tolerance_level (_resolve_default_tolerance_level, same 0.5 ChatConfig fallback) — only notify_admins() has a real originating chat and threads its actual ChatConfig.tolerance_level. Flagging for architect: A-2's ADR should ratify or override this 'default vs real chat' split explicitly. 3-state handling: scored -> pass/fail verdict; analyzed-but-unscored -> 'не оценён', never a fabricated verdict; entirely un-analyzed -> line omitted (existing ⏳ badge already covers it, avoids card bloat per PRD). Unit tests added: format_explicitness_line table (pass/fail/boundary/unscored, ru+en), _resolve_default_tolerance_level, _build_detail_text 3-state coverage incl. missing-key defensive case, handle_sticker_detail end-to-end, notify_admins threading+gating, media.py call-site kwarg wiring. All new+touched unit tests green (207 passed), ruff+mypy clean on all touched src files. No integration test added — qa item Q-2's manual smoke checklist should include this line across the DM surfaces listed above.",
+  "result": {
+    "kind": "commit",
+    "ref": "f5d376e",
+    "verification": "pytest tests/unit/test_sticker_tolerance.py tests/unit/test_admin_sticker_handler.py tests/unit/test_sticker_learning.py tests/unit/test_media_handler.py -q: 207 passed; ruff check + mypy clean on admin_sticker.py, media.py, tolerance.py, learning.py"
+  },
+  "confidence": 0.75,
+  "clarification_request": null,
+  "session_id": null
+}

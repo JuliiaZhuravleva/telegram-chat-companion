@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:33:59Z",
+  "role": "evaluator",
+  "item_id": "A-2",
+  "verdict": "PASS",
+  "evidence": "Commit c797c1c adds only docs/decisions/ADR-0009-manual-explicitness-override.md (382 lines, matches HEAD/working tree byte-for-byte, no src/ touched — architect scope respected). ADR Decision 1 ratifies the two RU terms (per-sticker 'оценка откровенности', per-chat 'уровень приличия') the item title requires, and Decisions 3-6 give the manual-score-survives-reanalysis rule as a SQL CASE on the existing row's own flag plus a NULL-based reset and duplicate-copy propagation. Independently confirmed downstream A-3 (commit 408b2b5) implements exactly this: stickers.py has explicitness_is_manual column, the CASE WHEN sticker_knowledge.explicitness_is_manual clause, set_manual_explicitness_score()/reset_explicitness_to_auto(), and the flag threaded into _VISION_DERIVED_COLUMNS.",
+  "regression_risk": "low",
+  "notes": "Docs-only item, no test suite applicable. Downstream A-3 spot-check (not full review) shows faithful implementation of the ADR's prescriptive Decisions 3-6."
+}
