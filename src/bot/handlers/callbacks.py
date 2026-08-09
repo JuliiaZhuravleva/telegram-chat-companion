@@ -19,6 +19,14 @@ _NOT_YOUR_BUTTON = {
     "en": "This button is not for you.",
 }
 
+# Mirrors the refusal `handle_summary` gives on the command path
+# (`src/bot/handlers/commands.py`). Kept as its own copy rather than imported
+# to avoid a handlers -> handlers dependency for two strings.
+_SAVE_MESSAGES_DISABLED = {
+    "ru": "Сохранение сообщений отключено для этого чата.",
+    "en": "Message saving is disabled for this chat.",
+}
+
 
 def _check_owner(callback: CallbackQuery, owner_id: int) -> bool:
     """Check if the callback sender is the button owner (0 = open to all)."""
@@ -52,6 +60,16 @@ async def handle_summary_callback(
 
     if not _check_owner(callback, owner_id):
         await callback.answer(_NOT_YOUR_BUTTON[lang], show_alert=True)
+        return
+
+    # `handle_summary` refuses on the command path when the chat has message
+    # saving turned off; this button reaches the same service and must refuse
+    # too. It is rendered by /help and by the summary's own navigation
+    # keyboard, both of which persist on already-sent messages, so without
+    # this check disabling `save_messages` left every existing button able to
+    # summarize the history saved before the toggle was flipped.
+    if not chat_config.save_messages:
+        await callback.answer(_SAVE_MESSAGES_DISABLED[lang], show_alert=True)
         return
 
     # Early return if message context is gone (e.g. expired callback)
