@@ -778,6 +778,81 @@ async def test_sticker_handler_learns_animated():
 
 
 @pytest.mark.asyncio
+async def test_sticker_handler_notify_admins_threads_tolerance_level():
+    """A-1: notify_admins() receives the originating chat's own resolved
+    ChatConfig.tolerance_level (уровень приличия) -- this is the one DM
+    sticker card with a real chat in scope, unlike the catalog-browsing
+    cards in admin_sticker.py which fall back to the global default."""
+    from src.bot.handlers.media import handle_sticker_message
+    from src.services.modules.sticker.models import StickerLearningResult
+
+    message = _make_message()
+    sticker = MagicMock()
+    sticker.file_id = "sticker-file-id"
+    sticker.file_unique_id = "unique-1"
+    sticker.set_name = None
+    sticker.is_animated = False
+    sticker.is_video = False
+    message.sticker = sticker
+
+    chat_config = _make_chat_config(tolerance_level=0.73)
+    bot = _make_bot()
+
+    sticker_service = MagicMock()
+    sticker_service.learn = AsyncMock(
+        return_value=StickerLearningResult(
+            is_new=True,
+            file_unique_id="unique-1",
+            visual_description="a cat",
+            analysis_failed=False,
+        )
+    )
+    sticker_service.notify_admins = AsyncMock()
+
+    sticker_responder = MagicMock()
+    sticker_responder.find_sticker_for_sticker_reply = AsyncMock(return_value=None)
+
+    bot_config_repo = MagicMock()
+    bot_config_repo.get = AsyncMock(return_value="12345")
+
+    message_repo = MagicMock()
+    message_repo.get_recent = AsyncMock(return_value=[])
+
+    admin_repo = MagicMock()
+    admin_repo.get_notification_settings = AsyncMock(
+        return_value={
+            "sticker": "on",
+            "unauthorized": True,
+            "jailbreak": True,
+            "blacklist": True,
+            "ai_fallback": True,
+        }
+    )
+
+    sticker_repo = _make_sticker_repo()
+
+    with patch(
+        "src.bot.handlers.media.download_telegram_file",
+        new_callable=AsyncMock,
+        return_value=b"fake-webp",
+    ):
+        await handle_sticker_message(
+            message,
+            chat_config,
+            sticker_service,
+            sticker_responder,
+            sticker_repo,
+            message_repo,
+            bot_config_repo,
+            admin_repo,
+            bot,
+        )
+
+    sticker_service.notify_admins.assert_awaited_once()
+    assert sticker_service.notify_admins.call_args.kwargs["tolerance_level"] == 0.73
+
+
+@pytest.mark.asyncio
 async def test_sticker_handler_disabled():
     from src.bot.handlers.media import handle_sticker_message
 

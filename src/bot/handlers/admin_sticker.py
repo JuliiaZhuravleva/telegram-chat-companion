@@ -39,6 +39,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
+from src.services.modules.sticker.tolerance import format_explicitness_line
 from src.utils import parse_admin_ids
 from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
@@ -82,6 +83,24 @@ async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bo
 
 def _is_private(callback: CallbackQuery) -> bool:
     return isinstance(callback.message, Message) and callback.message.chat.type == "private"
+
+
+async def _resolve_default_tolerance_level(bot_config_repo: BotConfigRepository) -> float:
+    """Уровень приличия used as the comparison ceiling for DM sticker cards
+    that aren't tied to one specific chat (catalog browsing, DM sticker
+    check, re-analyze) — every card outside ``notify_admins()`` (which has
+    the real originating chat's ``ChatConfig.tolerance_level`` in scope).
+
+    Resolves the same two layers ``ChatConfigService`` would for a chat
+    that never set its own override: ``bot_config.default_tolerance_level``
+    if an admin has set one via the defaults screen, else the
+    ``ChatConfig.tolerance_level`` dataclass fallback (``0.5``, ADR-0008
+    Decision 1/8) — never a per-chat override, since no specific chat
+    applies here.
+    """
+    defaults = await bot_config_repo.get_defaults()
+    raw = defaults.get("tolerance_level")
+    return float(raw) if raw is not None else 0.5
 
 
 # Regex to extract file_unique_id from notification text (🆔 line)
@@ -333,12 +352,23 @@ async def handle_sticker_back(
 # ── Sticker detail ──────────────────────────────────────────────────────
 
 
-def _build_detail_text(sticker: dict[str, Any], file_unique_id: str, lang: str) -> str:
+def _build_detail_text(
+    sticker: dict[str, Any],
+    file_unique_id: str,
+    lang: str,
+    tolerance_level: float,
+) -> str:
     """Build the HTML detail body for a single sticker.
 
     Shared by the detail view and the post-clear re-render so both render the
     sticker identically — including the ⏳ not-analyzed badge when the visual
     description is absent.
+
+    ``tolerance_level`` (A-1): threaded in by every caller via
+    ``_resolve_default_tolerance_level()`` (or, for a card tied to a real
+    chat, that chat's own resolved ``ChatConfig.tolerance_level``) so the
+    оценка откровенности line's pass/fail verdict is computed the same way
+    everywhere.
     """
     lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
     if sticker["visual_description"]:
@@ -356,6 +386,15 @@ def _build_detail_text(sticker: dict[str, Any], file_unique_id: str, lang: str) 
     lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
     lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
     lines.append(f"<b>Video:</b> {sticker['is_video']}")
+    # Explicitness line (A-1) only once the sticker has been through vision
+    # analysis at all — an entirely un-analyzed sticker's explicitness_score
+    # is always NULL too (same vision call, ADR-0008 Decision 4), and the
+    # ⏳/⚠️ status badge above already covers that state; repeating "не
+    # оценён" here would just be noise on a card the PRD asked to keep tight.
+    if sticker["visual_description"]:
+        lines.append(
+            format_explicitness_line(sticker.get("explicitness_score"), tolerance_level, lang)
+        )
     if sticker.get("admin_notes"):
         lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
     lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
@@ -391,7 +430,8 @@ async def handle_sticker_detail(
         await callback.answer("Sticker not found", show_alert=True)
         return
 
-    text = _build_detail_text(sticker, file_unique_id, lang)
+    tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+    text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
 
     if isinstance(callback.message, Message):
         # Clean up previous sticker message (if any) to prevent orphans
@@ -511,7 +551,8 @@ async def handle_clear(
     # prompt. Matches the edit-in-place idiom used by handle_run_analysis.
     sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
     if sticker and isinstance(callback.message, Message):
-        text = _build_detail_text(sticker, file_unique_id, lang)
+        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+        text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
         keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker["set_name"])
         with contextlib.suppress(TelegramBadRequest):
             await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
@@ -607,6 +648,13 @@ async def handle_run_analysis(
             raw_desc = updated.get("visual_description")
             if raw_desc:
                 desc_part = f"\n<b>Описание:</b> {html_lib.escape(str(raw_desc))}"
+                # A-1: same explicitness line as every other DM sticker card,
+                # only once the fresh analysis actually produced a description.
+                tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+                explicitness_line = format_explicitness_line(
+                    updated.get("explicitness_score"), tolerance_level, lang
+                )
+                desc_part = f"{desc_part}\n{explicitness_line}"
         result_text = (
             f"✅ Анализ обновлён{desc_part}" if lang == "ru" else f"✅ Analysis updated{desc_part}"
         )
@@ -655,7 +703,8 @@ async def handle_admin_sticker_check(
 
     existing = await sticker_repo.get_by_file_unique_id(sticker.file_unique_id)
     if existing:
-        text = _build_detail_text(existing, sticker.file_unique_id, lang)
+        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+        text = _build_detail_text(existing, sticker.file_unique_id, lang, tolerance_level)
         keyboard = sticker_detail_keyboard(
             sticker.file_unique_id, lang=lang, set_name=existing["set_name"]
         )
@@ -797,11 +846,11 @@ async def handle_admin_sticker_dm_analyze(
         keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
     else:
         updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
-        result_text = (
-            _build_detail_text(updated, file_unique_id, lang)
-            if updated
-            else ("✅ Анализ завершён" if lang == "ru" else "✅ Analysis complete")
-        )
+        if updated:
+            tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
+            result_text = _build_detail_text(updated, file_unique_id, lang, tolerance_level)
+        else:
+            result_text = "✅ Анализ завершён" if lang == "ru" else "✅ Analysis complete"
         keyboard = sticker_detail_keyboard(file_unique_id, lang=lang, set_name=sticker.set_name)
 
     with contextlib.suppress(TelegramBadRequest):

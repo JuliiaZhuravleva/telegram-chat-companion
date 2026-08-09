@@ -371,6 +371,7 @@ async def handle_sticker_message(
                             admin_ids,
                             notification_mode=sticker_mode,
                             collage_png=learning_result.collage_png,
+                            tolerance_level=chat_config.tolerance_level,
                         )
         except Exception:
             logger.exception("Failed to notify admins about new sticker")

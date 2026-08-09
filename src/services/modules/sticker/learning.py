@@ -26,6 +26,7 @@ from src.services.modules.sticker.models import (
     StickerSearchResult,
 )
 from src.services.modules.sticker.renderer import RenderedSticker, render_tgs, render_webm
+from src.services.modules.sticker.tolerance import format_explicitness_line
 
 logger = structlog.get_logger(__name__)
 
@@ -606,6 +607,7 @@ class StickerLearningService:
         *,
         notification_mode: str = "on",
         collage_png: bytes | None = None,
+        tolerance_level: float = 0.5,
     ) -> None:
         """Send new sticker notification to all admins.
 
@@ -613,6 +615,14 @@ class StickerLearningService:
             notification_mode: "off" (skip), "on" (sticker + text),
                                "detailed" (sticker + collage + text).
             collage_png: PNG bytes of the analysis collage (for detailed mode).
+            tolerance_level: The originating chat's resolved
+                ``ChatConfig.tolerance_level`` («уровень приличия», ADR-0008
+                / A-2 terminology) — the caller (``media.py``) already holds
+                the ``ChatConfig`` for the chat this sticker was just learned
+                from, so this is the one DM sticker card (A-1) that can
+                compare against a *real* chat's ceiling instead of the
+                global default. Defaults to the ``ChatConfig`` dataclass
+                fallback (``0.5``) only for callers that don't have one.
         """
         if notification_mode == "off":
             return
@@ -632,6 +642,15 @@ class StickerLearningService:
             )
         if sticker.set_name:
             description_parts.append(f"<b>Пак:</b> {html_lib.escape(sticker.set_name)}")
+        # A-1: same explicitness line as every other DM sticker card, only
+        # once there's a description at all (see admin_sticker.py's
+        # _build_detail_text for why — an un-analyzed sticker never reaches
+        # here anyway, this function already returned above on
+        # analysis_failed, so this mirrors that same not-analyzed-yet gate).
+        if result.visual_description:
+            description_parts.append(
+                format_explicitness_line(result.explicitness_score, tolerance_level, "ru")
+            )
 
         # In detailed mode, enrich with RAG data from DB
         if notification_mode == "detailed":

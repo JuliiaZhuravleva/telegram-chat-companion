@@ -9,7 +9,9 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from src.bot.handlers.admin_sticker import (
+    _build_detail_text,
     _extract_file_unique_id_from_reply,
+    _resolve_default_tolerance_level,
     handle_admin_sticker_check,
     handle_admin_sticker_dm_analyze,
     handle_admin_sticker_reply,
@@ -381,9 +383,15 @@ def _make_callback(
     return cb
 
 
-def _make_bot_config_repo(admin_ids: str = "12345") -> MagicMock:
+def _make_bot_config_repo(
+    admin_ids: str = "12345", tolerance_level: float | None = None
+) -> MagicMock:
     repo = MagicMock()
     repo.get = AsyncMock(return_value=admin_ids)
+    # A-1: _resolve_default_tolerance_level() reads defaults["tolerance_level"];
+    # None (the default here) exercises the ChatConfig dataclass fallback (0.5).
+    defaults = {} if tolerance_level is None else {"tolerance_level": tolerance_level}
+    repo.get_defaults = AsyncMock(return_value=defaults)
     return repo
 
 
@@ -1613,3 +1621,104 @@ class TestStickerDmCheckKeyboard:
         btn = kb.inline_keyboard[0][0]
         assert "Analyze" in btn.text
         assert btn.callback_data == "adm_stk_dmchk:en:AgADvh4AAlkbCFI"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_default_tolerance_level (A-1)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveDefaultToleranceLevel:
+    @pytest.mark.asyncio()
+    async def test_falls_back_to_chatconfig_dataclass_default(self) -> None:
+        """No admin-set default_tolerance_level -> the same 0.5 fallback
+        ChatConfig itself uses (ADR-0008 Decision 1/8)."""
+        bot_config_repo = _make_bot_config_repo()
+        assert await _resolve_default_tolerance_level(bot_config_repo) == 0.5
+
+    @pytest.mark.asyncio()
+    async def test_uses_admin_set_default(self) -> None:
+        bot_config_repo = _make_bot_config_repo(tolerance_level=0.2)
+        assert await _resolve_default_tolerance_level(bot_config_repo) == 0.2
+
+    @pytest.mark.asyncio()
+    async def test_coerces_to_float(self) -> None:
+        """bot_config values round-trip through JSON -- an admin-entered
+        whole number could come back as an int; must still compare cleanly
+        against explicitness_score (float)."""
+        bot_config_repo = MagicMock()
+        bot_config_repo.get_defaults = AsyncMock(return_value={"tolerance_level": 1})
+        result = await _resolve_default_tolerance_level(bot_config_repo)
+        assert result == 1.0
+        assert isinstance(result, float)
+
+
+# ---------------------------------------------------------------------------
+# _build_detail_text — explicitness line, three states (A-1)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildDetailTextExplicitnessLine:
+    def test_scored_and_passes_shows_pass_verdict(self) -> None:
+        sticker = {**_SAMPLE_STICKER, "explicitness_score": 0.3}
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "Оценка откровенности" in text
+        assert "0.30" in text
+        assert "0.50" in text
+        assert "✅ пройдёт" in text
+
+    def test_scored_and_fails_shows_fail_verdict(self) -> None:
+        sticker = {**_SAMPLE_STICKER, "explicitness_score": 0.9}
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "❌ не пройдёт" in text
+
+    def test_analyzed_but_unscored_shows_not_scored(self) -> None:
+        """State 2: visual_description present, explicitness_score NULL
+        (e.g. legacy row pending ADR-0008 backfill, or vision omitted the
+        field) -- must say "не оценён", never fabricate a pass/fail."""
+        sticker = {**_SAMPLE_STICKER, "explicitness_score": None}
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "не оценён" in text
+        assert "✅" not in text
+        assert "❌" not in text
+
+    def test_not_analyzed_at_all_omits_explicitness_line(self) -> None:
+        """State 3: sticker never went through vision at all -- the ⏳
+        not-analyzed badge already covers this; no redundant explicitness
+        line (keeps the card from bloating per the source plan)."""
+        sticker = {
+            **_SAMPLE_STICKER,
+            "visual_description": None,
+            "explicitness_score": None,
+        }
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "Оценка откровенности" not in text
+        assert "⏳" in text
+
+    def test_missing_explicitness_score_key_treated_as_unscored(self) -> None:
+        """A sticker row from before this column existed (or a dict that
+        just doesn't carry the key) must not KeyError."""
+        sticker = {k: v for k, v in _SAMPLE_STICKER.items() if k != "explicitness_score"}
+        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
+        assert "не оценён" in text
+
+
+# ---------------------------------------------------------------------------
+# handle_sticker_detail — explicitness line wired end-to-end (A-1)
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStickerDetailExplicitnessLine:
+    @pytest.mark.asyncio()
+    async def test_shows_explicitness_line_using_resolved_default(self) -> None:
+        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
+        sticker = {**_SAMPLE_STICKER, "explicitness_score": 0.3}
+        sticker_repo = _make_sticker_repo(sticker=sticker)
+        bot_config_repo = _make_bot_config_repo(tolerance_level=0.6)
+
+        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+
+        text = cb.message.answer.call_args[0][0]
+        assert "0.30" in text
+        assert "0.60" in text
+        assert "✅ пройдёт" in text

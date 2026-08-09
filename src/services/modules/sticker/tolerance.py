@@ -24,3 +24,48 @@ def is_within_tolerance(explicitness_score: float | None, tolerance_level: float
     "verified maximally explicit" onto the same value).
     """
     return explicitness_score is not None and explicitness_score <= tolerance_level
+
+
+def format_explicitness_line(
+    explicitness_score: float | None,
+    tolerance_level: float,
+    lang: str = "ru",
+) -> str:
+    """One-line summary for every admin-facing DM sticker card (A-1).
+
+    Format: ``<оценка откровенности>: <score> · уровень приличия чата
+    <tolerance_level> · пройдёт/не пройдёт`` — built on top of
+    ``is_within_tolerance()`` so the pass/fail verdict can never disagree
+    with the actual gating decision (ADR-0008 Decision 2). Terminology
+    fixed by the owner's [Q1] answer: the sticker-side value is "оценка
+    откровенности", the chat-side ceiling is "уровень приличия" (A-2).
+
+    ``explicitness_score is None`` (unscored — not yet analyzed, a vision
+    response that didn't carry a valid value, or a legacy catalog row
+    pending the ADR-0008 backfill script) always renders as "not scored"
+    and never a fabricated pass/fail — mirrors ``is_within_tolerance()``'s
+    fail-closed contract instead of re-deriving it here.
+    """
+    if lang == "ru":
+        label = "Оценка откровенности"
+        if explicitness_score is None:
+            return f"<b>{label}:</b> не оценён (бот не отправит)"
+        verdict = (
+            "✅ пройдёт"
+            if is_within_tolerance(explicitness_score, tolerance_level)
+            else "❌ не пройдёт"
+        )
+        return (
+            f"<b>{label}:</b> {explicitness_score:.2f} · "
+            f"уровень приличия чата {tolerance_level:.2f} · {verdict}"
+        )
+
+    label = "Explicitness score"
+    if explicitness_score is None:
+        return f"<b>{label}:</b> not scored (bot won't send it)"
+    verdict = (
+        "✅ passes" if is_within_tolerance(explicitness_score, tolerance_level) else "❌ blocked"
+    )
+    return (
+        f"<b>{label}:</b> {explicitness_score:.2f} · chat ceiling {tolerance_level:.2f} · {verdict}"
+    )
