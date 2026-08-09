@@ -58,7 +58,7 @@ _REMEMBER_SUCCESS_NO_EMBED = {
         "it is only visible via /kb."
     ),
 }
-_REMEMBER_KB_DISABLED = {
+_KB_DISABLED = {
     "ru": "📚 База знаний отключена для этого чата. Включите её в админ-панели.",
     "en": "📚 The knowledge base is disabled for this chat. Enable it from the admin panel.",
 }
@@ -436,7 +436,7 @@ async def handle_remember(
         return
 
     if not chat_config.kb_enabled:
-        await message.reply(_REMEMBER_KB_DISABLED[lang])
+        await message.reply(_KB_DISABLED[lang])
         return
 
     user_id = message.from_user.id if message.from_user else None
@@ -467,7 +467,9 @@ async def handle_remember(
     embedding: list[float] | None = None
     try:
         async with typing_indicator(bot, message.chat.id, message_thread_id):
-            embedding_result = await ai_router.generate_embedding(fact_text)
+            embedding_result = await ai_router.generate_embedding(
+                fact_text, chat_id=message.chat.id
+            )
         embedding = embedding_result.embedding
     except Exception:
         logger.warning("kb_remember_embedding_failed", chat_id=message.chat.id)
@@ -590,6 +592,11 @@ async def handle_kb_view_dm(
 ) -> None:
     """``/kb`` in DM: bold-title, topic-sectioned, paginated (5/page)."""
     lang = chat_config.language if chat_config.language in _KB_EMPTY_DM else "ru"
+
+    if not chat_config.kb_enabled:
+        await message.answer(_KB_DISABLED[lang])
+        return
+
     facts = await knowledge_repo.get_active_facts(message.chat.id)
 
     if not facts:
@@ -608,6 +615,11 @@ async def handle_kb_view_group(
 ) -> None:
     """``/kb`` in group: terse flat list, no provenance, paginated (8/page)."""
     lang = chat_config.language if chat_config.language in _KB_EMPTY_GROUP else "ru"
+
+    if not chat_config.kb_enabled:
+        await message.answer(_KB_DISABLED[lang])
+        return
+
     facts = await knowledge_repo.get_active_facts(message.chat.id)
 
     if not facts:
@@ -621,6 +633,7 @@ async def handle_kb_view_group(
 @router.callback_query(F.data.startswith("kb_view:"))
 async def handle_kb_view_page(
     callback: CallbackQuery,
+    chat_config: ChatConfig,
     knowledge_repo: FromDishka[KnowledgeRepository],
 ) -> None:
     """Paginate an existing ``/kb`` view in place (public — no admin gating).
@@ -628,6 +641,13 @@ async def handle_kb_view_page(
     Re-fetches and re-slices the same way the initial command did; renders
     group vs. DM the same way based on the callback's own chat type (the
     message being paginated always lives in the chat it was first sent in).
+
+    Gated on ``kb_enabled`` like the two command handlers: the buttons live on
+    an already-sent message and outlive the toggle, so without this check
+    disabling the KB left every existing ``/kb`` message working as a fully
+    functional reader — including the DM variant's provenance. Answered as an
+    alert rather than a silent ``callback.answer()`` so the press has a visible
+    result.
     """
     if not isinstance(callback.message, Message):
         await callback.answer()
@@ -639,6 +659,10 @@ async def handle_kb_view_page(
         page = int(parts[2]) if len(parts) > 2 else 0
     except ValueError:
         page = 0
+
+    if not chat_config.kb_enabled:
+        await callback.answer(_KB_DISABLED[lang], show_alert=True)
+        return
 
     chat_id = callback.message.chat.id
     facts = await knowledge_repo.get_active_facts(chat_id)

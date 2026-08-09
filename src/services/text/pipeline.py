@@ -27,7 +27,7 @@ from src.database.repositories.response_log import ResponseLogRepository
 from src.models.chat_config import ChatConfig
 from src.models.enums import ResponseType, TriggerType
 from src.services.abuse.checker import AntiAbuseChecker
-from src.services.ai.base import AIProviderError
+from src.services.ai.base import AIProviderError, EmbeddingResult
 from src.services.ai.pricing import calculate_cost
 from src.services.ai.router import AIRouter
 from src.services.modules.links.extractor import LinkExtractorService
@@ -181,13 +181,26 @@ class TextProcessingPipeline:
         )
         lengths_task = self._messages.get_recent_lengths(chat_id)
 
+        # S2-4: one shared query embedding per turn for RAG + KB (previously
+        # each called generate_embedding() independently for the same
+        # message_text -- an extra network round-trip plus a doubled
+        # cost-log row). embed_task is awaited by both consumers below; the
+        # coroutine itself still runs exactly once.
+        embed_task: asyncio.Task[tuple[EmbeddingResult | None, str | None]] | None = None
+        if (config.rag_enabled and self._rag) or (config.kb_enabled and self._knowledge):
+            embed_task = asyncio.ensure_future(self._safe_embed_query(chat_id, message_text))
+
         rag_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
         if config.rag_enabled and self._rag:
-            rag_task = asyncio.ensure_future(self._timed_rag_search(chat_id, message_text))
+            assert embed_task is not None
+            rag_task = asyncio.ensure_future(
+                self._timed_rag_search(chat_id, message_text, embed_task)
+            )
 
         kb_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
         if config.kb_enabled and self._knowledge:
-            kb_task = asyncio.ensure_future(self._timed_kb_facts(chat_id, message_text))
+            assert embed_task is not None
+            kb_task = asyncio.ensure_future(self._timed_kb_facts(chat_id, embed_task))
 
         link_task: asyncio.Task[str | None] | None = None
         if config.link_comments_enabled and self._links:
@@ -426,8 +439,31 @@ class TextProcessingPipeline:
             return base + 0.1
         return base
 
-    async def _timed_rag_search(
+    async def _safe_embed_query(
         self, chat_id: int, message_text: str
+    ) -> tuple[EmbeddingResult | None, str | None]:
+        """Shared query embedding for RAG + KB this turn (S2-4).
+
+        `AIRouter.generate_embedding()` self-logs cost with `chat_id`
+        (router-level `ensure_future(self._log_usage(...))`, TD-009) so no
+        separate `log_usage` call is needed here (cross-cutting constraint
+        applies to `generate_text`, which does not self-log -- embeddings
+        already do). Never raises: failure is reported to both consumers via
+        the returned error string.
+        """
+        try:
+            result = await self._ai.generate_embedding(message_text, chat_id=chat_id)
+        except Exception as exc:
+            error = f"embedding: {type(exc).__name__}: {exc}"
+            logger.warning("Query embedding failed", chat_id=chat_id, error=str(exc))
+            return None, error
+        return result, None
+
+    async def _timed_rag_search(
+        self,
+        chat_id: int,
+        message_text: str,
+        embed_task: asyncio.Task[tuple[EmbeddingResult | None, str | None]],
     ) -> tuple[list[dict[str, Any]], int, str | None]:
         """RAG search plus wall-clock ms and failure detail for retrieval_log.
 
@@ -436,44 +472,52 @@ class TextProcessingPipeline:
         retrieval_log.error — a retrieval outage must be visible, not fatal,
         and without the error field a broken source is byte-identical to a
         healthy source that matched nothing.
+
+        Embedding failure (S2-4: shared with KB via `embed_task`) degrades to
+        "no memories" the same way, and is reported through the same `error`
+        field. It used to be discarded here "matching pre-S2-4 behavior", but
+        pre-S2-4 the error was genuinely unavailable at this layer; after the
+        shared-embedding refactor it sits in the tuple, and `_timed_kb_facts`
+        already propagates it. Dropping it on the RAG side reproduced exactly
+        the byte-identical-to-empty case the paragraph above says must never
+        happen — during an embeddings outage (no fallback since S2-1) the KB
+        row carried the error and the RAG row read as "matched nothing".
         """
         start = time.monotonic()
         memories: list[dict[str, Any]] = []
-        error: str | None = None
-        try:
-            memories = await self._rag.search(chat_id, message_text) if self._rag else []
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            logger.warning("RAG search failed", chat_id=chat_id, error=str(exc), exc_info=True)
+        embedding, error = await embed_task
+        if self._rag and embedding is not None:
+            try:
+                memories = await self._rag.search(
+                    chat_id, message_text, query_embedding=embedding.embedding
+                )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                logger.warning("RAG search failed", chat_id=chat_id, error=str(exc), exc_info=True)
         return memories, int((time.monotonic() - start) * 1000), error
 
     async def _timed_kb_facts(
-        self, chat_id: int, message_text: str
+        self,
+        chat_id: int,
+        embed_task: asyncio.Task[tuple[EmbeddingResult | None, str | None]],
     ) -> tuple[list[dict[str, Any]], int, str | None]:
         """KB fact search plus wall-clock ms and failure detail for retrieval_log.
 
-        `AIRouter.generate_embedding()` self-logs cost (router-level
-        `ensure_future(self._log_usage(...))`) so no separate `log_usage`
-        call is needed here (cross-cutting constraint applies to
-        `generate_text`, which does not self-log -- embeddings already do).
+        S2-4: the query embedding is computed once by `_safe_embed_query`
+        and shared with RAG via `embed_task`, instead of KB calling
+        `generate_embedding()` on its own.
         """
         start = time.monotonic()
         facts: list[dict[str, Any]] = []
-        error: str | None = None
-        if self._knowledge is not None:
+        embedding, error = await embed_task
+        if self._knowledge is not None and embedding is not None:
             try:
-                embedding_result = await self._ai.generate_embedding(message_text)
+                facts = await self._knowledge.search_by_similarity(
+                    chat_id, embedding.embedding, limit=_KB_SEARCH_LIMIT
+                )
             except Exception as exc:
-                error = f"embedding: {type(exc).__name__}: {exc}"
-                logger.warning("KB embedding generation failed", chat_id=chat_id, error=str(exc))
-            else:
-                try:
-                    facts = await self._knowledge.search_by_similarity(
-                        chat_id, embedding_result.embedding, limit=_KB_SEARCH_LIMIT
-                    )
-                except Exception as exc:
-                    error = f"search: {type(exc).__name__}: {exc}"
-                    logger.warning("KB fact search failed", chat_id=chat_id, error=str(exc))
+                error = f"search: {type(exc).__name__}: {exc}"
+                logger.warning("KB fact search failed", chat_id=chat_id, error=str(exc))
         return facts, int((time.monotonic() - start) * 1000), error
 
     async def _safe_log_silence(

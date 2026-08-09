@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:49:25Z",
+  "role": "specialist",
+  "item_id": "S2-4",
+  "verdict": "PASS",
+  "cost_usd": 3.6,
+  "notes": "One shared query embedding per turn for RAG+KB via a new TextProcessingPipeline._safe_embed_query() awaited-once asyncio.Task; RAGMemoryService.search() gained an optional query_embedding param to accept it instead of re-embedding. Closed TD-009's generate_embedding() half: AIRouter.generate_embedding()/analyze_image() now accept chat_id (cost-log only, never forwarded to provider), threaded through RAGMemoryService.search()/store() and the /remember handler. Deferred, not done here: analyze_image() chat_id threading through ImageAnalysisService/media.py (photo handler has chat_id readily available -- cheap follow-up) and AbuseFilter.check()'s generate_embedding call (no chat_id in its signature at all -- would need a real API change, not 'cheap'). sticker/learning.py's two generate_embedding/analyze_image call sites intentionally left at chat_id=0: sticker sets are cross-chat, no natural chat scope exists there. Recommend a small follow-up item for the ImageAnalysisService/media.py leg if TD-009 should close fully; not filed as a plan item by me (PM's call).",
+  "result": {
+    "kind": "commit",
+    "ref": "8f40636c9689a5dc40bc5de2226b629dae1f2692",
+    "verification": "pytest tests/unit/test_text_pipeline.py tests/unit/test_rag_memory_service.py tests/unit/test_ai_router.py tests/unit/test_image_analysis.py tests/unit/test_commands_kb.py -q: all pass; pytest tests/unit/ -q: 1732 passed, 5 skipped; ruff check + ruff format --check clean on touched files; mypy src/services/ai/router.py src/services/rag/memory.py src/services/text/pipeline.py src/bot/handlers/commands.py: no issues"
+  },
+  "confidence": 0.88,
+  "clarification_request": null,
+  "session_id": null
+}

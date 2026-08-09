@@ -418,14 +418,28 @@ def trim_facts_to_budget(
 ) -> list[dict[str, Any]]:
     """Drop lowest-priority KB facts that would exceed the token budget.
 
-    Facts are assumed to already be ordered by salience DESC, then
-    pgvector-similarity-to-current-context DESC -- that ordering is
-    `KnowledgeRepository.search_by_similarity()`'s contract (ADR-0003 Part 2);
-    this function does not re-sort. Per-fact `fact_text` is pre-capped to
-    `MAX_FACT_CHARS`, then facts are accumulated in retrieval order until the
-    budget is exhausted; the tail is dropped (no `min_recency`-style override
-    -- salience ordering already encodes priority).
+    Facts arrive ordered by similarity DESC (`KnowledgeRepository.search_by_similarity()`'s
+    retrieval contract, ADR-0009) -- relevance to the query, not budget priority.
+    This function owns budget-trim priority: it stable-sorts by salience DESC
+    first, so a higher-salience fact survives a cut ahead of a merely-more-similar
+    one; equal-salience facts keep their incoming (similarity) order since
+    `sorted()` is stable. Per-fact `fact_text` is then pre-capped to
+    `MAX_FACT_CHARS`, and facts are accumulated in that order until the budget
+    is exhausted; the tail is dropped.
+
+    `chat_facts.salience` is nullable (`alembic/versions/014_chat_facts.py` --
+    `FLOAT DEFAULT 0.5`, no NOT NULL), and `search_by_similarity()` returns
+    rows as plain dicts, so the key is always present and may be `None`. A
+    bare `.get("salience", 0.5)` would not substitute the default in that case
+    and `sorted()` would raise `TypeError` comparing `None` to `float` -- in
+    the reply hot path. The explicit `is None` test (not `or`) is deliberate:
+    `or` would also rewrite a legitimate salience of `0.0` to `0.5`.
     """
+    facts = sorted(
+        facts,
+        key=lambda f: 0.5 if f.get("salience") is None else f["salience"],
+        reverse=True,
+    )
     trimmed: list[dict[str, Any]] = []
     used_tokens = 0
     for fact in facts:

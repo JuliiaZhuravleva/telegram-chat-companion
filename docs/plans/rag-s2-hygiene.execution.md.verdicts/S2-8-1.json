@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T15:25:56Z",
+  "role": "specialist",
+  "item_id": "S2-8",
+  "verdict": "PASS",
+  "cost_usd": 1.41,
+  "notes": "Added kb_enabled guard to handle_kb_view_dm and handle_kb_view_group, mirroring the existing guard in handle_remember (renamed _REMEMBER_KB_DISABLED -> shared _KB_DISABLED). Early message.answer() with explicit disabled-KB text before any facts are fetched -- no silent return, per the aiogram update-consumption gotcha in CLAUDE.md. Added 2 regression tests asserting the disabled response text, that facts never leak into it, and that get_active_facts is not even called. Out of scope, flagging for PM: handle_kb_view_page (the kb_view: pagination callback) does not receive chat_config at all and has no kb_enabled check -- if KB is disabled after a paginated /kb view was already sent, the old inline-keyboard buttons can still page through facts. Plan's S2-8 description only names the two view handlers, so left this as-is; worth a follow-up item if the gap matters.",
+  "result": {
+    "kind": "commit",
+    "ref": "f61b32cb84e13df33c10256a3c9215a300724dc5",
+    "verification": "pytest tests/unit/test_commands_kb.py -v: 19 passed; pytest tests/unit/ -q: 1742 passed, 5 skipped; ruff check src/bot/handlers/commands.py tests/unit/test_commands_kb.py: clean; mypy src/bot/handlers/commands.py: no issues"
+  },
+  "confidence": 0.9,
+  "clarification_request": null,
+  "session_id": null
+}

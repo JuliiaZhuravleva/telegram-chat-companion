@@ -249,6 +249,13 @@ def trim_facts_to_budget(
     """Drop lowest-priority facts that would exceed budget."""
 ```
 
+> **Superseded (2026-08-09) by [ADR-0009](ADR-0009-kb-retrieval-vs-budget-trim-ordering.md).**
+> Step 1 below (the `ORDER BY salience DESC, ...` retrieval contract and "not re-sorted
+> here") no longer holds: retrieval is now similarity-primary, and budget-trim priority
+> is a stable salience-sort inside `trim_facts_to_budget()` itself. Rest of this Part 2
+> (budget constants, per-fact char cap, fencing/sanitization) is unaffected. See ADR-0009
+> for the full rationale.
+
 1. Facts arrive from `KnowledgeRepository` already ordered by
    **salience DESC, then pgvector-similarity-to-current-context DESC** (retrieval
    order is the repository's concern, per §3.5 — not re-sorted here).

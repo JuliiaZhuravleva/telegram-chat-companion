@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T14:13:40Z",
+  "role": "evaluator",
+  "item_id": "S2-3a",
+  "verdict": "PASS",
+  "evidence": "Verified commit 868c2c0 (HEAD on plan/rag-s2-hygiene, only docs/decisions/** touched): ADR-0009 splits KB sort into similarity-primary retrieval SQL vs. salience-primary stable-sort budget trim, rejects 4 alternatives with reasoning, annotates ADR-0003 Part 2 as superseded on this point only (schema/budget untouched), and gives S2-3b precise SQL/docstring/test-rewrite instructions matching the plan's stated fix shape and control requirement.",
+  "regression_risk": "low",
+  "notes": "Specialist's raw session terminated with terminal_reason=budget_exhausted after the commit landed (it kept probing which worktree it was in via extra bash calls that got permission-denied) — cosmetically alarming but the deliverable (commit + verdict sidecar) is complete and correct; no follow-up needed for S2-3a itself."
+}

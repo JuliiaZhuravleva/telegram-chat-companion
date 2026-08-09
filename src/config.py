@@ -149,6 +149,24 @@ class MaintenanceSettings(BaseSettings):
     retrieval_log_days: int | None = 90
 
 
+class EmbeddingBackfillSettings(BaseSettings):
+    """Background worker that retries embeddings for pending ``chat_memory``
+    rows (S2-10).
+
+    ``RAGMemoryService.store()`` no longer drops a memory outright when
+    embedding generation fails (S2-1's honest no-fallback for embeddings
+    means a Gemini outage hits this path): it persists the content with
+    ``embedding = NULL`` instead, and this worker periodically retries those
+    rows. No retry cap or backoff, unlike ``MaintenanceSettings`` windows
+    above -- ``gemini-embedding-001`` is free, so there is no cost pressure
+    to bound attempts, only the pending row itself (cleared once it succeeds).
+    """
+
+    enabled: bool = True
+    interval_seconds: int = 3600
+    batch_limit: int = 20
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -184,6 +202,7 @@ class Settings(BaseSettings):
     rag: RAGSettings = Field(default_factory=RAGSettings)
     ai: AISettings = Field(default_factory=AISettings)
     maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
+    embedding_backfill: EmbeddingBackfillSettings = Field(default_factory=EmbeddingBackfillSettings)
     modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
