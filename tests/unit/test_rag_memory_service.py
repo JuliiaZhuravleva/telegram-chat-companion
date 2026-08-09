@@ -1,12 +1,19 @@
-"""Tests for src.services.rag.memory — RAGMemoryService threshold wiring (S2-2).
+"""Tests for src.services.rag.memory — RAGMemoryService (S2-2, S2-7b).
 
-Scope: the single-source-of-truth consolidation for the RAG similarity
-threshold (S2-2) only -- the constructor/repository ``min_similarity``
+S2-2 classes cover the single-source-of-truth consolidation for the RAG
+similarity threshold: the constructor/repository ``min_similarity``
 defaults (0.65, diverging from the 0.7 that's actually live via
 ``src/di.py``) are removed, and the ``x or default`` -> ``x if x is not
-None else default`` bug in the per-call override is fixed. Broader
-RAGMemoryService coverage (embedding-failure behavior, limit passthrough)
-is S2-7b's, not this item's.
+None else default`` bug in the per-call override is fixed.
+
+S2-7b classes cover the rest of ``RAGMemoryService``'s own behavior that
+S2-2 explicitly left out: what ``search()``/``store()`` do when embedding
+generation fails (currently: log a warning and return ``[]``/``None``
+without ever reaching the repository), the ``max_results`` passthrough
+(mirroring the ``min_similarity`` override tests), and the S2-4
+``query_embedding`` passthrough (a shared embedding skips a second
+``generate_embedding()`` call). Repository-level chat-scoping (privacy
+invariant) is S2-7a's, in ``tests/integration/``.
 """
 
 from __future__ import annotations
@@ -163,3 +170,132 @@ class TestEmbeddingDimensionGuard:
 
         assert memory_id == 42
         repo.store.assert_awaited_once()
+
+
+class TestSearchEmbeddingFailure:
+    """S2-7b: ``search()`` when query embedding generation fails.
+
+    ``generate_embedding()`` raises whenever the provider chain is
+    exhausted (e.g. Gemini down, no fallback since S2-1). ``search()``
+    degrades to "no memories found" rather than propagating -- a single
+    provider outage must not take down the whole turn.
+    """
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_returns_empty_list(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        router = AsyncMock()
+        router.generate_embedding.side_effect = RuntimeError("all providers failed")
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        result = await service.search(chat_id=1, query="hi")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_does_not_reach_repository(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        router = AsyncMock()
+        router.generate_embedding.side_effect = RuntimeError("all providers failed")
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        await service.search(chat_id=1, query="hi")
+
+        repo.search.assert_not_awaited()
+
+
+class TestSearchQueryEmbeddingPassthrough:
+    """S2-4: an already-computed ``query_embedding`` skips re-embedding.
+
+    The pipeline computes one shared query embedding for RAG + KB per
+    turn and passes it to ``search()`` instead of letting it embed the
+    query a second time.
+    """
+
+    @pytest.mark.asyncio
+    async def test_provided_embedding_skips_generation(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        service, _, _ = _make_service(repo=repo, router=router)
+        shared_embedding = [0.2] * 768
+
+        await service.search(chat_id=1, query="hi", query_embedding=shared_embedding)
+
+        router.generate_embedding.assert_not_awaited()
+        assert repo.search.call_args.kwargs["query_embedding"] == shared_embedding
+
+    @pytest.mark.asyncio
+    async def test_missing_embedding_falls_back_to_generation(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        await service.search(chat_id=1, query="hi")
+
+        router.generate_embedding.assert_awaited_once()
+
+
+class TestSearchMaxResultsOverride:
+    """S2-7b: ``max_results`` passthrough, mirroring the ``min_similarity``
+    override tests above -- same ``x or default`` pitfall shape (an
+    explicit ``0`` would be swallowed by ``or``), so cover both the
+    override and the no-override default explicitly.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_max_results_override_is_honored(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        await service.search(chat_id=1, query="hi", max_results=1)
+
+        assert repo.search.call_args.kwargs["max_results"] == 1
+
+    @pytest.mark.asyncio
+    async def test_no_override_falls_back_to_instance_default(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service = RAGMemoryService(repo, router, min_similarity=0.7, max_results=3)
+
+        await service.search(chat_id=1, query="hi")
+
+        assert repo.search.call_args.kwargs["max_results"] == 3
+
+
+class TestStoreEmbeddingFailure:
+    """S2-7b: ``store()`` when embedding generation fails.
+
+    Mirrors ``TestSearchEmbeddingFailure`` -- a failed embedding must not
+    reach the repository, and the memory is simply not persisted (the
+    caller, ``_safe_rag_store``, already ignores the return value).
+    """
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_returns_none(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        router = AsyncMock()
+        router.generate_embedding.side_effect = RuntimeError("all providers failed")
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        memory_id = await service.store(chat_id=1, content="hi")
+
+        assert memory_id is None
+
+    @pytest.mark.asyncio
+    async def test_embedding_failure_does_not_reach_repository(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        router = AsyncMock()
+        router.generate_embedding.side_effect = RuntimeError("all providers failed")
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        await service.store(chat_id=1, content="hi")
+
+        repo.store.assert_not_awaited()
