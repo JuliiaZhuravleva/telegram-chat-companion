@@ -93,21 +93,32 @@ class MemoryRepository:
             chat_id,
         )
 
-    async def get_pending_embeddings(self, limit: int) -> list[asyncpg.Record]:
+    async def get_pending_embeddings(
+        self, limit: int, *, exclude_ids: list[int] | None = None
+    ) -> list[asyncpg.Record]:
         """Rows awaiting a backfilled embedding (S2-10).
 
-        Oldest first, so a persistently-failing row does not starve the rest
-        of a growing backlog once the batch limit is smaller than it.
+        Oldest first. On its own that ordering does NOT protect the backlog:
+        a row that fails *deterministically* (content the model always
+        rejects, a lasting wrong-dimension response) stays NULL and, being
+        the oldest, is re-fetched at the head of every pass forever. Once
+        `limit` such rows accumulate, nothing written after them is ever
+        reached — and ADR-0011 keeps `chat_memory` out of retention, so they
+        never age out either. `exclude_ids` is how the caller retires them:
+        `EmbeddingBackfillWorker` parks a row after repeated failures and
+        passes the parked ids here, which moves the queue on.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
             SELECT id, chat_id, content
             FROM chat_memory
             WHERE embedding IS NULL
+              AND NOT (id = ANY($2::bigint[]))
             ORDER BY created_at ASC
             LIMIT $1
             """,
             limit,
+            exclude_ids or [],
         )
         return result
 

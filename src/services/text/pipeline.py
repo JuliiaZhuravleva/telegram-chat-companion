@@ -473,15 +473,19 @@ class TextProcessingPipeline:
         and without the error field a broken source is byte-identical to a
         healthy source that matched nothing.
 
-        Embedding failure (S2-4: shared with KB via `embed_task`) also
-        degrades silently to "no memories" with `error=None` -- matching
-        pre-S2-4 behavior, where `RAGMemoryService.search()` swallowed its
-        own embedding failure and returned `[]` without raising.
+        Embedding failure (S2-4: shared with KB via `embed_task`) degrades to
+        "no memories" the same way, and is reported through the same `error`
+        field. It used to be discarded here "matching pre-S2-4 behavior", but
+        pre-S2-4 the error was genuinely unavailable at this layer; after the
+        shared-embedding refactor it sits in the tuple, and `_timed_kb_facts`
+        already propagates it. Dropping it on the RAG side reproduced exactly
+        the byte-identical-to-empty case the paragraph above says must never
+        happen — during an embeddings outage (no fallback since S2-1) the KB
+        row carried the error and the RAG row read as "matched nothing".
         """
         start = time.monotonic()
         memories: list[dict[str, Any]] = []
-        error: str | None = None
-        embedding, _embed_error = await embed_task
+        embedding, error = await embed_task
         if self._rag and embedding is not None:
             try:
                 memories = await self._rag.search(

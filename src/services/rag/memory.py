@@ -94,9 +94,11 @@ class RAGMemoryService:
             query_embedding=embedding,
             # `x or default` would silently fall back to the instance default
             # for an explicit falsy override (min_similarity=0.0 is a valid
-            # "accept everything" threshold) — S2-2.
+            # "accept everything" threshold; max_results=0 is a valid "retrieve
+            # nothing this turn") — S2-2. Both arguments get the same treatment;
+            # applying it to only one of them is what review caught here.
             min_similarity=(min_similarity if min_similarity is not None else self._min_similarity),
-            max_results=max_results or self._max_results,
+            max_results=(max_results if max_results is not None else self._max_results),
         )
 
         return [

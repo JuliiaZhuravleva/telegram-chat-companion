@@ -491,7 +491,7 @@ class TestHandleKbViewPage:
         repo = _make_knowledge_repo()
         repo.get_active_facts = AsyncMock(return_value=_make_facts(10))  # 8/page -> page 1 has 2
 
-        await handle_kb_view_page(callback, repo)
+        await handle_kb_view_page(callback, _make_chat_config(), repo)
 
         callback.message.edit_text.assert_awaited_once()
         text = callback.message.edit_text.call_args[0][0]
@@ -505,7 +505,7 @@ class TestHandleKbViewPage:
         repo = _make_knowledge_repo()
         repo.get_active_facts = AsyncMock(return_value=_make_facts(7))  # 5/page -> page 1 has 2
 
-        await handle_kb_view_page(callback, repo)
+        await handle_kb_view_page(callback, _make_chat_config(), repo)
 
         callback.message.edit_text.assert_awaited_once()
         kwargs = callback.message.edit_text.call_args.kwargs
@@ -520,7 +520,37 @@ class TestHandleKbViewPage:
         repo = _make_knowledge_repo()
         repo.get_active_facts = AsyncMock(return_value=[])
 
-        await handle_kb_view_page(callback, repo)
+        await handle_kb_view_page(callback, _make_chat_config(), repo)
 
         callback.message.edit_text.assert_not_awaited()
         callback.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_disabled_kb_refuses_and_leaks_no_facts(self) -> None:
+        """The command handlers gate on kb_enabled, so the paginator must too.
+
+        Its buttons live on an already-sent message and outlive the toggle: a
+        chat that disabled the KB still had a fully working reader in every
+        previous /kb message, DM provenance included. The repo must not even
+        be queried, and the press must produce a visible refusal rather than a
+        silent no-op.
+        """
+        callback = _make_kb_view_callback("kb_view:ru:1")
+        repo = _make_knowledge_repo()
+
+        await handle_kb_view_page(callback, _make_chat_config(kb_enabled=False), repo)
+
+        repo.get_active_facts.assert_not_awaited()
+        callback.message.edit_text.assert_not_awaited()
+        callback.answer.assert_awaited_once()
+        assert callback.answer.call_args.kwargs.get("show_alert") is True
+
+    @pytest.mark.asyncio
+    async def test_disabled_kb_refuses_in_dm_too(self) -> None:
+        callback = _make_kb_view_callback("kb_view:ru:1", chat_type="private")
+        repo = _make_knowledge_repo()
+
+        await handle_kb_view_page(callback, _make_chat_config(kb_enabled=False), repo)
+
+        repo.get_active_facts.assert_not_awaited()
+        callback.message.edit_text.assert_not_awaited()

@@ -488,6 +488,7 @@ async def handle_kb_view_group(
 @router.callback_query(F.data.startswith("kb_view:"))
 async def handle_kb_view_page(
     callback: CallbackQuery,
+    chat_config: ChatConfig,
     knowledge_repo: FromDishka[KnowledgeRepository],
 ) -> None:
     """Paginate an existing ``/kb`` view in place (public — no admin gating).
@@ -495,6 +496,13 @@ async def handle_kb_view_page(
     Re-fetches and re-slices the same way the initial command did; renders
     group vs. DM the same way based on the callback's own chat type (the
     message being paginated always lives in the chat it was first sent in).
+
+    Gated on ``kb_enabled`` like the two command handlers: the buttons live on
+    an already-sent message and outlive the toggle, so without this check
+    disabling the KB left every existing ``/kb`` message working as a fully
+    functional reader — including the DM variant's provenance. Answered as an
+    alert rather than a silent ``callback.answer()`` so the press has a visible
+    result.
     """
     if not isinstance(callback.message, Message):
         await callback.answer()
@@ -506,6 +514,10 @@ async def handle_kb_view_page(
         page = int(parts[2]) if len(parts) > 2 else 0
     except ValueError:
         page = 0
+
+    if not chat_config.kb_enabled:
+        await callback.answer(_KB_DISABLED[lang], show_alert=True)
+        return
 
     chat_id = callback.message.chat.id
     facts = await knowledge_repo.get_active_facts(chat_id)

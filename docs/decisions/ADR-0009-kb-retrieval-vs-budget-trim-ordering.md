@@ -80,8 +80,18 @@ decision makes the code match that comment for the first time.
 Before the existing char-cap + token-accumulate loop, stable-sort the retrieved facts by `salience DESC`:
 
 ```python
-facts = sorted(facts, key=lambda f: f.get("salience", 0.5), reverse=True)
+facts = sorted(facts, key=lambda f: 0.5 if f.get("salience") is None else f["salience"], reverse=True)
 ```
+
+The `is None` test is load-bearing, not style. `chat_facts.salience` is nullable (migration 014,
+`FLOAT DEFAULT 0.5`, no `NOT NULL`) and `search_by_similarity()` returns rows as plain dicts, so the key
+is always **present** and may be `None` — and `dict.get(key, default)` substitutes the default only when
+the key is *absent*. The obvious `f.get("salience", 0.5)` therefore raises `TypeError` comparing `None`
+to `float`, in the reply hot path. Nor may it be written `f.get("salience") or 0.5`: that rewrites a
+legitimate salience of `0.0` to `0.5`. Regression test:
+`test_null_salience_does_not_crash_the_sort`. Anyone reusing this pattern for the planned `chat_chunks`
+index (S4) inherits the same nullable-column question and should re-check it there rather than copy the
+literal snippet.
 
 Python's `sorted()` is stable, so facts with equal salience keep the incoming (similarity) order — no
 explicit secondary key needed, and none should be added: an explicit `(salience, similarity)` tuple key

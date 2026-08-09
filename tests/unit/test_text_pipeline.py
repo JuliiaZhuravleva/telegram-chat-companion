@@ -960,6 +960,40 @@ class TestPipelineObservability:
         assert "pgvector down" in rag_calls[0].kwargs["error"]
         assert rag_calls[0].kwargs["n_results"] == 0
 
+    async def test_rag_embedding_failure_is_logged_with_error(self, make_chat_config):
+        """The shared query embedding (S2-4) failing must also reach
+        retrieval_log.error on the RAG row, not just the KB one.
+
+        The test above only covers a repository-level failure. When the
+        embedding call itself failed, `_timed_rag_search` discarded the error
+        and wrote `error=NULL, n_results=0` — indistinguishable from "matched
+        nothing" — while `_timed_kb_facts` recorded it. Since S2-1 removed the
+        embeddings fallback, a Gemini outage is exactly this path.
+        """
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline(embedding_error=RuntimeError("embeddings down"))
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="а что было?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+        await asyncio.sleep(0)
+
+        assert result.should_respond is True  # reply survives the outage
+        rag_calls = [
+            c
+            for c in mocks["observability_repo"].log_retrieval.await_args_list
+            if c.kwargs["source"] == "rag_memory"
+        ]
+        assert len(rag_calls) == 1
+        assert rag_calls[0].kwargs["error"] is not None
+        assert "embeddings down" in rag_calls[0].kwargs["error"]
+        assert rag_calls[0].kwargs["n_results"] == 0
+
     async def test_kb_search_failure_is_logged_with_error(self, make_chat_config):
         """A failing KB search must not be byte-identical to an empty KB."""
         config = make_chat_config(enabled=True, kb_enabled=True)

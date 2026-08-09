@@ -276,6 +276,25 @@ class TestSearchMaxResultsOverride:
 
         assert repo.search.call_args.kwargs["max_results"] == 3
 
+    @pytest.mark.asyncio
+    async def test_explicit_zero_max_results_is_not_swallowed(self) -> None:
+        """The case this class's docstring always claimed to cover but did not.
+
+        `max_results or self._max_results` replaces an explicit 0 with the
+        instance default, so a caller asking for "retrieve nothing this turn"
+        silently gets the configured 5 and memories land in the prompt anyway.
+        Verified to fail against the `or` form.
+        """
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service = RAGMemoryService(repo, router, min_similarity=0.7, max_results=5)
+
+        await service.search(chat_id=1, query="hi", max_results=0)
+
+        assert repo.search.call_args.kwargs["max_results"] == 0
+
 
 class TestStoreEmbeddingFailure:
     """S2-10: ``store()`` when embedding generation fails.
