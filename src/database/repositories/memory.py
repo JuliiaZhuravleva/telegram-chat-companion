@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -57,6 +58,7 @@ class MemoryRepository:
         *,
         min_similarity: float,
         max_results: int = 5,
+        before: datetime | None = None,
     ) -> list[asyncpg.Record]:
         """Search memories by cosine similarity.
 
@@ -64,6 +66,15 @@ class MemoryRepository:
         single source of truth for the threshold, and this repository method
         must not be able to silently apply a different one than
         ``RAGMemoryService`` (its only caller) resolves it to.
+
+        ``before`` (S3-3) is an optional time bound: when given, only
+        memories created strictly before that moment are eligible. It is
+        applied in ``WHERE``, ahead of ``LIMIT`` -- postfiltering after the
+        query would silently shrink ``k`` (rows past the cutoff would still
+        occupy a LIMIT slot and get dropped afterwards, understating the
+        true top-k). Default ``None`` means "no bound", matching current
+        production behavior; the only production caller
+        (``TextProcessingPipeline._timed_rag_search``) does not pass it.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
@@ -75,6 +86,7 @@ class MemoryRepository:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> $2) >= $3
               AND (expires_at IS NULL OR expires_at > NOW())
+              AND ($5::timestamptz IS NULL OR created_at < $5::timestamptz)
             ORDER BY embedding <=> $2 ASC
             LIMIT $4
             """,
@@ -82,6 +94,7 @@ class MemoryRepository:
             query_embedding,
             min_similarity,
             max_results,
+            before,
         )
         return result
 

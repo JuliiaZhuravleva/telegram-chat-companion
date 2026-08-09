@@ -21,10 +21,17 @@ failure; S2-10 changed that behavior (persist with ``embedding=None``
 instead of dropping the memory) so the class was rewritten in place --
 see ``tests/unit/test_embedding_backfill.py`` for the worker that fills
 those NULLs back in.
+
+S3-3 adds ``TestSearchBeforePassthrough`` / ``TestRepositorySearchBeforeDefault``:
+the optional ``before: datetime | None`` time bound for the real search path
+(needed by the S3-2 eval harness so a replayed question can't retrieve the
+memory of asking it) -- additive, default ``None``, and applied in the
+repository's ``WHERE`` ahead of ``LIMIT`` rather than postfiltered.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -294,6 +301,80 @@ class TestSearchMaxResultsOverride:
         await service.search(chat_id=1, query="hi", max_results=0)
 
         assert repo.search.call_args.kwargs["max_results"] == 0
+
+
+class TestSearchBeforePassthrough:
+    """S3-3: optional ``before`` time bound, passed straight through to the
+    repository -- in ``WHERE`` ahead of ``LIMIT`` there (see
+    ``MemoryRepository.search()``), not postfiltered here.
+
+    No instance-level default exists to fall back to (unlike
+    ``min_similarity``/``max_results``): omitting ``before`` must reach the
+    repository as ``None`` (no bound), and does not change the production
+    call path (``TextProcessingPipeline`` never passes it).
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_before_is_forwarded_to_repository(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service, _, _ = _make_service(repo=repo, router=router)
+        cutoff = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+        await service.search(chat_id=1, query="hi", before=cutoff)
+
+        assert repo.search.call_args.kwargs["before"] == cutoff
+
+    @pytest.mark.asyncio
+    async def test_no_before_forwards_none(self) -> None:
+        """Omitting ``before`` must reach the repository as ``None``, not be
+        dropped from the call -- the repository's own default only helps
+        callers that don't pass the kwarg at all; the service must not
+        substitute anything else."""
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        await service.search(chat_id=1, query="hi")
+
+        assert repo.search.call_args.kwargs["before"] is None
+
+
+class TestRepositorySearchBeforeDefault:
+    """S3-3: ``MemoryRepository.search()``'s ``before`` is optional and
+    additive -- omitting it must not change the SQL sent for existing
+    callers (asserted at the call-args level; the WHERE-before-LIMIT
+    ordering itself needs a real database, see
+    ``tests/integration/test_memory_repository_chat_scoping.py`` for the
+    established pattern of testing this repository's SQL against real rows).
+    """
+
+    @pytest.mark.asyncio
+    async def test_omitting_before_still_executes(self) -> None:
+        pool = AsyncMock()
+        pool.fetch.return_value = []
+        repo = MemoryRepository(pool)
+
+        result = await repo.search(1, [0.1] * 768, min_similarity=0.7)
+
+        assert result == []
+        # `before` positional arg (last bind param, $5) must be None.
+        assert pool.fetch.call_args.args[-1] is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_before_is_passed_as_last_bind_param(self) -> None:
+        pool = AsyncMock()
+        pool.fetch.return_value = []
+        repo = MemoryRepository(pool)
+        cutoff = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+        await repo.search(1, [0.1] * 768, min_similarity=0.7, before=cutoff)
+
+        assert pool.fetch.call_args.args[-1] == cutoff
 
 
 class TestStoreEmbeddingFailure:
