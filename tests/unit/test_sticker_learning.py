@@ -117,6 +117,8 @@ async def test_learn_new_sticker_wires_explicitness_score(sticker_service):
     result = await sticker_service.learn(sticker=sticker, image_data=b"fake-png")
 
     assert result.explicitness_score == 0.6
+    # ADR-0009 Decision 6: a fresh Vision analysis is never manual.
+    assert result.explicitness_is_manual is False
     save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
     assert save_kwargs["explicitness_score"] == 0.6
 
@@ -980,6 +982,7 @@ def _canonical_record(**overrides) -> dict:
         "description_embedding": [0.2] * 768,
         "image_hash": "0000000000000000",
         "explicitness_score": 0.3,
+        "explicitness_is_manual": False,
     }
     base.update(overrides)
     return base
@@ -1019,6 +1022,8 @@ class TestDuplicateDetection:
         # ADR-0008 Decision 7: explicitness_score is a Vision-derived column
         # too — copied verbatim from the canonical row, no new Vision call.
         assert result.explicitness_score == 0.3
+        # ADR-0009 Decision 6: canonical wasn't manually-scored -> duplicate isn't either.
+        assert result.explicitness_is_manual is False
 
         sticker_service._ai.analyze_image.assert_not_awaited()
         sticker_service._ai.generate_embedding.assert_not_awaited()
@@ -1029,6 +1034,7 @@ class TestDuplicateDetection:
         assert save_kwargs["duplicate_of_file_unique_id"] == "canonical-uid"
         assert save_kwargs["image_hash"] == target_hash
         assert save_kwargs["explicitness_score"] == 0.3
+        assert save_kwargs["explicitness_is_manual"] is False
 
         # Embedding copied via update_embedding(), not regenerated.
         sticker_service._repo.update_embedding.assert_awaited_once_with(
@@ -1105,6 +1111,42 @@ class TestDuplicateDetection:
         assert result.explicitness_score is None
         save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
         assert save_kwargs["explicitness_score"] is None
+
+    @pytest.mark.asyncio
+    async def test_duplicate_copies_manual_flag_together_with_score(self, sticker_service):
+        """ADR-0009 Decision 6: a canonical row with a hand-vetted score
+        makes the new duplicate inherit BOTH the score and the manual flag
+        together — copying the score alone would silently reintroduce the
+        ADR's own bug one hop away (the duplicate's own first re-analysis
+        would then clobber it, since a bare INSERT defaults the flag back
+        to false)."""
+        image_data = _real_png_bytes()
+        target_hash = compute_image_hash(image_data)
+
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[
+                None,
+                _canonical_record(explicitness_score=0.9, explicitness_is_manual=True),
+            ]
+        )
+        sticker_service._repo.get_dedup_candidates = AsyncMock(
+            return_value=[
+                {
+                    "file_unique_id": "canonical-uid",
+                    "image_hash": target_hash,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "duplicate_of_file_unique_id": None,
+                }
+            ]
+        )
+
+        result = await sticker_service.learn(sticker=_make_sticker(), image_data=image_data)
+
+        assert result.explicitness_score == 0.9
+        assert result.explicitness_is_manual is True
+        save_kwargs = sticker_service._repo.save_sticker.call_args.kwargs
+        assert save_kwargs["explicitness_score"] == 0.9
+        assert save_kwargs["explicitness_is_manual"] is True
 
     @pytest.mark.asyncio
     async def test_no_matching_candidate_falls_through_to_vision(self, sticker_service):

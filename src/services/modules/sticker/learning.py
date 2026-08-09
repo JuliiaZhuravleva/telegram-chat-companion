@@ -356,6 +356,8 @@ class StickerLearningService:
             failure_reason=_failure_reason,
             collage_png=vision_image if sticker_type != "static" else None,
             explicitness_score=explicitness_score,
+            # ADR-0009 Decision 6: a fresh Vision analysis is never manual.
+            explicitness_is_manual=False,
         )
 
     # ── Duplicate copy (ADR-0007) ───────────────────────────────────────
@@ -444,6 +446,12 @@ class StickerLearningService:
         # canonical row predates this feature (accepted, self-healing edge
         # case — see the ADR).
         explicitness_score = copied["explicitness_score"]
+        # ADR-0009 Decision 6: the manual-status flag travels WITH the score
+        # it describes — copying the score alone would silently reintroduce
+        # this ADR's own bug one hop away (a duplicate that inherited a
+        # hand-vetted score would get clobbered by its own first
+        # re-analysis, since a bare INSERT defaults the flag back to false).
+        explicitness_is_manual = bool(copied["explicitness_is_manual"])
 
         await self._repo.save_sticker(
             file_unique_id=file_unique_id,
@@ -463,6 +471,7 @@ class StickerLearningService:
             image_hash=image_hash,
             duplicate_of_file_unique_id=duplicate_of,
             explicitness_score=explicitness_score,
+            explicitness_is_manual=explicitness_is_manual,
         )
 
         embedding = copied["description_embedding"]
@@ -488,6 +497,7 @@ class StickerLearningService:
             collage_png=collage_png,
             duplicate_of=duplicate_of,
             explicitness_score=explicitness_score,
+            explicitness_is_manual=explicitness_is_manual,
         )
 
     # ── Admin re-analyze ─────────────────────────────────────────────
