@@ -103,6 +103,12 @@ def _make_router_message(
 
     bot_config_repo = MagicMock()
     bot_config_repo.get = AsyncMock(return_value="555")
+    # A-1 added _resolve_default_tolerance_level(), which awaits get_defaults()
+    # on this repo. An un-stubbed attribute is a plain MagicMock and raises
+    # TypeError inside the handler under test, which reads as a routing failure
+    # rather than a fixture gap. Empty dict == no admin-set default, so the
+    # handler falls back to ChatConfig's 0.5 (ADR-0008).
+    bot_config_repo.get_defaults = AsyncMock(return_value={})
 
     chat_config = MagicMock()
     chat_config.sticker_learning_enabled = True
