@@ -15,6 +15,7 @@ from src.services.ai.base import (
     VisionResult,
 )
 from src.services.ai.router import AIRouter
+from src.utils import background as background_tasks
 
 
 @pytest.fixture
@@ -336,6 +337,74 @@ class TestCentralizedLogging:
         mock_repo.log.assert_awaited_once()
         call_kwargs = mock_repo.log.call_args
         assert call_kwargs.kwargs["task_type"] == "embedding"
+
+    @pytest.mark.asyncio
+    async def test_cost_log_task_is_strongly_referenced_while_in_flight(
+        self, mock_provider, mock_router_settings
+    ):
+        """TD-041: the cost-logging task must survive garbage collection.
+
+        asyncio keeps only a *weak* reference to a task, so the result of a
+        bare ``ensure_future()`` can be collected mid-flight — silently
+        dropping the write. That is the worst possible place for it: the row
+        is the durable cost record, and a lost one is invisible (the spend
+        simply reads low). ``fire_and_forget`` exists for exactly this and
+        was already used by newer writers; these three router sites predated
+        it and were never migrated.
+
+        This asserts the **call site**, not the helper — the helper has its
+        own tests and was never the problem. A correct helper nobody calls is
+        precisely the state TD-041 recorded, and a test of the helper passes
+        happily in it.
+        """
+        embedding_result = EmbeddingResult(
+            embedding=[0.1] * 768,
+            model="mock-embed",
+            provider="gemini",
+            dimensions=768,
+            tokens_input=42,
+        )
+        provider = mock_provider(
+            name="gemini",
+            supported_capabilities={"embeddings": True},
+            embedding_result=embedding_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = []
+        task_config.model = "gemini-embedding-001"
+        mock_router_settings.ai.tasks = {"embeddings": task_config}
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _blocking_log(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock(side_effect=_blocking_log)
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["gemini"] = provider
+
+        tracked_before = set(background_tasks._TASKS)
+        await router.generate_embedding("test")
+
+        # Hold the write open so the task is unambiguously in flight — the
+        # window in which a weakly-referenced task is collectable.
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        in_flight = set(background_tasks._TASKS) - tracked_before
+        assert in_flight, (
+            "the cost-logging task is not in the strong-reference set, so it is "
+            "collectable mid-flight — this is the TD-041 defect"
+        )
+
+        release.set()
+        await asyncio.sleep(0.05)
+        assert not (set(background_tasks._TASKS) & in_flight), (
+            "the done-callback must drop the reference, or the set grows unbounded"
+        )
 
 
 class TestGenerateEmbeddingNoFallback:

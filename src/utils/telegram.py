@@ -171,7 +171,14 @@ async def download_telegram_file(bot: Bot, file_id: str) -> bytes:
     except TelegramFileError:
         raise
     except Exception as exc:
-        raise TelegramFileError(f"Failed to download file {file_id}: {exc}") from exc
+        # Name the concrete type in the message: four callers see only
+        # TelegramFileError, and "rate-limited, retry in 30s" versus "file is
+        # gone" are different situations that read identically once the type
+        # is gone. The chain via ``from exc`` is preserved for anyone who
+        # wants to inspect ``__cause__``.
+        raise TelegramFileError(
+            f"Failed to download file {file_id}: {type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def detect_mime_type(file_path: str) -> str:

@@ -11,6 +11,7 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.reply_flow import finish_reply, relevancy_allows_reply
 from src.bot.utils import extract_reply_context, should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -18,9 +19,12 @@ from src.database.repositories.messages import MessageRepository
 from src.database.repositories.stickers import StickerRepository
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
+from src.services.abuse.checker import AntiAbuseChecker
+from src.services.costs.spend_limit import SpendLimitService
 from src.services.modules.image import ImageAnalysisService
 from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.voice import VoiceTranscriptionService
+from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import PipelineResult, TextProcessingPipeline
 from src.utils import parse_admin_ids
 from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
@@ -103,6 +107,9 @@ async def handle_photo_message(
     pipeline: FromDishka[TextProcessingPipeline],
     sticker_responder: FromDishka[StickerResponderService],
     message_repo: FromDishka[MessageRepository],
+    relevancy_gate: FromDishka[RelevancyGate],
+    spend_limit_svc: FromDishka[SpendLimitService],
+    abuse_checker: FromDishka[AntiAbuseChecker],
     bot: Bot,
     message_thread_id: int | None = None,
     **kwargs: Any,
@@ -139,6 +146,27 @@ async def handle_photo_message(
         if bot_id is None:
             bot_id = (await bot.me()).id
         respond, trigger_type = should_respond(message, chat_config, bot_id)
+
+        # Relevancy gate (TD-028). Its absence here was a live defect: an
+        # unprompted reply to a captioned photo was sent without ever asking
+        # whether it was warranted, while the identical text message went
+        # through the gate.
+        #
+        # This does NOT avoid the Vision call — image_service.analyze() runs
+        # below regardless of `respond`, because the description is written to
+        # message history even when the bot stays silent. What a declined
+        # reply does save is the pipeline's text generation. (An earlier
+        # version of this comment claimed the Vision saving; a test written to
+        # that claim failed and was right to.)
+        if respond and not await relevancy_allows_reply(
+            message=message,
+            chat_config=chat_config,
+            trigger_type=trigger_type,
+            message_text=caption,
+            relevancy_gate=relevancy_gate,
+            abuse_checker=abuse_checker,
+        ):
+            respond = False
 
     # Show "typing" only when a reply is actually coming AND it was asked for.
     # A captioned photo is NOT a guarantee of a reply: should_respond() can
@@ -218,7 +246,14 @@ async def handle_photo_message(
             reply_to_message_id=reply_to,
         )
 
-        await pipeline.post_send(result, bot_message_id=sent.message_id)
+        await finish_reply(
+            message=message,
+            result=result,
+            sent_message_id=sent.message_id,
+            chat_config=chat_config,
+            pipeline=pipeline,
+            spend_limit_svc=spend_limit_svc,
+        )
     else:
         # photo_only: save description to message history, no response
         await _update_message_content(

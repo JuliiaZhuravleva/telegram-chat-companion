@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import logging
+from typing import Any
 
 import asyncpg
 import structlog
@@ -19,6 +20,7 @@ from dishka import make_async_container
 from dishka.integrations.aiogram import setup_dishka
 
 from src.bot.commands import sync_and_report
+from src.bot.errors import handle_unexpected_error
 from src.bot.handlers import router as main_router
 from src.bot.middleware import (
     AccessControlMiddleware,
@@ -53,21 +55,53 @@ async def _verify_schema(pool: asyncpg.Pool) -> None:
             raise RuntimeError(f"Required table '{table}' not found. Run: alembic upgrade head")
 
 
+def build_log_processors(log_format: str) -> list[Any]:
+    """The structlog processor chain, as a value so it can be tested.
+
+    Extracted from ``main()`` because the property that matters here is only
+    observable in *rendered* output, and ``structlog.testing.capture_logs()``
+    — the obvious way to test logging — replaces the configured processors
+    with a bare collector. It therefore asserts on the pre-render event dict
+    and is structurally incapable of catching a renderer-level defect, which
+    is exactly the defect this chain had.
+
+    ``format_exc_info`` is load-bearing, not decoration. structlog does not
+    forward ``exc_info`` to stdlib logging — it is just another key in the
+    event dict — so with no processor to turn it into text, ``JSONRenderer``
+    meets a non-serializable exception object and falls back to ``repr()``.
+    Every ``exc_info=True`` and ``logger.exception(...)`` site in this codebase
+    was rendering as a bare ``"ValueError('x')"``: no file, no line, no stack.
+    Measured, not assumed. ``ConsoleRenderer`` formats ``exc_info`` itself,
+    which is precisely why this stayed invisible in local development while
+    production — where ``logging.format`` defaults to ``json`` — lost every
+    traceback it wrote.
+
+    Deliberately NOT ``dict_tracebacks``, the more obvious "structured"
+    choice: it captures local variables into the log record, and the locals in
+    this process include the Telegram token, provider API keys and user
+    message content. Verified by rendering a frame holding a token — it comes
+    out in the output. Structured frames are not worth writing credentials to
+    a log file.
+    """
+    is_json = log_format == "json"
+    return [
+        structlog.stdlib.filter_by_level,
+        structlog.stdlib.add_logger_name,
+        structlog.stdlib.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+        # ConsoleRenderer does its own exc_info handling; adding this ahead of
+        # it would turn a readable traceback into an escaped blob.
+        *([structlog.processors.format_exc_info] if is_json else []),
+        structlog.processors.JSONRenderer() if is_json else structlog.dev.ConsoleRenderer(),
+    ]
+
+
 async def main() -> None:
     """Initialize and start the bot."""
     settings = Settings()
 
-    # Configure logging
     structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.JSONRenderer()
-            if settings.logging.format == "json"
-            else structlog.dev.ConsoleRenderer(),
-        ],
+        processors=build_log_processors(settings.logging.format),
         wrapper_class=structlog.stdlib.BoundLogger,
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
@@ -163,6 +197,14 @@ async def main() -> None:
 
     dp.include_router(main_router)
 
+    # Global safety net for handler exceptions (TD-062). Registered on the
+    # dispatcher rather than on a router because aiogram propagates errors up
+    # the router tree — this is the only place that covers every handler,
+    # including ones added later. Without it, an exception before a callback
+    # handler reaches its `callback.answer()` leaves the button spinning until
+    # Telegram times it out, and the traceback goes only to aiogram's logger.
+    dp.errors.register(handle_unexpected_error)
+
     # Register bot commands with Telegram API for autocomplete hints, then check
     # that Telegram really holds what the registry declares. A deploy is the one
     # moment this can be verified for free, and merging to main deploys
@@ -225,8 +267,22 @@ async def main() -> None:
         await retention_cleaner.stop()
         await sticker_sync.stop()
         await health_checker.stop()
-        await container.close()
-        await bot.session.close()
+        # Isolated on purpose. container.close() now has real work to do — the
+        # AIRouter teardown became reachable when its provider started yielding
+        # — and Dishka aggregates any failing exit into an ExitError it
+        # re-raises. Left sequential, that exception would skip the next line
+        # and leak the Bot's own HTTP session, i.e. adding a teardown would have
+        # introduced a leak elsewhere. Each close reports and continues.
+        for label, closer in (("container", container.close), ("bot_session", bot.session.close)):
+            try:
+                await closer()
+            except Exception as exc:
+                logger.warning(
+                    "shutdown_close_failed",
+                    component=label,
+                    error_type=type(exc).__name__,
+                    exc_info=exc,
+                )
 
 
 def run() -> None:
