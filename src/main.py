@@ -19,6 +19,7 @@ from dishka import make_async_container
 from dishka.integrations.aiogram import setup_dishka
 
 from src.bot.commands import sync_and_report
+from src.bot.errors import handle_unexpected_error
 from src.bot.handlers import router as main_router
 from src.bot.middleware import (
     AccessControlMiddleware,
@@ -162,6 +163,14 @@ async def main() -> None:
     dp.message_reaction.middleware(chat_config_mw)
 
     dp.include_router(main_router)
+
+    # Global safety net for handler exceptions (TD-062). Registered on the
+    # dispatcher rather than on a router because aiogram propagates errors up
+    # the router tree — this is the only place that covers every handler,
+    # including ones added later. Without it, an exception before a callback
+    # handler reaches its `callback.answer()` leaves the button spinning until
+    # Telegram times it out, and the traceback goes only to aiogram's logger.
+    dp.errors.register(handle_unexpected_error)
 
     # Register bot commands with Telegram API for autocomplete hints, then check
     # that Telegram really holds what the registry declares. A deploy is the one
