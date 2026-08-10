@@ -32,7 +32,13 @@ repos:
         name: docs/plans artifacts (raw payloads, paths, ids, credentials)
         entry: python3 scripts/check_plan_artifacts.py
         language: system
-        files: ^docs/plans/
+        # Must stay >= the scope scripts/check_plan_artifacts.py itself
+        # covers: docs/plans/ plus every entry in its EXTRA_TRACKED_PATHS.
+        # A filter narrower than the script silently disables the hook for
+        # the uncovered file -- a clean local commit then stops being
+        # evidence, the same lesson the ruff pin above records.
+        # test_plan_artifact_guard.py enforces this by parsing this regex.
+        files: ^(docs/plans/|docs/rag-eval-baseline\.md$)
         pass_filenames: true
 
   # Shell linting. The backup and restore scripts run unattended against a

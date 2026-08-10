@@ -16,10 +16,12 @@ on correct work gets switched off rather than fixed.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.check_plan_artifacts import (
     EXTRA_TRACKED_PATHS,
@@ -249,9 +251,12 @@ def test_tracked_plan_files_also_covers_the_baseline_doc(tmp_path: Path) -> None
     avoid inheriting the developer's global git config (CLAUDE.md gotcha --
     a stray hook here would make this test flaky/slow, not just wrong).
     """
-    assert EXTRA_TRACKED_PATHS == ("docs/rag-eval-baseline.md",), (
-        "keep this in sync with .pre-commit-config.yaml's check-plan-artifacts `files:` regex"
-    )
+    assert "docs/rag-eval-baseline.md" in EXTRA_TRACKED_PATHS
+    # The pre-commit side of this is enforced by
+    # test_precommit_hook_covers_every_extra_tracked_path, which reads the
+    # YAML. An assertion on this constant alone cannot see the two drifting
+    # apart -- that is exactly how the hook came to be narrower than the
+    # script it runs.
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -321,6 +326,42 @@ def test_tracked_plan_artifacts_are_clean() -> None:
         "docs/plans artifacts carry something that must not be public — "
         "run `python3 scripts/check_plan_artifacts.py` for the detail"
     )
+
+
+def test_precommit_hook_covers_every_extra_tracked_path() -> None:
+    """The hook's ``files:`` filter must be at least as wide as the scope the
+    script scans, or the hook silently never runs for the uncovered file.
+
+    Found in review: ``EXTRA_TRACKED_PATHS`` gained docs/rag-eval-baseline.md
+    while ``files:`` stayed ``^docs/plans/``, so editing only that file skipped
+    the hook entirely — while the file's own header told readers the hook
+    protected it. The previous guard against this was a comment asking a human
+    to keep the two in sync, which is not a guard: it passed green throughout.
+
+    Reads the YAML rather than restating the regex, so a future edit to either
+    side has to survive an actual match test.
+    """
+    root = Path(__file__).resolve().parents[2]
+    config = yaml.safe_load((root / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+
+    hooks = [
+        hook
+        for repo in config["repos"]
+        for hook in repo.get("hooks", [])
+        if hook.get("id") == "check-plan-artifacts"
+    ]
+    assert len(hooks) == 1, "expected exactly one check-plan-artifacts hook"
+    pattern = re.compile(hooks[0]["files"])
+
+    for path in EXTRA_TRACKED_PATHS:
+        assert pattern.search(path), (
+            f"{path} is in EXTRA_TRACKED_PATHS but does not match the "
+            f"check-plan-artifacts `files:` regex {hooks[0]['files']!r} — "
+            "the pre-commit hook will never run for it"
+        )
+
+    # And the original scope must not have been dropped while widening it.
+    assert pattern.search("docs/plans/anything.execution.md")
 
 
 # --------------------------------------------------------------------------

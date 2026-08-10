@@ -73,6 +73,7 @@ class Metrics:
     best_sim_percentiles: dict[int, float] = field(default_factory=dict)
     n_best_sim: int = 0
     n_embedding_errors: int = 0
+    n_search_errors: int = 0
 
 
 def _acceptable_ranges(case: EvalCase) -> list[MessageIdRange]:
@@ -134,8 +135,14 @@ def compute_metrics(
     hits beyond it are ignored defensively even though ``run_eval()``'s
     search call already caps results there.
     """
-    scored = [r for r in results if r.embedding_error is None]
-    n_embedding_errors = len(results) - len(scored)
+    # A case that errored is not evidence in either direction, so it is
+    # excluded from every denominator below and counted separately. The two
+    # error kinds are counted apart rather than derived from
+    # ``len(results) - len(scored)``, so neither can silently absorb the
+    # other in the summary line.
+    scored = [r for r in results if r.embedding_error is None and r.search_error is None]
+    n_embedding_errors = sum(1 for r in results if r.embedding_error is not None)
+    n_search_errors = sum(1 for r in results if r.search_error is not None)
 
     recall_eligible = [r for r in scored if r.case.stratum != "answer-absent"]
     ranks = [_hit_rank(r, k=k) for r in recall_eligible]
@@ -177,6 +184,7 @@ def compute_metrics(
         best_sim_percentiles=best_sim_percentiles,
         n_best_sim=len(best_sims),
         n_embedding_errors=n_embedding_errors,
+        n_search_errors=n_search_errors,
     )
 
 
@@ -197,9 +205,10 @@ def format_metrics(metrics: Metrics) -> str:
         lines.append(f"best-sim percentiles: {pct_str} (n={metrics.n_best_sim})")
     else:
         lines.append("best-sim percentiles: n/a (no case returned a hit)")
-    if metrics.n_embedding_errors:
+    if metrics.n_embedding_errors or metrics.n_search_errors:
         lines.append(
             f"excluded from all metrics above: {metrics.n_embedding_errors} "
-            "case(s) with a query embedding_error"
+            f"case(s) with a query embedding_error, {metrics.n_search_errors} "
+            "with a search_error"
         )
     return "\n".join(lines)

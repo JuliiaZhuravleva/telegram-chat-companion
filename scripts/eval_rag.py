@@ -66,6 +66,24 @@ DEFAULT_CASES_PATH = Path("tests/fixtures/eval/cases.json")
 _POOL_MIN_SIZE = 1
 _POOL_MAX_SIZE = 5
 
+# Pacing between cases. ``q5_replay.py:136`` sleeps 0.3s after every case,
+# and that -- not sequentiality -- is what its "pacing" actually was. It
+# matters more here than it did there: S2-1 removed the embeddings fallback
+# chain (there was never a working one), so a RateLimitError is re-raised as
+# AIProviderError immediately, with no second provider to absorb it. Without
+# this delay a quota trip turns every remaining case into an embedding_error,
+# and those cases drop out of every metric denominator -- i.e. a provider
+# quota would quietly reshape the score. The 11-case auto-strata run never
+# reached the limit; S3b's 30-50 curated cases are the size that would.
+_INTER_CASE_DELAY_SECONDS = 0.3
+
+# Exit codes. 0 means "measured something"; a caller that only checks the
+# exit code must never read a run that measured NOTHING as a success -- this
+# harness is meant to gate the S5 cutover, and "no evidence" is not a pass.
+_EXIT_OK = 0
+_EXIT_BAD_INPUT = 2
+_EXIT_NOTHING_MEASURED = 3
+
 
 @dataclass(frozen=True)
 class CaseResult:
@@ -81,11 +99,18 @@ class CaseResult:
     that simply matched nothing, which S3-5's ``answer-absent`` stratum
     treats as *correct* behavior. Conflating the two would let a provider
     outage masquerade as a good negative-control result.
+
+    ``search_error`` is the same idea one step later: the retrieval call
+    itself failed (connection drop, pool exhaustion, query timeout). It is
+    kept separate from ``embedding_error`` so the summary can say which
+    half broke, and both are excluded from every metric denominator --
+    an errored case is not evidence of anything, in either direction.
     """
 
     case: EvalCase
     hits: list[dict[str, Any]] = field(default_factory=list)
     embedding_error: str | None = None
+    search_error: str | None = None
 
 
 async def run_eval(
@@ -96,13 +121,21 @@ async def run_eval(
 ) -> list[CaseResult]:
     """Replay every case through the real embed -> search path, in order.
 
-    Sequential on purpose (mirrors ``q5_replay.py``'s pacing intent): this
-    hits a real embeddings provider per case, and the golden set (S3b) is
-    expected to stay in the tens of cases, not thousands -- no need for
-    concurrency here, and it keeps provider rate limits out of scope.
+    Sequential and paced (``_INTER_CASE_DELAY_SECONDS``, mirroring
+    ``q5_replay.py:136``): this hits a real embeddings provider per case,
+    and the golden set (S3b) is expected to stay in the tens of cases, not
+    thousands -- no need for concurrency here.
+
+    Both external calls are guarded per case. Guarding only the embedding
+    call (as the first version did) means a single transient DB error on
+    the last case discards every result already computed, since nothing is
+    printed until this function returns -- and the provider spend for those
+    cases is already made.
     """
     results: list[CaseResult] = []
-    for case in cases:
+    for index, case in enumerate(cases):
+        if index:
+            await asyncio.sleep(_INTER_CASE_DELAY_SECONDS)
         try:
             embedding_result = await ai_router.generate_embedding(
                 case.question, chat_id=case.chat_id
@@ -117,12 +150,29 @@ async def run_eval(
             results.append(CaseResult(case=case, embedding_error=str(exc)))
             continue
 
-        hits = await service.search(
-            case.chat_id,
-            case.question,
-            query_embedding=embedding_result.embedding,
-            before=case.asked_at,
-        )
+        try:
+            hits = await service.search(
+                case.chat_id,
+                case.question,
+                query_embedding=embedding_result.embedding,
+                before=case.asked_at,
+            )
+        except Exception as exc:  # noqa: BLE001 -- see below
+            # Deliberately broad: the failure modes here are asyncpg's
+            # (connection reset, pool timeout, a pgvector dimension
+            # mismatch), and there is no shared base class to name. The
+            # alternative is aborting the whole run, which is strictly
+            # worse -- the case is recorded as a non-measurement and the
+            # remaining cases still get their chance.
+            logger.warning(
+                "eval_rag: retrieval failed, case counted as search_error",
+                chat_id=case.chat_id,
+                question=case.question[:80],
+                error=str(exc),
+            )
+            results.append(CaseResult(case=case, search_error=str(exc)))
+            continue
+
         results.append(CaseResult(case=case, hits=hits))
     return results
 
@@ -140,6 +190,8 @@ def _print_results(results: list[CaseResult]) -> None:
         case = result.case
         if result.embedding_error is not None:
             status = f"EMBED-ERROR ({result.embedding_error})"
+        elif result.search_error is not None:
+            status = f"SEARCH-ERROR ({result.search_error})"
         else:
             best_sim = max((hit["similarity"] for hit in result.hits), default=0.0)
             status = f"{len(result.hits)} hit(s), best_sim={best_sim:.3f}"
@@ -191,42 +243,61 @@ async def main(argv: list[str] | None = None) -> int:
         cases = _load_all_cases(case_paths)
     except EvalCaseFileError as exc:
         print(f"INVALID case file: {exc}", file=sys.stderr)
-        return 2
+        return _EXIT_BAD_INPUT
     if not cases:
         print("No cases loaded -- nothing to evaluate.", file=sys.stderr)
-        return 2
+        return _EXIT_BAD_INPUT
 
     settings = Settings()
-    pool = await create_pool(args.dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+    # No response_log_repo: this is a read-only eval run against a
+    # throwaway seed container, not a chat -- there is no per-chat/user
+    # cost context worth logging, and AIRouter._log_usage() no-ops
+    # cleanly on repo=None (mirrors scripts/backfill_explicitness.py).
+    # Built before the pool so its own finally covers a create_pool failure:
+    # the router lazily opens an httpx.AsyncClient per provider, and only
+    # AIRouter.close() tears those down.
+    ai_router = AIRouter(settings)
     try:
-        repo = MemoryRepository(pool)
-        # No response_log_repo: this is a read-only eval run against a
-        # throwaway seed container, not a chat -- there is no per-chat/user
-        # cost context worth logging, and AIRouter._log_usage() no-ops
-        # cleanly on repo=None (mirrors scripts/backfill_explicitness.py).
-        ai_router = AIRouter(settings)
-        service = RAGMemoryService(
-            memory_repo=repo,
-            ai_router=ai_router,
-            min_similarity=(
-                args.min_similarity
-                if args.min_similarity is not None
-                else settings.rag.min_similarity
-            ),
-            max_results=(
-                args.max_results if args.max_results is not None else settings.rag.max_results
-            ),
-        )
+        pool = await create_pool(args.dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
+        try:
+            service = RAGMemoryService(
+                memory_repo=MemoryRepository(pool),
+                ai_router=ai_router,
+                min_similarity=(
+                    args.min_similarity
+                    if args.min_similarity is not None
+                    else settings.rag.min_similarity
+                ),
+                max_results=(
+                    args.max_results if args.max_results is not None else settings.rag.max_results
+                ),
+            )
 
-        results = await run_eval(cases, service=service, ai_router=ai_router)
-        _print_results(results)
-        metrics = compute_metrics(results, k=service.max_results)
-        print()
-        print(format_metrics(metrics))
+            results = await run_eval(cases, service=service, ai_router=ai_router)
+            _print_results(results)
+            metrics = compute_metrics(results, k=service.max_results)
+            print()
+            print(format_metrics(metrics))
+        finally:
+            await close_pool(pool)
     finally:
-        await close_pool(pool)
+        await ai_router.close()
 
-    return 0
+    # A run in which nothing could be measured is NOT a pass. Every case
+    # erroring out prints "recall@5: 0.000 (n=0)", which is textually the
+    # same shape as a genuinely terrible score -- so a wrapper diffing the
+    # numbers, or one checking only the exit code, would read a total
+    # provider outage as a clean result. Fail loudly instead.
+    if metrics.n_recall_cases + metrics.n_negative_control == 0:
+        print(
+            f"MEASURED NOTHING: all {len(cases)} case(s) errored out "
+            f"({metrics.n_embedding_errors} embedding, {metrics.n_search_errors} search). "
+            "The metrics above are vacuous -- do not treat this run as a result.",
+            file=sys.stderr,
+        )
+        return _EXIT_NOTHING_MEASURED
+
+    return _EXIT_OK
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ explicit instruction to reuse it rather than mock the database.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import asyncpg
@@ -51,10 +52,11 @@ import pytest
 import pytest_asyncio
 
 from scripts.eval_metrics import compute_metrics
+from scripts.eval_rag import main as eval_rag_main
 from scripts.eval_rag import run_eval
 from scripts.eval_schema import EvalCase
 from src.database.repositories.memory import MemoryRepository
-from src.services.ai.base import EmbeddingResult
+from src.services.ai.base import AIProviderError, EmbeddingResult
 from src.services.ai.router import AIRouter
 from src.services.rag.memory import RAGMemoryService
 
@@ -290,3 +292,61 @@ class TestDegradationControl:
         fixture in this file, so nothing exists for the query to match."""
         recall = await self._run_recall(repo, chat_id=self.EMPTY_CHAT_ID, query_vec=self.ANSWER_VEC)
         assert recall == 0.0
+
+
+class TestMainEntrypointBootstrap:
+    """``eval_rag.main()`` hand-builds AIRouter/MemoryRepository/RAGMemoryService,
+    mirroring src/di.py's wiring without reusing it.
+
+    Nothing else covers that bootstrap: CI runs ``mypy src/`` and ``--cov=src``,
+    so scripts/ is outside both, and every other test in the suite imports
+    ``run_eval``/``compute_metrics`` directly. A renamed or newly-required
+    constructor kwarg on RAGMemoryService or AIRouter -- exactly the kind of
+    change S5's hybrid-RRF work will make -- would therefore pass ruff, mypy and
+    the whole suite, and first break when a human runs the harness by hand: at
+    the S5 cutover, the one moment this tool exists for.
+
+    The embedding call is patched at the AIRouter class level so no network or
+    API key is needed, while the REAL AIRouter is still constructed -- patching
+    the constructor instead would defeat the purpose of the test.
+    """
+
+    _CASES = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "eval" / "cases.json"
+
+    @pytest.mark.asyncio
+    async def test_main_runs_end_to_end_and_reports_success(
+        self, pg_url: str, run_migrations: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The template's fictional chats have no rows in this database, so
+        every case comes back empty -- a legitimate measurement (blind), not an
+        error. Exit code must be 0."""
+        del run_migrations
+
+        async def _fake_embed(self: AIRouter, text: str, **kwargs: object) -> EmbeddingResult:
+            del self, text, kwargs
+            return _make_embedding_result(_one_hot(0))
+
+        monkeypatch.setattr(AIRouter, "generate_embedding", _fake_embed)
+
+        assert await eval_rag_main([pg_url, "--cases", str(self._CASES)]) == 0
+
+    @pytest.mark.asyncio
+    async def test_main_reports_failure_when_nothing_could_be_measured(
+        self, pg_url: str, run_migrations: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every case erroring prints ``recall@5: 0.000 (n=0)`` -- textually the
+        same shape as a genuinely terrible score. A caller reading only the exit
+        code must not see that as a pass, so it is a distinct non-zero code.
+
+        This is the review finding the whole harness turns on: absence of
+        evidence must never be an approval condition in an automated gate.
+        """
+        del run_migrations
+
+        async def _always_fails(self: AIRouter, text: str, **kwargs: object) -> EmbeddingResult:
+            del self, text, kwargs
+            raise AIProviderError("embeddings provider unreachable", provider="gemini")
+
+        monkeypatch.setattr(AIRouter, "generate_embedding", _always_fails)
+
+        assert await eval_rag_main([pg_url, "--cases", str(self._CASES)]) == 3

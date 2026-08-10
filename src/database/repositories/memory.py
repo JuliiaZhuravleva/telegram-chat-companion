@@ -76,6 +76,20 @@ class MemoryRepository:
         production behavior; the only production caller
         (``TextProcessingPipeline._timed_rag_search``) does not pass it.
 
+        Undated rows stay eligible under ``before``. ``chat_memory.created_at``
+        is nullable (migration 003 declares ``TIMESTAMPTZ DEFAULT NOW()``, no
+        ``NOT NULL``) and ``prompt_builder._rag_section`` already treats such
+        rows as reachable. A bare ``created_at < $5`` would evaluate to NULL
+        for them -- not TRUE -- so they would drop out silently, and since the
+        eval harness passes ``before`` on *every* case (``EvalCase.asked_at``
+        is required), the measured recall would sag for a reason that has
+        nothing to do with retrieval quality: exactly the distortion this
+        parameter exists to prevent. Keeping them visible is also what matches
+        production, which applies no bound at all. The self-retrieval the
+        bound guards against cannot hide among them -- ``store()`` never
+        writes ``created_at`` explicitly, so every row the bot itself creates
+        is dated; undated rows can only arrive via bulk import.
+
         ``source_message_id`` is now selected alongside the existing columns
         (S3-2): the eval harness needs it to match a retrieved memory back to
         the case's ``expected_message_id_ranges`` for recall@k. Purely
@@ -93,7 +107,11 @@ class MemoryRepository:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> $2) >= $3
               AND (expires_at IS NULL OR expires_at > NOW())
-              AND ($5::timestamptz IS NULL OR created_at < $5::timestamptz)
+              AND (
+                    $5::timestamptz IS NULL
+                    OR created_at IS NULL
+                    OR created_at < $5::timestamptz
+              )
             ORDER BY embedding <=> $2 ASC
             LIMIT $4
             """,
