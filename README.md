@@ -178,6 +178,7 @@ mypy src/                    # Type check
 pre-commit install           # Set up git hooks
 
 python -m scripts.verify_commands   # Check the bot's registered slash commands
+python -m scripts.eval_rag <dsn>    # Measure RAG retrieval quality
 ```
 
 The bot pushes its command menus to Telegram on every start and verifies what
@@ -185,6 +186,16 @@ Telegram actually holds; `scripts/verify_commands.py` runs the same check on
 demand (`--fix` re-pushes, `--json` for machines). Commands are declared once in
 [src/bot/command_registry.py](src/bot/command_registry.py) — adding a handler
 without a spec there fails CI.
+
+`scripts/eval_rag.py` replays a set of eval cases through the **real** search
+path the bot uses, reporting recall@k, MRR, blind rate and the similarity
+distribution. It exists so retrieval changes can be judged against a recorded
+number rather than an impression — see
+[the baseline](docs/rag-eval-baseline.md). The database DSN is a required
+argument with no default: the harness must never be able to point at a live
+database. Cases are validated by `scripts/eval_schema.py`; the tracked template
+in `tests/fixtures/eval/` is synthetic, and real cases stay out of this
+repository.
 
 ## Documentation
 
@@ -194,6 +205,7 @@ without a spec there fails CI.
 - [Deployment](docs/deployment.md) — **merging to `main` deploys to production**: the gates, what this repo must keep true, and the failure modes
 - [Database Backups](docs/backups.md) — nightly encrypted dumps, off-host upload, restore and rehearsal
 - [Functionality Overview](docs/FUNCTIONALITY.md) — full feature catalogue with live-QA observations and improvement recommendations
+- [RAG Eval Baseline](docs/rag-eval-baseline.md) — recorded retrieval measurements: how a baseline is produced, and what the current numbers are
 - [Admin DM Guide](docs/admin-dm-guide.md) — every command and panel screen available to a bot admin in a direct message, and the rules behind each action
 - [Admin DM Internals](docs/admin-dm-internals.md) — routers, callback grammar, permission checks, storage and the traps behind that surface
 
