@@ -86,8 +86,12 @@ class AbuseNotificationService:
         for admin_id in admin_ids:
             try:
                 await bot.send_message(admin_id, text)
-            except Exception:
-                logger.warning("Failed to notify admin", admin_id=admin_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
+                )
 
     async def notify_blacklist(
         self,
@@ -121,8 +125,12 @@ class AbuseNotificationService:
         for admin_id in admin_ids:
             try:
                 await bot.send_message(admin_id, text)
-            except Exception:
-                logger.warning("Failed to notify admin", admin_id=admin_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
+                )
 
     async def notify_unauthorized(
         self,
@@ -172,8 +180,12 @@ class AbuseNotificationService:
                     parse_mode="HTML",
                     reply_markup=reply_markup,
                 )
-            except Exception:
-                logger.warning("Failed to notify admin", admin_id=admin_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
+                )
 
     @staticmethod
     def _format_unauthorized(
@@ -261,5 +273,9 @@ class AbuseNotificationService:
         for admin_id in admin_ids:
             try:
                 await bot.send_message(admin_id, text, parse_mode=None)
-            except Exception:
-                logger.warning("Failed to notify admin", admin_id=admin_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
+                )

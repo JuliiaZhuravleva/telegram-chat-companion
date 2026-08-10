@@ -25,6 +25,7 @@ from aiogram.types import (
     BotCommandScopeChat,
     BotCommandScopeDefault,
 )
+from structlog.testing import capture_logs
 
 from src.bot.command_registry import (
     COMMAND_NAME_RE,
@@ -729,6 +730,62 @@ async def test_clean_bot_reports_no_shadowing() -> None:
 
     assert report.shadow_scopes == ()
     assert report.ok, report.problems()
+
+
+@pytest.mark.asyncio
+async def test_clean_reconcile_pass_emits_a_positive_signal() -> None:
+    """TD-057: the clean path has to say so out loud.
+
+    The rest of this module is written against the silent zero, and the
+    reconcile pass had the defect itself: it logged only when it *found*
+    something, so its steady state — "read every variant, no shadows" — was
+    silence, indistinguishable in a production log from "this never ran".
+    Proving a clean pass on 2026-08-08 therefore meant diffing the deployed
+    file's sha256 inside the running container.
+
+    Asserting ``variants_read == variants_expected`` rather than merely
+    ``shadows == 0`` is the point: absence of findings is not evidence of
+    coverage, and a line that said only "no shadows" would reintroduce the
+    very ambiguity it exists to remove.
+    """
+    with capture_logs() as logs:
+        await sync_bot_commands(_bot_with_scopes(), [], push=False)
+
+    checked = [entry for entry in logs if entry["event"] == "command_scopes_checked"]
+    assert len(checked) == 1, "exactly one summary line per reconcile pass"
+
+    summary = checked[0]
+    assert summary["shadows"] == 0
+    assert summary["variants_read"] > 0, "zero reads is the silent zero this guards against"
+    assert summary["variants_read"] == summary["variants_expected"], (
+        "a clean pass must state it read every variant, not just that it found nothing"
+    )
+
+
+@pytest.mark.asyncio
+async def test_positive_signal_still_emitted_when_a_shadow_is_found() -> None:
+    """Falsifiability control for the test above.
+
+    If the summary line only ever appeared on the clean path it would be an
+    assertion about one branch rather than about the pass, and a regression
+    that stopped reporting real shadows would leave that test green. Same
+    line, non-zero count.
+    """
+    bot = _bot_with_scopes({"all_chat_administrators": ["help", "summary"]})
+
+    with capture_logs() as logs:
+        await sync_bot_commands(bot, [], push=False)
+
+    # Collect-then-assert rather than next(): a bare next() inside a coroutine
+    # turns "the line is missing" into `RuntimeError: coroutine raised
+    # StopIteration`, which reads as a broken test rather than a caught
+    # regression. Verified by running this against the line-removed source.
+    checked = [entry for entry in logs if entry["event"] == "command_scopes_checked"]
+    assert len(checked) == 1, "the summary line must be emitted on this path too"
+
+    summary = checked[0]
+    assert summary["shadows"] == 1
+    assert summary["variants_read"] == summary["variants_expected"]
 
 
 def _unmanaged_deletes(bot: MagicMock) -> set[tuple[str, str | None]]:

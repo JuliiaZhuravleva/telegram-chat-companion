@@ -409,6 +409,7 @@ async def _reconcile_unmanaged_scopes(bot: Bot, *, clear: bool) -> UnmanagedScop
     shadows: list[str] = []
     cleared: list[str] = []
     unverified: list[str] = []
+    read_ok = 0
 
     for label, scope in UNMANAGED_GLOBAL_SCOPES:
         for language in _PUSH_LANGUAGES:
@@ -421,6 +422,7 @@ async def _reconcile_unmanaged_scopes(bot: Bot, *, clear: bool) -> UnmanagedScop
                     "command_scope_audit_failed", target=label, language=language, error=str(exc)
                 )
                 continue
+            read_ok += 1
             if not live:
                 continue
 
@@ -440,6 +442,21 @@ async def _reconcile_unmanaged_scopes(bot: Bot, *, clear: bool) -> UnmanagedScop
                 continue
             cleared.append(found)
             logger.info("command_scope_cleared", target=label, language=language)
+
+    # Unconditional, including — especially — the clean path. Without it the
+    # steady state emits nothing, so "read every variant, found no shadows" is
+    # indistinguishable in the log from "this never ran": the same silent zero
+    # this whole module exists to prevent. Proving a clean pass had otherwise
+    # required diffing the deployed file's sha256 inside the container.
+    logger.info(
+        "command_scopes_checked",
+        variants_read=read_ok,
+        variants_expected=len(UNMANAGED_GLOBAL_SCOPES) * len(_PUSH_LANGUAGES),
+        shadows=len(shadows),
+        cleared=len(cleared),
+        unverified=len(unverified),
+        clear_enabled=clear,
+    )
 
     return UnmanagedScopeReport(
         shadows=tuple(shadows),

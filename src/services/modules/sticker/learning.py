@@ -27,6 +27,7 @@ from src.services.modules.sticker.models import (
 )
 from src.services.modules.sticker.renderer import RenderedSticker, render_tgs, render_webm
 from src.services.modules.sticker.tolerance import format_explicitness_line
+from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
 
@@ -777,7 +778,7 @@ class StickerLearningService:
                 response_mime_type="application/json",
             )
             # Log usage explicitly — generate_text() does not auto-log (see ADR).
-            asyncio.ensure_future(self._ai.log_usage(ai_result, task_type="sticker_merge"))
+            fire_and_forget(self._ai.log_usage(ai_result, task_type="sticker_merge"))
             parsed = self._parse_vision_response(ai_result.text)
             new_visual = parsed.get("visual")
             if not new_visual:
@@ -850,7 +851,7 @@ class StickerLearningService:
                 timeout=5.0,
             )
             # Log usage explicitly — generate_text() does not auto-log (see ADR).
-            asyncio.ensure_future(self._ai.log_usage(result, task_type="sticker_context"))
+            fire_and_forget(self._ai.log_usage(result, task_type="sticker_context"))
             parsed = self._parse_vision_response(result.text)
             character = parsed.get("character")
             context = parsed.get("context") if isinstance(parsed.get("context"), str) else None
@@ -864,8 +865,12 @@ class StickerLearningService:
             return character, context
         except (TimeoutError, AIProviderError):
             return None, None
-        except Exception:
-            logger.debug("Pack context search failed", set_name=set_name)
+        except Exception as exc:
+            logger.debug(
+                "Pack context search failed",
+                set_name=set_name,
+                error_type=type(exc).__name__,
+            )
             return None, None
 
     # ── Private helpers ──────────────────────────────────────────────

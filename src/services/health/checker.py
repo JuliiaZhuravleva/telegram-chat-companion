@@ -154,8 +154,8 @@ class HealthChecker:
         # 2. Message activity (metric only — no alert on inactivity)
         try:
             result.messages_30m = await health_repo.get_message_count_30m()
-        except Exception:
-            logger.warning("Failed to get message count")
+        except Exception as exc:
+            logger.warning("Failed to get message count", error_type=type(exc).__name__)
 
         # 3. AI fallback frequency
         try:
@@ -171,8 +171,8 @@ class HealthChecker:
                         ),
                     )
                 )
-        except Exception:
-            logger.warning("Failed to get fallback count")
+        except Exception as exc:
+            logger.warning("Failed to get fallback count", error_type=type(exc).__name__)
 
         # Determine overall status
         if any(i.severity == HealthStatus.CRITICAL for i in result.issues):
@@ -237,8 +237,8 @@ class HealthChecker:
             deleted = await health_repo.cleanup_old_logs(keep_days=30)
             if deleted:
                 logger.debug("Cleaned up old health logs", deleted=deleted)
-        except Exception:
-            logger.warning("Failed to clean up health logs")
+        except Exception as exc:
+            logger.warning("Failed to clean up health logs", error_type=type(exc).__name__)
 
     async def _send_alert(
         self,
@@ -259,8 +259,15 @@ class HealthChecker:
                 text,
                 parse_mode="HTML",
             )
-        except Exception:
-            logger.warning("Failed to send health alert", admin_id=first_admin)
+        except Exception as exc:
+            # The one that matters most: this is the channel that reports the bot
+            # is unhealthy, and the likeliest cause of it failing (rate limit
+            # under load) is exactly when the alert is most needed.
+            logger.warning(
+                "Failed to send health alert",
+                admin_id=first_admin,
+                error_type=type(exc).__name__,
+            )
 
     # ------------------------------------------------------------------
     # Formatting

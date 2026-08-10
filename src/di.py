@@ -59,8 +59,20 @@ class AppProvider(Provider):
         await close_pool(pool)
 
     @provide
-    def get_ai_router(self, settings: Settings, pool: asyncpg.Pool) -> AIRouter:
-        return AIRouter(settings, response_log_repo=ResponseLogRepository(pool))
+    async def get_ai_router(
+        self, settings: Settings, pool: asyncpg.Pool
+    ) -> AsyncIterator[AIRouter]:
+        """Yield rather than return, so Dishka registers a teardown.
+
+        ``AIRouter.close()`` exists and, as a plain ``return`` provider, was
+        never reached: ``container.close()`` on shutdown had nothing to call and
+        the class has no ``__del__``, so the ``httpx.AsyncClient`` each provider
+        opens lazily was never closed. ``get_pool`` above already had the right
+        shape; this one simply did not follow it.
+        """
+        router = AIRouter(settings, response_log_repo=ResponseLogRepository(pool))
+        yield router
+        await router.close()
 
 
 class RepositoryProvider(Provider):

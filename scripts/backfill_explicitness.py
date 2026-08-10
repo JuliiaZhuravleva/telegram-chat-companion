@@ -281,15 +281,19 @@ async def main() -> int:
     settings = Settings()
     pool = await create_pool(settings.database_url)
     bot = Bot(token=settings.telegram_bot_token)
+    # Built before the try so the finally can always close it. Constructing it
+    # inside would leave the name unbound if construction itself raised, and
+    # the teardown would fail with NameError while masking the real error.
+    response_log_repo = ResponseLogRepository(pool)
+    ai_router = AIRouter(settings, response_log_repo)
 
     try:
         repo = StickerRepository(pool)
-        response_log_repo = ResponseLogRepository(pool)
-        ai_router = AIRouter(settings, response_log_repo)
         summary = await run_backfill(bot=bot, ai_router=ai_router, repo=repo)
         return _exit_code(summary)
     finally:
         await bot.session.close()
+        await ai_router.close()
         await close_pool(pool)
 
 
