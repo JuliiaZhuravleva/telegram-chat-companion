@@ -38,18 +38,35 @@ _ERROR_ALERT = "Ошибка, попробуйте ещё раз"
 def _chat_id_of(update: Update) -> int | None:
     """Best-effort chat id for the log line.
 
-    Written out rather than chained with ``or``/``and``: this runs on a path
-    where things are already broken, and a clever expression that silently
-    yields ``False`` or a stray attribute would corrupt the one record we get
-    of what went wrong. Every step is allowed to be absent — a callback query
-    older than 48 hours arrives with ``message`` unset.
+    Covers every update type this bot actually registers a handler for, not
+    just the two obvious ones: ``edited_message`` and ``my_chat_member``
+    (handlers/chat_events.py) and ``message_reaction`` (handlers/reactions.py)
+    are all live. The reaction path matters most here — CLAUDE.md records that
+    ``AccessControlMiddleware`` cannot gate it, so its whitelist check sits in
+    the handler body, which makes it some of the likeliest code to throw. An
+    error there logging ``chat_id=None`` would be untraceable to a chat.
+
+    Written as a loop over candidates rather than chained ``or``/``and``: this
+    runs when things are already broken, and an expression that quietly yields
+    ``False`` or a stray attribute would corrupt the one record of what
+    happened. Every field is allowed to be absent — a ``CallbackQuery`` older
+    than 48 hours arrives with ``message`` unset.
     """
     callback = update.callback_query
     if callback is not None and callback.message is not None:
         return int(callback.message.chat.id)
 
-    if update.message is not None:
-        return int(update.message.chat.id)
+    for candidate in (
+        update.message,
+        update.edited_message,
+        update.channel_post,
+        update.edited_channel_post,
+        update.message_reaction,
+        update.my_chat_member,
+        update.chat_member,
+    ):
+        if candidate is not None:
+            return int(candidate.chat.id)
 
     return None
 

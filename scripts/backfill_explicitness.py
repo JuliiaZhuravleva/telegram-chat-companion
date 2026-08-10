@@ -292,9 +292,21 @@ async def main() -> int:
         summary = await run_backfill(bot=bot, ai_router=ai_router, repo=repo)
         return _exit_code(summary)
     finally:
-        await bot.session.close()
-        await ai_router.close()
-        await close_pool(pool)
+        # Each close isolated. An exception raised inside `finally` REPLACES the
+        # `return` from the try block, so one failing socket teardown would turn
+        # a fully successful backfill into an unhandled crash — discarding the
+        # exit code this script computes precisely so a caller can tell "all
+        # scored" from "re-run needed". Cleanup failures are logged, never
+        # allowed to become the script's verdict.
+        for label, closer in (
+            ("bot_session", bot.session.close),
+            ("ai_router", ai_router.close),
+            ("pool", lambda: close_pool(pool)),
+        ):
+            try:
+                await closer()
+            except Exception as exc:
+                logger.warning("cleanup_failed", component=label, error_type=type(exc).__name__)
 
 
 if __name__ == "__main__":

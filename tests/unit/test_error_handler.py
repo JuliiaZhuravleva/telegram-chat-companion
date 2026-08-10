@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 from structlog.testing import capture_logs
 
 from src.bot.errors import handle_unexpected_error
@@ -122,6 +123,117 @@ async def test_non_callback_update_is_logged_without_crashing() -> None:
     assert handled is True
 
 
+def _render_with_real_processors(log_format: str, **event_kwargs) -> str:
+    """Emit one log record through the REAL configured chain and return the sink text.
+
+    Not ``capture_logs()``: that helper swaps the configured processors for a
+    bare collector, so it observes the event dict *before* rendering and is
+    blind to everything a renderer does or fails to do. The bug this guards
+    against lived entirely in the renderer.
+    """
+    import io
+    import logging as stdlib_logging
+
+    from src.main import build_log_processors
+
+    sink = io.StringIO()
+    root = stdlib_logging.getLogger()
+    previous_handlers = root.handlers[:]
+    previous_level = root.level
+    try:
+        for handler in previous_handlers:
+            root.removeHandler(handler)
+        root.addHandler(stdlib_logging.StreamHandler(sink))
+        root.setLevel(stdlib_logging.INFO)
+
+        structlog.configure(
+            processors=build_log_processors(log_format),
+            wrapper_class=structlog.stdlib.BoundLogger,
+            context_class=dict,
+            logger_factory=structlog.stdlib.LoggerFactory(),
+        )
+        structlog.get_logger("probe").error("unhandled_handler_error", **event_kwargs)
+        return sink.getvalue()
+    finally:
+        for handler in root.handlers[:]:
+            root.removeHandler(handler)
+        for handler in previous_handlers:
+            root.addHandler(handler)
+        root.setLevel(previous_level)
+        structlog.reset_defaults()
+
+
+def _raised(message: str) -> Exception:
+    """A genuinely raised exception, so it carries a real __traceback__."""
+
+    def _inner_frame_with_a_findable_name() -> None:
+        raise RuntimeError(message)
+
+    try:
+        _inner_frame_with_a_findable_name()
+    except RuntimeError as exc:
+        return exc
+    raise AssertionError("unreachable")
+
+
+def test_json_logging_renders_a_real_traceback() -> None:
+    """The regression this handler nearly shipped.
+
+    Returning True suppresses aiogram's own ``loggers.event.exception(...)``,
+    which produced a full stdlib traceback. If our replacement line does not
+    produce one, the net effect of "improving" error visibility is losing it —
+    in production only, since ConsoleRenderer handles exc_info by itself and
+    local development looks fine either way.
+    """
+    output = _render_with_real_processors(
+        "json", error_type="RuntimeError", exc_info=_raised("pool exhausted")
+    )
+
+    assert "Traceback (most recent call last)" in output, (
+        "JSON logs carry no stack — exc_info fell back to repr() and every "
+        "exc_info=True site in the codebase is equally blind"
+    )
+    assert "_inner_frame_with_a_findable_name" in output, "the frame names must survive"
+    assert "pool exhausted" in output
+
+
+def test_json_logging_does_not_leak_local_variables() -> None:
+    """dict_tracebacks was the tempting fix; it writes locals into the record.
+
+    The locals in this process include the Telegram token and provider API
+    keys, so a traceback renderer that captures frame locals turns every
+    logged exception into a credential disclosure. Pins the safer choice so a
+    later 'let's make tracebacks structured' change has to confront it.
+    """
+    token_shaped_local = "8456420238:AAFAKEfaketokenvaluenotrealatall"
+
+    def _frame_holding_a_secret() -> None:
+        secret = token_shaped_local  # noqa: F841 — the point is that it is a local
+        raise RuntimeError("boom")
+
+    try:
+        _frame_holding_a_secret()
+    except RuntimeError as exc:
+        raised = exc
+
+    output = _render_with_real_processors("json", exc_info=raised)
+
+    # Leak assertion FIRST, and the control stated in a format-agnostic way.
+    # Ordered the other way round, swapping in dict_tracebacks failed this test
+    # with "no traceback rendered" — true (it emits structured frames, not the
+    # classic string) but the wrong diagnosis, hiding the credential leak that
+    # is the entire point. A control that reports the wrong cause is worse than
+    # none: it sends the next reader after a phantom.
+    assert token_shaped_local not in output, (
+        "a frame local leaked into the log — this is why format_exc_info is used "
+        "instead of dict_tracebacks, whose frame `locals` carry the bot token"
+    )
+    assert "_frame_holding_a_secret" in output, (
+        "control: frame information IS present, so the assertion above is not "
+        "passing merely because nothing was rendered at all"
+    )
+
+
 def test_main_registers_the_error_handler_on_the_dispatcher() -> None:
     """The wiring, not the function — the assertion that actually bites.
 
@@ -136,9 +248,15 @@ def test_main_registers_the_error_handler_on_the_dispatcher() -> None:
     someone deleting or renaming the registration. Recorded as TD-069.
     """
     import ast
-    import pathlib
+    from pathlib import Path
 
-    tree = ast.parse(pathlib.Path("src/main.py").read_text())
+    # Anchored to this file, not the CWD. A bare Path("src/main.py") resolves
+    # against pytest's invocation directory, so running from tests/ or an IDE
+    # runner raised FileNotFoundError — and this is the one test the file
+    # describes as the assertion that actually bites. Matches the anchored form
+    # already used by test_migration_014_chat_facts.py and test_abuse_repository.py.
+    repo_root = Path(__file__).resolve().parents[2]
+    tree = ast.parse((repo_root / "src" / "main.py").read_text())
 
     registrations = [
         node
