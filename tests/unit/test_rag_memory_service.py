@@ -21,10 +21,17 @@ failure; S2-10 changed that behavior (persist with ``embedding=None``
 instead of dropping the memory) so the class was rewritten in place --
 see ``tests/unit/test_embedding_backfill.py`` for the worker that fills
 those NULLs back in.
+
+S3-3 adds ``TestSearchBeforePassthrough`` / ``TestRepositorySearchBeforeDefault``:
+the optional ``before: datetime | None`` time bound for the real search path
+(needed by the S3-2 eval harness so a replayed question can't retrieve the
+memory of asking it) -- additive, default ``None``, and applied in the
+repository's ``WHERE`` ahead of ``LIMIT`` rather than postfiltered.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -245,6 +252,59 @@ class TestSearchQueryEmbeddingPassthrough:
         router.generate_embedding.assert_awaited_once()
 
 
+class TestSearchResultIncludesSourceMessageId:
+    """S3-2: ``source_message_id`` is carried through from the repository
+    row into the dict ``search()`` returns.
+
+    Needed so the eval harness can match a retrieved memory back to a
+    case's ``expected_message_id_ranges`` for recall@k (S3-4) -- purely
+    additive, the production pipeline reads this dict by key and never
+    asked for this one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_source_message_id_is_passed_through(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = [
+            {
+                "id": 1,
+                "content": "we meet at 5pm",
+                "similarity": 0.9,
+                "metadata": None,
+                "created_at": datetime(2026, 5, 9, tzinfo=UTC),
+                "source_message_id": 42,
+            }
+        ]
+        service, _, _ = _make_service(repo=repo)
+
+        results = await service.search(chat_id=1, query="hi", query_embedding=[0.1] * 768)
+
+        assert results[0]["source_message_id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_none_source_message_id_is_passed_through_as_none(self) -> None:
+        """A memory stored with no ``source_message_id`` (S2-10 pending-embedding
+        rows, or any store() call that omits it) must not be coerced into
+        something else here -- ``None`` means "no linked message", not
+        "unknown, guess"."""
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = [
+            {
+                "id": 1,
+                "content": "we meet at 5pm",
+                "similarity": 0.9,
+                "metadata": None,
+                "created_at": datetime(2026, 5, 9, tzinfo=UTC),
+                "source_message_id": None,
+            }
+        ]
+        service, _, _ = _make_service(repo=repo)
+
+        results = await service.search(chat_id=1, query="hi", query_embedding=[0.1] * 768)
+
+        assert results[0]["source_message_id"] is None
+
+
 class TestSearchMaxResultsOverride:
     """S2-7b: ``max_results`` passthrough, mirroring the ``min_similarity``
     override tests above -- same ``x or default`` pitfall shape (an
@@ -294,6 +354,80 @@ class TestSearchMaxResultsOverride:
         await service.search(chat_id=1, query="hi", max_results=0)
 
         assert repo.search.call_args.kwargs["max_results"] == 0
+
+
+class TestSearchBeforePassthrough:
+    """S3-3: optional ``before`` time bound, passed straight through to the
+    repository -- in ``WHERE`` ahead of ``LIMIT`` there (see
+    ``MemoryRepository.search()``), not postfiltered here.
+
+    No instance-level default exists to fall back to (unlike
+    ``min_similarity``/``max_results``): omitting ``before`` must reach the
+    repository as ``None`` (no bound), and does not change the production
+    call path (``TextProcessingPipeline`` never passes it).
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_before_is_forwarded_to_repository(self) -> None:
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service, _, _ = _make_service(repo=repo, router=router)
+        cutoff = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+        await service.search(chat_id=1, query="hi", before=cutoff)
+
+        assert repo.search.call_args.kwargs["before"] == cutoff
+
+    @pytest.mark.asyncio
+    async def test_no_before_forwards_none(self) -> None:
+        """Omitting ``before`` must reach the repository as ``None``, not be
+        dropped from the call -- the repository's own default only helps
+        callers that don't pass the kwarg at all; the service must not
+        substitute anything else."""
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = []
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        service, _, _ = _make_service(repo=repo, router=router)
+
+        await service.search(chat_id=1, query="hi")
+
+        assert repo.search.call_args.kwargs["before"] is None
+
+
+class TestRepositorySearchBeforeDefault:
+    """S3-3: ``MemoryRepository.search()``'s ``before`` is optional and
+    additive -- omitting it must not change the SQL sent for existing
+    callers (asserted at the call-args level; the WHERE-before-LIMIT
+    ordering itself needs a real database, see
+    ``tests/integration/test_memory_repository_chat_scoping.py`` for the
+    established pattern of testing this repository's SQL against real rows).
+    """
+
+    @pytest.mark.asyncio
+    async def test_omitting_before_still_executes(self) -> None:
+        pool = AsyncMock()
+        pool.fetch.return_value = []
+        repo = MemoryRepository(pool)
+
+        result = await repo.search(1, [0.1] * 768, min_similarity=0.7)
+
+        assert result == []
+        # `before` positional arg (last bind param, $5) must be None.
+        assert pool.fetch.call_args.args[-1] is None
+
+    @pytest.mark.asyncio
+    async def test_explicit_before_is_passed_as_last_bind_param(self) -> None:
+        pool = AsyncMock()
+        pool.fetch.return_value = []
+        repo = MemoryRepository(pool)
+        cutoff = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+
+        await repo.search(1, [0.1] * 768, min_similarity=0.7, before=cutoff)
+
+        assert pool.fetch.call_args.args[-1] == cutoff
 
 
 class TestStoreEmbeddingFailure:

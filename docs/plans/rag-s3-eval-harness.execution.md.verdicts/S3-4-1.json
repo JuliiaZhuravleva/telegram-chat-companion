@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T22:51:46Z",
+  "role": "specialist",
+  "item_id": "S3-4",
+  "verdict": "PASS",
+  "cost_usd": 2.16,
+  "notes": "scripts/eval_metrics.py adds recall@k (primary), MRR (secondary), blind_rate (found/knowledge-update empty-result analog of q5_replay's 'bot answers blind', 7/11), negative_control_rate (answer-absent correctly-empty share, kept separate from blind_rate per S3-5), and best_sim_percentiles (linear-interpolation percentiles over every case with >=1 hit, for S6). Design call flagged for architect: EvalCase (S3-1) has no field marking which expected_message_id_ranges entry is authoritative for knowledge-update cases -- this module treats the LAST-listed range as freshest/correct and earlier ranges as superseded (a hit landing only on an earlier range is a miss), matching the fixture's note but not yet schema-enforced. Worth formalizing once S3b's real golden set has more than one knowledge-update case. eval_rag.py's CLI now prints the metrics summary after per-case output. No integration coverage needed here -- pure arithmetic over CaseResult, no DB/provider calls; qa's S3-8 testcontainer coverage is unaffected.",
+  "result": {
+    "kind": "commit",
+    "ref": "3a66523",
+    "verification": "pytest tests/unit/test_eval_metrics.py tests/unit/test_eval_rag.py -q: 31 passed; pytest tests/unit/ -q: 1991 passed, 5 skipped; ruff check + ruff format --check clean on scripts/eval_metrics.py, scripts/eval_rag.py, tests/unit/test_eval_metrics.py; mypy src/: Success, 131 files (CI's only mypy gate, ci.yml:48). mypy on scripts/ directly hits a pre-existing 'Source file found twice' namespace-package quirk (scripts/ has no __init__.py) that reproduces even on S3-2's original eval_rag.py+eval_schema.py pair alone, before this item's changes -- not CI-gated, not introduced here."
+  },
+  "confidence": 0.85,
+  "clarification_request": null,
+  "session_id": null
+}

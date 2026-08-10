@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import asyncpg
@@ -57,6 +58,7 @@ class MemoryRepository:
         *,
         min_similarity: float,
         max_results: int = 5,
+        before: datetime | None = None,
     ) -> list[asyncpg.Record]:
         """Search memories by cosine similarity.
 
@@ -64,10 +66,40 @@ class MemoryRepository:
         single source of truth for the threshold, and this repository method
         must not be able to silently apply a different one than
         ``RAGMemoryService`` (its only caller) resolves it to.
+
+        ``before`` (S3-3) is an optional time bound: when given, only
+        memories created strictly before that moment are eligible. It is
+        applied in ``WHERE``, ahead of ``LIMIT`` -- postfiltering after the
+        query would silently shrink ``k`` (rows past the cutoff would still
+        occupy a LIMIT slot and get dropped afterwards, understating the
+        true top-k). Default ``None`` means "no bound", matching current
+        production behavior; the only production caller
+        (``TextProcessingPipeline._timed_rag_search``) does not pass it.
+
+        Undated rows stay eligible under ``before``. ``chat_memory.created_at``
+        is nullable (migration 003 declares ``TIMESTAMPTZ DEFAULT NOW()``, no
+        ``NOT NULL``) and ``prompt_builder._rag_section`` already treats such
+        rows as reachable. A bare ``created_at < $5`` would evaluate to NULL
+        for them -- not TRUE -- so they would drop out silently, and since the
+        eval harness passes ``before`` on *every* case (``EvalCase.asked_at``
+        is required), the measured recall would sag for a reason that has
+        nothing to do with retrieval quality: exactly the distortion this
+        parameter exists to prevent. Keeping them visible is also what matches
+        production, which applies no bound at all. The self-retrieval the
+        bound guards against cannot hide among them -- ``store()`` never
+        writes ``created_at`` explicitly, so every row the bot itself creates
+        is dated; undated rows can only arrive via bulk import.
+
+        ``source_message_id`` is now selected alongside the existing columns
+        (S3-2): the eval harness needs it to match a retrieved memory back to
+        the case's ``expected_message_id_ranges`` for recall@k. Purely
+        additive to the SELECT list -- WHERE/ORDER/LIMIT are unchanged, and
+        the only production caller reads results by key, so an extra key is
+        invisible to it.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
-            SELECT id, content, metadata, importance_score,
+            SELECT id, content, metadata, importance_score, source_message_id,
                    1 - (embedding <=> $2) AS similarity,
                    created_at
             FROM chat_memory
@@ -75,6 +107,11 @@ class MemoryRepository:
               AND embedding IS NOT NULL
               AND 1 - (embedding <=> $2) >= $3
               AND (expires_at IS NULL OR expires_at > NOW())
+              AND (
+                    $5::timestamptz IS NULL
+                    OR created_at IS NULL
+                    OR created_at < $5::timestamptz
+              )
             ORDER BY embedding <=> $2 ASC
             LIMIT $4
             """,
@@ -82,6 +119,7 @@ class MemoryRepository:
             query_embedding,
             min_similarity,
             max_results,
+            before,
         )
         return result
 

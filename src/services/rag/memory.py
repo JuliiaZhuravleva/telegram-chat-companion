@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -66,6 +67,7 @@ class RAGMemoryService:
         query_embedding: list[float] | None = None,
         min_similarity: float | None = None,
         max_results: int | None = None,
+        before: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Search memories relevant to a query.
 
@@ -76,8 +78,16 @@ class RAGMemoryService:
         is still required in that case (kept for logging) but not
         re-embedded.
 
-        Returns list of dicts with keys: id, content, similarity, metadata,
-        created_at.
+        ``before`` (S3-3), if given, bounds results to memories created
+        strictly before that moment -- passed straight through to
+        ``MemoryRepository.search()``, which applies it in ``WHERE`` ahead
+        of ``LIMIT``. Default ``None`` (no bound); the production pipeline
+        does not pass it, so this is additive and does not change prod
+        behavior. Intended consumer: the eval harness (S3-2), replaying a
+        historical question must only see memories that existed at
+        ``asked_at`` -- without the bound, the memory of the question itself
+        ("X asked: ...") is typically the top hit, and the replay circularly
+        measures self-retrieval.
         """
         if query_embedding is not None:
             embedding = query_embedding
@@ -99,6 +109,11 @@ class RAGMemoryService:
             # applying it to only one of them is what review caught here.
             min_similarity=(min_similarity if min_similarity is not None else self._min_similarity),
             max_results=(max_results if max_results is not None else self._max_results),
+            # `before` has no instance-level default to fall back to -- `None`
+            # unconditionally means "no bound" (S3-3). Written as an explicit
+            # pass-through (not `before or None`) to match the S2-2 convention
+            # above rather than introduce a second style for a new parameter.
+            before=before,
         )
 
         return [
@@ -108,6 +123,11 @@ class RAGMemoryService:
                 "similarity": float(row["similarity"]),
                 "metadata": row["metadata"],
                 "created_at": row["created_at"],
+                # S3-2: carried through so the eval harness can match a hit
+                # back to a case's expected_message_id_ranges. The pipeline
+                # (this dict's other consumer) reads by key and never asked
+                # for this one, so its behavior is unaffected.
+                "source_message_id": row["source_message_id"],
             }
             for row in rows
         ]

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T23:10:21Z",
+  "role": "evaluator",
+  "item_id": "S3-6",
+  "verdict": "PASS",
+  "evidence": "Commit 92e6285 adds scripts/harvest_auto_strata.py faithfully porting the regex/query from internal/analysis/q5_replay.py:31-35 (verified byte-identical regex and query shape), emits EvalCase objects with an honestly-documented wide placeholder range and floor-not-golden-set boundary in docstring/note/CLI banner. Ran pytest tests/unit/test_harvest_auto_strata.py -q locally: 11 passed (matches claim); ruff check and mypy on the new file both clean.",
+  "regression_risk": "low",
+  "notes": "Specialist deferred a live-credentialed eval_rag.py replay smoke test as optional QA follow-up (not a correctness gap in committed code) — reasonable given item scope is the harvest side, not re-verifying S3-2/S3-4's already-verified search plumbing."
+}

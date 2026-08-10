@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "ts": "2026-08-09T21:48:24Z",
+  "role": "evaluator",
+  "item_id": "S3-3",
+  "verdict": "PASS",
+  "evidence": "Verified commit 8cbcdee: MemoryRepository.search()/RAGMemoryService.search() gain optional before: datetime|None=None, applied as $5::timestamptz IS NULL OR created_at < $5 in WHERE ahead of LIMIT (not postfiltered); pipeline.py:491 (only prod caller) confirmed unchanged, does not pass before; None-check pass-through matches S2-2 convention. Ran pytest tests/unit/test_rag_memory_service.py: 21 passed, matching claim.",
+  "regression_risk": "low",
+  "notes": "Specialist correctly deferred the WHERE-before-LIMIT SQL-ordering integration test to a follow-up (flagged for qa before S3-2 relies on it) -- reasonable scope given unit-level call-args coverage already exists and this is additive/opt-in."
+}

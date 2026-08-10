@@ -333,9 +333,18 @@ def _scan_plain(text: str, lines: list[str], path: str) -> Iterator[Violation]:
         yield from scan_text(line, path, line_no, "")
 
 
+#: Tracked docs outside docs/plans/ that carry the same public-repo risk profile
+#: (aggregate numbers written by a run, sourced from real chat content) and are
+#: therefore required to pass this guard too. docs/rag-eval-baseline.md (S3-7):
+#: a long-lived reference under docs/ rather than docs/plans/ (it outlives any
+#: one plan), but it is written from the same eval-harness runs that produce
+#: per-case detail in internal/, so it must be scanned the same way.
+EXTRA_TRACKED_PATHS: tuple[str, ...] = ("docs/rag-eval-baseline.md",)
+
+
 def tracked_plan_files(root: Path) -> list[Path]:
     result = subprocess.run(
-        ["git", "ls-files", "-z", "docs/plans/"],
+        ["git", "ls-files", "-z", "docs/plans/", *EXTRA_TRACKED_PATHS],
         cwd=root,
         capture_output=True,
         text=True,
