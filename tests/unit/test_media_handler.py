@@ -6,6 +6,7 @@ import pytest
 
 from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import TranscriptionResult
+from src.services.relevancy.gate import GateDecision
 from src.services.text.pipeline import PipelineResult
 
 
@@ -23,6 +24,10 @@ def _make_message(
     msg.chat = MagicMock()
     msg.chat.id = chat_id
     msg.message_id = message_id
+    # Explicitly awaitable: a bare MagicMock attribute raises TypeError when
+    # awaited, and finish_reply() swallows send failures — so without this the
+    # sticker test would "pass" against a call that never succeeded.
+    msg.answer_sticker = AsyncMock()
 
     user = MagicMock()
     user.id = user_id
@@ -211,6 +216,27 @@ async def test_voice_handler_forwards_message_thread_id_to_typing_indicator():
 # ── Photo handler tests ──────────────────────────────────────────────
 
 
+def _permissive_gate():
+    """A relevancy gate that always allows — these tests are not about gating."""
+    gate = MagicMock()
+    gate.evaluate = AsyncMock(
+        return_value=GateDecision(should_respond=True, tier="fast_rules", reason="test-allow")
+    )
+    return gate
+
+
+def _no_spend_warning():
+    svc = MagicMock()
+    svc.get_warning_if_exceeded = AsyncMock(return_value=None)
+    return svc
+
+
+def _no_cooldown():
+    checker = MagicMock()
+    checker.is_in_cooldown = AsyncMock(return_value=False)
+    return checker
+
+
 @pytest.mark.asyncio
 async def test_photo_handler_no_caption_saves_description():
     from src.bot.handlers.media import handle_photo_message
@@ -239,7 +265,16 @@ async def test_photo_handler_no_caption_saves_description():
         return_value=b"fake-image",
     ):
         await handle_photo_message(
-            message, chat_config, image_service, pipeline, sticker_responder, message_repo, bot
+            message,
+            chat_config,
+            image_service,
+            pipeline,
+            sticker_responder,
+            message_repo,
+            _permissive_gate(),
+            _no_spend_warning(),
+            _no_cooldown(),
+            bot,
         )
 
     message_repo.save.assert_awaited_once()
@@ -263,7 +298,16 @@ async def test_photo_handler_disabled():
     message_repo = MagicMock()
 
     await handle_photo_message(
-        message, chat_config, image_service, pipeline, sticker_responder, message_repo, bot
+        message,
+        chat_config,
+        image_service,
+        pipeline,
+        sticker_responder,
+        message_repo,
+        _permissive_gate(),
+        _no_spend_warning(),
+        _no_cooldown(),
+        bot,
     )
 
     image_service.analyze.assert_not_called()
@@ -295,7 +339,16 @@ async def test_photo_handler_analysis_fails():
         return_value=b"fake-image",
     ):
         await handle_photo_message(
-            message, chat_config, image_service, pipeline, sticker_responder, message_repo, bot
+            message,
+            chat_config,
+            image_service,
+            pipeline,
+            sticker_responder,
+            message_repo,
+            _permissive_gate(),
+            _no_spend_warning(),
+            _no_cooldown(),
+            bot,
         )
 
     message_repo.save.assert_not_called()
@@ -348,7 +401,16 @@ async def test_photo_handler_with_caption_forwards_reply_quote_to_pipeline():
         return_value=b"fake-image",
     ):
         await handle_photo_message(
-            message, chat_config, image_service, pipeline, sticker_responder, message_repo, bot
+            message,
+            chat_config,
+            image_service,
+            pipeline,
+            sticker_responder,
+            message_repo,
+            _permissive_gate(),
+            _no_spend_warning(),
+            _no_cooldown(),
+            bot,
         )
 
     pipeline.process.assert_awaited_once()
@@ -406,6 +468,18 @@ def _make_photo_deps(
     sticker_responder = MagicMock()
     sticker_responder.get_sticker_candidates = AsyncMock(return_value=[])
 
+    # TD-028 collaborators. Defaults deliberately permissive: the gate allows,
+    # nobody is in cooldown, no spend warning — so every pre-existing assertion
+    # in this file keeps testing what it was written to test.
+    relevancy_gate = MagicMock()
+    relevancy_gate.evaluate = AsyncMock(
+        return_value=GateDecision(should_respond=True, tier="fast_rules", reason="test-allow")
+    )
+    spend_limit_svc = MagicMock()
+    spend_limit_svc.get_warning_if_exceeded = AsyncMock(return_value=None)
+    abuse_checker = MagicMock()
+    abuse_checker.is_in_cooldown = AsyncMock(return_value=False)
+
     return {
         "message": message,
         "chat_config": chat_config,
@@ -415,6 +489,9 @@ def _make_photo_deps(
         "message_repo": message_repo,
         "sticker_responder": sticker_responder,
         "message_thread_id": thread_id,
+        "relevancy_gate": relevancy_gate,
+        "spend_limit_svc": spend_limit_svc,
+        "abuse_checker": abuse_checker,
     }
 
 
@@ -449,6 +526,9 @@ class TestHandlePhotoMessageTypingIndicator:
                 deps["pipeline"],
                 deps["sticker_responder"],
                 deps["message_repo"],
+                deps["relevancy_gate"],
+                deps["spend_limit_svc"],
+                deps["abuse_checker"],
                 deps["bot"],
             )
 
@@ -482,6 +562,9 @@ class TestHandlePhotoMessageTypingIndicator:
                 deps["pipeline"],
                 deps["sticker_responder"],
                 deps["message_repo"],
+                deps["relevancy_gate"],
+                deps["spend_limit_svc"],
+                deps["abuse_checker"],
                 deps["bot"],
             )
 
@@ -515,6 +598,9 @@ class TestHandlePhotoMessageTypingIndicator:
                 deps["pipeline"],
                 deps["sticker_responder"],
                 deps["message_repo"],
+                deps["relevancy_gate"],
+                deps["spend_limit_svc"],
+                deps["abuse_checker"],
                 deps["bot"],
                 message_thread_id=777,
             )
@@ -554,6 +640,9 @@ class TestHandlePhotoMessageTypingIndicator:
                 deps["pipeline"],
                 deps["sticker_responder"],
                 deps["message_repo"],
+                deps["relevancy_gate"],
+                deps["spend_limit_svc"],
+                deps["abuse_checker"],
                 deps["bot"],
             )
 
@@ -607,6 +696,9 @@ class TestHandlePhotoMessageTypingIndicator:
                 deps["pipeline"],
                 deps["sticker_responder"],
                 deps["message_repo"],
+                deps["relevancy_gate"],
+                deps["spend_limit_svc"],
+                deps["abuse_checker"],
                 deps["bot"],
             )
 
@@ -632,6 +724,9 @@ class TestHandlePhotoMessageTypingIndicator:
                     deps["pipeline"],
                     deps["sticker_responder"],
                     deps["message_repo"],
+                    deps["relevancy_gate"],
+                    deps["spend_limit_svc"],
+                    deps["abuse_checker"],
                     deps["bot"],
                 )
 
@@ -884,3 +979,162 @@ async def test_sticker_handler_disabled():
     )
 
     sticker_service.learn.assert_not_called()
+
+
+# TD-028: three things the text path does that the photo path did not.
+#
+# handlers/media.py grew as a partial copy of handlers/message.py, and the copy
+# lost the relevancy gate, the spend-limit warning and the AI-chosen sticker.
+# The first was a live defect, not just duplication: an unprompted reply to a
+# captioned photo was sent without ever asking whether it was warranted, while
+# the identical text message was gated.
+#
+# These assert the photo handler's OWN behaviour. Every pre-existing test in
+# this file kept passing the whole time the gaps were there, because none of
+# them ever looked.
+
+
+def _photo_deps_for_random_reply(*, gate_allows: bool):
+    deps = _make_photo_deps(caption="just chatting", random_reply=True)
+    deps["relevancy_gate"].evaluate = AsyncMock(
+        return_value=GateDecision(should_respond=gate_allows, tier="llm_judge", reason="test")
+    )
+    return deps
+
+
+async def _run_photo_handler(deps):
+    from src.bot.handlers.media import handle_photo_message
+
+    with patch(
+        "src.bot.handlers.media.download_telegram_file",
+        new_callable=AsyncMock,
+        return_value=b"fake-image",
+    ):
+        await handle_photo_message(
+            deps["message"],
+            deps["chat_config"],
+            deps["image_service"],
+            deps["pipeline"],
+            deps["sticker_responder"],
+            deps["message_repo"],
+            deps["relevancy_gate"],
+            deps["spend_limit_svc"],
+            deps["abuse_checker"],
+            deps["bot"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_random_photo_reply_is_blocked_when_gate_declines():
+    """The live defect. Before the fix the bot replied regardless."""
+    deps = _photo_deps_for_random_reply(gate_allows=False)
+
+    await _run_photo_handler(deps)
+
+    deps["relevancy_gate"].evaluate.assert_awaited_once()
+    deps["pipeline"].process.assert_not_awaited()
+    deps["message"].answer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_random_photo_reply_proceeds_when_gate_allows():
+    """False-positive control for the test above.
+
+    Without it, that assertion would also pass if the gate blocked
+    everything — including replies it approved.
+    """
+    deps = _photo_deps_for_random_reply(gate_allows=True)
+
+    await _run_photo_handler(deps)
+
+    deps["relevancy_gate"].evaluate.assert_awaited_once()
+    deps["pipeline"].process.assert_awaited_once()
+    deps["message"].answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_declined_random_reply_still_analyses_but_skips_generation():
+    """What the gate does and does not save, pinned deliberately.
+
+    It does NOT skip the Vision call: the description is written to message
+    history whether or not the bot replies, so analyse() runs either way. It
+    DOES skip pipeline.process(), the text generation.
+
+    Written the other way round first — asserting analyse() was skipped — and
+    it failed, correctly: the assumption was wrong and a comment in media.py
+    had already been written to it. Kept as a test so the distinction is
+    recorded rather than re-derived.
+    """
+    deps = _photo_deps_for_random_reply(gate_allows=False)
+
+    await _run_photo_handler(deps)
+
+    deps["image_service"].analyze.assert_awaited_once()
+    deps["pipeline"].process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_trigger_on_a_photo_is_never_gated():
+    """A mention or trigger word is an invitation — gating it would be a
+    behaviour change, not a fix. Guards against over-applying the gate."""
+    deps = _make_photo_deps(caption="look at this")  # trigger word: "look"
+
+    await _run_photo_handler(deps)
+
+    deps["relevancy_gate"].evaluate.assert_not_awaited()
+    deps["pipeline"].process.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_ai_chosen_sticker_is_sent_on_the_photo_path():
+    """Was computed by the pipeline and silently dropped."""
+    deps = _make_photo_deps(caption="look at this")
+    deps["pipeline"].process = AsyncMock(
+        return_value=PipelineResult(
+            should_respond=True,
+            html_text="Nice cat!",
+            trigger_type=TriggerType.TRIGGER,
+            response_type=ResponseType.NORMAL,
+            sticker_file_id="sticker-123",
+        )
+    )
+
+    await _run_photo_handler(deps)
+
+    deps["message"].answer_sticker.assert_awaited_once_with("sticker-123")
+
+
+@pytest.mark.asyncio
+async def test_spend_limit_warning_fires_on_the_photo_path():
+    """A daily limit that silently does not apply to photo traffic is worse
+    than no limit — it still reads as enforced."""
+    deps = _make_photo_deps(caption="look at this")
+    deps["spend_limit_svc"].get_warning_if_exceeded = AsyncMock(return_value="⚠️ over budget")
+
+    await _run_photo_handler(deps)
+
+    warned = [call for call in deps["message"].answer.await_args_list if "over budget" in str(call)]
+    assert warned, "the photo path never emitted the spend warning"
+
+
+@pytest.mark.asyncio
+async def test_spend_warning_is_checked_after_post_send_writes_the_cost_row():
+    """Ordering is load-bearing: post_send writes the usage row, so checking
+    the limit before it reads a stale total and the warning is always one
+    message late."""
+    deps = _make_photo_deps(caption="look at this")
+    order: list[str] = []
+
+    async def _record_post_send(*_args, **_kwargs):
+        order.append("post_send")
+
+    async def _record_spend_check(*_args, **_kwargs):
+        order.append("spend_check")
+        return None
+
+    deps["pipeline"].post_send = AsyncMock(side_effect=_record_post_send)
+    deps["spend_limit_svc"].get_warning_if_exceeded = AsyncMock(side_effect=_record_spend_check)
+
+    await _run_photo_handler(deps)
+
+    assert order == ["post_send", "spend_check"], f"wrong order: {order}"
