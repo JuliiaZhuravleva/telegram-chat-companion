@@ -9,10 +9,11 @@ noticed it had been removed from a chat.
 from __future__ import annotations
 
 import structlog
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.types import ChatMemberUpdated, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
 
@@ -94,4 +95,62 @@ async def handle_my_chat_member(
             chat_id=chat.id,
             chat_title=chat.title,
             status=status,
+        )
+
+
+@router.message(F.migrate_to_chat_id | F.migrate_from_chat_id)
+async def handle_chat_migration(
+    message: Message,
+    migration_repo: FromDishka[ChatMigrationRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Re-key a chat's settings and knowledge base when it becomes a supergroup.
+
+    Telegram issues a NEW ``chat_id`` on upgrade and announces it twice: once
+    in the old chat (``migrate_to_chat_id`` set, ``chat.id`` = old) and once in
+    the new one (``migrate_from_chat_id`` set, ``chat.id`` = new). Either
+    update carries both ids, so both are accepted and the second is a quiet
+    no-op -- ``migrate()`` reports ``nothing_to_move`` once the rows are gone
+    from the old id.
+
+    Filters, not a body guard: once a handler's filters match, aiogram
+    consumes the update, so a chat-type or field check inside the body would
+    silently swallow ordinary messages (CLAUDE.md).
+
+    Known limitation, deliberate: ``AccessControlMiddleware`` gates on
+    ``chat_settings.enabled``, so a chat that was never enabled never reaches
+    this handler. That is acceptable today -- a disabled chat cannot run
+    ``/remember``, so it has no facts to strand -- but it stops being true the
+    moment anything writes ``chat_facts`` outside the enabled path.
+    """
+    old_chat_id = message.chat.id
+    new_chat_id = message.migrate_to_chat_id
+    if new_chat_id is None:
+        # The announcement seen from the new side: chat.id is already the new id.
+        new_chat_id = old_chat_id
+        old_chat_id = message.migrate_from_chat_id or old_chat_id
+
+    if old_chat_id == new_chat_id:
+        return
+
+    outcome = await migration_repo.migrate(old_chat_id, new_chat_id)
+
+    if outcome.status == "migrated":
+        # The cached ChatConfig is keyed by the old id and would otherwise
+        # serve this request's remaining handlers a config for a chat that no
+        # longer exists.
+        chat_config_service.invalidate(old_chat_id)
+        logger.info(
+            "Chat migrated to supergroup: settings and knowledge base re-keyed",
+            old_chat_id=old_chat_id,
+            new_chat_id=new_chat_id,
+            settings_moved=outcome.settings_moved,
+            facts_moved=outcome.facts_moved,
+            not_moved="chat_memory, chat_messages, observability logs",
+        )
+    elif outcome.status == "target_occupied":
+        logger.warning(
+            "Chat migration needs a human: the new chat already has settings",
+            old_chat_id=old_chat_id,
+            new_chat_id=new_chat_id,
         )

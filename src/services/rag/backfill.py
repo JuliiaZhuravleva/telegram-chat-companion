@@ -34,16 +34,36 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 import asyncpg
 import structlog
 
 from src.config import EmbeddingBackfillSettings
+from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
 from src.services.ai.router import AIRouter
 from src.services.rag.memory import EXPECTED_EMBEDDING_DIMENSIONS
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _Source:
+    """One table this worker repairs.
+
+    Added when `chat_facts` joined `chat_memory` here (plan KB-04): a manual
+    KB fact whose embedding call failed is invisible to retrieval forever,
+    which is the same defect this worker already existed to fix — so it got a
+    second source rather than a second worker.
+    """
+
+    name: str
+    text_field: str
+    fetch: Callable[..., Awaitable[list[asyncpg.Record]]]
+    update: Callable[[int, list[float]], Awaitable[None]]
+
 
 _INITIAL_DELAY = 180  # let startup settle before the first pass
 
@@ -72,10 +92,31 @@ class EmbeddingBackfillWorker:
         self._ai_router = ai_router
         self._config = config
         self._task: asyncio.Task[None] | None = None
-        # memory_id -> consecutive failures; a row graduates to `_parked` at
-        # `_MAX_ATTEMPTS` and is then excluded from the query.
-        self._failures: dict[int, int] = {}
-        self._parked: set[int] = set()
+        # (source, row_id) -> consecutive failures; a row graduates to
+        # `_parked` at `_MAX_ATTEMPTS` and is then excluded from the query.
+        # Keyed by SOURCE as well as id: `chat_memory` row 5 and `chat_facts`
+        # row 5 are different rows, and a bare-int key would park one because
+        # the other failed.
+        self._failures: dict[tuple[str, int], int] = {}
+        self._parked: set[tuple[str, int]] = set()
+
+    def _sources(self) -> tuple[_Source, ...]:
+        memory = MemoryRepository(self._pool)
+        knowledge = KnowledgeRepository(self._pool)
+        return (
+            _Source(
+                "chat_memory", "content", memory.get_pending_embeddings, memory.update_embedding
+            ),
+            _Source(
+                "chat_facts",
+                "fact_text",
+                knowledge.get_pending_embeddings,
+                knowledge.update_embedding,
+            ),
+        )
+
+    def _parked_ids(self, source: str) -> list[int]:
+        return sorted(row_id for src, row_id in self._parked if src == source)
 
     async def start(self) -> None:
         """Start the backfill loop (no-op when disabled by config)."""
@@ -96,18 +137,20 @@ class EmbeddingBackfillWorker:
                 await self._task
         logger.info("Embedding backfill worker stopped")
 
-    def _record_failure(self, memory_id: int) -> None:
+    def _record_failure(self, source: str, row_id: int) -> None:
         """Count a failed attempt and park the row once it hits the cap."""
-        attempts = self._failures.get(memory_id, 0) + 1
-        self._failures[memory_id] = attempts
+        key = (source, row_id)
+        attempts = self._failures.get(key, 0) + 1
+        self._failures[key] = attempts
         if attempts >= _MAX_ATTEMPTS:
-            self._parked.add(memory_id)
-            self._failures.pop(memory_id, None)
+            self._parked.add(key)
+            self._failures.pop(key, None)
             logger.warning(
                 "Embedding backfill: parking row after repeated failures — it will "
                 "no longer be retried until the process restarts, so the rest of "
                 "the backlog can proceed",
-                memory_id=memory_id,
+                source=source,
+                row_id=row_id,
                 attempts=attempts,
                 parked_total=len(self._parked),
             )
@@ -121,57 +164,34 @@ class EmbeddingBackfillWorker:
         (see module docstring) so a deterministically-failing row cannot hold
         the head of a FIFO queue forever.
         """
-        repo = MemoryRepository(self._pool)
-        pending = await repo.get_pending_embeddings(
-            limit=self._config.batch_limit,
-            exclude_ids=sorted(self._parked),
-        )
-
         filled = 0
         still_pending = 0
 
-        for row in pending:
-            memory_id = row["id"]
+        for source in self._sources():
+            # `batch_limit` is applied PER SOURCE, not shared. A shared budget
+            # would let a long `chat_memory` backlog starve `chat_facts`
+            # indefinitely, and a stranded fact is the more visible failure:
+            # the user can see it in /kb while the bot can never retrieve it.
+            #
+            # Each source is also isolated: `_run_loop` only catches around the
+            # WHOLE pass, so before this guard a failing fetch on the first
+            # source aborted the pass and the second never ran — permanently
+            # starving `chat_facts`, which is ordered second and is precisely
+            # the source added to fix stranded facts.
             try:
-                embedding_result = await self._ai_router.generate_embedding(
-                    row["content"], chat_id=row["chat_id"]
+                pending = await source.fetch(
+                    limit=self._config.batch_limit,
+                    exclude_ids=self._parked_ids(source.name),
                 )
-            except Exception:
-                logger.warning(
-                    "Embedding backfill: provider still failing, leaving pending",
-                    memory_id=memory_id,
-                )
-                self._record_failure(memory_id)
-                still_pending += 1
-                continue
-
-            actual_dimensions = len(embedding_result.embedding)
-            if actual_dimensions != EXPECTED_EMBEDDING_DIMENSIONS:
-                logger.warning(
-                    "Embedding backfill: unexpected dimensionality, leaving pending",
-                    memory_id=memory_id,
-                    expected=EXPECTED_EMBEDDING_DIMENSIONS,
-                    actual=actual_dimensions,
-                    provider=embedding_result.provider,
-                    model=embedding_result.model,
-                )
-                self._record_failure(memory_id)
-                still_pending += 1
-                continue
-
-            try:
-                await repo.update_embedding(memory_id, embedding_result.embedding)
+                source_filled, source_pending = await self._process(source, pending)
             except Exception:
                 logger.exception(
-                    "Embedding backfill: failed to persist backfilled embedding",
-                    memory_id=memory_id,
+                    "Embedding backfill: source failed, continuing with the others",
+                    source=source.name,
                 )
-                self._record_failure(memory_id)
-                still_pending += 1
                 continue
-
-            self._failures.pop(memory_id, None)
-            filled += 1
+            filled += source_filled
+            still_pending += source_pending
 
         if filled or still_pending:
             logger.info(
@@ -182,6 +202,59 @@ class EmbeddingBackfillWorker:
             )
 
         return {"filled": filled, "still_pending": still_pending}
+
+    async def _process(self, source: _Source, pending: list[asyncpg.Record]) -> tuple[int, int]:
+        """Embed and persist one source's batch. Returns (filled, still_pending)."""
+        filled = 0
+        still_pending = 0
+
+        for row in pending:
+            row_id = row["id"]
+            try:
+                embedding_result = await self._ai_router.generate_embedding(
+                    row[source.text_field], chat_id=row["chat_id"]
+                )
+            except Exception:
+                logger.warning(
+                    "Embedding backfill: provider still failing, leaving pending",
+                    source=source.name,
+                    row_id=row_id,
+                )
+                self._record_failure(source.name, row_id)
+                still_pending += 1
+                continue
+
+            actual_dimensions = len(embedding_result.embedding)
+            if actual_dimensions != EXPECTED_EMBEDDING_DIMENSIONS:
+                logger.warning(
+                    "Embedding backfill: unexpected dimensionality, leaving pending",
+                    source=source.name,
+                    row_id=row_id,
+                    expected=EXPECTED_EMBEDDING_DIMENSIONS,
+                    actual=actual_dimensions,
+                    provider=embedding_result.provider,
+                    model=embedding_result.model,
+                )
+                self._record_failure(source.name, row_id)
+                still_pending += 1
+                continue
+
+            try:
+                await source.update(row_id, embedding_result.embedding)
+            except Exception:
+                logger.exception(
+                    "Embedding backfill: failed to persist backfilled embedding",
+                    source=source.name,
+                    row_id=row_id,
+                )
+                self._record_failure(source.name, row_id)
+                still_pending += 1
+                continue
+
+            self._failures.pop((source.name, row_id), None)
+            filled += 1
+
+        return filled, still_pending
 
     async def _run_loop(self) -> None:
         await asyncio.sleep(_INITIAL_DELAY)

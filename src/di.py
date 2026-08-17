@@ -19,6 +19,7 @@ from src.database.repositories.abuse import AbuseRepository
 from src.database.repositories.activity import ActivityRepository
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
+from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
@@ -123,6 +124,10 @@ class RepositoryProvider(Provider):
     @provide
     def knowledge_repo(self, pool: asyncpg.Pool) -> KnowledgeRepository:
         return KnowledgeRepository(pool)
+
+    @provide
+    def chat_migration_repo(self, pool: asyncpg.Pool) -> ChatMigrationRepository:
+        return ChatMigrationRepository(pool)
 
     @provide
     def reaction_repo(self, pool: asyncpg.Pool) -> ReactionRepository:

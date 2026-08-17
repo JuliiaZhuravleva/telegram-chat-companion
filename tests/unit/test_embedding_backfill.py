@@ -340,3 +340,137 @@ class TestMemoryRepositoryPendingEmbeddings:
         assert memory_id == 42
         args = pool.fetchrow.call_args.args
         assert args[3] is None  # embedding positional slot
+
+
+# ---------------------------------------------------------------------------
+# chat_facts as a second source (plan KB-04)
+# ---------------------------------------------------------------------------
+
+
+def _make_fact(fact_id: int = 1, chat_id: int = 100, fact_text: str = "сбор в 19:00") -> dict:
+    return {"id": fact_id, "chat_id": chat_id, "fact_text": fact_text}
+
+
+def _patch_sources(
+    monkeypatch: pytest.MonkeyPatch, memory_rows: list[dict], fact_rows: list[dict]
+) -> tuple[AsyncMock, AsyncMock]:
+    """Patch BOTH repositories.
+
+    Patching only MemoryRepository (what the pre-KB-04 tests do) leaves
+    KnowledgeRepository holding an AsyncMock pool, whose fetch() result
+    iterates as empty -- so the whole chat_facts source would appear to work
+    while doing nothing. These tests exist to make that failure visible.
+    """
+    memory = AsyncMock()
+    memory.get_pending_embeddings = AsyncMock(return_value=memory_rows)
+    memory.update_embedding = AsyncMock()
+    knowledge = AsyncMock()
+    knowledge.get_pending_embeddings = AsyncMock(return_value=fact_rows)
+    knowledge.update_embedding = AsyncMock()
+    monkeypatch.setattr("src.services.rag.backfill.MemoryRepository", lambda _pool: memory)
+    monkeypatch.setattr("src.services.rag.backfill.KnowledgeRepository", lambda _pool: knowledge)
+    return memory, knowledge
+
+
+class TestChatFactsSource:
+    @pytest.mark.asyncio
+    async def test_a_stranded_fact_gets_its_embedding(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """D-2: a fact whose embedding call failed was invisible to retrieval forever."""
+        _memory, knowledge = _patch_sources(monkeypatch, [], [_make_fact(7)])
+        worker = _make_worker()
+        worker._ai_router.generate_embedding = AsyncMock(return_value=_make_embedding_result())
+
+        result = await worker.run_once()
+
+        knowledge.update_embedding.assert_awaited_once()
+        assert knowledge.update_embedding.await_args.args[0] == 7
+        assert result["filled"] == 1
+
+    @pytest.mark.asyncio
+    async def test_embeds_fact_text_not_content(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """chat_facts has no `content` column -- reading one would KeyError."""
+        _patch_sources(monkeypatch, [], [_make_fact(1, fact_text="сбор в 19:00")])
+        worker = _make_worker()
+        worker._ai_router.generate_embedding = AsyncMock(return_value=_make_embedding_result())
+
+        await worker.run_once()
+
+        assert worker._ai_router.generate_embedding.await_args.args[0] == "сбор в 19:00"
+
+    @pytest.mark.asyncio
+    async def test_both_sources_run_in_one_pass(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        memory, knowledge = _patch_sources(monkeypatch, [_make_row(1)], [_make_fact(1)])
+        worker = _make_worker()
+        worker._ai_router.generate_embedding = AsyncMock(return_value=_make_embedding_result())
+
+        result = await worker.run_once()
+
+        memory.get_pending_embeddings.assert_awaited_once()
+        knowledge.get_pending_embeddings.assert_awaited_once()
+        assert result["filled"] == 2
+
+    @pytest.mark.asyncio
+    async def test_batch_limit_is_per_source_not_shared(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A shared budget would let a memory backlog starve the KB indefinitely."""
+        memory, knowledge = _patch_sources(monkeypatch, [], [])
+        worker = _make_worker(batch_limit=20)
+
+        await worker.run_once()
+
+        assert memory.get_pending_embeddings.await_args.kwargs["limit"] == 20
+        assert knowledge.get_pending_embeddings.await_args.kwargs["limit"] == 20
+
+    @pytest.mark.asyncio
+    async def test_parking_is_keyed_per_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """chat_memory row 5 and chat_facts row 5 are different rows.
+
+        With a bare-int park key, failing one would exclude the other from
+        every future pass -- silently, and only for rows whose ids collide.
+        """
+        memory, knowledge = _patch_sources(monkeypatch, [_make_row(5)], [_make_fact(5)])
+        worker = _make_worker()
+        # Memory fails every time; the fact succeeds every time.
+        calls: list[str] = []
+
+        async def _embed(text: str, **_kw: object) -> EmbeddingResult:
+            calls.append(text)
+            if text == "hi":  # the chat_memory row
+                raise RuntimeError("provider down")
+            return _make_embedding_result()
+
+        worker._ai_router.generate_embedding = AsyncMock(side_effect=_embed)
+
+        for _ in range(3):  # _MAX_ATTEMPTS
+            await worker.run_once()
+
+        assert ("chat_memory", 5) in worker._parked
+        assert ("chat_facts", 5) not in worker._parked
+        # And the exclusion list handed to each source is scoped to that source.
+        assert worker._parked_ids("chat_memory") == [5]
+        assert worker._parked_ids("chat_facts") == []
+        assert knowledge.update_embedding.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_a_failing_source_does_not_starve_the_others(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_run_loop` only catches around the WHOLE pass.
+
+        So without per-source isolation, a fetch that keeps failing on
+        chat_memory aborts every pass before chat_facts is ever reached —
+        permanently stranding the facts this source was added to repair.
+        """
+        memory, knowledge = _patch_sources(monkeypatch, [], [_make_fact(1)])
+        memory.get_pending_embeddings = AsyncMock(side_effect=RuntimeError("db hiccup"))
+        worker = _make_worker()
+        worker._ai_router.generate_embedding = AsyncMock(return_value=_make_embedding_result())
+
+        result = await worker.run_once()
+
+        knowledge.get_pending_embeddings.assert_awaited_once()
+        knowledge.update_embedding.assert_awaited_once()
+        assert result["filled"] == 1
