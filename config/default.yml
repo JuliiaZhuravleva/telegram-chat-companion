@@ -91,6 +91,19 @@ rag:
   # Memory importance scoring
   default_importance: 0.5
 
+# Knowledge Base retrieval (the module on/off gate is modules.knowledge_base)
+knowledge_base:
+  # Minimum cosine similarity for a fact to reach the prompt (0.0 to 1.0).
+  #
+  # Measured on production 2026-08-18 against a 36-fact corpus
+  # (docs/kb-eval-baseline.md): unrelated questions topped out at 0.646,
+  # genuine matches started at 0.706. 0.70 sits in that gap — and is the
+  # value `rag.min_similarity` above has used for months on the same
+  # embedding model, so this is the existing number rather than a new one.
+  #
+  # Set to 0.0 to disable filtering and restore the pre-floor behaviour.
+  min_similarity: 0.7
+
 # Data retention for the periodic cleanup task.
 # Set any window to null to never delete that table.
 maintenance:

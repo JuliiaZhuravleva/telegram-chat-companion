@@ -71,6 +71,22 @@ class RAGSettings(BaseSettings):
     default_importance: float = 0.5
 
 
+class KnowledgeBaseSettings(BaseSettings):
+    """Knowledge-base *retrieval* tuning (the module gate lives in `modules`).
+
+    Deliberately a sibling of `RAGSettings` rather than a new invention: both
+    describe a cosine search over the same 768-dim embedding space, and KB was
+    the only one of the two with no floor at all -- every lookup injected its
+    top-5 regardless of how far away they were.
+
+    `min_similarity = 0.0` disables filtering entirely and restores the
+    pre-floor behaviour, which is the rollback path that does not need a
+    release.
+    """
+
+    min_similarity: float = 0.7
+
+
 class AITaskConfig(BaseSettings):
     """Configuration for a specific AI task."""
 
@@ -200,6 +216,7 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     bot: BotSettings = Field(default_factory=BotSettings)
     rag: RAGSettings = Field(default_factory=RAGSettings)
+    knowledge_base: KnowledgeBaseSettings = Field(default_factory=KnowledgeBaseSettings)
     ai: AISettings = Field(default_factory=AISettings)
     maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
     embedding_backfill: EmbeddingBackfillSettings = Field(default_factory=EmbeddingBackfillSettings)

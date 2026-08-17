@@ -55,8 +55,17 @@ def _make_pipeline(
     knowledge_repo=None,
     kb_facts=None,
     embedding_error=None,
+    kb_min_similarity=0.0,
 ):
-    """Build a pipeline with mocked dependencies."""
+    """Build a pipeline with mocked dependencies.
+
+    ``kb_min_similarity`` defaults to 0.0 — i.e. no floor — so that every test
+    written before the floor existed keeps testing exactly what it tested then.
+    Their ``kb_facts`` fixtures carry no ``similarity`` key at all, so any
+    positive default would silently filter all of them away and the failures
+    would point at retrieval rather than at the fixture. Tests that are about
+    the floor pass it explicitly.
+    """
     abuse_checker = AsyncMock()
     abuse_checker.check.return_value = abuse_result or _make_abuse_result()
     abuse_checker.update_cooldown = AsyncMock()
@@ -106,6 +115,7 @@ def _make_pipeline(
         link_service=link_service,
         knowledge_repo=knowledge_repo,
         observability_repo=observability_repo,
+        kb_min_similarity=kb_min_similarity,
     )
     return pipeline, {
         "abuse_checker": abuse_checker,
@@ -662,6 +672,199 @@ class TestPipelineKnowledgeBase:
         call_kwargs = mocks["ai_router"].generate_text.call_args.kwargs
         assert "мероприятие: дата 2026-08-01" in call_kwargs["system_prompt"]
 
+    async def test_kb_facts_below_the_floor_never_reach_the_prompt(self, make_chat_config):
+        """A distant fact must not be shown to the model as a fact of this chat.
+
+        Asserted on the system prompt the router actually received, not on an
+        intermediate list: the prompt is the artifact the defect lived in
+        (production 2026-08-18 injected five sub-floor facts on every off-topic
+        turn), so it is the thing worth pinning.
+        """
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_min_similarity=0.7,
+            kb_facts=[
+                {"id": 1, "fact_text": "релевантный факт", "similarity": 0.81, "salience": 0.5},
+                {"id": 2, "fact_text": "посторонний факт", "similarity": 0.64, "salience": 0.5},
+            ],
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="что решили?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "релевантный факт" in system_prompt
+        assert "посторонний факт" not in system_prompt
+
+    async def test_no_match_means_no_knowledge_base_block_at_all(self, make_chat_config):
+        """Owner decision 2026-08-18: answer without the base unless something matches.
+
+        Not "an empty block" and not "a block saying nothing matched" — the
+        section must be absent, so the model answers as it would in a chat with
+        no knowledge base.
+        """
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_min_similarity=0.7,
+            kb_facts=[
+                {"id": 1, "fact_text": "про караоке", "similarity": 0.646, "salience": 0.5},
+                {"id": 2, "fact_text": "про проектор", "similarity": 0.63, "salience": 0.5},
+            ],
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="как варить борщ?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "Knowledge Base" not in system_prompt
+        assert "про караоке" not in system_prompt
+        assert "про проектор" not in system_prompt
+
+    async def test_sub_floor_facts_are_still_logged_with_their_similarity(self, make_chat_config):
+        """The floor filters the prompt, never the log.
+
+        `retrieval_log` is the only record of the noise band, and the floor was
+        derived from exactly that band (docs/kb-eval-baseline.md). Filtering at
+        selection would make the number unmaintainable the moment it shipped:
+        every future re-tuning needs to see what was cut.
+        """
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_min_similarity=0.7,
+            kb_facts=[
+                {"id": 1, "fact_text": "релевантный", "similarity": 0.81, "salience": 0.5},
+                {"id": 2, "fact_text": "посторонний", "similarity": 0.64, "salience": 0.5},
+            ],
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="что решили?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+        await asyncio.sleep(0)
+
+        call = next(
+            c
+            for c in mocks["observability_repo"].log_retrieval.await_args_list
+            if c.kwargs["source"] == "kb"
+        )
+        assert call.kwargs["n_results"] == 2, "the sub-floor row must still be recorded"
+        assert call.kwargs["n_injected"] == 1
+        assert call.kwargs["params"]["min_similarity"] == 0.7
+        by_id = {item["id"]: item for item in call.kwargs["results"]}
+        assert by_id[2]["sim"] == 0.64, "its similarity is the measurement"
+        assert by_id[2]["above_floor"] is False
+        assert by_id[2]["injected"] is False
+        assert by_id[1]["above_floor"] is True
+        assert by_id[1]["injected"] is True
+
+    async def test_floor_is_applied_before_the_budget_trim(self, make_chat_config):
+        """A sub-floor fact must be `injected=False` even when the budget had room.
+
+        The budget almost never binds at real fact lengths, so trimming the
+        unfiltered set instead would mark sub-floor rows as injected on nearly
+        every turn — and `kb_report.py` reads that field. The mistake would be
+        invisible in the data it corrupts.
+        """
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_min_similarity=0.7,
+            kb_facts=[
+                {"id": 1, "fact_text": "короткий релевантный", "similarity": 0.9, "salience": 0.5},
+                {"id": 2, "fact_text": "короткий посторонний", "similarity": 0.5, "salience": 0.9},
+            ],
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="что решили?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+        await asyncio.sleep(0)
+
+        call = next(
+            c
+            for c in mocks["observability_repo"].log_retrieval.await_args_list
+            if c.kwargs["source"] == "kb"
+        )
+        by_id = {item["id"]: item for item in call.kwargs["results"]}
+        # Both are short enough that KB_BUDGET_TOKENS cannot be what drops #2,
+        # and its higher salience means the trim would have preferred it.
+        assert by_id[2]["injected"] is False
+        assert call.kwargs["n_injected"] == 1
+
+    async def test_zero_floor_restores_pre_floor_behaviour(self, make_chat_config):
+        """`min_similarity = 0.0` is the documented rollback, so it must cut nothing.
+
+        Including a negatively-scored row: cosine similarity is defined on
+        [-1, 1], so a naive `sim >= 0.0` test would still drop it and the
+        rollback would not actually be one.
+        """
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_min_similarity=0.0,
+            kb_facts=[
+                {"id": 1, "fact_text": "далёкий факт", "similarity": 0.12, "salience": 0.5},
+                {"id": 2, "fact_text": "противоположный факт", "similarity": -0.3, "salience": 0.5},
+            ],
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="что решили?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "далёкий факт" in system_prompt
+        assert "противоположный факт" in system_prompt
+
+    async def test_fact_without_similarity_is_cut_when_a_floor_is_set(self, make_chat_config):
+        """A row that cannot be shown to clear the floor does not clear it.
+
+        Treating a missing score as 0.0 would make a malformed row more
+        privileged than a genuine distant match.
+        """
+        config = make_chat_config(enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            kb_min_similarity=0.7,
+            kb_facts=[{"id": 1, "fact_text": "факт без оценки", "salience": 0.5}],
+        )
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="что решили?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "факт без оценки" not in system_prompt
+
     async def test_kb_embedding_failure_does_not_block(self, make_chat_config):
         """Embedding-generation failure must not prevent an AI response."""
         config = make_chat_config(enabled=True, kb_enabled=True)
@@ -713,6 +916,7 @@ class TestPipelineKnowledgeBase:
             abuse_checker=abuse_checker,
             message_repo=message_repo,
             response_log_repo=response_log_repo,
+            kb_min_similarity=0.0,
         )
 
         result = await pipeline.process(

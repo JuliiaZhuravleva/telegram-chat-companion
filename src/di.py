@@ -204,6 +204,7 @@ class ServiceProvider(Provider):
     @provide
     def text_pipeline(
         self,
+        settings: Settings,
         ai_router: AIRouter,
         abuse_checker: AntiAbuseChecker,
         message_repo: MessageRepository,
@@ -224,6 +225,7 @@ class ServiceProvider(Provider):
             sticker_service=sticker_service,
             knowledge_repo=knowledge_repo,
             observability_repo=observability_repo,
+            kb_min_similarity=settings.knowledge_base.min_similarity,
         )
 
     @provide

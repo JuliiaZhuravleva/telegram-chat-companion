@@ -98,3 +98,80 @@ must be read as a new baseline rather than as a delta. What moved:
 readiness from the corpus, not the calendar: `SELECT count(*) FROM chat_facts
 WHERE status = 'active' AND valid_to IS NULL` in the tens, across more than one
 subject, before the sweep can distinguish anything.
+
+---
+
+## 2026-08-18 — first measurement with a real corpus
+
+A production group chat was seeded with 33 hand-written facts through the real
+`/remember` path (so every one carries an embedding; a direct `INSERT` would
+leave `embedding = NULL` and be invisible to `search_by_similarity`). Corpus
+after seeding: **36 live facts** in that chat, 8 topics, lengths 46–233 chars
+(none near the 600-char render cap), 4 carrying `expires_at`.
+
+Five addressed turns were then issued deliberately to span the range. Verbatim
+from `retrieval_log`, `source='kb'`, all with `n_results = n_injected = 5`:
+
+```
+query                                    top sim   bottom sim
+what is <a recurring chat event>?          0.706        0.563   ← intended hit
+why does everyone call each other X?       0.793        0.658   ← intended hit
+(a statement, not a question)              0.646        0.608   ← no topic match
+how do you cook borscht?                   0.640        0.586   ← intended miss
+what is bitcoin worth right now?           0.630        0.586   ← intended miss
+```
+
+**Noise ceiling 0.646. Signal floor 0.706. Gap 0.060.** No overlap — the
+separation is clean, but narrow, and n = 5.
+
+### What this changes versus the 2-fact line
+
+**0.588 from the previous section must not be reused as a threshold.** It was
+the *ceiling of a 2-fact corpus*, and the noise floor rises with corpus size:
+with 36 facts an unrelated question now reaches 0.640. Comparing the two
+numbers directly compares different quantities.
+
+**On a miss the retriever returns the same handful of self-referential facts
+every time.** The three low-scoring turns returned near-identical id sets,
+dominated by facts *about the bot itself*. Every addressed message begins with
+the trigger word, so with no real topical match the query embedding is closest
+to the facts that talk about the bot. Low-similarity injection therefore does
+not supply varied colour — it supplies the same five rows regardless of the
+question.
+
+### The floor: 0.70, copied rather than invented
+
+`rag.min_similarity` is already **0.70** (`config/default.yml`), wired through
+`settings.rag` into `MemoryRepository`. It is the same embedding model, the same
+768-dim cosine space, and it has been in production for months. In this same
+five-turn window RAG returned **0 results on every turn** — which is that floor
+working, not a fault.
+
+That number lands inside the measured gap without being tuned to it. KB is the
+only retrieval subsystem in the project with no floor at all, so the fix is to
+give it the one that already exists, not to derive a second one from five points.
+
+> **Owner decision, 2026-08-18: by default answer *without* the knowledge base;
+> attach facts only when there is a topical match.** No match → the KB block is
+> not added to the prompt at all.
+
+Implementation notes that follow from this measurement:
+
+- **Filter at injection, not at selection.** Keep fetching the top 5 and keep
+  writing all 5 to `retrieval_log` with their similarities, marking sub-floor
+  rows `injected: false`. Filtering earlier would stop the log from recording the
+  noise band — i.e. destroy exactly the data needed to re-tune the floor later.
+- **Full rollback is `min_similarity = 0.0`**, restoring today's behaviour without
+  a revert.
+- **The hit at 0.706 clears the floor by 0.006.** A slightly worse phrasing of the
+  same question would be cut. Re-measure once the chat has lived with the corpus.
+
+### One misattribution, recorded because it was convincing
+
+The off-topic answers were laced with chat in-jokes, which read as the knowledge
+base polluting them. It was not: the fact ids actually retrieved on those turns
+contained none of that material, the chat's custom `system_prompt` (613 chars)
+does not mention it, and RAG returned nothing. The only remaining channel is the
+recent-message history in the user prompt — the chat's own lore, which the bot
+sees regardless of the KB. **A plausible story about which subsystem caused an
+output is not evidence; check what that subsystem actually returned.**
