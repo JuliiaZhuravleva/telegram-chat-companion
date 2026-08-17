@@ -1,5 +1,6 @@
 """Tests for media handlers (voice, photo, sticker)."""
 
+from contextlib import ExitStack
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -47,6 +48,12 @@ def _make_message(
 def _make_chat_config(**overrides):
     """Create a mock ChatConfig."""
     config = MagicMock()
+    # Explicit, not inherited from MagicMock: should_respond() iterates
+    # trigger_words and compares random_response_chance to a float, and a bare
+    # MagicMock makes the second raise TypeError inside the handler. Defaults
+    # are "never speak unprompted" so each test opts in to what it is testing.
+    config.trigger_words = ()
+    config.random_response_chance = 0.0
     config.transcribe_voice = True
     config.transcribe_video_notes = True
     config.image_analysis_enabled = True
@@ -82,6 +89,14 @@ def _make_bot():
     return bot
 
 
+def _repo(transcription_row=None):
+    """A MessageRepository whose transcription lookup returns `transcription_row`."""
+    repo = MagicMock()
+    repo.get_transcription_source = AsyncMock(return_value=transcription_row)
+    repo.save = AsyncMock()
+    return repo
+
+
 def _make_sticker_repo():
     repo = MagicMock()
     repo.get_sticker_set = AsyncMock(return_value=None)
@@ -91,126 +106,303 @@ def _make_sticker_repo():
 
 # ── Voice handler tests ──────────────────────────────────────────────
 
+BOT_ID = 999
 
-@pytest.mark.asyncio
-async def test_voice_handler_transcribes_and_replies():
-    from src.bot.handlers.media import handle_voice_message
 
-    message = _make_message()
+def _make_voice_deps(
+    *,
+    transcript: str | None = "Hello world",
+    trigger_words=(),
+    random_chance: float = 0.0,
+    gate_allows: bool = True,
+    voice_message_id: int = 42,
+):
+    message = _make_message(message_id=voice_message_id)
     voice = MagicMock()
     voice.file_id = "voice-file-id"
     message.voice = voice
     message.video_note = None
+    # Both sends now go through send_quoted_reply -> message.answer: the
+    # transcription first (id 43), then the AI reply (id 77).
+    _sent_ids = iter([43, 77, 78, 79])
+    message.answer = AsyncMock(side_effect=lambda *_a, **_kw: MagicMock(message_id=next(_sent_ids)))
 
-    chat_config = _make_chat_config()
-    bot = _make_bot()
+    chat_config = _make_chat_config(
+        trigger_words=tuple(trigger_words), random_response_chance=random_chance
+    )
 
     voice_service = MagicMock()
+    voice_service.record_transcription_message = AsyncMock()
     voice_service.transcribe = AsyncMock(
-        return_value=TranscriptionResult(
-            text="Hello world",
-            model="whisper-1",
-            provider="openai",
+        return_value=(
+            None
+            if transcript is None
+            else TranscriptionResult(text=transcript, model="whisper-1", provider="openai")
         )
     )
 
-    with patch(
-        "src.bot.handlers.media.download_telegram_file",
-        new_callable=AsyncMock,
-        return_value=b"fake-audio",
-    ):
-        await handle_voice_message(message, chat_config, voice_service, bot)
+    pipeline = MagicMock()
+    pipeline.process = AsyncMock(
+        return_value=PipelineResult(
+            should_respond=True,
+            html_text="и тебе привет",
+            trigger_type=TriggerType.TRIGGER,
+            response_type=ResponseType.NORMAL,
+        )
+    )
+    pipeline.post_send = AsyncMock()
 
-    voice_service.transcribe.assert_awaited_once()
-    message.reply.assert_awaited_once()
-    reply_text = message.reply.call_args.args[0]
-    assert "Hello world" in reply_text
+    relevancy_gate = MagicMock()
+    relevancy_gate.evaluate = AsyncMock(
+        return_value=GateDecision(should_respond=gate_allows, tier="llm_judge", reason="test")
+    )
+
+    return {
+        "message": message,
+        "chat_config": chat_config,
+        "voice_service": voice_service,
+        "pipeline": pipeline,
+        "message_repo": _repo(),
+        "relevancy_gate": relevancy_gate,
+        "spend_limit_svc": _no_spend_warning(),
+        "abuse_checker": _no_cooldown(),
+        "bot": _make_bot(),
+    }
+
+
+async def _run_voice_handler(deps, *, message_thread_id=None, patch_indicator=False):
+    from src.bot.handlers.media import handle_voice_message
+
+    stack = [
+        patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new_callable=AsyncMock,
+            return_value=b"fake-audio",
+        )
+    ]
+    indicator = None
+    if patch_indicator:
+        indicator = patch("src.bot.handlers.media.typing_indicator")
+        stack.append(indicator)
+
+    with ExitStack() as ctx:
+        entered = [ctx.enter_context(cm) for cm in stack]
+        if patch_indicator:
+            mock_indicator = entered[-1]
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await handle_voice_message(
+            deps["message"],
+            deps["chat_config"],
+            deps["voice_service"],
+            deps["pipeline"],
+            deps["message_repo"],
+            deps["relevancy_gate"],
+            deps["spend_limit_svc"],
+            deps["abuse_checker"],
+            deps["bot"],
+            message_thread_id=message_thread_id,
+            bot_id=BOT_ID,
+        )
+
+    return entered[-1] if patch_indicator else None
+
+
+@pytest.mark.asyncio
+async def test_voice_handler_transcribes_and_replies():
+    deps = _make_voice_deps()
+
+    await _run_voice_handler(deps)
+
+    deps["voice_service"].transcribe.assert_awaited_once()
+    deps["message"].answer.assert_awaited_once()
+    assert "Hello world" in deps["message"].answer.call_args.args[0]
 
 
 @pytest.mark.asyncio
 async def test_voice_handler_disabled():
     from src.bot.handlers.media import handle_voice_message
 
-    message = _make_message()
-    voice = MagicMock()
-    voice.file_id = "voice-file-id"
-    message.voice = voice
-    message.video_note = None
+    deps = _make_voice_deps()
+    deps["chat_config"].transcribe_voice = False
 
-    chat_config = _make_chat_config(transcribe_voice=False)
-    bot = _make_bot()
-    voice_service = MagicMock()
+    await handle_voice_message(
+        deps["message"],
+        deps["chat_config"],
+        deps["voice_service"],
+        deps["pipeline"],
+        deps["message_repo"],
+        deps["relevancy_gate"],
+        deps["spend_limit_svc"],
+        deps["abuse_checker"],
+        deps["bot"],
+    )
 
-    await handle_voice_message(message, chat_config, voice_service, bot)
-
-    voice_service.transcribe.assert_not_called()
+    deps["voice_service"].transcribe.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_voice_handler_transcription_returns_none():
-    from src.bot.handlers.media import handle_voice_message
+    deps = _make_voice_deps(transcript=None)
 
-    message = _make_message()
-    voice = MagicMock()
-    voice.file_id = "voice-file-id"
-    message.voice = voice
-    message.video_note = None
+    await _run_voice_handler(deps)
 
-    chat_config = _make_chat_config()
-    bot = _make_bot()
-
-    voice_service = MagicMock()
-    voice_service.transcribe = AsyncMock(return_value=None)
-
-    with patch(
-        "src.bot.handlers.media.download_telegram_file",
-        new_callable=AsyncMock,
-        return_value=b"fake-audio",
-    ):
-        await handle_voice_message(message, chat_config, voice_service, bot)
-
-    message.reply.assert_not_awaited()
+    deps["message"].answer.assert_not_awaited()
+    deps["pipeline"].process.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_voice_handler_forwards_message_thread_id_to_typing_indicator():
     """Regression guard for I-9 (forum topic routing) after the I-6 refactor
     to the shared typing_indicator helper.
+
+    Asserts the *transcription* indicator specifically. Step 2.5 opens a second
+    one when it decides to answer; this config never does, so the call count is
+    still exactly one.
     """
-    from src.bot.handlers.media import handle_voice_message
+    deps = _make_voice_deps()
 
-    message = _make_message()
-    voice = MagicMock()
-    voice.file_id = "voice-file-id"
-    message.voice = voice
-    message.video_note = None
+    mock_indicator = await _run_voice_handler(deps, message_thread_id=777, patch_indicator=True)
 
-    chat_config = _make_chat_config()
-    bot = _make_bot()
+    mock_indicator.assert_called_once_with(deps["bot"], deps["message"].chat.id, 777)
 
-    voice_service = MagicMock()
-    voice_service.transcribe = AsyncMock(
-        return_value=TranscriptionResult(
-            text="Hello world",
-            model="whisper-1",
-            provider="openai",
-        )
+
+# ── Voice step 2.5: deciding about the transcript ─────────────────────
+#
+# A voice message used to be a dead end: transcribed, posted, and never
+# considered as something to answer, no matter what was said in it. The
+# transcript is now put through the same decision the text path makes — with
+# one difference, that the answer quotes the voice message rather than the
+# transcription, so it is visibly aimed at the person who spoke.
+
+
+@pytest.mark.asyncio
+async def test_trigger_word_in_the_transcript_draws_an_answer():
+    deps = _make_voice_deps(transcript="привет бот, как дела", trigger_words=("бот",))
+
+    await _run_voice_handler(deps)
+
+    assert deps["message"].answer.await_count == 2  # transcription, then the answer
+    deps["pipeline"].process.assert_awaited_once()
+    call = deps["pipeline"].process.call_args.kwargs
+    assert call["message_text"] == "привет бот, как дела"
+    assert call["trigger_type"] == TriggerType.TRIGGER
+    assert call["message_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_transcript_without_a_trigger_is_transcribed_but_not_answered():
+    """Control for the test above — same path, nothing addressed to the bot."""
+    deps = _make_voice_deps(transcript="привет всем, как дела", trigger_words=("бот",))
+
+    await _run_voice_handler(deps)
+
+    deps["message"].answer.assert_awaited_once()  # transcription still posted
+    assert "привет всем" in deps["message"].answer.call_args.args[0]
+    deps["pipeline"].process.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_answer_quotes_the_voice_message():
+    """The owner's ask: the reply must land on the original audio, never on
+    the bot's own transcription."""
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",), voice_message_id=4242)
+
+    await _run_voice_handler(deps)
+
+    assert deps["message"].answer.call_args.kwargs["reply_to_message_id"] == 4242
+
+
+@pytest.mark.asyncio
+async def test_a_random_answer_also_quotes_the_voice_message():
+    """Deliberate divergence from the text path, which quotes nothing on
+    RANDOM: here the bot's transcription sits between the voice note and the
+    answer, so an unquoted reply would read as addressed to nobody."""
+    deps = _make_voice_deps(transcript="сегодня хорошая погода", random_chance=1.0)
+
+    await _run_voice_handler(deps)
+
+    assert deps["pipeline"].process.call_args.kwargs["trigger_type"] == TriggerType.RANDOM
+    assert deps["message"].answer.call_args.kwargs["reply_to_message_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_an_unprompted_answer_is_blocked_when_the_gate_declines():
+    deps = _make_voice_deps(
+        transcript="сегодня хорошая погода", random_chance=1.0, gate_allows=False
     )
 
-    with (
-        patch(
-            "src.bot.handlers.media.download_telegram_file",
-            new_callable=AsyncMock,
-            return_value=b"fake-audio",
-        ),
-        patch("src.bot.handlers.media.typing_indicator") as mock_indicator,
-    ):
-        mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
-        mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+    await _run_voice_handler(deps)
 
-        await handle_voice_message(message, chat_config, voice_service, bot, message_thread_id=777)
+    deps["relevancy_gate"].evaluate.assert_awaited_once()
+    deps["pipeline"].process.assert_not_awaited()
+    deps["message"].answer.assert_awaited_once()  # only the transcription
 
-    mock_indicator.assert_called_once_with(bot, message.chat.id, 777)
+
+@pytest.mark.asyncio
+async def test_a_trigger_word_is_never_sent_to_the_gate():
+    """An explicit address is an invitation — gating it would be a behaviour
+    change, not a fix. Mirrors the photo path's rule."""
+    deps = _make_voice_deps(transcript="бот, привет", trigger_words=("бот",))
+
+    await _run_voice_handler(deps)
+
+    deps["relevancy_gate"].evaluate.assert_not_awaited()
+    deps["pipeline"].process.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_transcript_pipeline_runs_at_most_once():
+    """CLAUDE.md: AntiAbuseChecker.check() writes on four paths, so a second
+    pipeline pass over one message pushes the speaker toward a ban faster.
+    pipeline.process() is where that check lives."""
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+
+    await _run_voice_handler(deps)
+
+    assert deps["pipeline"].process.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_post_send_bookkeeping_runs_for_a_voice_answer():
+    """finish_reply(): cost row, cooldown and the spend warning. The photo path
+    shipped without these once (TD-028); this path must not repeat it."""
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+    deps["spend_limit_svc"].get_warning_if_exceeded = AsyncMock(return_value="⚠️ over budget")
+
+    await _run_voice_handler(deps)
+
+    deps["pipeline"].post_send.assert_awaited_once()
+    assert deps["pipeline"].post_send.call_args.kwargs["bot_message_id"] == 77
+    warned = [c for c in deps["message"].answer.await_args_list if "over budget" in str(c)]
+    assert warned, "the voice path never emitted the spend warning"
+
+
+@pytest.mark.asyncio
+async def test_a_suppressed_pipeline_result_sends_nothing():
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+    deps["pipeline"].process = AsyncMock(return_value=PipelineResult(should_respond=False))
+
+    await _run_voice_handler(deps)
+
+    deps["message"].answer.assert_awaited_once()  # only the transcription
+    deps["pipeline"].post_send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_video_note_transcript_is_decided_the_same_way():
+    """Both media types share the handler; a guard that only covers voice
+    would leave half the traffic on the old dead-end path."""
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+    deps["message"].voice = None
+    note = MagicMock()
+    note.file_id = "note-file-id"
+    deps["message"].video_note = note
+
+    await _run_voice_handler(deps)
+
+    deps["pipeline"].process.assert_awaited_once()
 
 
 # ── Photo handler tests ──────────────────────────────────────────────
@@ -1033,7 +1225,7 @@ async def test_random_photo_reply_is_blocked_when_gate_declines():
 
     deps["relevancy_gate"].evaluate.assert_awaited_once()
     deps["pipeline"].process.assert_not_awaited()
-    deps["message"].answer.assert_not_awaited()
+    deps["message"].answer.assert_not_awaited()  # the photo path sends nothing
 
 
 @pytest.mark.asyncio
@@ -1138,3 +1330,113 @@ async def test_spend_warning_is_checked_after_post_send_writes_the_cost_row():
     await _run_photo_handler(deps)
 
     assert order == ["post_send", "spend_check"], f"wrong order: {order}"
+
+
+# ── Voice: the transcription is recorded as such ──────────────────────
+#
+# The row written here is the entire basis on which a later reply to the
+# transcription gets routed to the speaker instead of the bot. Recognition used
+# to be a regex over the rendered header, which a user could forge by asking
+# the bot to echo that text back.
+
+
+@pytest.mark.asyncio
+async def test_the_posted_transcription_is_linked_to_its_audio():
+    deps = _make_voice_deps(voice_message_id=4242)
+
+    await _run_voice_handler(deps)
+
+    deps["voice_service"].record_transcription_message.assert_awaited_once()
+    call = deps["voice_service"].record_transcription_message.call_args.kwargs
+    # The id of the message the BOT posted, linked to the audio it transcribes.
+    assert call["message_id"] == 43
+    assert call["source_message_id"] == 4242
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_recorded_when_there_is_no_transcription():
+    deps = _make_voice_deps(transcript=None)
+
+    await _run_voice_handler(deps)
+
+    deps["voice_service"].record_transcription_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_the_answer_survives_the_voice_message_being_deleted():
+    """Owner's ask: if the original is gone, still answer — and say so.
+
+    The bot has already paid for the generation by this point (Whisper, the
+    relevancy judge, the model). Dropping the reply because the quote target
+    vanished is the worst of the options.
+    """
+    from aiogram.exceptions import TelegramBadRequest
+
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+    deps["message"].answer = AsyncMock(
+        side_effect=[
+            MagicMock(message_id=43),  # the transcription lands fine
+            TelegramBadRequest(
+                method=MagicMock(), message="Bad Request: message to be replied not found"
+            ),
+            MagicMock(message_id=77),  # the retry, unquoted
+        ]
+    )
+
+    await _run_voice_handler(deps)
+
+    assert deps["message"].answer.await_count == 3
+    _transcription, first, second = deps["message"].answer.await_args_list
+    # First attempt quotes the audio; the retry drops the quote and explains.
+    assert first.kwargs["reply_to_message_id"] == 42
+    assert "reply_to_message_id" not in second.kwargs
+    assert "удалено" in second.args[0]
+    assert "и тебе привет" in second.args[0]
+    # Bookkeeping still runs against the message that actually landed.
+    deps["pipeline"].post_send.assert_awaited_once()
+    assert deps["pipeline"].post_send.call_args.kwargs["bot_message_id"] == 77
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_send_failure_is_not_disguised_as_a_deletion():
+    """Control. Only "the quote target is gone" earns the note — a broken
+    payload must not be relabelled as a deleted message and retried blind."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+    deps["message"].answer = AsyncMock(
+        side_effect=[
+            MagicMock(message_id=43),  # the transcription lands fine
+            TelegramBadRequest(method=MagicMock(), message="Bad Request: can't parse entities"),
+        ]
+    )
+
+    with pytest.raises(TelegramBadRequest):
+        await _run_voice_handler(deps)
+
+    # Two calls, not three: no blind retry of a payload Telegram rejected.
+    assert deps["message"].answer.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cost_is_still_recorded_when_the_answer_cannot_be_delivered():
+    """post_send writes the cost row, and generate_text does not self-log (ADR).
+    If an undeliverable reply skipped it, the spend limit would under-report
+    money that was genuinely spent."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
+    deps["message"].answer = AsyncMock(
+        side_effect=[
+            MagicMock(message_id=43),  # the transcription lands fine
+            TelegramBadRequest(
+                method=MagicMock(), message="Bad Request: message to be replied not found"
+            ),
+            RuntimeError("network gone"),
+        ]
+    )
+
+    await _run_voice_handler(deps)
+
+    deps["pipeline"].post_send.assert_awaited_once()
+    assert deps["pipeline"].post_send.call_args.kwargs["bot_message_id"] is None

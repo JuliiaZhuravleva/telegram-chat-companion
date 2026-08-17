@@ -86,6 +86,7 @@ class HealthRepository:
                 """
                 SELECT COUNT(*) FROM chat_messages
                 WHERE created_at > NOW() - interval '30 minutes'
+                  AND message_type <> 'transcription'  -- migration 028
                 """,
             )
             or 0

@@ -21,6 +21,7 @@ on the bot's most critical path.
 from __future__ import annotations
 
 import structlog
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Message
 
 from src.models.chat_config import ChatConfig
@@ -33,6 +34,82 @@ from src.services.relevancy.gate import GateDecision, RelevancyGate
 from src.services.text.pipeline import PipelineResult, TextProcessingPipeline
 
 logger = structlog.get_logger(__name__)
+
+# Shown in place of the quote when the message being answered is already gone.
+# Keys must match ChatConfig.language values; both are plain text with no HTML
+# special characters, so they need no escaping when prepended to html_text.
+_SOURCE_DELETED_NOTE: dict[str, str] = {
+    "ru": "⚠️ Исходное сообщение удалено.",
+    "en": "⚠️ The original message was deleted.",
+}
+
+# Telegram returns no machine-readable code for "the message you want to quote
+# is gone" -- only prose, and the wording has changed across Bot API versions.
+# Matching text is unpleasant but it is the only signal available; an unmatched
+# TelegramBadRequest is deliberately re-raised rather than silently treated as
+# a deletion, so a genuine formatting error cannot hide behind this note.
+_REPLY_TARGET_GONE_MARKERS = (
+    "message to be replied not found",
+    "message to reply not found",
+    "replied message not found",
+    "reply message not found",
+)
+
+
+async def send_quoted_reply(
+    *,
+    message: Message,
+    html_text: str,
+    reply_to_message_id: int | None,
+    language: str,
+) -> Message | None:
+    """Send `html_text`, quoting `reply_to_message_id`, surviving its deletion.
+
+    The bot decides to answer, then spends real time on it -- for a voice note,
+    Whisper plus the relevancy judge plus generation is easily tens of seconds.
+    The author can delete their message inside that window, and Telegram then
+    rejects the send outright because the quote target no longer exists. The
+    reply was already paid for, so dropping it is the worst of the options.
+
+    Instead the reply is re-sent unquoted with a one-line note at the top, so
+    the chat can see what happened rather than reading an answer that appears
+    to address nobody.
+
+    Returns the sent `Message`, or None if it could not be delivered at all --
+    callers must still run their post-send bookkeeping in that case, because
+    the AI call has already been made and its cost has to be recorded whether
+    or not the text reached the chat.
+    """
+    try:
+        return await message.answer(
+            html_text,
+            parse_mode="HTML",
+            reply_to_message_id=reply_to_message_id,
+        )
+    except TelegramBadRequest as exc:
+        detail = str(exc).lower()
+        if reply_to_message_id is None or not any(
+            marker in detail for marker in _REPLY_TARGET_GONE_MARKERS
+        ):
+            raise
+        logger.info(
+            "Reply target vanished before the answer was sent; sending unquoted",
+            chat_id=message.chat.id,
+            reply_to_message_id=reply_to_message_id,
+        )
+
+    note = _SOURCE_DELETED_NOTE.get(language, _SOURCE_DELETED_NOTE["en"])
+    try:
+        return await message.answer(f"{note}\n\n{html_text}", parse_mode="HTML")
+    except Exception as exc:
+        logger.warning(
+            "Failed to send the answer even without a quote",
+            chat_id=message.chat.id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
+        )
+        return None
 
 
 async def react_to_silence(
