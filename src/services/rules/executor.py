@@ -67,8 +67,12 @@ class RuleActionExecutor:
         for admin_id in admin_ids:
             try:
                 await bot.send_message(admin_id, text, parse_mode="HTML")
-            except Exception:
-                logger.warning("Failed to notify admin about rule", admin_id=admin_id)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to notify admin about rule",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
+                )
 
     @staticmethod
     def _format_notification(action: RuleActionResult, message: Message) -> str:

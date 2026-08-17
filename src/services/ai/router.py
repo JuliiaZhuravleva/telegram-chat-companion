@@ -10,7 +10,6 @@ Routes AI requests to the appropriate provider based on:
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import structlog
@@ -28,6 +27,7 @@ from src.services.ai.base import (
 )
 from src.services.ai.capabilities import get_providers_for_capability, provider_supports
 from src.services.ai.pricing import calculate_cost
+from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger()
 
@@ -311,7 +311,7 @@ class AIRouter:
                     model=model,
                     **kwargs,
                 )
-                asyncio.ensure_future(
+                fire_and_forget(
                     self._log_usage(
                         task_type="embedding",
                         provider=result.provider,
@@ -370,7 +370,7 @@ class AIRouter:
                     prompt=prompt,
                     **kwargs,
                 )
-                asyncio.ensure_future(
+                fire_and_forget(
                     self._log_usage(
                         task_type="vision",
                         provider=result.provider,
@@ -424,7 +424,7 @@ class AIRouter:
                     language=language,
                     **kwargs,
                 )
-                asyncio.ensure_future(
+                fire_and_forget(
                     self._log_usage(
                         task_type="transcription",
                         provider=result.provider,

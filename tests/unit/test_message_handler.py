@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.bot.handlers.message import _react_to_silence, handle_text_message
+from src.bot.handlers.message import handle_text_message
+
+# Moved to src/bot/reply_flow.py (TD-028) so the photo path shares one copy.
+from src.bot.reply_flow import react_to_silence as _react_to_silence
 from src.bot.utils import ReplyContext, extract_reply_context, should_respond
 from src.models.chat_config import ChatConfig
 from src.models.enums import ResponseType, TriggerType
@@ -282,7 +285,7 @@ class TestReactToSilence:
         msg = make_message(message_id=42)
         msg.bot = AsyncMock()
         set_reaction_mock = AsyncMock(return_value=True)
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(
             should_respond=False,
@@ -304,7 +307,7 @@ class TestReactToSilence:
         msg = make_message()
         msg.bot = AsyncMock()
         set_reaction_mock = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
@@ -320,7 +323,7 @@ class TestReactToSilence:
         msg = make_message()
         msg.bot = AsyncMock()
         set_reaction_mock = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(should_respond=False, tier="engagement", reason="no")
         await _react_to_silence(msg, self._config(), decision, self._checker())
@@ -333,7 +336,7 @@ class TestReactToSilence:
         msg = make_message()
         msg.bot = AsyncMock()
         set_reaction_mock = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🥸"
@@ -347,7 +350,7 @@ class TestReactToSilence:
         msg = make_message()
         msg.bot = None
         set_reaction_mock = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
@@ -362,7 +365,7 @@ class TestReactToSilence:
         msg = make_message()
         msg.bot = AsyncMock()
         set_reaction_mock = AsyncMock(side_effect=RuntimeError("boom"))
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
@@ -380,7 +383,7 @@ class TestReactToSilence:
         msg = make_message()
         msg.bot = AsyncMock()
         set_reaction_mock = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", set_reaction_mock)
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", set_reaction_mock)
 
         decision = GateDecision(
             should_respond=False, tier="llm_judge", reason="no", suggested_emoji="🔥"
@@ -395,7 +398,7 @@ class TestReactToSilence:
         react to must not pay for it."""
         msg = make_message()
         msg.bot = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", AsyncMock())
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", AsyncMock())
         checker = self._checker()
 
         # Module off -> returns before the probe.
@@ -423,7 +426,7 @@ class TestReactToSilence:
         runs. The read-only probe is the only permitted call."""
         msg = make_message()
         msg.bot = AsyncMock()
-        monkeypatch.setattr("src.bot.handlers.message.set_reaction", AsyncMock(return_value=True))
+        monkeypatch.setattr("src.bot.reply_flow.set_reaction", AsyncMock(return_value=True))
         checker = self._checker()
 
         decision = GateDecision(

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import re
 from html import escape as html_escape
 
@@ -13,6 +12,7 @@ from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_sanitizer import sanitize_prompt_content
+from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
 
@@ -258,7 +258,7 @@ class SummaryService:
             return "Failed to generate summary. Please try again later."
 
         # Log usage explicitly — generate_text() does not auto-log (see ADR).
-        asyncio.ensure_future(self._ai.log_usage(result, chat_id=chat_id, task_type="summary"))
+        fire_and_forget(self._ai.log_usage(result, chat_id=chat_id, task_type="summary"))
 
         formatted = markdown_to_html(header + result.text)
         return _resolve_mentions(formatted, participants, language)

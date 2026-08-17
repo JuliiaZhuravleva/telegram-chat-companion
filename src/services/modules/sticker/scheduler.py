@@ -90,10 +90,11 @@ class StickerSetSyncScheduler:
                     is_video=any(s.is_video for s in tg_set.stickers[:1]),
                 )
                 synced += 1
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "Failed to sync sticker set",
                     set_name=set_name,
+                    error_type=type(exc).__name__,
                 )
 
         if synced:

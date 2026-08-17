@@ -9,77 +9,18 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.reply_flow import finish_reply, relevancy_allows_reply
 from src.bot.utils import extract_reply_context, should_respond
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.abuse.checker import AntiAbuseChecker
 from src.services.costs.spend_limit import SpendLimitService
-from src.services.modules.reactions.responder import set_reaction
-from src.services.modules.reactions.selector import ReactionSelector
-from src.services.relevancy.gate import GateDecision, RelevancyGate
+from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
 from src.utils.telegram import typing_indicator
 
 router = Router(name="messages")
 logger = structlog.get_logger()
-
-
-async def _react_to_silence(
-    message: Message,
-    config: ChatConfig,
-    gate_decision: GateDecision,
-    abuse_checker: AntiAbuseChecker,
-) -> None:
-    """R-5: tier-3 silence -> optionally react instead of a text reply.
-
-    `gate_decision.suggested_emoji` is only ever populated on the tier-3
-    `llm_judge` path (ADR-0004 Decision 4) -- every other tier leaves it
-    `None`, so this is a no-op there. Gated on `reactions_enabled` only,
-    never `reactions_history_enabled` (Decision 3): R-5 needs no history at
-    all, `llm_judge` decides live, per-call.
-
-    Anti-abuse: this path returns before `TextProcessingPipeline.process()`,
-    so the pipeline's Stage 1 abuse gate never runs for it. Setting a reaction
-    is an outbound, user-visible action, so it must respect the same "be quiet
-    toward this user" signal a text reply would. The cooldown is probed
-    read-only and *after* the cheap guards, so a message the bot was never
-    going to react to costs no query at all.
-    """
-    if not config.reactions_enabled or message.bot is None:
-        return
-
-    emoji = ReactionSelector.select(gate_decision.suggested_emoji)
-    if emoji is None:
-        return
-
-    user = message.from_user
-    if user is not None and await abuse_checker.is_in_cooldown(message.chat.id, user.id):
-        logger.debug(
-            "Skipping silence reaction: user in cooldown",
-            chat_id=message.chat.id,
-            user_id=user.id,
-        )
-        return
-
-    try:
-        await set_reaction(
-            message.bot,
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            emoji=emoji,
-        )
-    except Exception as exc:
-        # `set_reaction` swallows TelegramAPIError; this is a last-resort net
-        # for anything else (e.g. a programming error after a signature change)
-        # so a suppressed text reply never turns into an unhandled crash.
-        logger.warning(
-            "Failed to set reaction on silence",
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            error=str(exc),
-            error_type=type(exc).__name__,
-            exc_info=True,
-        )
 
 
 @router.message(F.text)
@@ -105,18 +46,18 @@ async def handle_text_message(
     if not should_reply:
         return
 
-    # Relevancy gate: filter random triggers for natural participation
-    if trigger_type == TriggerType.RANDOM:
-        gate_decision = await relevancy_gate.evaluate(
-            chat_id=message.chat.id,
-            message_text=message.text or "",
-            config=chat_config,
-            message_id=message.message_id,
-            user_id=message.from_user.id if message.from_user else None,
-        )
-        if not gate_decision.should_respond:
-            await _react_to_silence(message, chat_config, gate_decision, abuse_checker)
-            return
+    # Relevancy gate: filter random triggers for natural participation.
+    # Shared with the photo path (src/bot/reply_flow.py) — it used to be
+    # inline here and absent there, which is exactly how it went missing.
+    if not await relevancy_allows_reply(
+        message=message,
+        chat_config=chat_config,
+        trigger_type=trigger_type,
+        message_text=message.text or "",
+        relevancy_gate=relevancy_gate,
+        abuse_checker=abuse_checker,
+    ):
+        return
 
     user = message.from_user
     user_id = user.id if user else 0
@@ -182,23 +123,12 @@ async def handle_text_message(
         reply_to_message_id=reply_to,
     )
 
-    # Send sticker if AI chose one
-    if result.sticker_file_id:
-        try:
-            await message.answer_sticker(result.sticker_file_id)
-        except Exception:
-            logger.warning(
-                "Failed to send AI-chosen sticker",
-                sticker_file_id=result.sticker_file_id,
-            )
-
-    # Post-send tasks (non-blocking)
-    await pipeline.post_send(result, bot_message_id=sent.message_id)
-
-    # Check daily spend limit AFTER usage is logged (post_send writes the row)
-    warning = await spend_limit_svc.get_warning_if_exceeded(chat_config.language)
-    if warning:
-        try:
-            await message.answer(warning)
-        except Exception:
-            logger.warning("Failed to send spend limit warning", chat_id=message.chat.id)
+    # Sticker -> post_send -> spend warning, shared with the photo path.
+    await finish_reply(
+        message=message,
+        result=result,
+        sent_message_id=sent.message_id,
+        chat_config=chat_config,
+        pipeline=pipeline,
+        spend_limit_svc=spend_limit_svc,
+    )

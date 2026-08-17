@@ -84,6 +84,13 @@ def _make_router_message(
     msg.voice = None
     msg.video_note = None
     msg.photo = None
+    # Same trap as `voice`/`video_note` above, one router earlier:
+    # chat_events' migration handler filters on
+    # `F.migrate_to_chat_id | F.migrate_from_chat_id`, and an unset MagicMock
+    # attribute is truthy — so an ordinary sticker would be consumed as a
+    # group→supergroup migration. A real aiogram Message has both as None.
+    msg.migrate_to_chat_id = None
+    msg.migrate_from_chat_id = None
     msg.message_id = 1
     msg.chat = MagicMock()
     msg.chat.id = 555
