@@ -128,7 +128,23 @@ def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
 # an FSM dialog is active (e.g. the tolerance prompt, which the admin may
 # answer as a *reply*) this handler must yield instead of swallowing the
 # input as a description correction (2026-08-07 review).
-@router.message(F.reply_to_message, F.text, F.chat.type == "private", IsAdmin(), StateFilter(None))
+#
+# ~F.text.startswith("/"): same reason one step further out. This router is
+# included first, so for a bot admin in a DM this handler matches *any* reply
+# carrying text -- including a slash command. A matched handler consumes the
+# update even when its body decides to do nothing, so an admin who replied to
+# something with `/remember ...` or `/kb` in a DM got silence, and the command's
+# own handler never ran. Commands belong to the command handlers; the
+# description-correction path only ever wants free text (same filter shape as
+# `handle_sticker_explicitness_input`).
+@router.message(
+    F.reply_to_message,
+    F.text,
+    ~F.text.startswith("/"),
+    F.chat.type == "private",
+    IsAdmin(),
+    StateFilter(None),
+)
 async def handle_admin_sticker_reply(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],

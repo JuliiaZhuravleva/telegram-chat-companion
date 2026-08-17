@@ -109,14 +109,16 @@ COMMANDS: tuple[CommandSpec, ...] = (
         command="remember",
         scopes=frozenset(),
         description={
-            "ru": "Сохранить факт из сообщения",
-            "en": "Save a fact from a replied-to message",
+            "ru": "Сохранить факт в базу знаний чата",
+            "en": "Save a fact to the chat knowledge base",
         },
         hidden_reason=(
-            "Needs a reply and is restricted to chat organizers / bot admins "
+            "Restricted to chat organizers / bot admins "
             "(handlers/commands.py:handle_remember). No Telegram scope expresses "
             "'organizers of this chat', so advertising it would offer every member "
-            "a command that answers them with a refusal."
+            "a command that answers them with a refusal. The reply requirement is "
+            "gone since S2/KB-09 -- free text works too -- but the authority gate "
+            "is what keeps this hidden."
         ),
     ),
     CommandSpec(

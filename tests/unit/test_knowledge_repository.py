@@ -1,7 +1,10 @@
 """Tests for KnowledgeRepository (chat_facts) with mocked asyncpg pool."""
 
+from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
 
+import asyncpg
 import pytest
 
 from src.database.repositories.knowledge import KnowledgeRepository
@@ -161,6 +164,259 @@ async def test_upsert_fact_uses_one_transaction(repo, conn):
     conn.transaction.assert_called_once()
 
 
+@pytest.mark.asyncio
+async def test_upsert_fact_carries_expires_at_into_the_insert(repo, conn):
+    """The supersession path gained `expires_at` too (migration 027).
+
+    Asserts the BOUND PARAMETER, not the SQL: the INSERT text is shared with
+    `append_fact` via `_INSERT_FACT`, so a `$14` in the string proves nothing
+    about *this* call site actually forwarding the argument.
+    """
+    repo_, _pool = repo
+    conn.fetchrow.side_effect = [{"id": 5}, {"id": 6}]
+    expires_at = datetime(2026, 9, 5, 23, 59, 59, 999999, tzinfo=ZoneInfo("Asia/Tbilisi"))
+
+    await repo_.upsert_fact(
+        chat_id=-1009999990001,
+        subject="s",
+        predicate="p",
+        value="v",
+        fact_text="ft",
+        source="manual",
+        expires_at=expires_at,
+    )
+
+    insert_call = conn.fetchrow.await_args_list[1]
+    assert "INSERT INTO chat_facts" in insert_call.args[0]
+    assert _bound_param(insert_call, 14) is expires_at
+    # ...and it still superseded: advisory lock + close old + stamp forward.
+    assert conn.execute.await_count == 3
+    assert any("status = 'superseded'" in c.args[0] for c in conn.execute.await_args_list)
+
+
+# ---------------------------------------------------------------------------
+# append_fact — the append-only write path (KB-07)
+# ---------------------------------------------------------------------------
+
+
+def _bound_param(call, position: int):
+    """The value bound to `$<position>` of the statement in `call`.
+
+    `call.args[0]` is the SQL, so `$1` is `args[1]` -- asserting on the bound
+    parameter rather than on the SQL text is the point: `_INSERT_FACT` is shared
+    between both write paths, so its text says nothing about what a given call
+    site passed.
+    """
+    return call.args[position]
+
+
+def _statements(pool, conn) -> list[str]:
+    """Every SQL string actually issued, on the pool and on a pooled connection.
+
+    Built from the awaited calls, so a statement that was never issued cannot
+    appear here -- and an assertion over this list cannot pass vacuously by
+    looking at a call that did not happen.
+    """
+    calls = []
+    for target in (pool, conn):
+        for method in ("fetchrow", "fetch", "execute", "fetchval"):
+            mock = getattr(target, method, None)
+            if mock is None or not hasattr(mock, "await_args_list"):
+                continue
+            calls.extend(c.args[0] for c in mock.await_args_list if c.args)
+    return [c for c in calls if isinstance(c, str)]
+
+
+@pytest.mark.asyncio
+async def test_append_fact_binds_expires_at_as_the_14th_parameter(repo):
+    """A tz-aware deadline must reach asyncpg unchanged.
+
+    Not "a datetime equal to it": `end_of_day()` returns an aware value on
+    purpose (asyncpg encodes a *naive* datetime through the process's local
+    timezone, so dropping the tzinfo silently re-dates the deadline by the
+    machine's UTC offset). Identity is the cheapest assertion that a
+    normalisation step cannot slip in unnoticed.
+    """
+    repo_, pool = repo
+    # Two statements now: the existence pre-check (no row -> None), then the
+    # INSERT. The pre-check is what stops a redelivery from resurrecting an
+    # undone fact, since `reject_fact` moves the row out of the partial UNIQUE
+    # index that used to catch it.
+    pool.fetchrow.side_effect = [None, {"id": 11}]
+    expires_at = datetime(2026, 9, 5, 23, 59, 59, 999999, tzinfo=ZoneInfo("Asia/Tbilisi"))
+
+    fact_id, created = await repo_.append_fact(
+        chat_id=-1009999990001,
+        subject="правила",
+        predicate="m1001",
+        value="сбор в 19:00",
+        fact_text="сбор в 19:00",
+        source="manual",
+        expires_at=expires_at,
+    )
+
+    assert (fact_id, created) == (11, True)
+    assert pool.fetchrow.await_count == 2
+    precheck, call = pool.fetchrow.await_args_list
+    assert "SELECT id, status FROM chat_facts" in precheck.args[0]
+    assert "INSERT INTO chat_facts" in call.args[0]
+    assert _bound_param(call, 14) is expires_at
+    assert _bound_param(call, 14).tzinfo is not None
+    # The other 13 slots must not have shifted while the 14th was added.
+    assert _bound_param(call, 1) == -1009999990001
+    assert _bound_param(call, 3) == "правила"
+    assert _bound_param(call, 4) == "m1001"
+    assert _bound_param(call, 13) == 0.5  # salience, i.e. expires_at was appended
+
+
+@pytest.mark.asyncio
+async def test_append_fact_defaults_expires_at_to_null(repo):
+    """A fact without a deadline binds NULL, never a computed "far future"."""
+    repo_, pool = repo
+    pool.fetchrow.side_effect = [None, {"id": 12}]
+
+    await repo_.append_fact(
+        chat_id=-1009999990001,
+        subject="s",
+        predicate="m1",
+        value="v",
+        fact_text="ft",
+        source="manual",
+    )
+
+    assert _bound_param(pool.fetchrow.await_args_list[1], 14) is None
+
+
+@pytest.mark.asyncio
+async def test_append_fact_never_supersedes_on_the_happy_path(repo, conn):
+    """The whole invariant of KB-07, asserted on the statements really issued.
+
+    Phase 1 wrote `/remember` through `upsert_fact`, whose key collapsed to
+    (chat_id, subject) because the predicate was a constant -- so "add another
+    detail about the same thing" retired the previous fact. The append path may
+    therefore issue exactly two statements: the existence pre-check and the
+    INSERT. No `FOR UPDATE` lookup (there is nothing to lock, by design), no
+    `status = 'superseded'` UPDATE, no advisory lock, not even a transaction to
+    hold them in.
+    """
+    repo_, pool = repo
+    pool.fetchrow.side_effect = [None, {"id": 13}]
+
+    await repo_.append_fact(
+        chat_id=-1009999990001,
+        subject="s",
+        predicate="m1",
+        value="v",
+        fact_text="ft",
+        source="manual",
+    )
+
+    issued = _statements(pool, conn)
+    assert len(issued) == 2, f"append_fact must issue exactly two statements, got: {issued}"
+    assert "SELECT id, status FROM chat_facts" in issued[0]
+    assert "INSERT INTO chat_facts" in issued[1]
+    joined = "\n".join(issued)
+    assert "superseded" not in joined
+    assert "FOR UPDATE" not in joined
+    assert "UPDATE chat_facts" not in joined
+    assert "pg_advisory_xact_lock" not in joined
+    pool.acquire.assert_not_called()
+    conn.transaction.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_append_fact_returns_the_existing_row_on_unique_violation(repo, conn):
+    """The redelivered-capture case: report the row that exists, write nothing.
+
+    `created=False` is the load-bearing half -- it is what makes the handler say
+    "already saved" instead of claiming a second save, and it must come with the
+    *existing* id so the undo button points at a real row.
+    """
+    repo_, pool = repo
+    pool.fetchrow.side_effect = [
+        None,  # pre-check: nothing yet (the concurrent writer has not committed)
+        asyncpg.UniqueViolationError("duplicate key value violates unique constraint"),
+        {"id": 77},
+    ]
+
+    fact_id, created = await repo_.append_fact(
+        chat_id=-1009999990001,
+        subject="s",
+        predicate="m1",
+        value="v",
+        fact_text="ft",
+        source="manual",
+    )
+
+    assert (fact_id, created) == (77, False)
+    assert pool.fetchrow.await_count == 3
+    lookup = pool.fetchrow.await_args_list[2]
+    assert "SELECT id FROM chat_facts" in lookup.args[0]
+    assert "valid_to IS NULL" in lookup.args[0]
+    assert lookup.args[1:] == (-1009999990001, "s", "m1")
+    # Nothing was retired to make room for a fact that was never written.
+    issued = "\n".join(_statements(pool, conn))
+    assert "superseded" not in issued
+    assert "UPDATE chat_facts" not in issued
+
+
+@pytest.mark.asyncio
+async def test_append_fact_does_not_resurrect_an_undone_fact(repo, conn):
+    """A redelivered capture must not re-create a fact the user just removed.
+
+    The partial UNIQUE index (`WHERE valid_to IS NULL`) cannot catch this on its
+    own: `reject_fact` sets `valid_to = NOW()`, so an undone row *leaves* the
+    index and the redelivered INSERT would succeed. The pre-check is the guard,
+    and it must look at the key regardless of `valid_to` -- which is exactly what
+    makes this test fail if someone "simplifies" it back to a live-rows-only
+    lookup.
+    """
+    repo_, pool = repo
+    pool.fetchrow.side_effect = [{"id": 91, "status": "rejected"}]
+
+    fact_id, created = await repo_.append_fact(
+        chat_id=-1009999990001,
+        subject="s",
+        predicate="m1",
+        value="v",
+        fact_text="ft",
+        source="manual",
+    )
+
+    assert (fact_id, created) == (91, False)
+    issued = _statements(pool, conn)
+    assert len(issued) == 1, f"the pre-check must short-circuit before the INSERT, got: {issued}"
+    assert "INSERT INTO chat_facts" not in "\n".join(issued)
+    # The pre-check must NOT be scoped to live rows, or the rejected row is
+    # invisible to it and the resurrection is back.
+    assert "valid_to IS NULL" not in issued[0]
+
+
+@pytest.mark.asyncio
+async def test_append_fact_reraises_when_the_lookup_finds_no_row(repo):
+    """A violation on some *other* key must not be reported as "already saved".
+
+    Swallowing it would return a fact id that is not this capture's (or worse,
+    a stale one), and the user would be told their text was stored when the
+    INSERT failed.
+    """
+    repo_, pool = repo
+    pool.fetchrow.side_effect = [
+        asyncpg.UniqueViolationError("duplicate key value violates unique constraint"),
+        None,
+    ]
+
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await repo_.append_fact(
+            chat_id=-1009999990001,
+            subject="s",
+            predicate="m1",
+            value="v",
+            fact_text="ft",
+            source="manual",
+        )
+
+
 # ---------------------------------------------------------------------------
 # get_by_id / get_active_facts
 # ---------------------------------------------------------------------------
@@ -228,6 +484,76 @@ async def test_get_active_facts_excludes_expired_on_both_branches(repo, topic):
 
 
 # ---------------------------------------------------------------------------
+# projection + ordering of the list reads
+# ---------------------------------------------------------------------------
+
+
+def _select_list(sql: str) -> str:
+    """The projection between SELECT and FROM. Lets a test say "not `embedding`"
+    without tripping over the `embedding IS NOT NULL` in a WHERE clause."""
+    head = sql.split("FROM", 1)[0]
+    return head.split("SELECT", 1)[1]
+
+
+def _order_by(sql: str) -> str:
+    """The ORDER BY clause only.
+
+    `predicate` is a legitimately *selected* column, so a bare
+    `"predicate" not in sql` would be red on a correct implementation. The claim
+    under test is about the sort key, so the assertion has to be about the sort
+    key.
+    """
+    assert "ORDER BY" in sql, f"no ORDER BY in:\n{sql}"
+    return sql.split("ORDER BY", 1)[1]
+
+
+@pytest.mark.parametrize("topic", [None, "event:summer-meetup"])
+@pytest.mark.asyncio
+async def test_get_active_facts_does_not_ship_the_embedding_vector(repo, topic):
+    """`SELECT *` sent 768 floats per row to the bot for a list that renders none.
+
+    Parametrized over both branches because the topic filter duplicates the
+    query -- one branch keeping `SELECT *` is exactly how this regresses, and
+    `get_active_facts` is unbounded, so the waste grows with the corpus S2 is
+    built to create.
+    """
+    repo_, pool = repo
+    pool.fetch.return_value = []
+
+    await repo_.get_active_facts(-1009999990001, topic=topic)
+
+    projection = _select_list(pool.fetch.call_args.args[0])
+    assert "*" not in projection, "named columns only -- `SELECT *` carries `embedding`"
+    assert "embedding" not in projection
+    # ...but still everything a renderer needs, including the S1 columns.
+    for column in ("fact_text", "topic", "expires_at", "rejected_by", "created_at"):
+        assert column in projection
+
+
+@pytest.mark.parametrize("topic", [None, "event:summer-meetup"])
+@pytest.mark.asyncio
+async def test_get_active_facts_tiebreaks_on_created_at_not_predicate(repo, topic):
+    """Append-only predicates sort as TEXT, so `predicate` is the wrong key.
+
+    KB-07 derives each fact's predicate from its command's message id (`m1001`,
+    `m999`). Ordering by that string puts `m1001` before `m999` -- i.e. two facts
+    about one subject list in an order that is neither capture order nor any
+    order a reader can explain, and that flips as message ids gain a digit.
+    `id` follows `created_at` because rows written in one transaction share
+    `NOW()` to the microsecond.
+    """
+    repo_, pool = repo
+    pool.fetch.return_value = []
+
+    await repo_.get_active_facts(-1009999990001, topic=topic)
+
+    order = _order_by(pool.fetch.call_args.args[0])
+    assert "created_at" in order
+    assert "id" in order
+    assert "predicate" not in order
+
+
+# ---------------------------------------------------------------------------
 # get_expired_facts
 # ---------------------------------------------------------------------------
 
@@ -252,6 +578,21 @@ async def test_get_expired_facts_returns_only_aged_out_rows(repo):
     assert "status = 'active'" in sql
     assert "valid_to IS NULL" in sql
     assert chat_id == -1009999990001
+
+
+@pytest.mark.asyncio
+async def test_get_expired_facts_does_not_ship_the_embedding_vector(repo):
+    """Same projection rule as the active list -- the expired segment renders
+    text, not vectors, and it is the one read that is guaranteed to grow."""
+    repo_, pool = repo
+    pool.fetch.return_value = []
+
+    await repo_.get_expired_facts(-1009999990001)
+
+    projection = _select_list(pool.fetch.call_args.args[0])
+    assert "*" not in projection
+    assert "embedding" not in projection
+    assert "expires_at" in projection
 
 
 # ---------------------------------------------------------------------------

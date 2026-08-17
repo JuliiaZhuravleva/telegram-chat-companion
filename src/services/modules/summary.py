@@ -13,6 +13,7 @@ from src.services.ai.router import AIRouter
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_sanitizer import sanitize_prompt_content
 from src.utils.background import fire_and_forget
+from src.utils.display_tz import DISPLAY_TZ
 
 logger = structlog.get_logger(__name__)
 
@@ -174,7 +175,16 @@ class SummaryService:
                     display_name = row["first_name"] or row["username"] or "?"
                     participants[idx] = (user_id, html_escape(display_name))
                 prefix = f"@@u{idx}@@"
-            ts = row["created_at"].strftime("%H:%M")
+            # Converted, not formatted raw: asyncpg returns TIMESTAMPTZ in UTC, so
+            # a bare strftime put every summary line four hours behind the clock
+            # the chat was reading — and the model then reasons about "when" from
+            # those times. Same shared constant as every other rendered date.
+            created = row["created_at"]
+            ts = (
+                created.astimezone(DISPLAY_TZ).strftime("%H:%M")
+                if created.tzinfo is not None
+                else created.strftime("%H:%M")
+            )
             lines.append(f"[{ts}] {prefix}: {sanitize_prompt_content(row['content'])}")
 
         conversation = "\n".join(lines)
