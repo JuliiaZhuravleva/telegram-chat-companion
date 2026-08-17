@@ -107,6 +107,9 @@ class AdminRepository:
                 """
             SELECT COUNT(*) FROM chat_messages
             WHERE created_at > NOW() - $1::interval
+              -- Bookkeeping rows are not messages anyone sent (migration 028);
+              -- counting them would report one extra per transcribed voice note.
+              AND message_type <> 'transcription'
             """,
                 interval,
             )
@@ -262,6 +265,7 @@ class AdminRepository:
                 SELECT chat_id, COUNT(*) AS message_count
                 FROM chat_messages
                 WHERE created_at > NOW() - $1::interval
+                  AND message_type <> 'transcription'  -- migration 028
                 GROUP BY chat_id
             ) mc ON mc.chat_id = cs.chat_id
             WHERE cs.enabled = true

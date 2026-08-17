@@ -34,8 +34,23 @@ class MessageRepository:
         message_thread_id: int | None = None,
         quote_text: str | None = None,
         quote_is_manual: bool | None = None,
+        transcribed_message_id: int | None = None,
     ) -> None:
-        """Save a chat message."""
+        """Save a chat message.
+
+        `transcribed_message_id` (migration 028): set ONLY on a message the bot
+        posted that carries a voice transcription, and holds the message_id of
+        the audio it transcribes. It is the sole marker of "this bot message is
+        a relayed transcription" — see `get_transcription_source`.
+
+        Note the ON CONFLICT branch does NOT touch that column, so re-saving an
+        existing row preserves the link rather than clearing it. That is the
+        behaviour we want, but it is currently load-bearing only in theory:
+        Telegram never delivers the bot's own outgoing message back as an
+        update, so the transcription row is written exactly once and never
+        re-saved. If a future path (message editing, business connections) can
+        re-save it, this is the line that decides whether the link survives.
+        """
         await self._pool.execute(
             """
             INSERT INTO chat_messages (
@@ -43,10 +58,13 @@ class MessageRepository:
                 message_type, content, raw_data, reply_to_message_id,
                 is_bot_message, sticker_file_id, sticker_file_unique_id,
                 sticker_set_name, sticker_emoji, message_thread_id,
-                quote_text, quote_is_manual
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                quote_text, quote_is_manual, transcribed_message_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
             ON CONFLICT (chat_id, message_id) DO UPDATE
-            SET content = EXCLUDED.content,
+            SET transcribed_message_id = COALESCE(
+                    EXCLUDED.transcribed_message_id, chat_messages.transcribed_message_id
+                ),
+                content = EXCLUDED.content,
                 edited_at = NOW(),
                 edit_count = chat_messages.edit_count + 1,
                 original_content = COALESCE(
@@ -70,6 +88,49 @@ class MessageRepository:
             message_thread_id,
             quote_text,
             quote_is_manual,
+            transcribed_message_id,
+        )
+
+    async def get_transcription_source(
+        self,
+        chat_id: int,
+        message_id: int,
+    ) -> asyncpg.Record | None:
+        """Resolve a bot transcription message back to the person who spoke.
+
+        Returns None unless `message_id` is a message the bot posted carrying a
+        transcription (i.e. its `transcribed_message_id` is set). On a hit, the
+        row carries the source audio's id plus the speaker's name and the
+        transcript itself, read from the *source* row — the transcription row
+        deliberately stores no content of its own (migration 028).
+
+        This replaces matching the rendered header text. A user can make the
+        bot echo any string, so a text marker on a bot-authored message proves
+        nothing; this column is written by exactly one code path and cannot be
+        forged from the chat.
+
+        `source_first_name` / `transcript` are LEFT JOINed and may be NULL if
+        the source row was pruned by retention while the transcription row
+        survived — callers must treat "recognised as a transcription" and
+        "know who said what" as separate facts.
+        """
+        return await self._pool.fetchrow(
+            """
+            SELECT t.transcribed_message_id       AS source_message_id,
+                   src.user_id                    AS source_user_id,
+                   src.first_name                 AS source_first_name,
+                   src.username                   AS source_username,
+                   src.content                    AS transcript
+            FROM chat_messages t
+            LEFT JOIN chat_messages src
+                   ON src.chat_id = t.chat_id
+                  AND src.message_id = t.transcribed_message_id
+            WHERE t.chat_id = $1
+              AND t.message_id = $2
+              AND t.transcribed_message_id IS NOT NULL
+            """,
+            chat_id,
+            message_id,
         )
 
     async def get_recent(
@@ -79,12 +140,22 @@ class MessageRepository:
         *,
         exclude_bot: bool = False,
     ) -> list[asyncpg.Record]:
-        """Get recent messages for a chat, ordered by newest first."""
+        """Get recent messages for a chat, ordered by newest first.
+
+        Transcription bookkeeping rows are excluded (migration 028). This is
+        NOT the same as `exclude_bot`: the relevancy gate's tier-3 judge calls
+        this with `exclude_bot=False` on purpose, because it needs to see the
+        bot's real replies to judge the conversation — it just must not see a
+        content-free row. It rendered as a bare `Bot: ` line in the judge's
+        prompt and, with a window of only 5 messages, pushed a real turn out of
+        view every time someone sent a voice note.
+        """
         query = """
             SELECT id, chat_id, message_id, user_id, username, first_name,
                    message_type, content, is_bot_message, created_at
             FROM chat_messages
             WHERE chat_id = $1
+              AND message_type <> 'transcription'
         """
         if exclude_bot:
             query += " AND is_bot_message = false"
@@ -127,6 +198,7 @@ class MessageRepository:
                        NULL::text AS topic_scope
                 FROM chat_messages
                 WHERE chat_id = $1
+                  AND message_type <> 'transcription'
                 ORDER BY created_at DESC
                 LIMIT $2
                 """,
@@ -144,6 +216,7 @@ class MessageRepository:
                     'current' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id = $2
+                AND message_type <> 'transcription'
               ORDER BY created_at DESC LIMIT $3)
             UNION ALL
             (SELECT id, chat_id, message_id, user_id, username, first_name,
@@ -152,6 +225,7 @@ class MessageRepository:
                     'other' AS topic_scope
                FROM chat_messages
               WHERE chat_id = $1 AND message_thread_id IS DISTINCT FROM $2
+                AND message_type <> 'transcription'
               ORDER BY created_at DESC LIMIT $4)
             """,
             chat_id,
@@ -206,6 +280,7 @@ class MessageRepository:
                        ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
                 FROM chat_messages
                 WHERE chat_id = $1
+                  AND message_type <> 'transcription'
                 ORDER BY created_at DESC
                 LIMIT $2
             ),

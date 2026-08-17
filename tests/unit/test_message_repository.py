@@ -33,6 +33,45 @@ def repo():
     return MessageRepository(pool), pool
 
 
+# Positional order of save()'s $1..$N, mirroring the INSERT's column list.
+_SAVE_PARAMS = (
+    "chat_id",
+    "message_id",
+    "user_id",
+    "username",
+    "first_name",
+    "message_type",
+    "content",
+    "raw_data",
+    "reply_to_message_id",
+    "is_bot_message",
+    "sticker_file_id",
+    "sticker_file_unique_id",
+    "sticker_set_name",
+    "sticker_emoji",
+    "message_thread_id",
+    "quote_text",
+    "quote_is_manual",
+    "transcribed_message_id",
+)
+
+
+def _saved(pool) -> dict:
+    """save()'s bound parameters, by name.
+
+    These assertions used to index from the end (`call_args[-2]`), which rotted
+    the moment migration 028 appended a parameter: two of them silently started
+    reading the wrong column, and a third kept passing only because every value
+    it compared happened to be None. The length check below turns the next such
+    append into an immediate, obvious failure instead of a quiet mis-read.
+    """
+    args = pool.execute.call_args[0][1:]
+    assert len(args) == len(_SAVE_PARAMS), (
+        f"save() now binds {len(args)} parameters, _SAVE_PARAMS lists {len(_SAVE_PARAMS)}"
+    )
+    return dict(zip(_SAVE_PARAMS, args, strict=True))
+
+
 class TestSaveQuoteColumns:
     """`save()`'s quote_text/quote_is_manual params (Q-3, migration 021)."""
 
@@ -50,10 +89,9 @@ class TestSaveQuoteColumns:
         )
 
         pool.execute.assert_awaited_once()
-        call_args = pool.execute.call_args[0]
-        # Last two positional params, matching $16/$17 in the INSERT.
-        assert call_args[-2] == "highlighted fragment"
-        assert call_args[-1] is True
+        saved = _saved(pool)
+        assert saved["quote_text"] == "highlighted fragment"
+        assert saved["quote_is_manual"] is True
 
     @pytest.mark.asyncio
     async def test_defaults_quote_fields_to_none_when_no_quote(self, repo):
@@ -61,9 +99,9 @@ class TestSaveQuoteColumns:
 
         await repo_.save(CHAT_ID, message_id=2, message_type="text", content="plain message")
 
-        call_args = pool.execute.call_args[0]
-        assert call_args[-2] is None
-        assert call_args[-1] is None
+        saved = _saved(pool)
+        assert saved["quote_text"] is None
+        assert saved["quote_is_manual"] is None
 
     @pytest.mark.asyncio
     async def test_non_manual_quote_persists_false_not_none(self, repo):
@@ -84,9 +122,39 @@ class TestSaveQuoteColumns:
             quote_is_manual=False,
         )
 
-        call_args = pool.execute.call_args[0]
-        assert call_args[-2] == "server-attached quote"
-        assert call_args[-1] is False
+        saved = _saved(pool)
+        assert saved["quote_text"] == "server-attached quote"
+        assert saved["quote_is_manual"] is False
+
+
+class TestSaveTranscriptionLink:
+    """`transcribed_message_id` (migration 028) — the sole marker of "this bot
+    message is a relayed voice transcription"."""
+
+    @pytest.mark.asyncio
+    async def test_link_is_bound_when_given(self, repo):
+        repo_, pool = repo
+
+        await repo_.save(
+            CHAT_ID,
+            message_id=778,
+            message_type="transcription",
+            is_bot_message=True,
+            transcribed_message_id=777,
+        )
+
+        assert _saved(pool)["transcribed_message_id"] == 777
+
+    @pytest.mark.asyncio
+    async def test_ordinary_messages_bind_null(self, repo):
+        """Every other save path must leave the column NULL — a stray value
+        would make an ordinary bot message read as a transcription and go
+        silent on replies."""
+        repo_, pool = repo
+
+        await repo_.save(CHAT_ID, message_id=5, message_type="text", content="hi")
+
+        assert _saved(pool)["transcribed_message_id"] is None
 
 
 class TestGetRecentWithTopicContext:

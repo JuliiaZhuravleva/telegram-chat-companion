@@ -11,6 +11,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.reply_flow import finish_reply, relevancy_allows_reply
 from src.bot.utils import extract_reply_context, should_respond
+from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.abuse.checker import AntiAbuseChecker
@@ -28,6 +29,7 @@ async def handle_text_message(
     message: Message,
     chat_config: ChatConfig,
     pipeline: FromDishka[TextProcessingPipeline],
+    message_repo: FromDishka[MessageRepository],
     relevancy_gate: FromDishka[RelevancyGate],
     spend_limit_svc: FromDishka[SpendLimitService],
     abuse_checker: FromDishka[AntiAbuseChecker],
@@ -41,7 +43,12 @@ async def handle_text_message(
         bot_info = await bot.me()
         bot_id = bot_info.id if bot_info else None
 
-    should_reply, trigger_type = should_respond(message, chat_config, bot_id)
+    # Extract reply context (full message + manually-highlighted quote, if any)
+    # BEFORE the trigger decision: it is what decides whether a reply addresses
+    # the bot at all, and the pipeline needs the same object further down.
+    reply_ctx = await extract_reply_context(message, bot_id, message_repo)
+
+    should_reply, trigger_type = should_respond(message, chat_config, reply_ctx=reply_ctx)
 
     if not should_reply:
         return
@@ -62,9 +69,6 @@ async def handle_text_message(
     user = message.from_user
     user_id = user.id if user else 0
     user_name = (user.first_name if user else None) or "Unknown"
-
-    # Extract reply context (full message + manually-highlighted quote, if any)
-    reply_ctx = extract_reply_context(message)
 
     logger.info(
         "Processing message",

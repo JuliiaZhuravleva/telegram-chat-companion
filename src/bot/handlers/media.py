@@ -11,8 +11,8 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.reply_flow import finish_reply, relevancy_allows_reply
-from src.bot.utils import extract_reply_context, should_respond
+from src.bot.reply_flow import finish_reply, relevancy_allows_reply, send_quoted_reply
+from src.bot.utils import ReplyContext, extract_reply_context, should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
@@ -37,6 +37,14 @@ _FAILED_SET_REGISTRATION: dict[str, float] = {}
 _FAILED_SET_TTL = 300  # 5 minutes
 
 
+async def _resolve_bot_id(bot: Bot, kwargs: dict[str, Any]) -> int:
+    """The bot's own user id, from `dp["bot_id"]` or a live `getMe` fallback."""
+    bot_id: int | None = kwargs.get("bot_id")
+    if bot_id is None:
+        bot_id = (await bot.me()).id
+    return bot_id
+
+
 # ── Voice / Video Note ────────────────────────────────────────────────
 
 
@@ -45,8 +53,14 @@ async def handle_voice_message(
     message: Message,
     chat_config: ChatConfig,
     voice_service: FromDishka[VoiceTranscriptionService],
+    pipeline: FromDishka[TextProcessingPipeline],
+    message_repo: FromDishka[MessageRepository],
+    relevancy_gate: FromDishka[RelevancyGate],
+    spend_limit_svc: FromDishka[SpendLimitService],
+    abuse_checker: FromDishka[AntiAbuseChecker],
     bot: Bot,
     message_thread_id: int | None = None,
+    **kwargs: Any,
 ) -> None:
     """Handle voice messages and video notes via Whisper transcription."""
     # Determine type
@@ -86,14 +100,183 @@ async def handle_voice_message(
             user_first_name=user_name,
             message_type=message_type,
             language=chat_config.language,
+            user_id=user.id if user else None,
+            username=user.username if user else None,
         )
 
     if result is None:
         return
 
-    # Send formatted reply (reply routes to same topic via reply_to_message_id)
+    # Send the transcription through the same deletion-tolerant sender as the
+    # answer below. The window is shorter here (Whisper only, not Whisper plus
+    # generation) but the race is identical: delete the voice note while it is
+    # being transcribed and an unguarded `message.reply` raises, crashing the
+    # handler. Telegram's own error is all the user gets — the global handler
+    # only replies to CallbackQuery events, never to a Message — so the
+    # transcription is lost with no explanation, Whisper is paid for anyway,
+    # and the link row below never gets written either.
     reply_text = VoiceTranscriptionService.format_reply(user_name, result.text)
-    await message.reply(reply_text, parse_mode="Markdown")
+    sent = await send_quoted_reply(
+        message=message,
+        html_text=reply_text,
+        reply_to_message_id=message.message_id,
+        language=chat_config.language,
+    )
+    if sent is None:
+        logger.warning(
+            "Transcription could not be delivered",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+        )
+        return
+
+    # Record what that message IS, before anything else can fail. This one row
+    # is how a later reply to it gets routed to the speaker instead of the bot
+    # (migration 028); without it the bot answers every such reply.
+    await voice_service.record_transcription_message(
+        chat_id=message.chat.id,
+        message_id=sent.message_id,
+        source_message_id=message.message_id,
+        message_thread_id=message_thread_id,
+    )
+
+    await _maybe_answer_transcript(
+        message=message,
+        chat_config=chat_config,
+        transcript=result.text,
+        user_name=user_name,
+        pipeline=pipeline,
+        message_repo=message_repo,
+        relevancy_gate=relevancy_gate,
+        spend_limit_svc=spend_limit_svc,
+        abuse_checker=abuse_checker,
+        bot=bot,
+        bot_id=await _resolve_bot_id(bot, kwargs),
+        message_thread_id=message_thread_id,
+    )
+
+
+async def _maybe_answer_transcript(
+    *,
+    message: Message,
+    chat_config: ChatConfig,
+    transcript: str,
+    user_name: str,
+    pipeline: TextProcessingPipeline,
+    message_repo: MessageRepository,
+    relevancy_gate: RelevancyGate,
+    spend_limit_svc: SpendLimitService,
+    abuse_checker: AntiAbuseChecker,
+    bot: Bot,
+    bot_id: int,
+    message_thread_id: int | None,
+) -> None:
+    """Decide about the transcript the way an ordinary text message is decided.
+
+    Once the bot has relayed the speaker's words, the transcript is just chat
+    content: trigger words in it count, a random reply may fire, and an
+    unprompted one still has to clear the relevancy gate — the same sequence
+    `handlers/message.py` runs. Before this existed a voice message could never
+    draw a reply at all, no matter what was said in it.
+
+    Two deliberate differences from the text path:
+
+    * The answer always quotes the **voice message**, never the transcription,
+      and quotes it even on a RANDOM trigger (where the text path deliberately
+      quotes nothing). The bot's own transcription sits between the voice note
+      and the answer, so an unquoted reply here would read as addressed to
+      nobody.
+    * `should_respond` is fed the transcript explicitly — a voice `Message`
+      carries no text of its own, so the default scan would see an empty
+      string and only ever produce RANDOM.
+
+    Anti-abuse is not double-counted: `AntiAbuseChecker.check()` writes on four
+    paths (CLAUDE.md), and this is the only pipeline pass a voice message ever
+    makes.
+    """
+    reply_ctx = await extract_reply_context(message, bot_id, message_repo)
+    respond, trigger_type = should_respond(
+        message, chat_config, reply_ctx=reply_ctx, text=transcript
+    )
+    if not respond:
+        return
+
+    if not await relevancy_allows_reply(
+        message=message,
+        chat_config=chat_config,
+        trigger_type=trigger_type,
+        message_text=transcript,
+        relevancy_gate=relevancy_gate,
+        abuse_checker=abuse_checker,
+    ):
+        return
+
+    user = message.from_user
+    user_id = user.id if user else 0
+
+    logger.info(
+        "Responding to voice transcript",
+        chat_id=message.chat.id,
+        user_id=user_id,
+        trigger_type=trigger_type.value,
+        message_thread_id=message_thread_id,
+    )
+
+    # Same Q1 rule as the text path: no "typing" before an unsolicited reply.
+    async with typing_indicator(
+        bot,
+        message.chat.id,
+        message_thread_id,
+        enabled=trigger_type != TriggerType.RANDOM,
+    ):
+        result = await pipeline.process(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            user_name=user_name,
+            message_text=transcript,
+            trigger_type=trigger_type,
+            config=chat_config,
+            reply_author=reply_ctx.author,
+            reply_text=reply_ctx.text,
+            reply_is_bot=reply_ctx.is_bot,
+            reply_quote_text=reply_ctx.quote_text,
+            reply_quote_is_manual=reply_ctx.quote_is_manual,
+            message_thread_id=message_thread_id,
+            message_id=message.message_id,
+        )
+
+    if not result.should_respond or not result.html_text:
+        logger.info(
+            "Pipeline suppressed response to voice transcript",
+            chat_id=message.chat.id,
+            trigger_type=trigger_type.value,
+            response_type=result.response_type.value if result.response_type else None,
+            has_text=bool(result.html_text),
+        )
+        return
+
+    sent = await send_quoted_reply(
+        message=message,
+        html_text=result.html_text,
+        reply_to_message_id=message.message_id,
+        language=chat_config.language,
+    )
+
+    if sent is None:
+        # Undeliverable, but the generation already happened. post_send is what
+        # writes the cost row (generate_text does not self-log, per ADR), so
+        # skipping it here would make the spend limit under-report real money.
+        await pipeline.post_send(result, bot_message_id=None)
+        return
+
+    await finish_reply(
+        message=message,
+        result=result,
+        sent_message_id=sent.message_id,
+        chat_config=chat_config,
+        pipeline=pipeline,
+        spend_limit_svc=spend_limit_svc,
+    )
 
 
 # ── Photo ─────────────────────────────────────────────────────────────
@@ -141,11 +324,14 @@ async def handle_photo_message(
     # description, so it does not need the analysis to have run.
     respond = False
     trigger_type = TriggerType.NONE
+    reply_ctx = ReplyContext()
     if caption:
-        bot_id: int | None = kwargs.get("bot_id")
-        if bot_id is None:
-            bot_id = (await bot.me()).id
-        respond, trigger_type = should_respond(message, chat_config, bot_id)
+        bot_id = await _resolve_bot_id(bot, kwargs)
+        # Extracted before the decision, not after: it is what decides whether
+        # a reply addresses the bot (a reply to one of the bot's transcriptions
+        # does not), and pipeline.process() below needs the same object.
+        reply_ctx = await extract_reply_context(message, bot_id, message_repo)
+        respond, trigger_type = should_respond(message, chat_config, reply_ctx=reply_ctx)
 
         # Relevancy gate (TD-028). Its absence here was a live defect: an
         # unprompted reply to a captioned photo was sent without ever asking
@@ -201,9 +387,6 @@ async def handle_photo_message(
             user = message.from_user
             user_id = user.id if user else 0
             user_name = (user.first_name if user else None) or "Unknown"
-
-            # Extract reply context (full message + manually-highlighted quote, if any)
-            reply_ctx = extract_reply_context(message)
 
             result = await pipeline.process(
                 chat_id=message.chat.id,
