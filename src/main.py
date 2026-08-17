@@ -41,7 +41,16 @@ from src.services.rag.backfill import EmbeddingBackfillWorker
 from src.utils import parse_admin_ids
 from src.utils.background import fire_and_forget
 
-_REQUIRED_TABLES = ("bot_config", "chat_settings", "custom_rules", "health_log")
+_REQUIRED_TABLES = (
+    "bot_config",
+    "chat_settings",
+    "custom_rules",
+    "health_log",
+    # Added with migration 027. Its absence used to surface as a runtime
+    # crash on the first /remember rather than a refusal to start -- the
+    # shape of the 2026-08-02 incident (schema drift, migration 016).
+    "chat_facts",
+)
 
 
 async def _verify_schema(pool: asyncpg.Pool) -> None:

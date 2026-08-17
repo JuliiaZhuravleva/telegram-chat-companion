@@ -15,6 +15,33 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# The one definition of "a fact that should influence the bot right now".
+#
+# `status='active' AND valid_to IS NULL` alone was the Phase-1 predicate;
+# migration 027 adds `expires_at`, and an expired fact must stop being
+# retrievable without becoming a *superseded revision* of anything (see that
+# migration's docstring). Interpolated as a local constant only -- never a
+# user value -- per the SQL-composition ADR.
+_LIVE_FACTS = """
+    status = 'active'
+      AND valid_to IS NULL
+      AND (expires_at IS NULL OR expires_at > NOW())
+"""
+
+# pgvector's ivfflat index is APPROXIMATE: it scans `probes` of its `lists`
+# partitions and returns whatever it finds there. Migration 014 built the
+# index with `lists = 10` and nothing ever set `probes`, whose default is 1 --
+# i.e. every KB lookup has been reading ~1/10th of the index and silently
+# missing the best fact whenever it lived in another partition.
+#
+# probes == lists means an exact scan. That is the right trade here and not a
+# general one: `chat_facts` holds a curated, hand-written set (tens of rows
+# per chat, not the thousands `chat_memory` carries), the whole point of the
+# revision is to let a fact decide whether the bot speaks, and a decision made
+# on an approximate result is not reproducible. Raise `lists` and revisit this
+# together, per migration 014's own note.
+_IVFFLAT_PROBES = 10
+
 
 class KnowledgeRepository:
     """Data access layer for `chat_facts`."""
@@ -212,24 +239,46 @@ class KnowledgeRepository:
         """
         if topic is not None:
             rows = await self._pool.fetch(
-                """
+                f"""
                 SELECT * FROM chat_facts
-                WHERE chat_id = $1 AND status = 'active' AND valid_to IS NULL
+                WHERE chat_id = $1 AND {_LIVE_FACTS}
                   AND topic = $2
                 ORDER BY topic NULLS LAST, subject, predicate
-                """,
+                """,  # noqa: S608 -- local constant, no user input
                 chat_id,
                 topic,
             )
         else:
             rows = await self._pool.fetch(
-                """
+                f"""
                 SELECT * FROM chat_facts
-                WHERE chat_id = $1 AND status = 'active' AND valid_to IS NULL
+                WHERE chat_id = $1 AND {_LIVE_FACTS}
                 ORDER BY topic NULLS LAST, subject, predicate
-                """,
+                """,  # noqa: S608 -- local constant, no user input
                 chat_id,
             )
+        return [dict(r) for r in rows]
+
+    async def get_expired_facts(self, chat_id: int) -> list[dict[str, Any]]:
+        """Facts that were live and have aged out. Reachable, not vanished.
+
+        `_LIVE_FACTS` hides expired rows from every read path, which would
+        otherwise make the management action they need ("the event moved --
+        clear the expiry") inapplicable to exactly the facts that need it.
+        The S3 fact list surfaces these behind their own segment.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT * FROM chat_facts
+            WHERE chat_id = $1
+              AND status = 'active'
+              AND valid_to IS NULL
+              AND expires_at IS NOT NULL
+              AND expires_at <= NOW()
+            ORDER BY expires_at DESC, subject
+            """,
+            chat_id,
+        )
         return [dict(r) for r in rows]
 
     async def search_by_similarity(
@@ -245,43 +294,110 @@ class KnowledgeRepository:
         -- retrieval relevance decides what this round trip returns at all;
         salience-driven budget-trim priority moved to `trim_facts_to_budget()`
         in `prompt_builder.py`, which now stable-sorts by salience before
-        applying the token budget). Only `status='active' AND valid_to IS NULL`
-        rows with a stored embedding are eligible.
+        applying the token budget). Only live rows (`_LIVE_FACTS` -- active,
+        not superseded, not past `expires_at`) with a stored embedding are
+        eligible.
         """
-        rows = await self._pool.fetch(
-            """
-            SELECT *,
-                   1 - (embedding <=> $2) AS similarity
-            FROM chat_facts
-            WHERE chat_id = $1
-              AND status = 'active'
-              AND valid_to IS NULL
-              AND embedding IS NOT NULL
-            ORDER BY embedding <=> $2 ASC, salience DESC
-            LIMIT $3
-            """,
-            chat_id,
-            query_embedding,
-            limit,
-        )
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Transaction-local (`is_local=true`), so this never leaks onto a
+            # pooled connection that some other query will reuse. Set through
+            # set_config() rather than `SET LOCAL` because only the function
+            # form accepts a bind parameter.
+            await conn.execute(
+                "SELECT set_config('ivfflat.probes', $1, true)", str(_IVFFLAT_PROBES)
+            )
+            rows = await conn.fetch(
+                f"""
+                SELECT *,
+                       1 - (embedding <=> $2) AS similarity
+                FROM chat_facts
+                WHERE chat_id = $1
+                  AND {_LIVE_FACTS}
+                  AND embedding IS NOT NULL
+                ORDER BY embedding <=> $2 ASC, salience DESC
+                LIMIT $3
+                """,  # noqa: S608 -- local constant, no user input
+                chat_id,
+                query_embedding,
+                limit,
+            )
         return [dict(r) for r in rows]
+
+    # ── embedding backfill (mirrors MemoryRepository's contract) ─────
+
+    async def get_pending_embeddings(
+        self, limit: int, *, exclude_ids: list[int] | None = None
+    ) -> list[asyncpg.Record]:
+        """Live facts stored without a vector, oldest first.
+
+        `/remember` persists the fact even when `generate_embedding()` raises,
+        so a provider blip leaves a row the user can see in `/kb` and
+        `search_by_similarity()` can never return (it filters
+        `embedding IS NOT NULL`). Nothing retried it, which made a transient
+        outage permanent for that fact. `EmbeddingBackfillWorker` is what
+        repairs it, using the same shape it already uses for `chat_memory`.
+
+        Only live facts are eligible: re-embedding a superseded, rejected or
+        expired row spends a call on something no read path will return.
+        `exclude_ids` carries the worker's parked rows, same as the memory
+        repository -- see its docstring for why a FIFO queue needs it.
+        """
+        result: list[asyncpg.Record] = await self._pool.fetch(
+            f"""
+            SELECT id, chat_id, fact_text
+            FROM chat_facts
+            WHERE embedding IS NULL
+              AND {_LIVE_FACTS}
+              AND NOT (id = ANY($2::bigint[]))
+            ORDER BY created_at ASC
+            LIMIT $1
+            """,  # noqa: S608 -- local constant, no user input
+            limit,
+            exclude_ids or [],
+        )
+        return result
+
+    async def update_embedding(self, fact_id: int, embedding: list[float]) -> None:
+        """Fill in a previously-pending fact's embedding.
+
+        ``AND embedding IS NULL`` guards against clobbering a row a concurrent
+        pass already filled, mirroring ``MemoryRepository.update_embedding``.
+        """
+        await self._pool.execute(
+            "UPDATE chat_facts SET embedding = $2 WHERE id = $1 AND embedding IS NULL",
+            fact_id,
+            embedding,
+        )
 
     # ── update (terminal, non-supersession) ──────────────────────────
 
-    async def reject_fact(self, fact_id: int, *, chat_id: int) -> bool:
+    async def reject_fact(
+        self, fact_id: int, *, chat_id: int, rejected_by: int | None = None
+    ) -> bool:
         """Mark a fact as rejected (terminal; not superseded, not deleted).
 
         Used by organizer/admin removal (A4) -- per ADR-0003, `chat_facts`
         rows are never hard-deleted so `/kb history` (Phase 4) stays free.
         Returns True if a row was updated.
+
+        `rejected_by` is the user who retired it (migration 027). It is
+        recorded because the revision lets every Telegram chat administrator
+        remove facts, not only the operator's hand-picked organizers -- so
+        "a fact disappeared" needs an answer that is not "ask everyone".
+        Defaulting to None keeps a system-initiated removal expressible and
+        distinct from an unattributed one.
         """
         result = await self._pool.execute(
             """
             UPDATE chat_facts
-            SET status = 'rejected', valid_to = COALESCE(valid_to, NOW())
+            SET status = 'rejected',
+                valid_to = COALESCE(valid_to, NOW()),
+                rejected_by = $3,
+                rejected_at = NOW()
             WHERE id = $1 AND chat_id = $2 AND valid_to IS NULL
             """,
             fact_id,
             chat_id,
+            rejected_by,
         )
         return result.endswith(" 1") if result else False
