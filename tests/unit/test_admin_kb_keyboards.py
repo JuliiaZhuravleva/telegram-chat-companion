@@ -1,10 +1,14 @@
 """Tests for the Knowledge Base admin sub-router's keyboards (A4).
 
-Scope: unit coverage for the B-2 participant-picker keyboards
-(`kb_organizer_picker_keyboard`, `_candidate_label`, `kb_org_add_prompt_keyboard`).
-The rest of this module (`kb_chat_picker_keyboard`, `kb_menu_keyboard`,
-`kb_organizers_keyboard`, `kb_view_keyboard`) has no dedicated keyboard-unit
-coverage yet -- pre-existing gap, out of scope for B-2.
+Scope: the B-2 participant-picker keyboards (`kb_organizer_picker_keyboard`,
+`_candidate_label`, `kb_org_add_prompt_keyboard`), the panel-origin routes
+(`kb_menu_keyboard`, `kb_organizers_keyboard`), and — since S2/KB-08 —
+`kb_undo_keyboard` plus the `kb_undo:` / `kb_view:` prefix boundary, which is
+checked against the handlers' REAL filters rather than a re-typed prefix.
+
+`kb_chat_picker_keyboard` still has no dedicated coverage here, and
+`kb_view_keyboard` is exercised only as the other side of that prefix boundary
+-- pre-existing gaps, not S2 regressions.
 """
 
 from __future__ import annotations
@@ -15,10 +19,18 @@ from src.bot.keyboards.admin_kb import (
     kb_org_add_prompt_keyboard,
     kb_organizer_picker_keyboard,
     kb_organizers_keyboard,
+    kb_undo_keyboard,
+    kb_view_keyboard,
 )
 from src.bot.nav import PANEL_ORIGIN
 
 CHAT_ID = -1001234567890
+
+# Obviously-fake ids at the widest realistic shape (this repo is public).
+# `chat_facts.id` is a bigint; 17 digits is the widest a Postgres sequence
+# realistically reaches, and a Telegram user id is currently 10 digits.
+WIDEST_FACT_ID = 99999999999999999
+WIDEST_OWNER_ID = 9999999999
 
 
 def _get_callbacks(keyboard):
@@ -172,7 +184,14 @@ class TestSubPanelBackOrigin:
         assert self._back_of(kb) == "adm_kb:ru:0"
 
     def test_every_callback_fits_telegrams_64_byte_limit(self) -> None:
-        """The origin token has to fit next to the longest realistic chat id."""
+        """The origin token has to fit next to the longest realistic chat id.
+
+        `kb_undo:` joins the sweep here (S2/KB-08): it is the first
+        write-capable button in a *group* chat, and Telegram rejects an
+        over-length `callback_data` at send time — the confirmation message
+        would fail to post *after* the fact was already written, i.e. the fact
+        lands and the user is told nothing.
+        """
         long_id = -1009999000001234
         for kb in (
             kb_menu_keyboard("ru", chat_id=long_id, kb_enabled=True, origin=PANEL_ORIGIN),
@@ -184,6 +203,140 @@ class TestSubPanelBackOrigin:
                 total=1,
                 origin=PANEL_ORIGIN,
             ),
+            kb_undo_keyboard("ru", fact_id=WIDEST_FACT_ID, owner_id=WIDEST_OWNER_ID),
+            kb_undo_keyboard("en", fact_id=WIDEST_FACT_ID, owner_id=WIDEST_OWNER_ID),
         ):
-            for cb in _get_callbacks(kb):
+            callbacks = _get_callbacks(kb)
+            assert callbacks, "no callback_data collected — the sweep would be vacuous"
+            for cb in callbacks:
                 assert len(cb.encode()) <= 64, f"{cb} is {len(cb.encode())} bytes"
+
+
+class TestKbUndoKeyboard:
+    """The `/remember` confirmation's undo button (S2/KB-08).
+
+    Threat model, and why it needs its own tests: this is the project's first
+    write-capable inline button in a **group** chat, where Telegram lets any
+    member press any button. The presser's right to use it is decided by the
+    handler, but the payload is what tells the handler who was offered it — so
+    the payload has to survive Telegram's transport intact (64 bytes) and parse
+    back to exactly the two ids it was built from, unambiguously.
+    """
+
+    FACT_ID = 4242
+    OWNER_ID = 1000000001
+
+    def _only_callback(self) -> str:
+        kb = kb_undo_keyboard("ru", fact_id=self.FACT_ID, owner_id=self.OWNER_ID)
+        callbacks = _get_callbacks(kb)
+        assert len(callbacks) == 1, callbacks
+        return callbacks[0]
+
+    def test_exactly_one_row_with_exactly_one_button(self) -> None:
+        """The project caps a keyboard row at 2 buttons; undo is a single
+        destructive action and must not acquire a neighbour it could be
+        mis-tapped for."""
+        kb = kb_undo_keyboard("ru", fact_id=self.FACT_ID, owner_id=self.OWNER_ID)
+        assert len(kb.inline_keyboard) == 1, kb.inline_keyboard
+        assert len(kb.inline_keyboard[0]) == 1, kb.inline_keyboard[0]
+
+    def test_payload_round_trips_through_int_parsing(self) -> None:
+        """The handler does `int(parts[1])`, `int(parts[2])` on a `:`-split of
+        the payload. Three parts, and both ids come back byte-identical —
+        a fourth field or a stray `:` would silently retire a different fact
+        or hand the button to a different user."""
+        payload = self._only_callback()
+        parts = payload.split(":")
+        assert parts[0] == "kb_undo", payload
+        assert len(parts) == 3, parts
+        assert int(parts[1]) == self.FACT_ID, payload
+        assert int(parts[2]) == self.OWNER_ID, payload
+
+    def test_label_is_localised_both_ways(self) -> None:
+        assert any(
+            "Убрать" in text for text in _get_labels(kb_undo_keyboard("ru", fact_id=1, owner_id=2))
+        )
+        assert any(
+            "Remove" in text for text in _get_labels(kb_undo_keyboard("en", fact_id=1, owner_id=2))
+        )
+
+    def test_language_does_not_leak_into_the_payload(self) -> None:
+        """Unlike the `adm_kb_*` family, `kb_undo:` carries no lang field — the
+        handler reads it from `chat_config`. If one variant grew one, the
+        handler's positional `int(parts[2])` would parse a language code."""
+        ru = _get_callbacks(kb_undo_keyboard("ru", fact_id=7, owner_id=8))
+        en = _get_callbacks(kb_undo_keyboard("en", fact_id=7, owner_id=8))
+        assert ru == en == ["kb_undo:7:8"]
+
+
+def _callback_filters(handler_name: str) -> list:
+    """The REAL registered filters of a `commands` callback_query handler.
+
+    Read off the router rather than re-spelled here: a test that restates
+    `F.data.startswith("kb_undo:")` proves only that the test author can type
+    the prefix twice.
+    """
+    from src.bot.handlers.commands import router as commands_router
+
+    for handler in commands_router.callback_query.handlers:
+        if handler.callback.__name__ == handler_name:
+            filters = [f.callback for f in (handler.filters or ())]
+            assert filters, f"{handler_name} has no filters — a match test would be vacuous"
+            return filters
+    raise AssertionError(f"no callback_query handler named {handler_name}")
+
+
+def _matches(handler_name: str, data: str) -> bool:
+    from types import SimpleNamespace
+
+    query = SimpleNamespace(data=data)
+    return all(bool(flt(query)) for flt in _callback_filters(handler_name))
+
+
+class TestKbCallbackPrefixHygiene:
+    """`kb_undo:` and `kb_view:` are siblings in the same router.
+
+    Both are un-namespaced (no `adm_` prefix) because both live outside the
+    admin DM panel, so they are the pair most able to collide. aiogram consumes
+    an update at the first matching handler, so a prefix that matches the wrong
+    handler does not fall through — `/kb` pagination would retire a fact, or
+    undo would silently repaint a list.
+
+    Driven through the handlers' REAL filter objects, and each payload comes
+    from the real keyboard builder rather than a hand-typed string.
+    """
+
+    def test_kb_undo_payload_matches_only_the_undo_handler(self) -> None:
+        payload = _get_callbacks(kb_undo_keyboard("ru", fact_id=4242, owner_id=1000000001))[0]
+        assert _matches("handle_kb_undo", payload)
+        assert not _matches("handle_kb_view_page", payload)
+
+    def test_kb_view_payload_matches_only_the_view_handler(self) -> None:
+        payloads = [
+            cb
+            for cb in _get_callbacks(kb_view_keyboard("ru", page=1, total_pages=3))
+            if cb != "noop"
+        ]
+        assert payloads, "expected pagination callbacks"
+        for payload in payloads:
+            assert _matches("handle_kb_view_page", payload)
+            assert not _matches("handle_kb_undo", payload)
+
+    def test_the_trailing_colon_stops_a_future_sibling_prefix(self) -> None:
+        """`str.startswith("kb_undo")` without the colon would also match
+        `kb_undo_all:`; the colon is what makes the two disambiguate."""
+        assert not _matches("handle_kb_undo", "kb_undo_all:1"), (
+            "kb_undo_all: matched handle_kb_undo"
+        )
+        assert not _matches("handle_kb_view_page", "kb_viewer:ru:1"), (
+            "kb_viewer: matched handle_kb_view_page"
+        )
+
+    def test_the_match_test_can_say_no(self) -> None:
+        """Negative control for the matcher itself: an unrelated payload must
+        match neither handler, so a `_matches` that always returned True (e.g.
+        an empty filter list) cannot make the assertions above vacuous."""
+        assert not _matches("handle_kb_undo", "adm_kb_menu:ru:-1001"), "matcher always says yes"
+        assert not _matches("handle_kb_view_page", "adm_kb_menu:ru:-1001"), (
+            "matcher always says yes"
+        )

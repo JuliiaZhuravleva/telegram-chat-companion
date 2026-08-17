@@ -69,3 +69,32 @@ Re-run before setting `min_similarity`:
 ```
 python -m scripts.kb_report <dsn> --since-days 90 --markdown
 ```
+
+---
+
+## What S2 changed under this measurement (2026-08-17, not yet re-measured)
+
+The line above was recorded against the Phase-1 capture path. S2 changed that
+path, so **the next run of this report is not comparable to the one above** and
+must be read as a new baseline rather than as a delta. What moved:
+
+- **Capture is append-only** (ADR-0012). Before, a second `/remember` about one
+  subject superseded the first, so the corpus could not grow past one fact per
+  subject — which is part of why production held two facts. A growing corpus is
+  the whole point: the floor is calibrated from it.
+- **Retrieval reads an exact index** since S1 (`ivfflat.probes = lists`), so
+  similarity figures are no longer partly a function of which partition a fact
+  landed in.
+- **The prompt header changed** and no longer claims "authoritative, current",
+  so the sentence quoted above describes the *old* injection wording. An expiring
+  fact now also renders its date to the model.
+- **`expires_at` is written for the first time**, which means the live-fact set
+  can now shrink on its own. A fact that stopped being injected is no longer
+  necessarily evidence of a retrieval change.
+
+**Do not re-run this report immediately after the deploy.** It reads
+`retrieval_log`, which needs turns *after* a corpus exists; a run against a
+2-fact corpus reproduces exactly the "no signal" state described above. Judge
+readiness from the corpus, not the calendar: `SELECT count(*) FROM chat_facts
+WHERE status = 'active' AND valid_to IS NULL` in the tens, across more than one
+subject, before the sweep can distinguish anything.

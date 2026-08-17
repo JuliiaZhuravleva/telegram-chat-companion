@@ -43,6 +43,7 @@ from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
 from src.services.chat_config import ChatConfigService
+from src.utils import parse_user_id_list
 
 logger = structlog.get_logger(__name__)
 
@@ -139,17 +140,13 @@ def _is_private(callback: CallbackQuery) -> bool:
 
 
 def _parse_organizer_ids(raw: Any) -> list[int]:
-    """Defensively parse kb_organizer_ids (asyncpg may return list or JSON str)."""
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except (ValueError, TypeError):
-            return []
-    if not isinstance(raw, list):
-        return []
-    return [int(v) for v in raw]
+    """Defensively parse kb_organizer_ids. Thin alias over the shared parser.
+
+    Kept as a name because this module reads it at several call sites; the parse
+    itself lives in `src/utils` so the `/remember` authority gate and this screen
+    cannot disagree about who an organizer is.
+    """
+    return parse_user_id_list(raw)
 
 
 async def _render_chat_picker(

@@ -225,6 +225,26 @@ ru: "Общее"
 en: "General"
 ```
 
+> **⚠️ Superseded in part by §7.1 (S2, 2026-08-17). Read both.** Two deviations
+> from the templates below are now shipped, deliberately:
+>
+> 1. **The per-fact line renders `fact_text`**, not `{subject} — {predicate}: {value}`
+>    (§6a) or `{subject} — {value}` (§6b). S2's generated `predicate` is machine
+>    identity, and a captured quote has no natural subject/value split — its
+>    `subject` is a derived head, so printing it beside the text it came from reads
+>    as a duplicated sentence. Rendering one column everywhere is also what stops a
+>    fact from saying different things in the group list, the DM list and the
+>    model's prompt; a test pins that. §6b's own instruction was to bounce a
+>    line-shape change back to this doc rather than change it silently — this note
+>    is that bounce. A fact with a deadline additionally carries `⏳ до dd.mm.yyyy`,
+>    and any line over 200 characters is capped with `…`.
+> 2. **The DM title carries no `{chat_title}`.** It never has. Interpolating one
+>    would be actively misleading right now: `/kb` in a DM lists the *private*
+>    chat's own facts, not a group's (TD-084), so the title would name the wrong
+>    knowledge base. The right fix is the S3 management surface, where the user
+>    picks which chat's base they are looking at — at which point the title becomes
+>    meaningful and this template applies again.
+
 ### 6a. DM (rich — bold title + sectioned)
 
 ```
@@ -348,6 +368,107 @@ the malformed/no_reply cases; the success case's `**bold**` needs
 `markdown_to_html` like `/help`, or plain `*bold*`→HTML conversion — reuse
 whichever helper the surrounding command already uses, don't add a second
 markdown renderer).
+
+---
+
+### 7.1 Revision — S2 «Захват» (2026-08-17)
+
+The Phase-1 register above described a command that **required a reply** and
+took `тема: значение`. S2/KB-07..KB-09 changed the contract, so four of its
+strings no longer exist in the code (`_REMEMBER_NO_REPLY`,
+`_REMEMBER_MALFORMED`, `_REMEMBER_SUCCESS`, `_REMEMBER_SUCCESS_NO_EMBED`).
+Recorded here rather than by editing §7 in place: §7 is what shipped in Phase 1
+and the diff between the two registers *is* the behaviour change.
+
+**Rendering rule changed, and this one is load-bearing.** The confirmation is
+now built as **explicit HTML with `html.escape()` on every dynamic part** and is
+NOT passed through `markdown_to_html`. That helper escapes first but then
+*interprets* Markdown, so captured text containing `**` or a lone `_` — routine
+in a quoted message — comes back with crossing tags that Telegram rejects
+outright. The reply happens **after** the row is committed, so a rejected
+confirmation reads to the user as a save that did not happen; they retype it,
+and under append-only that is a second fact. `_reply_html_with_fallback` retries
+once with `parse_mode=None` for the same reason: a completed write must never be
+reported as silence.
+
+Grammar the copy has to serve:
+
+```
+/remember [#тема] <текст> [до <дата>]
+/remember [#тема] [до <дата>]      ← as a reply: saves the quoted message
+```
+
+```
+saved ru:          "✅ Сохранено: {text}"
+saved en:          "✅ Saved: {text}"
+
+already ru:        "ℹ️ Это уже сохранено (#{fact_id}), второй раз не записываю: {text}"
+already en:        "ℹ️ Already saved (#{fact_id}), not storing it twice: {text}"
+
+topic ru:          "🗂 Тема: {topic}"
+expiry ru:         "⏳ Действует до {date} включительно"
+
+no_embed ru:       "⚠️ Поиск по смыслу для этого факта включится в течение часа —
+                    до тех пор он виден только в /kb."
+
+nothing_to_save ru:"↩️ Нечего сохранять. Ответьте этой командой на сообщение —
+                    или напишите текст сразу: /remember у нас созвон по вторникам"
+own_message ru:    "🚫 Это моё собственное сообщение, а не чей-то факт.
+                    Сохраните первоисточник — или напишите текст факта прямо в команде."
+dm_notice ru:      "📚 /remember работает в групповом чате: …В личке сохранять некуда."
+
+note_topic ru:     "⚠️ Тему «{topic}» не принял (буквы, цифры, «-», «_», «:», до 32 символов) —
+                    факт сохранён без темы."
+note_expiry ru:    "⚠️ Срок «{value}» не распознал — сохранил без срока.
+                    Понимаю «до 05.09», «до 5 сентября», «до 2026-09-05»."
+note_past ru:      "⚠️ Дата «{value}» уже прошла — сохранил без срока, иначе факт исчез бы сразу."
+note_long ru:      "ℹ️ Факт длиннее {limit} символов — в ответах бота он будет обрезан."
+note_quote ru:     "ℹ️ Сохранил выделенный фрагмент, а не всё сообщение."
+removed ru:        "ℹ️ Этот факт уже сохраняли и потом убрали (#{fact_id}) — сам не восстанавливаю.
+                    Отправьте команду заново, если он снова нужен."
+saved_terse ru:    "✅ Сохранено (#{fact_id})"
+
+undo_button ru:    "↩️ Убрать"
+undo_done ru:      "↩️ Убрал этот факт."
+undo_already ru:   "Этот факт уже убран."
+undo_not_yours ru: "Эту кнопку нажимает тот, кто сохранил факт."
+```
+
+Three copy decisions worth keeping straight:
+
+- **A degradation always announces a save, never a refusal.** An unreadable
+  deadline or a rejected topic produces `saved` *plus* a `note_*` line — the
+  fact is stored, minus the part that was not understood. The one thing the
+  copy must never do is imply the text was lost.
+- **`no_embed` promises "within the hour", not "a few minutes".**
+  `EmbeddingBackfillWorker` sleeps 180 s at startup and then runs hourly, so
+  "minutes" would be a string that is usually wrong.
+- **`_KB_EMPTY_DM` stopped offering the admin panel** as a way to add facts. It
+  never was one — the panel toggles `kb_enabled` and appoints organizers.
+- **`saved_terse` is the third send, not a variant.** The confirmation is
+  attempted as HTML, then as plain text, then as this one short line. The second
+  attempt resends the *same* body, so a length rejection kills it too — and the
+  row is already committed, which makes "the chat sees nothing" the one outcome
+  that must not happen (the user retypes, and append-only writes a second fact).
+- **`note_quote` exists because the choice is otherwise invisible.** The
+  confirmation echoes the highlighted words; without this line nothing tells the
+  user the rest of the message was deliberately left out.
+
+**§6's terse group template is superseded here.** It locks
+`• {subject} — {value}`; both `/kb` views now render `fact_text`, because S2's
+generated `predicate` is machine identity and a captured quote has no natural
+subject/value split (so `subject` is a derived head, and printing it beside the
+text it came from reads as a duplicated sentence). §6's own instruction was to
+bounce a shape change back here rather than change it silently — this is that
+note. One fact now reads identically in the group list, the DM list and the
+model's prompt, which is pinned by a test.
+
+§8's note about a 3-button confirmation row is still accurate as guidance and
+still unspent: the undo confirmation is **one** button on the success message,
+not a confirmation row. KB-10's preview-and-confirm register (a multi-line paste
+split into N facts) is deliberately **not** written here yet — the item is held
+pending the owner's decision on whether a pasted rules block should become N
+facts or one, because the answer changes every string in it.
 
 ---
 

@@ -45,7 +45,8 @@ Three rules apply to the whole admin surface:
 | `/costs` | Shortcut to the 24-hour AI spend screen (§6) |
 | `/start`, `/help` | Ordinary user commands, nothing admin-specific |
 | `/summary` | Answers "group chats only" — summaries are never generated for a DM |
-| `/kb`, `/remember` | Work on the *DM's own* knowledge base, which is almost always empty. Chat knowledge bases are curated from the panel (§8). `/kb` appears in the command menu; `/remember` deliberately does not — it needs a reply and only organizers and bot admins may use it, which no Telegram scope can express |
+| `/kb` | Works on the *DM's own* knowledge base, which is almost always empty. It appears in the command menu |
+| `/remember` | **Group chats only** since S2. In a DM it answers with a notice and writes nothing: a fact is stored against the chat it was written in, and the bot answers from the knowledge base of *that* chat, so a fact captured in a DM is one no group retrieval can ever reach. It deliberately does not appear in the command menu — only organizers and bot admins may use it, which no Telegram scope can express |
 | Sends a sticker | Catalogue check (§7.3) — never silently learned |
 | Replies with text to a sticker card | Updates that sticker's description via the AI merge (§7.4) |
 | Any other text | Treated as an ordinary message to the bot: it answers only if a trigger word matches or the random chance fires |

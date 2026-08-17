@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import structlog
 from aiogram import Bot
+from aiogram.client.default import Default
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import InlineKeyboardMarkup, Message
@@ -104,19 +105,28 @@ async def safe_edit_text(
     text: str,
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
-    parse_mode: str | None = None,
+    parse_mode: str | None | Default = Default("parse_mode"),
 ) -> None:
     """edit_text that tolerates re-rendering identical content.
 
     Telegram raises TelegramBadRequest("message is not modified") when the
     new text+markup equal the current ones (double-tap on a refresh button,
     re-opening the same page). Only that error is suppressed.
+
+    The default is aiogram's own `Default("parse_mode")` sentinel — the same
+    value `edit_text` declares — rather than `None`, so the three states stay
+    distinguishable:
+
+    * omitted        → inherit the bot-wide default (HTML). Nine callers rely on
+                       this and their text contains real markup.
+    * `parse_mode=None` → genuinely NO parse mode. Previously this was
+                       indistinguishable from "omitted" and therefore re-enabled
+                       HTML, so a caller asking for plain text got the opposite —
+                       the project's documented escaping trap, one step removed.
+    * an explicit mode → that mode.
     """
     try:
-        if parse_mode is not None:
-            await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
-        else:
-            await message.edit_text(text, reply_markup=reply_markup)
+        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc):
             raise

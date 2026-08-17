@@ -9,9 +9,14 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.client.default import Default
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramBadRequest
 
-from src.bot.utils import check_admin_direct, is_bot_chat_admin
+from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
+
+# Distinguishes "passed None" from "not passed at all" — the whole point here.
+_ABSENT = object()
 
 CHAT_ID = -1001234567890
 BOT_ID = 999
@@ -93,3 +98,80 @@ class TestCheckAdminDirect:
     @pytest.mark.asyncio
     async def test_unset_admin_ids_rejects_everyone(self) -> None:
         assert await check_admin_direct(self._repo(None), 7) is False
+
+
+class TestSafeEditTextParseMode:
+    """`parse_mode=None` must disable HTML, not silently re-enable it.
+
+    The three states are distinct and the middle one used to be unreachable:
+
+    * omitted           → inherit the bot-wide default (HTML). Nine call sites
+                          rely on this and their text contains real markup, so
+                          this is the state that must not change.
+    * `parse_mode=None` → genuinely no parse mode. Previously indistinguishable
+                          from "omitted", because `None` *was* the default and the
+                          helper then dropped the argument — so a caller asking
+                          for plain text got HTML, which is this project's
+                          documented escaping trap one step removed.
+    * explicit mode     → that mode.
+
+    Asserted on what reaches `edit_text`, because that is where the substitution
+    happened; a test on the helper's return value could not see it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_explicit_none_disables_parsing(self) -> None:
+        message = MagicMock()
+        message.edit_text = AsyncMock()
+
+        await safe_edit_text(message, "a < b & c", parse_mode=None)
+
+        passed = message.edit_text.await_args.kwargs.get("parse_mode", _ABSENT)
+        assert passed is None, (
+            "parse_mode must be passed through as None; "
+            f"got {passed!r} (absent means the helper dropped the argument, "
+            "so aiogram substitutes the bot default and HTML is re-enabled)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_omitted_inherits_the_bot_default(self) -> None:
+        message = MagicMock()
+        message.edit_text = AsyncMock()
+
+        await safe_edit_text(message, "<b>bold</b>")
+
+        passed = message.edit_text.await_args.kwargs.get("parse_mode", _ABSENT)
+        assert isinstance(passed, Default), (
+            f"expected aiogram's Default sentinel so the bot-wide HTML applies, got {passed!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_mode_is_passed_through(self) -> None:
+        message = MagicMock()
+        message.edit_text = AsyncMock()
+
+        await safe_edit_text(message, "<b>bold</b>", parse_mode="HTML")
+
+        assert message.edit_text.await_args.kwargs["parse_mode"] == "HTML"
+
+    @pytest.mark.asyncio
+    async def test_not_modified_is_still_suppressed(self) -> None:
+        """The helper's original reason for existing must survive the change."""
+        message = MagicMock()
+        message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=MagicMock(), message="message is not modified: nothing changed"
+            )
+        )
+
+        await safe_edit_text(message, "same", parse_mode=None)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_other_bad_requests_still_propagate(self) -> None:
+        message = MagicMock()
+        message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="message can't be edited")
+        )
+
+        with pytest.raises(TelegramBadRequest):
+            await safe_edit_text(message, "x", parse_mode=None)

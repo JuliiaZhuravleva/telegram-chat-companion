@@ -15,11 +15,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from src.models.enums import ResponseType
 from src.services.text.adaptive_length import compute_length_instruction
 from src.services.text.prompt_sanitizer import sanitize_history_field, sanitize_prompt_content
+from src.utils.display_tz import DISPLAY_TZ
 
 # --- KB (Knowledge Base) budget constants (ADR-0003 Part 2, addendum to ADR-0001) ---
 # Budgeted independently of history/RAG (additive, per Julia's decision #3) --
@@ -371,7 +371,7 @@ def _sticker_section() -> str:
 # this bot lives in — an off-by-one on exactly the recency question the date
 # exists to answer (TD-016). No per-chat timezone exists in config; a fixed
 # display zone is strictly better than silent UTC until one does.
-_MEMORY_DATE_TZ = ZoneInfo("Asia/Tbilisi")
+_MEMORY_DATE_TZ = DISPLAY_TZ
 
 
 def _memory_date(mem: dict[str, Any]) -> str | None:
@@ -457,8 +457,36 @@ def trim_facts_to_budget(
 
 
 def _kb_section(facts: list[dict[str, Any]]) -> str:
-    lines = ["Curated Knowledge Base facts for this chat (authoritative, current):"]
+    """Render the curated-facts block: one fact, one bullet, dated if it expires.
+
+    Three properties this block has to hold, all of them consequences of S2
+    making manual capture append-only and quote-driven:
+
+    * **One fact is one bullet.** `sanitize_prompt_content` neutralises five tag
+      names and nothing else, so a fact carrying a newline followed by `- `
+      rendered as a *second* bullet — user text presented to the model as another
+      curated fact of the chat. Capture collapses whitespace on the write path;
+      this collapses again on the read path, because rows written before that
+      change still contain newlines.
+    * **The header no longer says "authoritative, current".** Append-only makes
+      contradiction representable (two live facts about one subject), retrieval
+      ranks by similarity with no recency term, and an expiring fact is current
+      only until its date. Calling the block authoritative told the model to
+      resolve a contradiction it cannot see.
+    * **A deadline is rendered.** `expires_at` is invisible to the model
+      otherwise, so "до 5 сентября" would shape retention but never the answer.
+    """
+    lines = ["Curated Knowledge Base facts for this chat, written by its organizers:"]
     for fact in trim_facts_to_budget(facts):
-        content = sanitize_prompt_content(fact.get("fact_text", ""))
+        content = " ".join(sanitize_prompt_content(fact.get("fact_text", "")).split())
+        expires_at = fact.get("expires_at")
+        if isinstance(expires_at, datetime):
+            # Naive values are not produced by the capture path (it writes
+            # tz-aware), but a hand-written row can carry one -- and calling
+            # astimezone() on a naive datetime interprets it in the *process's*
+            # timezone, which would shift the rendered date by hours.
+            if expires_at.tzinfo is not None:
+                expires_at = expires_at.astimezone(_MEMORY_DATE_TZ)
+            content = f"{content} (valid until {expires_at.date().isoformat()})"
         lines.append(f"- {content}")
     return "\n".join(lines)

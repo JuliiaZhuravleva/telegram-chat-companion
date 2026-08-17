@@ -28,9 +28,11 @@ one, only its DB-backed slow path is skipped.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.types import Chat, Message, User
 
 from src.bot.handlers import router as main_router
 
@@ -246,3 +248,222 @@ class TestAdminDmStickerRouterOrder:
 
         sub_routers = main_router.sub_routers
         assert sub_routers.index(admin_sticker_router) < sub_routers.index(media_router)
+
+
+# ── S2 dependency: a slash command in an admin's DM reply must reach the
+#    command handlers ─────────────────────────────────────────────────────────
+
+
+def _make_text_reply_message(
+    *,
+    text: str,
+    is_admin: bool = True,
+    chat_type: str = "private",
+) -> tuple[Message, dict[str, object]]:
+    """A REAL aiogram `Message` that is a text reply, plus the data dict.
+
+    A MagicMock will not do here, unlike the sticker tests above: aiogram's
+    `Command` filter opens with `isinstance(message, Message)` and returns
+    False for anything else, so every command handler in the chain would be
+    skipped for a mock — and "no command handler ran" is exactly the bug under
+    test. A mock-driven version of this test passes with the fix reverted.
+
+    Everything else follows from that choice: `message.answer()` / `.reply()` on
+    a real Message return a `SendMessage` bound to `self._bot` and awaiting it
+    calls the bot itself, so the single AsyncMock in `data["bot"]` records what
+    the user would have received (see `_sent_texts`). It is an AsyncMock and not
+    a MagicMock for a second reason: the sticker-merge path opens a real
+    `ChatActionSender` around `bot.send_chat_action`, whose return value must be
+    awaitable — that failure would surface inside a background task and read as
+    "the handler did nothing".
+    """
+    bot = AsyncMock()
+    chat = Chat(id=555, type=chat_type)
+    user = User(id=555, is_bot=False, first_name="Admin")
+    date = datetime(2026, 8, 17, 12, 0, tzinfo=UTC)
+
+    reply_to = Message(
+        message_id=4242,
+        date=date,
+        chat=chat,
+        text="🆔 AgADvh4AAlkbCFI",
+    )
+    msg = Message(
+        message_id=4243,
+        date=date,
+        chat=chat,
+        from_user=user,
+        text=text,
+        reply_to_message=reply_to,
+    ).as_(bot)
+
+    sticker_repo = MagicMock()
+    # The sticker reply handler's FIRST action, and unconditional -- so this is
+    # the probe for "did that handler run", independent of what it decides next.
+    sticker_repo.get_notification_by_reply = AsyncMock(
+        return_value={"file_unique_id": "AgADvh4AAlkbCFI"}
+    )
+
+    sticker_service = MagicMock()
+    sticker_service.merge_admin_description = AsyncMock(return_value="обновлённое описание")
+
+    chat_config = MagicMock()
+    chat_config.language = "ru"
+    chat_config.kb_enabled = True
+    # Pinned so a FALL-THROUGH to `message.py`'s generic text handler is silent
+    # and cannot raise. Without this the tests still go red when the slash guard
+    # is broken -- but they go red on `handle_text_message() missing 5 required
+    # positional arguments`, which blames the fixture rather than the guard, and
+    # a reader triaging that failure fixes the wrong thing. `trigger_words` also
+    # has to be a real list: `should_respond` iterates it, and iterating a
+    # MagicMock raises.
+    chat_config.trigger_words = []
+    chat_config.random_response_chance = 0.0
+
+    bot_config_repo = MagicMock()
+    bot_config_repo.get = AsyncMock(return_value="555")
+    bot_config_repo.get_defaults = AsyncMock(return_value={})
+
+    # `/kb` in a DM is the other command the old filter swallowed, and its
+    # handler reads the KB. An un-stubbed attribute would raise TypeError inside
+    # the handler, which reads as a routing failure rather than a fixture gap.
+    knowledge_repo = MagicMock()
+    knowledge_repo.get_active_facts = AsyncMock(return_value=[])
+
+    data: dict[str, object] = {
+        "is_admin": is_admin,
+        "sticker_repo": sticker_repo,
+        "sticker_service": sticker_service,
+        "bot_config_repo": bot_config_repo,
+        "knowledge_repo": knowledge_repo,
+        "chat_config": chat_config,
+        "bot": bot,
+        "message_thread_id": None,
+        "event_from_user": user,
+        # Present only so the fall-through handler is *constructible*; with
+        # trigger_words empty and random chance 0 it returns before touching any
+        # of them. `bot_id` short-circuits its `await bot.me()`.
+        "bot_id": 424242,
+        "pipeline": AsyncMock(),
+        "message_repo": AsyncMock(),
+        "relevancy_gate": AsyncMock(),
+        "spend_limit_svc": AsyncMock(),
+        "abuse_checker": AsyncMock(),
+    }
+    return msg, data
+
+
+def _sent_texts(bot: AsyncMock) -> list[str]:
+    """Texts the handlers actually tried to send, read off the bot itself.
+
+    `message.answer()` / `.reply()` on a real Message resolve to
+    `await bot(SendMessage(...))`, so this sees both — and sees nothing when no
+    handler replied, which is what makes "the update arrived somewhere"
+    falsifiable. Chat-action keep-alives go through `bot.send_chat_action`, a
+    child mock, so they never show up here.
+    """
+    texts: list[str] = []
+    for call in bot.await_args_list:
+        if call.args and isinstance(getattr(call.args[0], "text", None), str):
+            texts.append(call.args[0].text)
+    return texts
+
+
+class TestAdminDmSlashCommandReachesCommandHandlers:
+    """S2/KB-09 depends on this: `admin_sticker` is included FIRST, and its
+    reply handler used to match *any* text reply in a bot admin's DM.
+
+    A matched handler consumes the update even when its body decides to do
+    nothing, so an admin who replied to something with `/remember ...` in a DM
+    got silence and the command's own handler never ran. Worse than silence for
+    S2: `/remember` in a DM is exactly the mistake `handle_remember_dm` exists
+    to explain, so the user got no explanation of where facts actually live.
+
+    Driven through the REAL `main_router`, so a re-ordering of
+    `include_router(...)` or a filter edit is caught here.
+    """
+
+    @pytest.mark.asyncio()
+    async def test_slash_command_reply_is_not_swallowed_by_the_sticker_handler(self) -> None:
+        msg, data = _make_text_reply_message(text="/remember у нас созвон по вторникам")
+
+        await main_router.propagate_event("message", msg, **data)
+
+        sticker_repo = data["sticker_repo"]
+        assert isinstance(sticker_repo, MagicMock)
+        sticker_repo.get_notification_by_reply.assert_not_awaited()
+        sticker_service = data["sticker_service"]
+        assert isinstance(sticker_service, MagicMock)
+        sticker_service.merge_admin_description.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_slash_command_reply_actually_reaches_handle_remember_dm(self) -> None:
+        """ "Not swallowed" is only half the property -- the update has to arrive
+        somewhere. Asserted on what the user would have received, so a future
+        router that consumes it and stays silent fails here too."""
+        msg, data = _make_text_reply_message(text="/remember у нас созвон по вторникам")
+
+        await main_router.propagate_event("message", msg, **data)
+
+        bot = data["bot"]
+        assert isinstance(bot, AsyncMock)
+        texts = _sent_texts(bot)
+        assert len(texts) == 1, texts
+        assert "/remember" in texts[0], texts[0]
+        assert "групповом чате" in texts[0], texts[0]
+
+    @pytest.mark.asyncio()
+    async def test_kb_command_reply_is_not_swallowed_either(self) -> None:
+        """The bug was about slash commands in general, not `/remember` alone --
+        `/kb` in a DM reply was equally invisible."""
+        msg, data = _make_text_reply_message(text="/kb")
+
+        await main_router.propagate_event("message", msg, **data)
+
+        sticker_repo = data["sticker_repo"]
+        assert isinstance(sticker_repo, MagicMock)
+        sticker_repo.get_notification_by_reply.assert_not_awaited()
+        # ...and it landed in the `/kb` handler, which read the chat's facts.
+        knowledge_repo = data["knowledge_repo"]
+        assert isinstance(knowledge_repo, MagicMock)
+        knowledge_repo.get_active_facts.assert_awaited_once_with(555)
+
+    # ── the pre-existing behaviour must not be traded away ────────────────
+
+    @pytest.mark.asyncio()
+    async def test_plain_text_reply_is_still_consumed_by_the_sticker_handler(self) -> None:
+        """Positive control for the same scaffolding: a NON-slash reply from a
+        bot admin in a DM is the description-correction path and must still be
+        handled, all the way to the confirmation the admin sees. Without this,
+        the filter could be tightened into uselessness and the assertions above
+        would stay green."""
+        msg, data = _make_text_reply_message(text="это довольный кот")
+
+        await main_router.propagate_event("message", msg, **data)
+
+        sticker_repo = data["sticker_repo"]
+        assert isinstance(sticker_repo, MagicMock)
+        sticker_repo.get_notification_by_reply.assert_awaited_once_with(555, 4242)
+        sticker_service = data["sticker_service"]
+        assert isinstance(sticker_service, MagicMock)
+        sticker_service.merge_admin_description.assert_awaited_once_with(
+            "AgADvh4AAlkbCFI", "это довольный кот"
+        )
+        bot = data["bot"]
+        assert isinstance(bot, AsyncMock)
+        texts = _sent_texts(bot)
+        assert len(texts) == 1, texts
+        assert "обновлённое описание" in texts[0]
+
+    @pytest.mark.asyncio()
+    async def test_a_text_that_merely_contains_a_slash_is_still_consumed(self) -> None:
+        """The filter is anchored at the start (`startswith`). A correction that
+        mentions a slash mid-sentence is ordinary free text and must not be
+        pushed out to the command handlers, which would answer it with nothing."""
+        msg, data = _make_text_reply_message(text="кот 50/50 довольный")
+
+        await main_router.propagate_event("message", msg, **data)
+
+        sticker_repo = data["sticker_repo"]
+        assert isinstance(sticker_repo, MagicMock)
+        sticker_repo.get_notification_by_reply.assert_awaited_once()

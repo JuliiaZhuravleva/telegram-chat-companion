@@ -113,11 +113,22 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 - `/summary [n]` — AI-generated chat summary; the optional count covers the last `n`
   messages (default 100, from 20 up to 1000)
 - `/summary500` — the same summary over 500 messages, as one word
-- `/remember` — save a fact from a replied-to message into the chat's knowledge base
+- `/remember [#тема] <текст> [до <дата>]` — save a fact into the chat's knowledge base. Used as a
+  reply with no text of its own, it saves the replied-to message — or just the part of it you
+  highlighted. `#тема` files the fact under a topic, and `до 5 сентября` gives it a deadline after
+  which it stops influencing answers. Group chats only, organizers and bot admins only. A second
+  `/remember` about the same subject **adds** a fact rather than replacing the first one
+  ([ADR-0012](docs/decisions/ADR-0012-manual-capture-append-only-identity.md)); the confirmation
+  carries an undo button. A pasted multi-line list (house rules, say) is stored as **one**
+  complete fact rather than split per line — split facts would let the bot answer "what are our
+  rules?" with three of twelve in the confident tone of a curated base, whereas one fact is either
+  complete or visibly truncated
 - `/kb` — browse the facts remembered for this chat
 
 ### Optional Modules
-- **Knowledge base** — per-chat facts the bot remembers and reuses as context; curated by chat organizers from the admin panel
+- **Knowledge base** — per-chat facts the bot remembers and reuses as context; captured by chat
+  organizers with `/remember` in the chat itself, with the module toggled and organizers appointed
+  from the admin panel
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually. Each sticker carries an

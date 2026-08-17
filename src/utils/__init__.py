@@ -2,7 +2,37 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+
+def parse_user_id_list(raw: Any) -> list[int]:
+    """Parse a per-chat JSON list of user ids (`chat_settings.kb_organizer_ids`).
+
+    Defensive because asyncpg hands a `jsonb` column back either already decoded
+    or as a raw string depending on how it was written, and a malformed value
+    must degrade to "nobody" rather than raise inside an authority check.
+
+    Separate from `parse_admin_ids` on purpose: that one also accepts the legacy
+    comma-separated `bot_config` spelling, which has never been a valid shape
+    here. Shared by `handlers/commands.py` (the `/remember` authority gate) and
+    `handlers/admin_kb.py` (the organizer management screen) — two readers of one
+    column that had two independent copies of this parse, so a change to how
+    organizers are stored had to be made twice with nothing enforcing it.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(raw, list):
+        return []
+    try:
+        return [int(v) for v in raw]
+    except (ValueError, TypeError):
+        return []
 
 
 def parse_admin_ids(raw: Any) -> list[int]:
