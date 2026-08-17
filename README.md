@@ -128,7 +128,9 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 ### Optional Modules
 - **Knowledge base** — per-chat facts the bot remembers and reuses as context; captured by chat
   organizers with `/remember` in the chat itself, with the module toggled and organizers appointed
-  from the admin panel
+  from the admin panel. Facts only reach an answer when they actually match what was asked
+  (`knowledge_base.min_similarity`, default 0.70): a question the base has nothing to say about is
+  answered without it, rather than with the nearest few facts presented as relevant
 - **Voice transcription** — transcribe voice messages and video notes (Whisper)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually. Each sticker carries an

@@ -68,6 +68,27 @@ rag:
   default_importance: 0.5
 ```
 
+### Knowledge Base Settings
+
+Retrieval tuning only — whether the module runs at all is `modules.knowledge_base.enabled`
+plus the per-chat `kb_enabled` toggle.
+
+```yaml
+knowledge_base:
+  min_similarity: 0.7    # Cosine similarity threshold (0.0–1.0)
+```
+
+A fact below the floor is not shown to the model, and a turn where nothing clears it
+gets no knowledge-base block in the prompt at all — the bot answers as it would with no
+base. Sub-floor facts are still written to `retrieval_log` (with `above_floor: false`),
+so the floor stays measurable after it ships; see
+[kb-eval-baseline.md](kb-eval-baseline.md) for the production measurement this value
+comes from.
+
+Set to `0.0` to disable filtering entirely and restore the previous behaviour. Note that
+`config/default.yml` is COPY'd into the image at build time, so changing it means a
+rebuild (or an in-container edit plus restart).
+
 ### Logging
 
 ```yaml

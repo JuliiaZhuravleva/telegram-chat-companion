@@ -54,6 +54,34 @@ def _round_sim(similarity: Any) -> float | None:
     return round(float(similarity), 4)
 
 
+def _facts_above_floor(facts: list[dict[str, Any]], min_similarity: float) -> list[dict[str, Any]]:
+    """The facts whose cosine similarity clears the retrieval floor.
+
+    One definition, used both to decide what reaches the prompt and to mark
+    `above_floor` in `retrieval_log` -- the two must never disagree, or the
+    report describes an injection that did not happen.
+
+    ``min_similarity <= 0.0`` means *no floor* and returns the input unchanged.
+    That is not the same as testing ``sim >= 0.0``: cosine similarity is defined
+    on [-1, 1], so a ``>= 0.0`` test would still cut negatively-scored rows and
+    the "set it to 0.0 to roll back" path documented in ``config/default.yml``
+    would not actually restore the previous behaviour.
+
+    A row with no usable ``similarity`` is treated as below any floor. It cannot
+    be *shown* to clear one, and letting it through would make a malformed row
+    more privileged than a genuine distant match.
+    """
+    if min_similarity <= 0.0:
+        return list(facts)
+    return [
+        fact
+        for fact in facts
+        if isinstance(fact.get("similarity"), int | float)
+        and not isinstance(fact.get("similarity"), bool)
+        and float(fact["similarity"]) >= min_similarity
+    ]
+
+
 # Base max tokens for text generation
 _BASE_MAX_TOKENS = 2000
 
@@ -105,6 +133,8 @@ class TextProcessingPipeline:
         sticker_service: StickerResponderService | None = None,
         knowledge_repo: KnowledgeRepository | None = None,
         observability_repo: ObservabilityRepository | None = None,
+        *,
+        kb_min_similarity: float,
     ) -> None:
         self._ai = ai_router
         self._abuse = abuse_checker
@@ -115,6 +145,11 @@ class TextProcessingPipeline:
         self._sticker = sticker_service
         self._knowledge = knowledge_repo
         self._observability = observability_repo
+        # No default, mirroring `RAGMemoryService.__init__` (S2-2): the YAML is
+        # the single source for this number, and a dropped wiring must fail
+        # loudly at construction rather than silently retrieve at some other
+        # threshold than the one the config states.
+        self._kb_min_similarity = kb_min_similarity
         if observability_repo is None:
             # DI always wires the repo; absence means a hand-built instance.
             # Without this line, "nobody is recording decisions/retrievals"
@@ -261,12 +296,29 @@ class TextProcessingPipeline:
                     message_id=message_id,
                     source="kb",
                     query_text=message_text,
-                    params={"limit": _KB_SEARCH_LIMIT},
+                    params={
+                        "limit": _KB_SEARCH_LIMIT,
+                        "min_similarity": self._kb_min_similarity,
+                    },
+                    # Deliberately the UNFILTERED set. The floor is applied to
+                    # the prompt below, not here: once sub-floor rows stop being
+                    # logged, `retrieval_log` no longer records the noise band —
+                    # i.e. exactly the data any future re-tuning of the floor
+                    # would need, and the data docs/kb-eval-baseline.md was
+                    # derived from. Filtering at selection would make the floor
+                    # unmeasurable the moment it shipped.
                     raw=kb_facts,
                     duration_ms=kb_ms,
                     error=kb_error,
                 )
             )
+
+        # What actually reaches the model. A turn where everything is below the
+        # floor gets NO knowledge-base block at all (owner decision 2026-08-18:
+        # answer without the base by default, attach facts only on a topical
+        # match) — `_kb_section` is only rendered when `ctx.kb_facts` is
+        # non-empty.
+        kb_facts_for_prompt = _facts_above_floor(kb_facts, self._kb_min_similarity)
 
         # Convert Record rows to dicts for prompt builder
         history = [dict(r) for r in reversed(recent_msgs)]
@@ -284,7 +336,7 @@ class TextProcessingPipeline:
             jailbreak_hint=abuse_result.jailbreak_hint,
             recent_messages=history,
             message_lengths=message_lengths,
-            kb_facts=kb_facts,
+            kb_facts=kb_facts_for_prompt,
             rag_memories=rag_memories,
             reply_author=reply_author,
             reply_text=reply_text,
@@ -575,14 +627,29 @@ class TextProcessingPipeline:
             return
         try:
             if source == "kb":
+                # `raw` is the unfiltered top-N, so the two reductions the
+                # prompt path performs are replayed here IN THE SAME ORDER:
+                # floor first, budget trim second. Trimming `raw` instead would
+                # mark a sub-floor fact `injected` whenever the budget happened
+                # to have room for it — the budget almost never binds at these
+                # lengths, so that mistake would be invisible in the data and
+                # would silently corrupt the one field kb_report.py relies on.
+                #
                 # Same pure trim the renderer applies (agreement pinned by
                 # test_kb_retrieval_logs_budget_trim_as_not_injected), so
                 # `injected` states what actually reaches the prompt.
-                kept_ids = {fact.get("id") for fact in trim_facts_to_budget(raw)}
+                above_floor = _facts_above_floor(raw, self._kb_min_similarity)
+                above_floor_ids = {fact.get("id") for fact in above_floor}
+                kept_ids = {fact.get("id") for fact in trim_facts_to_budget(above_floor)}
                 items = [
                     {
                         "id": fact.get("id"),
                         "sim": _round_sim(fact.get("similarity")),
+                        # Two distinct facts about one row: whether it was
+                        # relevant enough, and whether it then fitted. Collapsing
+                        # them would make "the floor cut it" and "the budget cut
+                        # it" indistinguishable in the report.
+                        "above_floor": fact.get("id") in above_floor_ids,
                         "injected": fact.get("id") in kept_ids,
                         "head": (fact.get("fact_text") or "")[:_RETRIEVAL_HEAD_CHARS],
                     }
