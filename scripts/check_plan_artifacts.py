@@ -339,7 +339,7 @@ def _scan_plain(text: str, lines: list[str], path: str) -> Iterator[Violation]:
 #: a long-lived reference under docs/ rather than docs/plans/ (it outlives any
 #: one plan), but it is written from the same eval-harness runs that produce
 #: per-case detail in internal/, so it must be scanned the same way.
-EXTRA_TRACKED_PATHS: tuple[str, ...] = ("docs/rag-eval-baseline.md",)
+EXTRA_TRACKED_PATHS: tuple[str, ...] = ("docs/rag-eval-baseline.md", "docs/kb-eval-baseline.md")
 
 
 def tracked_plan_files(root: Path) -> list[Path]:

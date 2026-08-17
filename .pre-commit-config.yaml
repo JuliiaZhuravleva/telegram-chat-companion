@@ -38,7 +38,7 @@ repos:
         # the uncovered file -- a clean local commit then stops being
         # evidence, the same lesson the ruff pin above records.
         # test_plan_artifact_guard.py enforces this by parsing this regex.
-        files: ^(docs/plans/|docs/rag-eval-baseline\.md$)
+        files: ^(docs/plans/|docs/rag-eval-baseline\.md$|docs/kb-eval-baseline\.md$)
         pass_filenames: true
 
   # Shell linting. The backup and restore scripts run unattended against a
