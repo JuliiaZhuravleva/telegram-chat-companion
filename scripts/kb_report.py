@@ -237,16 +237,31 @@ async def fetch_regime_split(
 
 
 def format_regime_caution(stripped: int, unstripped: int, pre_r0: int) -> str | None:
-    """A one-line warning when the window straddles the R0 deploy, else None."""
+    """A warning when the window is not a description of retrieval as it runs.
+
+    Two distinct ways that happens, and only one of them is a *mixture* — the
+    first version warned about that one alone, which left the quieter case
+    silent: a window entirely before R0 is perfectly homogeneous and still
+    describes a query the bot no longer sends. Silence there reads as "these
+    numbers are current", and the number a reader takes away is the floor.
+    """
     post = stripped + unstripped
-    if not pre_r0 or not post:
-        return None
-    return (
-        f"  ⚠ mixed regimes: {pre_r0} lookup(s) predate R0 query hygiene "
-        f"(TD-092) and {post} follow it. Similarities are not comparable "
-        "across that line — narrow --since-days until this warning is gone "
-        "before tuning a floor from the sweep below."
-    )
+    if pre_r0 and post:
+        return (
+            f"  ⚠ mixed regimes: {pre_r0} lookup(s) predate R0 query hygiene "
+            f"(TD-092) and {post} follow it. Similarities are not comparable "
+            "across that line — narrow --since-days until this warning is gone "
+            "before tuning a floor from the sweep below."
+        )
+    if pre_r0:
+        return (
+            f"  ⚠ every one of these {pre_r0} lookup(s) predates R0 query "
+            "hygiene (TD-092): the query embedding still carried the address, "
+            "which lifts a miss (0.524 → 0.640 on the recorded probes). These "
+            "are consistent with each other and NOT with retrieval as it runs "
+            "today — do not tune a floor from them."
+        )
+    return None
 
 
 def format_report(

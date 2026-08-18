@@ -3,25 +3,29 @@ r"""Query hygiene: what gets embedded for retrieval, as opposed to what was said
 R0 of the RAG revision (TD-092). The retrieval embedding used to be computed
 from the raw message, and every addressed message opens with ``бот``/``bot``.
 That token is semantically loud and it is *about the bot*, so it dragged the
-query toward the bot's own self-referential memories:
+query toward the bot's own self-referential memories. Two indexes were probed
+on live data, and the rows are kept apart here because their similarities are
+not comparable -- reading a gap across the two is how these figures get
+garbled:
 
-    | probe                                           | top match |
-    |-------------------------------------------------|-----------|
-    | a real question, addressed ("бот, ...")          | 0.675 -- every result about the bot |
-    | the same question, address removed              | 0.821 -- results actually on topic  |
-    | a question the index cannot answer, addressed   | 0.640 |
-    | the same unanswerable question, address removed | 0.524 |
+    | index | probe                          | addressed | address removed |
+    |-------|--------------------------------|-----------|-----------------|
+    | RAG   | a real question                |     0.675 |           0.821 |
+    | KB    | a real question                |     0.706 |           0.719 |
+    | KB    | a question it cannot answer    |     0.640 |           0.524 |
 
-Hits are pushed down, misses are pushed up: the signal/noise gap measured on
-production is 0.066 with the address and 0.195 without it. One question with a
-0.821 match in the index returned nothing at all.
+Hits are pushed down and misses are pushed up, which is what makes the effect
+worse than a constant offset. Taking the two KB rows, the only pair measured
+against one index, the signal/noise gap goes from **0.066** (0.706 - 0.640) to
+**0.195** (0.719 - 0.524). On the RAG side the hit alone moves 0.146, and the
+0.7 floor is what turned that into silence: a question with a 0.821 match in
+the index returned nothing at all.
 
 (Query text withheld here on purpose: this repository is public and those are
-real messages. The probes are written out in the RAG revision plan --
-docs/plans/rag-revision-2026-08.md §5.1, which lands with PR #47.)
+real messages. The probes themselves are recorded with TD-092.)
 
 **Only an address at the head is removed.** The distinction is the whole
-design, and it comes from the corpus rather than from intuition: of 522
+design, and it comes from the corpus rather than from intuition: of 523
 production messages that fire the trigger, the majority carry ``бот`` in the
 middle of a sentence -- the shape of "мне нравится этот бот", "кажется, бот
 сегодня молчит", "у бота странная манера отвечать". There the word *is* the
@@ -34,7 +38,7 @@ Deliberately NOT stripped, each for a measured reason:
 * **Trailing "..., бот".** Tried and rejected against the corpus: a first draft
   removed it and turned sentences of the shape "ну и зануда ты бот" into "ну и
   зануда ты", i.e. it deleted the predicate. Trailing position is a predicate
-  far more often than a vocative, and it is 25 of 522 messages -- nowhere near
+  far more often than a vocative, and it is 25 of 523 messages -- nowhere near
   worth that false-positive rate.
 * **A leading @handle.** The plan for R0 called for this too; the corpus
   refused it. Of 667 production messages that open with a handle, **635 address
@@ -109,6 +113,13 @@ def _leading_trigger_pattern(trigger_words: Sequence[str]) -> re.Pattern[str] | 
     ")) привет", because the punctuation that was not in the class simply
     survived while the word in front of it did not. Requiring the delimiter
     makes every one of those a non-match, which is the conservative outcome.
+
+    The ``\s*`` before the punctuation run is not decoration: without it
+    "бот , привет" matched only up to the space and left the comma orphaned at
+    the head of the query -- the same defect the delimiter rule exists to
+    prevent, one keystroke away. Backtracking keeps the plain "бот привет"
+    working, because the greedy ``\s*`` gives the space back to the ``\s+``
+    that follows.
     """
     usable = sorted((t.strip() for t in trigger_words if t and t.strip()), key=len, reverse=True)
     if not usable:
@@ -118,7 +129,7 @@ def _leading_trigger_pattern(trigger_words: Sequence[str]) -> re.Pattern[str] | 
         # leading space | the trigger, whole-word | glued closing punctuation
         # | either the end of the message, or whitespace optionally followed by
         # a spaced dash ("бот — ты как?").
-        rf"^\s*(?<!\w)(?:{alternation})(?!\w)[,:;!—–]*(?:$|\s+(?:[—–-]+\s+)?)",
+        rf"^\s*(?<!\w)(?:{alternation})(?!\w)\s*[,:;!—–]*(?:$|\s+(?:[—–-]+\s+)?)",
         re.IGNORECASE,
     )
 
@@ -135,11 +146,13 @@ def strip_bot_address(text: str, trigger_words: Sequence[str]) -> str:
 
     A message is never reduced to something that is not a query: if peeling
     leaves no word character at all (the bare "Бот", 7 occurrences in the
-    production corpus), the original is returned.
+    production corpus), the message's own text is returned instead. A message
+    that had no word character to begin with normalises to the empty string by
+    the same path -- deliberately one exit rather than an early return for
+    blank input, which was the first version and left "   " coming back
+    untouched, i.e. the one input for which the caller's "was an address
+    removed?" test answered yes about a message that has nothing in it.
     """
-    if not text or not text.strip():
-        return text
-
     pattern = _leading_trigger_pattern(trigger_words)
     remainder = text
     if pattern is not None:

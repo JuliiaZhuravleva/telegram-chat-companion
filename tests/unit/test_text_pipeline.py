@@ -1354,6 +1354,17 @@ class TestPipelineQueryHygiene:
             assert call.kwargs["query_text"] == self.BARE
             assert call.kwargs["params"]["query_stripped"] is False
 
+    async def test_whitespace_only_message_is_not_reported_as_an_address_strip(
+        self, make_chat_config
+    ):
+        """The degenerate input a guard clause is most likely to get wrong."""
+        mocks = await self._run(make_chat_config, "   ")
+
+        calls = mocks["observability_repo"].log_retrieval.call_args_list
+        assert calls
+        for call in calls:
+            assert call.kwargs["params"]["query_stripped"] is False
+
     async def test_chat_configured_triggers_are_the_ones_removed(self, make_chat_config):
         """Not the YAML default: `trigger_words` is a per-chat setting."""
         config = make_chat_config(enabled=True, rag_enabled=True, trigger_words=["ассистент"])

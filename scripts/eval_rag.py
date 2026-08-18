@@ -132,11 +132,16 @@ async def run_eval(
     the resulting baseline would drift from production for a reason nothing
     in the numbers would reveal.
 
-    It is a global list rather than each case's own chat config: the harness
-    talks to a throwaway seed DB with no ``chat_settings`` to merge from, and
-    every production chat currently configures the same two words. If that
-    ever stops being true, this is the line that has to learn about the
-    per-chat merge.
+    It is ``settings.bot.trigger_words`` -- layer 1 of the three-layer merge
+    (YAML -> ``bot_config`` -> ``chat_settings``) -- rather than each case's own
+    resolved ``ChatConfig``: the harness talks to a throwaway seed DB that has
+    neither of the other two tables populated. Checked rather than assumed: all
+    23 production chats currently carry ``{бот,bot}``, so the approximation is
+    exact today. It stops being exact the moment anyone sets a global
+    ``bot_config.default_trigger_words`` or a per-chat override, and the harness
+    would then measure a query the bot never sends -- silently, because nothing
+    in the metrics changes shape. This is the line that has to learn about the
+    merge on that day.
 
     Sequential and paced (``_INTER_CASE_DELAY_SECONDS``, mirroring
     ``q5_replay.py:136``): this hits a real embeddings provider per case,

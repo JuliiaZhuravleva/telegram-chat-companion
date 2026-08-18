@@ -34,6 +34,11 @@ class TestAddressIsRemoved:
             ("бот: расскажи про кофе", "расскажи про кофе"),
             ("бот! срочно нужен совет", "срочно нужен совет"),
             ("бот!!! срочно нужен совет", "срочно нужен совет"),
+            # A space before the comma left it orphaned at the head of the
+            # query in the first version — the very defect the delimiter rule
+            # exists to prevent, one keystroke away.
+            ("бот , привет", "привет"),
+            ("бот :  ответь", "ответь"),
             # Latin trigger, arbitrary case.
             ("BOT, what is a monad?", "what is a monad?"),
             ("Bot tell me about tea", "tell me about tea"),
@@ -77,7 +82,7 @@ class TestContentIsPreserved:
             # the head would delete the addressee far more often than it would
             # remove an address to the bot.
             "@some_bot, привет",
-            "@artem_k что там с ботом",
+            "@someone_else что там с ботом",
             "спроси у @some_bot про это",
             # An address must be DELIMITED. Without that requirement the
             # punctuation run ate the hyphen of a compound and left orphans
@@ -107,8 +112,17 @@ class TestNeverReturnsNothing:
         assert strip_bot_address("  бот  ", TRIGGERS) == "бот"
 
     @pytest.mark.parametrize("text", ["", "   ", "\n"])
-    def test_blank_input_is_returned_as_is(self, text: str) -> None:
-        assert strip_bot_address(text, TRIGGERS) == text
+    def test_blank_input_normalises_to_empty(self, text: str) -> None:
+        """Not returned as-is, which is what the first version did.
+
+        The caller answers "was an address removed?" as
+        ``result != text.strip()``. An early return that handed "   " straight
+        back made that comparison say yes about a message containing nothing —
+        the same over-reporting that the trailing-newline case had, in the one
+        shape a guard clause hides.
+        """
+        assert strip_bot_address(text, TRIGGERS) == ""
+        assert strip_bot_address(text, TRIGGERS) == text.strip()
 
 
 class TestTriggerWordsAreUntrustedInput:

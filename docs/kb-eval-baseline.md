@@ -132,11 +132,14 @@ separation is clean, but narrow, and n = 5.
 >
 > The direction is favourable and worth stating plainly, so that nobody "fixes"
 > the floor on the strength of the narrow gap above: on the same production
-> data, removing the address moved a hit from 0.706 to **0.719** and a miss from
-> 0.640 down to **0.524**. Both edges move away from 0.70, so the gap widens
-> from 0.060 to roughly 0.195 and the shipped floor sits further inside it than
-> when it was chosen. **0.70 needs no change; it needs re-measuring**, on a
-> fresh window of addressed turns, before anyone tunes it.
+> data, removing the address moved the 0.706 hit up to **0.719** and the 0.640
+> borscht miss down to **0.524**. Both edges move away from 0.70. Comparing
+> like with like — that same hit against that same miss — the gap goes from
+> 0.066 to **0.195**, roughly threefold. (The 0.060 quoted above is a different
+> pair: it measures the 0.706 hit against the 0.646 *statement*, which was the
+> highest-scoring non-question in the window and was not re-probed after R0.)
+> **0.70 needs no change; it needs re-measuring**, on a fresh window of
+> addressed turns, before anyone tunes it.
 
 ### What this changes versus the 2-fact line
 
