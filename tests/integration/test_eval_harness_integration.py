@@ -151,7 +151,9 @@ class TestBeforeFilterAppliedInWhereNotPostFilter:
         results = await repo.search(
             self.CHAT_ID,
             self.QUERY_VEC,
-            min_similarity=0.5,
+            # No floor since R1 — and this test never needed one: it is about
+            # `before` deciding what occupies the single LIMIT slot, and both
+            # fixture rows clear any threshold the old call passed.
             max_results=1,
             before=self.ASKED_AT,
         )

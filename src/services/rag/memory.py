@@ -9,6 +9,7 @@ import structlog
 
 from src.database.repositories.memory import MemoryRepository
 from src.services.ai.router import AIRouter
+from src.services.retrieval_floor import rows_above_floor
 
 logger = structlog.get_logger(__name__)
 
@@ -69,7 +70,21 @@ class RAGMemoryService:
         max_results: int | None = None,
         before: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        """Search memories relevant to a query.
+        """Memories relevant to a query -- only those clearing the floor.
+
+        The filtering moved here from the repository's ``WHERE`` in R1;
+        callers that want to *see* what was rejected (the pipeline, so it can
+        log the near-misses a future re-calibration needs) call
+        ``search_unfiltered`` instead.
+
+        The contract is unchanged for every floor the bot runs with, but not
+        literally for all of them: at ``min_similarity <= 0`` the old SQL still
+        applied ``1 - (embedding <=> $2) >= 0``, which cut negatively-scored
+        rows, while ``rows_above_floor`` treats a non-positive floor as *no
+        floor* and keeps them. That is the intended reading of "set it to 0.0
+        to retrieve everything", and it is the value a floor sweep uses as its
+        baseline — but it is a behaviour change, not a refactor, so it is said
+        out loud rather than buried.
 
         ``query_embedding``, if given, is used as-is instead of embedding
         ``query`` again (S2-4): the pipeline computes one shared query
@@ -89,6 +104,41 @@ class RAGMemoryService:
         ("X asked: ...") is typically the top hit, and the replay circularly
         measures self-retrieval.
         """
+        # `x or default` would silently fall back to the instance default for
+        # an explicit falsy override (min_similarity=0.0 is a valid "accept
+        # everything" threshold; max_results=0 is a valid "retrieve nothing
+        # this turn") — S2-2. Both arguments get the same treatment; applying
+        # it to only one of them is what review caught here.
+        floor = min_similarity if min_similarity is not None else self._min_similarity
+        memories = await self.search_unfiltered(
+            chat_id,
+            query,
+            query_embedding=query_embedding,
+            max_results=max_results,
+            before=before,
+        )
+        return rows_above_floor(memories, floor)
+
+    async def search_unfiltered(
+        self,
+        chat_id: int,
+        query: str,
+        *,
+        query_embedding: list[float] | None = None,
+        max_results: int | None = None,
+        before: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """The top-k nearest memories, floor or no floor (R1).
+
+        Exists so the caller can record what retrieval *considered*, not only
+        what it accepted. Until R1 the floor was applied in SQL, so a turn
+        that injected nothing wrote an empty ``retrieval_log`` row and the
+        near-misses behind it were unrecoverable — including the case that
+        motivated this whole revision, where the best match sat at 0.675
+        against a 0.7 floor and nothing in the data said so.
+
+        Same argument handling as ``search`` minus the floor; see there.
+        """
         if query_embedding is not None:
             embedding = query_embedding
         else:
@@ -102,12 +152,6 @@ class RAGMemoryService:
         rows = await self._repo.search(
             chat_id=chat_id,
             query_embedding=embedding,
-            # `x or default` would silently fall back to the instance default
-            # for an explicit falsy override (min_similarity=0.0 is a valid
-            # "accept everything" threshold; max_results=0 is a valid "retrieve
-            # nothing this turn") — S2-2. Both arguments get the same treatment;
-            # applying it to only one of them is what review caught here.
-            min_similarity=(min_similarity if min_similarity is not None else self._min_similarity),
             max_results=(max_results if max_results is not None else self._max_results),
             # `before` has no instance-level default to fall back to -- `None`
             # unconditionally means "no bound" (S3-3). Written as an explicit

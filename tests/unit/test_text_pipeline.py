@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from src.database.repositories.abuse import AntiAbuseResult
 from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import AIProviderError, EmbeddingResult, TextGenerationResult
+from src.services.retrieval_floor import rows_above_floor
 from src.services.text.pipeline import TextProcessingPipeline
 
 
@@ -56,6 +57,7 @@ def _make_pipeline(
     kb_facts=None,
     embedding_error=None,
     kb_min_similarity=0.0,
+    rag_min_similarity=0.0,
 ):
     """Build a pipeline with mocked dependencies.
 
@@ -65,6 +67,13 @@ def _make_pipeline(
     positive default would silently filter all of them away and the failures
     would point at retrieval rather than at the fixture. Tests that are about
     the floor pass it explicitly.
+
+    ``rag_min_similarity`` is the same arrangement for R1, which moved the RAG
+    floor out of SQL and into the service. It is set on the mocked service as a
+    real float rather than left as an ``AsyncMock`` attribute: the pipeline now
+    compares against it, and a mock there fails with ``'<=' not supported
+    between instances of 'AsyncMock' and 'float'`` — a fixture defect that
+    reads like a production bug.
     """
     abuse_checker = AsyncMock()
     abuse_checker.check.return_value = abuse_result or _make_abuse_result()
@@ -95,8 +104,16 @@ def _make_pipeline(
     response_log_repo.log = AsyncMock()
 
     rag_service = AsyncMock()
-    rag_service.search.return_value = rag_memories or []
+    # The two entry points must differ the way the real service's do, or the
+    # mock cannot tell them apart and a pipeline that calls the filtered
+    # `search()` — restoring exactly the blindness R1 removed — passes every
+    # test. Verified by control: with both returning the same list, swapping
+    # the call site changed nothing.
+    rag_service.search.return_value = rows_above_floor(rag_memories or [], rag_min_similarity)
+    rag_service.search_unfiltered.return_value = rag_memories or []
     rag_service.store = AsyncMock()
+    rag_service.min_similarity = rag_min_similarity
+    rag_service.max_results = 5
 
     if knowledge_repo is None:
         knowledge_repo = AsyncMock()
@@ -215,7 +232,12 @@ class TestPipelineProcess:
             config=config,
         )
 
+        # Both entry points, not just the one the pipeline happens to use
+        # today: R1 switched this call from `search` to `search_unfiltered`,
+        # and an assertion naming only the abandoned method passes whatever
+        # the pipeline does.
         mocks["rag_service"].search.assert_not_called()
+        mocks["rag_service"].search_unfiltered.assert_not_called()
 
     async def test_jailbreak_passes_to_ai(self, make_chat_config):
         config = make_chat_config(enabled=True)
@@ -1142,7 +1164,11 @@ class TestPipelineObservability:
         source must be distinguishable from an empty one."""
         config = make_chat_config(enabled=True)
         pipeline, mocks = _make_pipeline()
-        mocks["rag_service"].search.side_effect = RuntimeError("pgvector down")
+        # `search_unfiltered` is what the pipeline calls since R1. Left on
+        # `search`, this test raises nothing and asserts an error that never
+        # happened — it fails, but for the wrong reason, which is the polite
+        # version of this defect.
+        mocks["rag_service"].search_unfiltered.side_effect = RuntimeError("pgvector down")
 
         result = await pipeline.process(
             chat_id=-100123,
@@ -1249,6 +1275,116 @@ class TestPipelineStickerTolerance:
         assert sticker_service.get_sticker_candidates.call_args.kwargs["tolerance_level"] == 0.73
 
 
+class TestPipelineRagFloor:
+    """R1 — the RAG floor moved out of SQL, so the log can see the near-misses.
+
+    Until R1 the floor was a `WHERE` clause: a sub-floor row was never
+    returned, so `retrieval_log` recorded an empty result and the data could
+    not say whether the best match missed by 0.001 or by 0.3. Every test here
+    is about that gap between what was *considered* and what was *injected*.
+    """
+
+    MEMORIES = [
+        {"id": 1, "content": "мы решили ехать в субботу", "similarity": 0.83},
+        {"id": 2, "content": "кто-то говорил про поезд", "similarity": 0.62},
+    ]
+
+    async def _run(self, make_chat_config, *, floor, memories=None):
+        config = make_chat_config(enabled=True, rag_enabled=True)
+        pipeline, mocks = _make_pipeline(
+            rag_memories=self.MEMORIES if memories is None else memories,
+            rag_min_similarity=floor,
+        )
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="а что мы решили?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+        await asyncio.sleep(0)  # flush the fire-and-forget retrieval writer
+        return mocks
+
+    @staticmethod
+    def _rag_log(mocks):
+        calls = [
+            c
+            for c in mocks["observability_repo"].log_retrieval.await_args_list
+            if c.kwargs["source"] == "rag_memory"
+        ]
+        assert len(calls) == 1
+        return calls[0].kwargs
+
+    async def test_sub_floor_memory_is_logged_but_not_injected(self, make_chat_config):
+        mocks = await self._run(make_chat_config, floor=0.7)
+
+        logged = self._rag_log(mocks)
+        by_id = {item["id"]: item for item in logged["results"]}
+        assert set(by_id) == {1, 2}, "the whole candidate set must be recorded"
+        assert by_id[1]["above_floor"] is True
+        assert by_id[1]["injected"] is True
+        assert by_id[2]["above_floor"] is False
+        assert by_id[2]["injected"] is False
+        assert logged["n_injected"] == 1
+
+    async def test_sub_floor_memory_does_not_reach_the_model(self, make_chat_config):
+        mocks = await self._run(make_chat_config, floor=0.7)
+
+        prompt = "".join(str(v) for v in mocks["ai_router"].generate_text.call_args.kwargs.values())
+        assert "мы решили ехать в субботу" in prompt
+        assert "кто-то говорил про поезд" not in prompt
+
+    async def test_a_blind_turn_still_records_every_near_miss(self, make_chat_config):
+        """The case the whole slice exists for.
+
+        With the floor in SQL this turn wrote `n_results = 0` and the
+        similarities behind it were gone — so "missed by a hair" and "missed
+        by a mile" were the same row, and §4.2's plan to re-calibrate the
+        floor from these distributions had no data to work with.
+        """
+        mocks = await self._run(make_chat_config, floor=0.9)
+
+        logged = self._rag_log(mocks)
+        assert logged["n_results"] == 2
+        assert logged["n_injected"] == 0
+        assert sorted(item["sim"] for item in logged["results"]) == [0.62, 0.83]
+        assert all(item["above_floor"] is False for item in logged["results"])
+
+    async def test_no_floor_injects_everything(self, make_chat_config):
+        mocks = await self._run(make_chat_config, floor=0.0)
+
+        logged = self._rag_log(mocks)
+        assert logged["n_injected"] == 2
+        assert all(item["above_floor"] is True for item in logged["results"])
+
+    async def test_the_logged_floor_is_the_service_floor(self, make_chat_config):
+        """One number, read from the service — not a literal repeated here.
+
+        `params.min_similarity` is what a later analysis reads to know which
+        line the `above_floor` flags were drawn against. If it and the flags
+        came from different places, the recorded distribution would be
+        uninterpretable in exactly the situation it exists for.
+        """
+        mocks = await self._run(make_chat_config, floor=0.75)
+
+        logged = self._rag_log(mocks)
+        assert logged["params"]["min_similarity"] == 0.75
+        assert [item["above_floor"] for item in logged["results"]] == [True, False]
+
+    async def test_a_memory_without_a_usable_similarity_is_below_any_floor(self, make_chat_config):
+        """A malformed row must not be more privileged than a distant match."""
+        mocks = await self._run(
+            make_chat_config,
+            floor=0.7,
+            memories=[{"id": 9, "content": "нет схожести", "similarity": None}],
+        )
+
+        logged = self._rag_log(mocks)
+        assert logged["results"][0]["above_floor"] is False
+        assert logged["n_injected"] == 0
+
+
 class TestPipelineQueryHygiene:
     """R0 / TD-092 — the retrieval embedding must not carry the address.
 
@@ -1299,7 +1435,17 @@ class TestPipelineQueryHygiene:
     async def test_rag_search_is_given_the_stripped_query(self, make_chat_config):
         mocks = await self._run(make_chat_config, self.ADDRESSED)
 
-        assert mocks["rag_service"].search.call_args.args[1] == self.BARE
+        # `search_unfiltered` since R1; the filtered `search` is not on the
+        # pipeline's path at all. Written to survive the next such move: it
+        # takes whichever entry point was actually used, and fails if neither
+        # was — rather than naming one and passing vacuously when it changes.
+        called = [
+            m
+            for m in (mocks["rag_service"].search, mocks["rag_service"].search_unfiltered)
+            if m.call_args is not None
+        ]
+        assert len(called) == 1, "exactly one RAG entry point should be used per turn"
+        assert called[0].call_args.args[1] == self.BARE
 
     async def test_prompt_still_receives_the_message_as_written(self, make_chat_config):
         """Hygiene is retrieval-only: the model must see what the user typed."""

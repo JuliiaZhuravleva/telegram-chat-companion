@@ -90,10 +90,12 @@ class TestChatScoping:
         """Two memories, same embedding, two different chats; querying from
         chat A must return chat A's memory only -- chat B's must never
         appear, no matter how high its similarity score is."""
+        # No floor since R1 (it moved to RAGMemoryService), which makes this
+        # assertion strictly stronger: chat B's row is a live candidate at
+        # similarity 1.0 and only the `chat_id` predicate can keep it out.
         results = await repo.search(
             CHAT_A,
             _one_hot(0),
-            min_similarity=0.99,
             max_results=10,
         )
 
