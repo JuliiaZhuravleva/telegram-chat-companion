@@ -54,17 +54,24 @@ class _FakeRouter:
     the whole point of S4's embedding call is that it does.
     """
 
-    def __init__(self, *, dimensions: int = 768, fail: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        dimensions: int = 768,
+        fail: bool = False,
+        fail_marker: str | None = None,
+    ) -> None:
         self.calls: list[tuple[str, str | None]] = []
         self._dimensions = dimensions
         self._fail = fail
+        self._fail_marker = fail_marker
 
     async def generate_embedding(
         self, text: str, *, chat_id: int = 0, **kwargs: str | int
     ) -> _Embedding:
         task_type = kwargs.get("task_type")
         self.calls.append((text, str(task_type) if task_type is not None else None))
-        if self._fail:
+        if self._fail or (self._fail_marker is not None and self._fail_marker in text):
             raise AIProviderError("provider down", provider="gemini")
         return _Embedding(embedding=[0.01] * self._dimensions)
 
@@ -125,6 +132,10 @@ class TestNaturalKey:
     async def test_the_same_range_in_another_thread_is_a_different_chunk(
         self, chunks: ChunkRepository
     ) -> None:
+        """Nothing writes a non-NULL `thread_id` today -- chunks are
+        chat-wide. The key still has to distinguish them, because that column
+        is what forum-aware chunking would use, and a natural key that only
+        works for the current writer is not a key."""
         await chunks.insert_many([_chunk()])
 
         assert await chunks.insert_many([_chunk(thread_id=77)]) == 1
@@ -172,22 +183,25 @@ class TestGeneratedTsvector:
         assert "почт" not in vector
 
 
-class TestWatermarks:
-    async def test_per_thread_not_per_chat(self, chunks: ChunkRepository) -> None:
-        """A forum thread whose history sits entirely below another thread's
-        newest message must not be declared already-indexed."""
+class TestWatermark:
+    async def test_the_newest_indexed_message(self, chunks: ChunkRepository) -> None:
         await chunks.insert_many(
             [
-                _chunk(thread_id=None, msg_from=10, msg_to=20),
-                _chunk(thread_id=7, msg_from=100, msg_to=200),
-                _chunk(thread_id=7, msg_from=201, msg_to=300),
+                _chunk(msg_from=10, msg_to=20),
+                _chunk(msg_from=100, msg_to=300),
+                _chunk(msg_from=40, msg_to=60),
             ]
         )
 
-        assert await chunks.watermarks(CHAT_ID) == {None: 20, 7: 300}
+        assert await chunks.watermark(CHAT_ID) == 300
 
-    async def test_an_empty_index_has_no_watermarks(self, chunks: ChunkRepository) -> None:
-        assert await chunks.watermarks(CHAT_ID) == {}
+    async def test_an_empty_index_starts_at_zero(self, chunks: ChunkRepository) -> None:
+        assert await chunks.watermark(CHAT_ID) == 0
+
+    async def test_another_chat_does_not_move_it(self, chunks: ChunkRepository) -> None:
+        await chunks.insert_many([_chunk(chat_id=OTHER_CHAT, msg_from=900, msg_to=999)])
+
+        assert await chunks.watermark(CHAT_ID) == 0
 
 
 class TestPendingEmbeddings:
@@ -237,16 +251,10 @@ class TestSourceQuery:
             CHAT_ID, 104, "transcription", user_id=None, content=None, is_bot_message=True
         )
 
-    async def test_returns_a_non_forum_chat_via_is_not_distinct_from(
-        self, messages: MessageRepository
-    ) -> None:
-        """`message_thread_id = NULL` matches nothing; this is the query that
-        decides whether most chats are indexed at all."""
+    async def test_returns_the_whole_chat(self, messages: MessageRepository) -> None:
         await self._seed(messages)
 
-        rows = await messages.get_for_chunking(
-            CHAT_ID, thread_id=None, after_message_id=0, limit=100
-        )
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=0, limit=100)
 
         assert [row["message_id"] for row in rows] == [101, 102, 103]
 
@@ -255,45 +263,28 @@ class TestSourceQuery:
     ) -> None:
         await self._seed(messages)
 
-        rows = await messages.get_for_chunking(
-            CHAT_ID, thread_id=None, after_message_id=102, limit=100
-        )
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=102, limit=100)
 
         assert [row["message_id"] for row in rows] == [103]
 
-    async def test_threads_are_separate(
+    async def test_a_reply_chain_does_not_split_the_conversation(
         self, messages: MessageRepository, db_pool: asyncpg.Pool
     ) -> None:
+        """`message_thread_id` marks reply chains, not forum topics (measured
+        on production 2026-08-19: 2.0-2.7 messages per value, ~70% NULL). A
+        reply carries the id and the message it answers does not, so filtering
+        by it would put the two halves of one exchange in different chunks."""
         await self._seed(messages)
         await db_pool.execute(
-            "UPDATE chat_messages SET message_thread_id = 7 WHERE chat_id = $1 AND message_id = $2",
+            "UPDATE chat_messages SET message_thread_id = 101 "
+            "WHERE chat_id = $1 AND message_id = $2",
             CHAT_ID,
             102,
         )
 
-        in_thread = await messages.get_for_chunking(
-            CHAT_ID, thread_id=7, after_message_id=0, limit=100
-        )
-        outside = await messages.get_for_chunking(
-            CHAT_ID, thread_id=None, after_message_id=0, limit=100
-        )
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=0, limit=100)
 
-        assert [row["message_id"] for row in in_thread] == [102]
-        assert [row["message_id"] for row in outside] == [101, 103]
-
-    async def test_thread_ids_are_listed_including_null(
-        self, messages: MessageRepository, db_pool: asyncpg.Pool
-    ) -> None:
-        await self._seed(messages)
-        await db_pool.execute(
-            "UPDATE chat_messages SET message_thread_id = 7 WHERE chat_id = $1 AND message_id = $2",
-            CHAT_ID,
-            102,
-        )
-
-        assert sorted(
-            await messages.get_thread_ids(CHAT_ID), key=lambda value: (value is not None, value)
-        ) == [None, 7]
+        assert [row["message_id"] for row in rows] == [101, 102, 103]
 
     async def test_rows_the_chunker_cannot_use_are_dropped(
         self, messages: MessageRepository, db_pool: asyncpg.Pool
@@ -305,20 +296,36 @@ class TestSourceQuery:
             101,
         )
 
-        rows = await messages.get_for_chunking(
-            CHAT_ID, thread_id=None, after_message_id=0, limit=100
-        )
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=0, limit=100)
 
         assert [row["message_id"] for row in rows] == [102, 103]
+
+    async def test_contentless_rows_never_occupy_the_batch(
+        self, messages: MessageRepository, db_pool: asyncpg.Pool
+    ) -> None:
+        """`LIMIT` counts rows, not usable ones. A run of stickers longer than
+        one batch would otherwise fill the window, produce no chunk, leave the
+        watermark unmoved, and hide every real message behind it -- for ever,
+        on every pass."""
+        for message_id in (301, 302, 303):
+            await messages.save(
+                CHAT_ID, message_id, "sticker", user_id=501, first_name="Аня", content=None
+            )
+        await messages.save(CHAT_ID, 304, "text", user_id=501, first_name="Аня", content="   ")
+        await messages.save(
+            CHAT_ID, 305, "text", user_id=501, first_name="Аня", content="настоящая реплика"
+        )
+
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=0, limit=2)
+
+        assert [row["message_id"] for row in rows] == [305]
 
     async def test_the_rows_feed_the_chunker_unchanged(self, messages: MessageRepository) -> None:
         """The column list the query selects and the keys `source_messages`
         reads are two halves of one contract, and nothing else checks them
         against each other."""
         await self._seed(messages)
-        rows = await messages.get_for_chunking(
-            CHAT_ID, thread_id=None, after_message_id=0, limit=100
-        )
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=0, limit=100)
 
         built = build_chunks(
             source_messages(rows), chat_id=CHAT_ID, thread_id=None, chat_title="Тест"
@@ -484,3 +491,70 @@ class TestIndexerEndToEnd:
             [CHAT_ID, OTHER_CHAT],
         )
         assert len(rows) == 2
+
+
+class TestParking:
+    """Parking must separate "this row is bad" from "the provider is down".
+
+    Counting an outage toward the per-row limit parks the whole backlog after
+    three passes, and parked rows are only retried on a process restart -- so
+    a five-minute provider blip would stop the index filling until someone
+    noticed, which is exactly the kind of failure nobody notices.
+    """
+
+    def _indexer(self, db_pool: asyncpg.Pool, router: _FakeRouter) -> ChatChunkIndexer:
+        from src.config import BotSettings
+
+        return ChatChunkIndexer(
+            pool=db_pool,
+            ai_router=router,  # type: ignore[arg-type]
+            chat_config=ChatConfigService(
+                BotSettings(),
+                BotConfigRepository(db_pool),
+                ChatSettingsRepository(db_pool),
+            ),
+            config=ChunkIndexerSettings(),
+        )
+
+    async def _seed(self, chunks: ChunkRepository, count: int, *, bad_index: int | None) -> None:
+        rows = []
+        for index in range(count):
+            marker = "НЕПЕРЕВАРИВАЕМОЕ " if index == bad_index else ""
+            rows.append(
+                _chunk(
+                    msg_from=100 + index * 10,
+                    msg_to=105 + index * 10,
+                    content=f"Чат «Тест», 18 августа 2026\nАня (12:0{index}): {marker}реплика",
+                )
+            )
+        await chunks.insert_many(rows)
+
+    async def test_an_outage_does_not_park_the_backlog(
+        self, db_pool: asyncpg.Pool, chunks: ChunkRepository
+    ) -> None:
+        await self._seed(chunks, 3, bad_index=None)
+        down = self._indexer(db_pool, _FakeRouter(fail=True))
+        for _ in range(4):
+            await down.run_once()
+
+        recovered = _FakeRouter()
+        down._ai_router = recovered  # type: ignore[assignment]
+        result = await down.run_once()
+
+        assert result["embedded"] == 3
+        assert await chunks.counts(CHAT_ID) == {"total": 3, "pending": 0}
+
+    async def test_one_bad_row_among_many_is_parked(
+        self, db_pool: asyncpg.Pool, chunks: ChunkRepository
+    ) -> None:
+        await self._seed(chunks, 3, bad_index=1)
+        indexer = self._indexer(db_pool, _FakeRouter(fail_marker="НЕПЕРЕВАРИВАЕМОЕ"))
+
+        for _ in range(3):
+            await indexer.run_once()
+        after_parking = _FakeRouter(fail_marker="НЕПЕРЕВАРИВАЕМОЕ")
+        indexer._ai_router = after_parking  # type: ignore[assignment]
+        await indexer.run_once()
+
+        assert after_parking.calls == [], "the queue must move on past a row that never embeds"
+        assert await chunks.counts(CHAT_ID) == {"total": 3, "pending": 1}

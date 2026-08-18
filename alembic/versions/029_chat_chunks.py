@@ -15,9 +15,13 @@ Design notes that are one-way doors, so they land here rather than later:
 
 - **Natural key `(chat_id, thread_id, msg_from, msg_to, part)`** with `NULLS
   NOT DISTINCT` (PG15+; we run pg16). Without that clause a NULL `thread_id`
-  -- every non-forum chat, i.e. most rows -- compares distinct from itself and
-  the unique index silently permits duplicates, which is precisely the case it
-  exists to prevent. `part` is the chunk's index inside its session, so a
+  compares distinct from itself and the unique index silently permits
+  duplicates -- and today *every* row has a NULL there, because chunks are
+  chat-wide: measured on production 2026-08-19, `chat_messages.
+  message_thread_id` identifies reply chains rather than forum topics (2.0-2.7
+  messages per value, ~70% NULL, 3737 distinct values in one chat). The column
+  is kept for forum-aware chunking, which needs a way to recognise a forum
+  first (`chat.is_forum` is not stored). `part` is the chunk's index inside its session, so a
   re-run over the same messages produces the same keys and `ON CONFLICT DO
   NOTHING` becomes a real idempotency guarantee.
 - **No ANN index.** At hundreds to a couple of thousand chunks per chat an

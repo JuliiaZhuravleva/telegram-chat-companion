@@ -9,6 +9,16 @@ normal path, not the exception, and it carries a `task_type` that worker has no
 notion of. Sharing them would mean one queue where a chat_memory repair waits
 behind two thousand backfill chunks.
 
+**Chat-wide, not per thread (measured 2026-08-19).** The plan sessioned by
+`(chat_id, thread_id)` on the assumption that `chat_messages.message_thread_id`
+identifies a forum topic. On production it does not: every chat averages
+2.0-2.7 messages per distinct value and ~70% of messages carry none, because
+Telegram sets it on ordinary reply chains in a supergroup too -- the largest
+chat has 3737 of them, none of which is a topic. Sessioning by it would cut a
+conversation into two-message fragments and separate a reply from the message
+it answers. The `thread_id` column stays in `chat_chunks`, written as NULL,
+for when a real forum appears and there is a way to recognise one.
+
 **Debounce by design, rather than a cleanup pass.** A session is only chunked
 once it can no longer grow -- its last message older than `SESSION_PAUSE`.
 Chunking an open session would produce a chunk whose `(msg_from, msg_to)`
@@ -153,38 +163,28 @@ class ChatChunkIndexer:
         messages_repo = MessageRepository(self._pool)
         chunks_repo = ChunkRepository(self._pool)
 
-        watermarks = await chunks_repo.watermarks(chat_id)
-        written = 0
+        rows = await messages_repo.get_for_chunking(
+            chat_id,
+            after_message_id=await chunks_repo.watermark(chat_id),
+            limit=self._config.messages_per_pass,
+        )
+        if not rows:
+            return 0
 
-        for thread_id in await messages_repo.get_thread_ids(chat_id):
-            after = watermarks.get(thread_id, 0)
-            rows = await messages_repo.get_for_chunking(
-                chat_id,
-                thread_id=thread_id,
-                after_message_id=after,
-                limit=self._config.messages_per_pass,
-            )
-            if not rows:
-                continue
+        messages = source_messages(rows)
+        if not messages:
+            return 0
 
-            messages = source_messages(rows)
-            if not messages:
-                continue
+        sessions = _closed_sessions(
+            split_sessions(messages),
+            batch_full=len(rows) >= self._config.messages_per_pass,
+        )
+        indexable = [message for session in sessions for message in session]
+        if not indexable:
+            return 0
 
-            sessions = _closed_sessions(
-                split_sessions(messages),
-                batch_full=len(rows) >= self._config.messages_per_pass,
-            )
-            indexable = [message for session in sessions for message in session]
-            if not indexable:
-                continue
-
-            chunks = build_chunks(
-                indexable, chat_id=chat_id, thread_id=thread_id, chat_title=chat_title
-            )
-            written += await chunks_repo.insert_many(chunks)
-
-        return written
+        chunks = build_chunks(indexable, chat_id=chat_id, thread_id=None, chat_title=chat_title)
+        return await chunks_repo.insert_many(chunks)
 
     async def _embed_pending(self) -> int:
         """Give vectors to chunks that have none, oldest first.
@@ -198,6 +198,7 @@ class ChatChunkIndexer:
             self._config.embed_per_pass, exclude_ids=sorted(self._parked)
         )
         embedded = 0
+        failed: list[int] = []
 
         for row in pending:
             chunk_id = int(row["id"])
@@ -211,7 +212,7 @@ class ChatChunkIndexer:
                 # Almost always the whole provider being down, which fails
                 # every row in the batch equally; the next pass retries.
                 logger.warning("Chunk embedding failed", chunk_id=chunk_id, error=str(exc))
-                self._record_failure(chunk_id)
+                failed.append(chunk_id)
                 continue
 
             if len(result.embedding) != EXPECTED_EMBEDDING_DIMENSIONS:
@@ -223,7 +224,7 @@ class ChatChunkIndexer:
                     chunk_id=chunk_id,
                     dimensions=len(result.embedding),
                 )
-                self._record_failure(chunk_id)
+                failed.append(chunk_id)
                 continue
 
             await repo.update_embedding(
@@ -235,7 +236,30 @@ class ChatChunkIndexer:
             self._failures.pop(chunk_id, None)
             embedded += 1
 
+        self._account_for_failures(failed, batch=len(pending))
         return embedded
+
+    def _account_for_failures(self, failed: list[int], *, batch: int) -> None:
+        """Count failures toward parking -- unless the whole batch failed.
+
+        Parking exists for a row the provider will never accept. A provider
+        that is down, rate-limiting, or answering with the wrong vector width
+        fails every row equally, and counting those would park the entire
+        backlog after three passes: a transient outage would turn into an
+        index that stops filling until someone restarts the process. The
+        distinction is cheap to make and there is no honest way to make it
+        per-row, because from here both look like an exception.
+        """
+        if not failed:
+            return
+        if batch > 1 and len(failed) == batch:
+            logger.warning(
+                "Every chunk in the pass failed to embed -- treating as an outage, not as bad rows",
+                batch=batch,
+            )
+            return
+        for chunk_id in failed:
+            self._record_failure(chunk_id)
 
     def _record_failure(self, chunk_id: int) -> None:
         attempts = self._failures.get(chunk_id, 0) + 1

@@ -94,7 +94,7 @@ Two consequences worth knowing before reading that table:
 chunk_indexer:
   enabled: true
   interval_seconds: 900
-  messages_per_pass: 2000   # per chat AND per thread
+  messages_per_pass: 2000   # per chat, per pass
   embed_per_pass: 100       # embedding calls per pass, across all chats
 ```
 

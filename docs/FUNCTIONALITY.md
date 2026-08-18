@@ -164,15 +164,15 @@ Forum-topic awareness is **present in message history** (`message_thread_id` com
 addressed the bot, so the bot's long-term memory is largely a record of conversations
 about itself. `chat_chunks` indexes the conversation instead.
 
-- **Unit** — a conversation session: messages bounded by a 3-hour pause per
-  `(chat_id, thread_id)`, packed to ~1200 characters (hard cap 2600, ≤80 messages),
+- **Unit** — a conversation session: messages bounded by a 3-hour pause, chat-wide,
+  packed to ~1200 characters (hard cap 2600, ≤80 messages),
   with a 2-message / 400-character overlap at the seam that is suppressed across a
   pause. Rendered as a header (`Чат «X», 18 августа 2026`) plus verbatim
   `Имя (ЧЧ:ММ): текст` lines, so speakers, times and the group's own vocabulary stay
   searchable in both retrieval legs.
 - **Indexer** — a background pass every 15 minutes, gated per chat on `save_messages`.
   It chunks only *closed* sessions, resumes from a watermark derived from the index
-  itself (`MAX(msg_to)` per chat and thread), and inserts with `ON CONFLICT DO NOTHING`
+  itself (`MAX(msg_to)` per chat), and inserts with `ON CONFLICT DO NOTHING`
   on the natural key `(chat_id, thread_id, msg_from, msg_to, part)` — so re-running it
   is a no-op rather than a duplicate.
 - **Embeddings** — `gemini-embedding-001`, 768 dim, with `task_type=RETRIEVAL_DOCUMENT`.
@@ -185,6 +185,14 @@ about itself. `chat_chunks` indexes the conversation instead.
   uses, one message is one line, and a single message longer than the hard cap is
   truncated — an oversized input is rejected by the embedding API, and a chunk that
   never embeds is invisible to retrieval for ever.
+
+**Chunks are chat-wide, not per topic.** The plan sessioned by
+`(chat_id, thread_id)`; measured on production 2026-08-19 that column identifies
+*reply chains*, not forum topics — 2.0–2.7 messages per distinct value in every chat,
+~70% of messages with none, 3737 distinct values in the largest chat. Sessioning by it
+would separate a reply from the message it answers. The column stays in `chat_chunks`
+for when a forum can be recognised (`chat.is_forum` is not stored). The same fact makes
+the *prompt's* forum branch fire on ordinary replies — tracked as TD-102, not fixed here.
 
 **Nothing reads this table yet.** Retrieval moves onto it in S5 (hybrid FTS + vector
 with RRF), behind a shadow period; until then the index is written, embedded and unused,

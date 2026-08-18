@@ -62,26 +62,29 @@ class ChunkRepository:
                     inserted += 1
         return inserted
 
-    async def watermarks(self, chat_id: int) -> dict[int | None, int]:
-        """The newest indexed message id per thread, `{thread_id: msg_to}`.
+    async def watermark(self, chat_id: int) -> int:
+        """The newest message id this chat is indexed up to, 0 when empty.
 
-        Per *thread*, not per chat: in a forum, thread B's history can sit
-        entirely below thread A's newest message, and a single chat-wide
-        watermark would declare it already indexed. Derived from the rows
-        themselves rather than kept in a state table -- there is then no way
-        for the watermark and the index to disagree, and a manually deleted
-        chunk is simply re-created on the next pass.
+        Chat-wide, because chunks are chat-wide: `message_thread_id` turned
+        out to identify reply chains rather than forum topics (see
+        `MessageRepository.get_for_chunking`), so there is no per-thread index
+        to keep a per-thread watermark for. If forum-aware chunking ever
+        lands, this becomes a `GROUP BY thread_id` and the column is already
+        in the table.
+
+        Derived from the rows rather than kept in a state table, so there is
+        nothing that can disagree with what was actually written: a crash
+        mid-backfill resumes exactly where the rows stop. Note what that does
+        *not* give you -- deleting the newest chunk makes the indexer rebuild
+        it, but deleting one from the middle does not, because the watermark
+        is a maximum and never moved. Re-indexing a range means deleting
+        everything from that point on.
         """
-        rows = await self._pool.fetch(
-            """
-            SELECT thread_id, MAX(msg_to) AS watermark
-            FROM chat_chunks
-            WHERE chat_id = $1
-            GROUP BY thread_id
-            """,
+        value = await self._pool.fetchval(
+            "SELECT coalesce(max(msg_to), 0) FROM chat_chunks WHERE chat_id = $1",
             chat_id,
         )
-        return {row["thread_id"]: int(row["watermark"]) for row in rows}
+        return int(value or 0)
 
     async def get_pending_embeddings(
         self, limit: int, *, exclude_ids: list[int] | None = None
