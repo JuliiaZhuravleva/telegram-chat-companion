@@ -79,6 +79,30 @@ class TestSessionBoundaries:
     def test_empty_input_yields_no_sessions(self) -> None:
         assert split_sessions([]) == []
 
+    def test_one_stale_timestamp_does_not_invent_a_pause(self) -> None:
+        """Messages arrive in `message_id` order, and 1.8% of adjacent pairs
+        in production have timestamps that disagree with it. Measuring the
+        gap against the previous message rather than against the latest
+        moment seen would cut a live conversation in half every time one row
+        carried an old timestamp."""
+        messages = [
+            _msg(0, "раз", message_id=1),
+            _msg(1, "два", message_id=2),
+            _msg(-500, "запоздалая запись", message_id=3),
+            _msg(3, "три", message_id=4),
+        ]
+
+        assert len(split_sessions(messages)) == 1
+
+    def test_a_real_pause_still_splits_after_a_stale_timestamp(self) -> None:
+        messages = [
+            _msg(0, "раз", message_id=1),
+            _msg(-500, "запоздалая запись", message_id=2),
+            _msg(400, "спустя часы", message_id=3),
+        ]
+
+        assert [len(s) for s in split_sessions(messages)] == [2, 1]
+
 
 class TestPacking:
     def test_long_conversation_splits_at_target(self) -> None:

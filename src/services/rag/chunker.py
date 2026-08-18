@@ -130,17 +130,26 @@ def source_messages(rows: Iterable[Any]) -> list[SourceMessage]:
 def split_sessions(messages: Sequence[SourceMessage]) -> list[list[SourceMessage]]:
     """Group messages into conversation sessions on `SESSION_PAUSE` gaps.
 
-    Input must be ascending in time; the indexer's query guarantees it.
+    Input arrives in `message_id` order -- Telegram's own send order, and the
+    axis the indexer's watermark advances along. The timestamps are therefore
+    *mostly* ascending but not guaranteed to be: 1.8% of adjacent pairs in
+    production disagree, mostly rows written by the n8n-era import.
+
+    So the gap is measured against the latest moment seen so far, not against
+    the previous message. With a bare `previous`, one row carrying a stale
+    timestamp makes the *next* message look like it arrived hours later and
+    splits a session in the middle of a live conversation.
     """
     sessions: list[list[SourceMessage]] = []
     current: list[SourceMessage] = []
-    previous: datetime | None = None
+    latest: datetime | None = None
     for message in messages:
-        if previous is not None and message.created_at - previous > SESSION_PAUSE:
+        if latest is not None and message.created_at - latest > SESSION_PAUSE:
             sessions.append(current)
             current = []
+            latest = None
         current.append(message)
-        previous = message.created_at
+        latest = message.created_at if latest is None else max(latest, message.created_at)
     if current:
         sessions.append(current)
     return sessions
