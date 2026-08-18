@@ -1383,3 +1383,146 @@ class TestPipelineRagFloor:
         logged = self._rag_log(mocks)
         assert logged["results"][0]["above_floor"] is False
         assert logged["n_injected"] == 0
+
+
+class TestPipelineQueryHygiene:
+    """R0 / TD-092 — the retrieval embedding must not carry the address.
+
+    These assert the CALL SITE. `strip_bot_address` has its own suite
+    (tests/unit/test_query_hygiene.py) and every one of those tests stays
+    green if the pipeline never calls it, which is precisely the state this
+    change exists to prevent.
+    """
+
+    ADDRESSED = "бот, а почему все любят этот фильм?"
+    BARE = "а почему все любят этот фильм?"
+
+    async def _run(self, make_chat_config, text):
+        config = make_chat_config(enabled=True, rag_enabled=True, kb_enabled=True)
+        pipeline, mocks = _make_pipeline()
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text=text,
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+        await asyncio.sleep(0)  # let the fire-and-forget retrieval logs run
+        return mocks
+
+    async def test_embedding_is_computed_without_the_address(self, make_chat_config):
+        mocks = await self._run(make_chat_config, self.ADDRESSED)
+
+        embedded = mocks["ai_router"].generate_embedding.call_args.args[0]
+        assert embedded == self.BARE
+
+    async def test_trigger_word_does_not_change_the_retrieval_query(self, make_chat_config):
+        """The plan's stated control: same message, with and without the trigger.
+
+        Written as a comparison rather than as a literal on purpose — it holds
+        whatever the stripping rule becomes, and it fails on any code that
+        embeds the raw text, because there the two runs differ by "бот, ".
+        """
+        addressed = await self._run(make_chat_config, self.ADDRESSED)
+        bare = await self._run(make_chat_config, self.BARE)
+
+        assert (
+            addressed["ai_router"].generate_embedding.call_args.args[0]
+            == bare["ai_router"].generate_embedding.call_args.args[0]
+        )
+
+    async def test_rag_search_is_given_the_stripped_query(self, make_chat_config):
+        mocks = await self._run(make_chat_config, self.ADDRESSED)
+
+        # `search_unfiltered` since R1; the filtered `search` is not on the
+        # pipeline's path at all. Written to survive the next such move: it
+        # takes whichever entry point was actually used, and fails if neither
+        # was — rather than naming one and passing vacuously when it changes.
+        called = [
+            m
+            for m in (mocks["rag_service"].search, mocks["rag_service"].search_unfiltered)
+            if m.call_args is not None
+        ]
+        assert len(called) == 1, "exactly one RAG entry point should be used per turn"
+        assert called[0].call_args.args[1] == self.BARE
+
+    async def test_prompt_still_receives_the_message_as_written(self, make_chat_config):
+        """Hygiene is retrieval-only: the model must see what the user typed."""
+        mocks = await self._run(make_chat_config, self.ADDRESSED)
+
+        prompt = mocks["ai_router"].generate_text.call_args.kwargs["prompt"]
+        assert self.ADDRESSED in prompt
+
+    async def test_abuse_check_still_receives_the_message_as_written(self, make_chat_config):
+        mocks = await self._run(make_chat_config, self.ADDRESSED)
+
+        assert mocks["abuse_checker"].check.call_args.kwargs["content"] == self.ADDRESSED
+
+    async def test_retrieval_log_records_the_query_that_was_embedded(self, make_chat_config):
+        """Otherwise the stored similarities are unreproducible from the log.
+
+        `retrieval_log` is what R2 rebuilds the golden set from; logging the
+        raw message there would re-contaminate the next baseline with the
+        exact token this change removes.
+        """
+        mocks = await self._run(make_chat_config, self.ADDRESSED)
+
+        calls = mocks["observability_repo"].log_retrieval.call_args_list
+        sources = {call.kwargs["source"] for call in calls}
+        assert sources == {"rag_memory", "kb"}
+        for call in calls:
+            assert call.kwargs["query_text"] == self.BARE
+            assert call.kwargs["params"]["query_stripped"] is True
+
+    async def test_query_stripped_is_false_when_nothing_was_removed(self, make_chat_config):
+        mocks = await self._run(make_chat_config, self.BARE)
+
+        calls = mocks["observability_repo"].log_retrieval.call_args_list
+        assert calls
+        for call in calls:
+            assert call.kwargs["query_text"] == self.BARE
+            assert call.kwargs["params"]["query_stripped"] is False
+
+    async def test_trailing_newline_alone_is_not_an_address_strip(self, make_chat_config):
+        """Telegram delivers these constantly.
+
+        Deriving the flag from a raw `!=` against the untrimmed message made it
+        True for every un-addressed question that happened to end in a newline
+        — silently useless as the field that separates the pre- and post-R0
+        halves of `retrieval_log`, which is what R2 rebuilds from.
+        """
+        mocks = await self._run(make_chat_config, self.BARE + "\n")
+
+        calls = mocks["observability_repo"].log_retrieval.call_args_list
+        assert calls
+        for call in calls:
+            assert call.kwargs["query_text"] == self.BARE
+            assert call.kwargs["params"]["query_stripped"] is False
+
+    async def test_whitespace_only_message_is_not_reported_as_an_address_strip(
+        self, make_chat_config
+    ):
+        """The degenerate input a guard clause is most likely to get wrong."""
+        mocks = await self._run(make_chat_config, "   ")
+
+        calls = mocks["observability_repo"].log_retrieval.call_args_list
+        assert calls
+        for call in calls:
+            assert call.kwargs["params"]["query_stripped"] is False
+
+    async def test_chat_configured_triggers_are_the_ones_removed(self, make_chat_config):
+        """Not the YAML default: `trigger_words` is a per-chat setting."""
+        config = make_chat_config(enabled=True, rag_enabled=True, trigger_words=["ассистент"])
+        pipeline, mocks = _make_pipeline()
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="ассистент, сколько времени?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        assert mocks["ai_router"].generate_embedding.call_args.args[0] == "сколько времени?"

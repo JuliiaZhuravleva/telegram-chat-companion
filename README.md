@@ -205,7 +205,11 @@ without a spec there fails CI.
 path the bot uses, reporting recall@k, MRR, blind rate and the similarity
 distribution. It exists so retrieval changes can be judged against a recorded
 number rather than an impression — see
-[the baseline](docs/rag-eval-baseline.md). The database DSN is a required
+[the baseline](docs/rag-eval-baseline.md). "The real search path" now includes
+query hygiene: a message that opens by addressing the bot ("бот, ...") has that
+address removed before the retrieval embedding is computed, in the harness
+exactly as in the bot, because the trigger word is semantically loud and was
+measured to steer retrieval toward the bot's own memories. The database DSN is a required
 argument with no default: the harness must never be able to point at a live
 database. Cases are validated by `scripts/eval_schema.py`; the tracked template
 in `tests/fixtures/eval/` is synthetic, and real cases stay out of this
@@ -218,6 +222,16 @@ floors over it. Read-only is enforced by the database rather than by
 convention — the query runs inside a `readonly=True` transaction — and an empty
 window exits non-zero, because a silent zero reads exactly like "no problems
 found". See [the KB baseline](docs/kb-eval-baseline.md).
+
+Both of those read what retrieval *returned*. `scripts/kb_probe.py` covers the
+side neither can see: given real questions, it reports whether the knowledge
+base would answer them at all — `WOULD ANSWER` / `BORDERLINE` / `BLIND`. A
+question the base is blind to leaves no trace in the logs, and the similarity
+floor makes that worse, since a filtered-out turn looks exactly like a turn
+where nothing was relevant. `BORDERLINE` marks a hit whose margin over the floor
+is thin enough that a slightly worse phrasing would get nothing. Take the
+questions from what people actually ask — questions written by reading the facts
+match by construction and measure nothing.
 
 ## Documentation
 

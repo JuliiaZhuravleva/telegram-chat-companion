@@ -124,6 +124,23 @@ what is bitcoin worth right now?           0.630        0.586   ← intended mis
 **Noise ceiling 0.646. Signal floor 0.706. Gap 0.060.** No overlap — the
 separation is clean, but narrow, and n = 5.
 
+> **Measured before R0 (TD-092), and the conditions have since changed.** Every
+> one of those five turns was addressed, so every query embedding carried the
+> leading trigger word — which the paragraph below names as the reason a miss
+> returns bot-about-bot facts. Retrieval now strips that address before
+> embedding, so this window is a record of a regime that no longer runs.
+>
+> The direction is favourable and worth stating plainly, so that nobody "fixes"
+> the floor on the strength of the narrow gap above: on the same production
+> data, removing the address moved the 0.706 hit up to **0.719** and the 0.640
+> borscht miss down to **0.524**. Both edges move away from 0.70. Comparing
+> like with like — that same hit against that same miss — the gap goes from
+> 0.066 to **0.195**, roughly threefold. (The 0.060 quoted above is a different
+> pair: it measures the 0.706 hit against the 0.646 *statement*, which was the
+> highest-scoring non-question in the window and was not re-probed after R0.)
+> **0.70 needs no change; it needs re-measuring**, on a fresh window of
+> addressed turns, before anyone tunes it.
+
 ### What this changes versus the 2-fact line
 
 **0.588 from the previous section must not be reused as a threshold.** It was

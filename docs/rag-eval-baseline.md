@@ -69,6 +69,18 @@ deltas").
 | Negative-control rate (`answer-absent`, correctly empty) | n/a | 0 | No `answer-absent` cases exist yet — auto-harvest only produces `found` (S3-5's negative control needs S3b) |
 | Best-sim percentiles (over cases with ≥1 hit) | p10=0.713, p25=0.727, p50=0.739, p75=0.758, p90=0.786 | 4 | Free from the same run; S6 calibrates the similarity floor against this distribution |
 
+> **Superseded as a ruler by R0 (2026-08-18, TD-092).** This run embedded
+> each question exactly as it was typed, and auto-harvested questions come
+> from `chat_messages.content` verbatim — so most of them still carried the
+> leading `бот`/`bot` that addressed the bot. That token was measured to
+> depress a real hit from 0.821 to 0.675 and to *raise* a miss from 0.524 to
+> 0.640, so the numbers below describe retrieval through a query the bot no
+> longer sends. `run_eval()` now strips the address the same way the pipeline
+> does, which means a re-run of this very case file will not reproduce these
+> figures — that is the fix working, not drift. The blind rate of 0.636
+> remains a true statement about the system as of 2026-08-10; it is not a
+> baseline S4/S5 deltas may be measured against. R2 re-records it.
+
 **Caveats carried forward to S4–S6:**
 - Only 11 cases, all one stratum — far below the roadmap's "<50 cases, trust
   only large deltas" threshold. Treat any future delta against this baseline
