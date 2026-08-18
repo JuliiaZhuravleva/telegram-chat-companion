@@ -101,6 +101,16 @@ class TestWindows:
         assert "chat_memory" not in RETENTION_TABLES
         assert "chat_memory" not in _make_cleaner()._windows()
 
+    def test_chat_chunks_is_excluded_from_retention(self) -> None:
+        """S4: `chat_messages` has a 365-day window and `chat_chunks` is the
+        only copy of what was said in it. Ageing chunks with their source
+        would put a hole exactly one year deep in the bot's memory, and the
+        hole has no observable trace -- it reads as "the bot got worse at
+        remembering", not as a deletion. Same invariant as chat_memory above,
+        now at 100% of the history instead of ~7%."""
+        assert "chat_chunks" not in RETENTION_TABLES
+        assert "chat_chunks" not in _make_cleaner()._windows()
+
 
 # ---------------------------------------------------------------------------
 # run_once

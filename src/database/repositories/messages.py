@@ -471,3 +471,64 @@ class MessageRepository:
                 limit,
             )
         return result
+
+    async def get_for_chunking(
+        self,
+        chat_id: int,
+        *,
+        after_message_id: int,
+        limit: int,
+    ) -> list[asyncpg.Record]:
+        """Messages the chunk indexer has not seen yet, oldest first (S4).
+
+        **The whole chat, not per `message_thread_id`.** The plan assumed that
+        column identifies a forum topic; measured on production 2026-08-19 it
+        does not. Every chat averages 2.0-2.7 messages per "thread" and ~70%
+        of messages have none at all, because Telegram also sets
+        `message_thread_id` on ordinary *reply chains* in a supergroup -- one
+        chat had 3737 of them. Sessioning by it would shatter a conversation
+        into two-message fragments and, worse, split a reply from the message
+        it replies to: the reply carries the thread id and the original does
+        not. Chunks stay chat-wide until there is a way to tell a real forum
+        topic from a reply chain (`chat.is_forum` is not stored).
+
+        Bot messages are included on purpose. A chunk is the conversation, and
+        a question whose answer is missing reads as an unanswered question;
+        `chat_memory`'s Q&A pairs exist precisely because the bot's own side
+        is worth retrieving. `transcription` bookkeeping rows are excluded
+        here as everywhere (migration 028) -- they are content-free.
+
+        The three exclusions are the same ones `source_messages` applies, and
+        they are here as well as there on purpose. `LIMIT` counts rows, not
+        usable rows: a stretch of stickers, photos or content-free rows longer
+        than one batch would fill the whole window, yield no chunk, leave the
+        watermark where it was -- and be re-read on every pass for ever, with
+        the real messages behind it never reached. Filtering in SQL makes the
+        batch a batch of *chunkable* messages; the checks in `source_messages`
+        stay as the guarantee for any other caller.
+
+        Ordered by time, then id: sessions are defined by pauses, so time is
+        the axis that decides the boundaries. The `after_message_id`
+        watermark is on the id axis, which is monotonic with time for real
+        Telegram traffic; `Chunk` takes min/max over both so an imported row
+        that violates that cannot produce a backwards range.
+        """
+        result: list[asyncpg.Record] = await self._pool.fetch(
+            """
+            SELECT message_id, user_id, username, first_name,
+                   message_type, content, is_bot_message, created_at
+            FROM chat_messages
+            WHERE chat_id = $1
+              AND message_id > $2
+              AND message_type <> 'transcription'
+              AND created_at IS NOT NULL
+              AND content IS NOT NULL
+              AND btrim(content) <> ''
+            ORDER BY created_at ASC, message_id ASC
+            LIMIT $3
+            """,
+            chat_id,
+            after_message_id,
+            limit,
+        )
+        return result

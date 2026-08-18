@@ -155,6 +155,49 @@ Live QA evidence from chat history: a sticker `🍩 Аниме-девочка с
 
 Forum-topic awareness is **present in message history** (`message_thread_id` composite index from migration 007) but **not enforced in RAG retrieval** — the cosine query does not scope by topic. This is by design: long-term memory is chat-wide, while recent-history quotes are topic-scoped (20 current topic + 10 other topics via UNION ALL).
 
+### 2.7a Chunk Index (S4 — written, not yet read)
+
+[src/services/rag/chunker.py](src/services/rag/chunker.py), [src/services/rag/indexer.py](src/services/rag/indexer.py), [src/database/repositories/chunks.py](src/database/repositories/chunks.py), migration 029.
+
+`chat_memory` above stores what the bot was *part of*. Measured on production
+2026-08-18, that is 4–8% of a live chat's history — and it is the part where people
+addressed the bot, so the bot's long-term memory is largely a record of conversations
+about itself. `chat_chunks` indexes the conversation instead.
+
+- **Unit** — a conversation session: messages bounded by a 3-hour pause, chat-wide,
+  packed to ~1200 characters (hard cap 2600, ≤80 messages),
+  with a 2-message / 400-character overlap at the seam that is suppressed across a
+  pause. Rendered as a header (`Чат «X», 18 августа 2026`) plus verbatim
+  `Имя (ЧЧ:ММ): текст` lines, so speakers, times and the group's own vocabulary stay
+  searchable in both retrieval legs.
+- **Indexer** — a background pass every 15 minutes, gated per chat on `save_messages`.
+  It chunks only *closed* sessions, resumes from a watermark derived from the index
+  itself (`MAX(msg_to)` per chat), and inserts with `ON CONFLICT DO NOTHING`
+  on the natural key `(chat_id, thread_id, msg_from, msg_to, part)` — so re-running it
+  is a no-op rather than a duplicate.
+- **Embeddings** — `gemini-embedding-001`, 768 dim, with `task_type=RETRIEVAL_DOCUMENT`.
+  Measured 2026-08-19: omitting `task_type` returns a byte-identical vector to
+  `RETRIEVAL_QUERY`, so the query side already asks for the query half implicitly and
+  needs no change — and `chat_memory`'s existing vectors *are* a `RETRIEVAL_QUERY`
+  index, which is why the asymmetry may only be applied to an index built from scratch.
+- **A chunk is a rendering, not an archive.** `chat_messages` stays the verbatim record;
+  chunk text is sanitised with the same `sanitize_history_field` the live history block
+  uses, one message is one line, and a single message longer than the hard cap is
+  truncated — an oversized input is rejected by the embedding API, and a chunk that
+  never embeds is invisible to retrieval for ever.
+
+**Chunks are chat-wide, not per topic.** The plan sessioned by
+`(chat_id, thread_id)`; measured on production 2026-08-19 that column identifies
+*reply chains*, not forum topics — 2.0–2.7 messages per distinct value in every chat,
+~70% of messages with none, 3737 distinct values in the largest chat. Sessioning by it
+would separate a reply from the message it answers. The column stays in `chat_chunks`
+for when a forum can be recognised (`chat.is_forum` is not stored). The same fact makes
+the *prompt's* forum branch fire on ordinary replies — tracked as TD-102, not fixed here.
+
+**Nothing reads this table yet.** Retrieval moves onto it in S5 (hybrid FTS + vector
+with RRF), behind a shadow period; until then the index is written, embedded and unused,
+which is exactly what makes the migration safe to ship on its own.
+
 ### 2.8 Forum Topics
 
 Migration 007 added `message_thread_id BIGINT` to `chat_messages` with a composite index. `TopicMiddleware` extracts the thread ID from incoming messages and injects it as a handler kwarg. `/summary` in a forum supergroup is topic-scoped (filters by `message_thread_id`). The prompt builder splits recent history into `<current_topic>` / `<other_topics>` sections when `is_forum_mode=True`. 385 unit tests cover this (per project memory).
@@ -431,6 +474,11 @@ For text messages, in order:
 
 - `chat_messages` (archive) — `message_thread_id` indexed for forum topic filtering.
 - `chat_memory` — pgvector embedding (768 d), `importance_score`, `expires_at` TTL, `source_message_id` FK.
+- `chat_chunks` — conversation-session chunks over the whole history (migration 029, §2.7a):
+  natural key `(chat_id, thread_id, msg_from, msg_to, part)` with `NULLS NOT DISTINCT`,
+  `senders BIGINT[]`, a generated `tsvector` (russian, ё→е), `embedding` + `emb_model` +
+  `emb_task_type`. No ANN index by design — exact scan at a couple of thousand rows per
+  chat is both faster and complete. Written since S4, read from S5.
 - `chat_stickers` — `file_unique_id` PK, `visual_description`, `emotion`, `character`, `contexts` array, `description_embedding`, `usage_count`, `bot_usage_count`.
 - `chat_rules` — per-chat JSON rule store with `type`, `weight`, `mandatory`, `enabled`.
 - `bot_config` — global KV (admin_ids, default_*, notifications).

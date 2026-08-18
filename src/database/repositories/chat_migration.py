@@ -12,8 +12,8 @@ transaction, and hanging it off `ChatSettingsRepository` would put
 `chat_facts` SQL in a class that has no business knowing about it.
 
 Scope note: only `chat_settings` and `chat_facts` move here. `chat_memory`,
-`chat_messages` and the observability logs are also chat-keyed and are NOT
-re-keyed -- moving history is a larger decision (retention, ADR-0011's
+`chat_messages`, `chat_chunks` (S4) and the observability logs are also
+chat-keyed and are NOT re-keyed -- moving history is a larger decision (retention, ADR-0011's
 preservation invariant) than this slice should make on its own. The outcome
 names what it moved so the gap is visible in the log rather than assumed.
 """

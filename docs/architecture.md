@@ -103,3 +103,7 @@ config/default.yml          ← YAML defaults
 - **Repository pattern** for data access
 - **Alembic** for schema migrations
 - **768-dimensional vectors** (gemini-embedding-001) with IVFFlat index
+
+Background tasks (process-lifetime, owned by `main()`, not Dishka): `HealthChecker`,
+`StickerSetSyncScheduler`, `RetentionCleaner`, `EmbeddingBackfillWorker`, and — since
+S4 — `ChatChunkIndexer`, which turns saved messages into the `chat_chunks` index.

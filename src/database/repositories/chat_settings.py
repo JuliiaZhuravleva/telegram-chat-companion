@@ -165,3 +165,17 @@ class ChatSettingsRepository:
         """Get all enabled (whitelisted) chat IDs."""
         rows = await self._pool.fetch("SELECT chat_id FROM chat_settings WHERE enabled = true")
         return [row["chat_id"] for row in rows]
+
+    async def list_all(self) -> list[asyncpg.Record]:
+        """Every chat the bot has a settings row for, with its title.
+
+        Deliberately not `list_enabled()`: the chunk indexer's gate is
+        `save_messages`, not the whitelist. A chat that was disabled after
+        years of saved history still owns that history, and freezing its index
+        at the moment of a whitelist change would be a silent, unrecoverable
+        edit to the bot's memory.
+        """
+        rows: list[asyncpg.Record] = await self._pool.fetch(
+            "SELECT chat_id, chat_title FROM chat_settings ORDER BY chat_id"
+        )
+        return rows

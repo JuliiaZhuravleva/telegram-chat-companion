@@ -156,6 +156,17 @@ embedding_backfill:
   interval_seconds: 3600
   batch_limit: 20
 
+# Conversation-session chunk index (S4). Gated per chat by `save_messages`:
+# a chat that does not keep its messages has nothing to chunk, and turning
+# saving off freezes that chat's index rather than erasing it.
+chunk_indexer:
+  enabled: true
+  interval_seconds: 900
+  # Per chat and per thread, per pass.
+  messages_per_pass: 2000
+  # Embedding calls per pass, across all chats.
+  embed_per_pass: 100
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:

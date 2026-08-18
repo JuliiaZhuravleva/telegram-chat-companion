@@ -132,6 +132,16 @@ class GeminiProvider(AIProvider):
             "outputDimensionality": dimensions,
         }
 
+        # Asymmetric retrieval (S4): `RETRIEVAL_DOCUMENT` when indexing,
+        # `RETRIEVAL_QUERY` when searching. Omitted by default on purpose --
+        # `task_type` changes the embedding space, so sending one for
+        # `chat_memory`, whose stored vectors were produced without it, would
+        # silently make every stored vector incomparable with every new query.
+        # Only an index built from scratch may opt in.
+        task_type = kwargs.get("task_type")
+        if task_type:
+            payload["taskType"] = task_type
+
         url = f"{_BASE_URL}/models/{model}:embedContent"
         response = await self._request(url, payload)
 
