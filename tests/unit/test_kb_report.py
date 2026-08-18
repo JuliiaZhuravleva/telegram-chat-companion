@@ -13,6 +13,7 @@ from scripts.kb_report import (
     Report,
     extract_sims,
     fetch_turns,
+    format_regime_caution,
     format_report,
     main,
     summarize,
@@ -113,9 +114,17 @@ class _FakeTransaction:
 
 
 class _FakeConnection:
-    def __init__(self, rows: list[dict[str, Any]], recorder: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        recorder: dict[str, Any],
+        regime_row: dict[str, Any] | None = None,
+    ) -> None:
         self._rows = rows
         self._recorder = recorder
+        # Default: a window entirely after R0, i.e. no caution — so every test
+        # written before the caution existed keeps asserting what it asserted.
+        self._regime_row = regime_row or {"stripped": 1, "unstripped": 0, "pre_r0": 0}
 
     def transaction(self, **kwargs: Any) -> _FakeTransaction:
         self._recorder["transaction_kwargs"] = kwargs
@@ -125,6 +134,16 @@ class _FakeConnection:
         self._recorder["query"] = query
         self._recorder["args"] = args
         return self._rows
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        """The regime-split probe (R0/TD-092).
+
+        Answers "all rows are post-R0" by default, so the existing tests keep
+        asserting exactly what they asserted before the caution line existed.
+        """
+        self._recorder["regime_query"] = query
+        self._recorder["regime_args"] = args
+        return self._regime_row
 
 
 class _FakeAcquire:
@@ -139,8 +158,13 @@ class _FakeAcquire:
 
 
 class _FakePool:
-    def __init__(self, rows: list[dict[str, Any]], recorder: dict[str, Any]) -> None:
-        self._conn = _FakeConnection(rows, recorder)
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        recorder: dict[str, Any],
+        regime_row: dict[str, Any] | None = None,
+    ) -> None:
+        self._conn = _FakeConnection(rows, recorder, regime_row)
 
     def acquire(self) -> _FakeAcquire:
         return _FakeAcquire(self._conn)
@@ -284,3 +308,128 @@ class TestReportInvariants:
         report = summarize([[0.1, 0.3, 0.5, 0.7, 0.9]], floors=(0.2, 0.4, 0.6, 0.8))
         kept = [row.facts_kept for row in report.floors]
         assert kept == sorted(kept, reverse=True)
+
+
+class TestRegimeCaution:
+    """R0/TD-092 — a window that straddles the deploy is two populations.
+
+    The floor sweep is what a reader tunes `knowledge_base.min_similarity`
+    from, and similarities recorded before query hygiene sit measurably
+    higher on a miss. A blended percentile table presented as one number is
+    the failure this line exists to prevent.
+    """
+
+    def test_silent_when_every_row_is_post_r0(self) -> None:
+        assert format_regime_caution(12, 3, 0) is None
+
+    def test_warns_when_every_row_is_pre_r0(self) -> None:
+        """Homogeneous is not the same as current.
+
+        A window entirely before the deploy has no mixture to complain about
+        and is still the wrong ruler — the address was in every one of those
+        query embeddings. Staying silent here was the first version, and
+        silence in a report is read as "these numbers describe today".
+        """
+        caution = format_regime_caution(0, 0, 9)
+
+        assert caution is not None
+        assert "9 lookup(s) predates" in caution
+        assert "do not tune a floor" in caution
+
+    def test_silent_on_an_empty_window(self) -> None:
+        assert format_regime_caution(0, 0, 0) is None
+
+    def test_warns_and_counts_both_sides_when_the_window_straddles(self) -> None:
+        caution = format_regime_caution(4, 2, 7)
+
+        assert caution is not None
+        assert "7 lookup(s) predate" in caution
+        # 4 + 2: both post-R0 shapes count as one population, and a reader who
+        # saw only "4" would think the mix was smaller than it is.
+        assert "6 follow it" in caution
+
+    def test_format_report_renders_a_caution_it_is_given(self) -> None:
+        """The renderer's own contract — see the next test for the wiring."""
+        report = summarize([[0.8], [0.5]], (0.7,))
+
+        rendered = format_report(report, since_days=90, regime_caution="⚠ CANARY")
+
+        assert "⚠ CANARY" in rendered
+
+
+class TestTheCautionIsActuallyWired:
+    """The call site, driven through `main()` — not the helper, not the renderer.
+
+    CLAUDE.md: a correct helper is not a used helper. The first version of this
+    suite asserted `format_report` renders an injected string, which is the
+    helper's *consumer*; deleting the one line in `main()` that computes the
+    caution left 40/40 green. Nothing here hand-injects: the caution has to
+    travel main -> fetch_regime_split -> format_regime_caution -> format_report
+    on its own, so a deleted kwarg and a permuted argument order both fail.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_straddling_window_prints_the_caution(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        recorder: dict[str, Any] = {}
+        pool = _FakePool(
+            [{"results": [{"sim": 0.8}]}, {"results": [{"sim": 0.5}]}],
+            recorder,
+            # Deliberately three different numbers: an argument order permuted
+            # anywhere in the chain renders a different sentence.
+            regime_row={"stripped": 4, "unstripped": 2, "pre_r0": 7},
+        )
+
+        async def _fake_create_pool(*_args: Any, **_kwargs: Any) -> _FakePool:
+            return pool
+
+        monkeypatch.setattr("scripts.kb_report.asyncpg.create_pool", _fake_create_pool)
+
+        exit_code = await main(["postgresql://seed/db"])
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "7 lookup(s) predate" in out
+        assert "6 follow it" in out
+
+    @pytest.mark.asyncio
+    async def test_a_post_r0_window_prints_no_caution(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """The negative control: silence must come from the data, not from a
+        broken chain that can never speak."""
+        recorder: dict[str, Any] = {}
+        pool = _FakePool(
+            [{"results": [{"sim": 0.8}]}],
+            recorder,
+            regime_row={"stripped": 9, "unstripped": 0, "pre_r0": 0},
+        )
+
+        async def _fake_create_pool(*_args: Any, **_kwargs: Any) -> _FakePool:
+            return pool
+
+        monkeypatch.setattr("scripts.kb_report.asyncpg.create_pool", _fake_create_pool)
+
+        exit_code = await main(["postgresql://seed/db"])
+
+        assert exit_code == 0
+        assert "predate R0" not in capsys.readouterr().out
+
+    @pytest.mark.asyncio
+    async def test_the_regime_probe_is_bound_to_the_same_window_and_chat(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A caution derived from a different window would be worse than none."""
+        recorder: dict[str, Any] = {}
+        pool = _FakePool([{"results": [{"sim": 0.8}]}], recorder)
+
+        async def _fake_create_pool(*_args: Any, **_kwargs: Any) -> _FakePool:
+            return pool
+
+        monkeypatch.setattr("scripts.kb_report.asyncpg.create_pool", _fake_create_pool)
+
+        await main(["postgresql://seed/db", "--since-days", "14", "--chat-id", "-100777"])
+
+        assert recorder["regime_args"] == (14, -100777)
+        assert recorder["args"] == (14, -100777)

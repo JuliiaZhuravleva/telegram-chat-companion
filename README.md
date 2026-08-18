@@ -205,7 +205,11 @@ without a spec there fails CI.
 path the bot uses, reporting recall@k, MRR, blind rate and the similarity
 distribution. It exists so retrieval changes can be judged against a recorded
 number rather than an impression — see
-[the baseline](docs/rag-eval-baseline.md). The database DSN is a required
+[the baseline](docs/rag-eval-baseline.md). "The real search path" now includes
+query hygiene: a message that opens by addressing the bot ("бот, ...") has that
+address removed before the retrieval embedding is computed, in the harness
+exactly as in the bot, because the trigger word is semantically loud and was
+measured to steer retrieval toward the bot's own memories. The database DSN is a required
 argument with no default: the harness must never be able to point at a live
 database. Cases are validated by `scripts/eval_schema.py`; the tracked template
 in `tests/fixtures/eval/` is synthetic, and real cases stay out of this

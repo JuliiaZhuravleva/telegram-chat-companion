@@ -253,7 +253,13 @@ class TestDegradationControl:
         )
 
         results = await run_eval(
-            [self._eval_case(chat_id=chat_id)], service=service, ai_router=ai_router
+            [self._eval_case(chat_id=chat_id)],
+            service=service,
+            ai_router=ai_router,
+            # The production trigger words (R0/TD-092). Irrelevant to this
+            # fixture's English question, and passed anyway so the harness is
+            # exercised in the configuration production actually runs it in.
+            trigger_words=("бот", "bot"),
         )
         metrics = compute_metrics(results, k=service.max_results)
         return metrics.recall_at_k
