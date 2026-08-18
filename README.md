@@ -219,6 +219,16 @@ convention — the query runs inside a `readonly=True` transaction — and an em
 window exits non-zero, because a silent zero reads exactly like "no problems
 found". See [the KB baseline](docs/kb-eval-baseline.md).
 
+Both of those read what retrieval *returned*. `scripts/kb_probe.py` covers the
+side neither can see: given real questions, it reports whether the knowledge
+base would answer them at all — `WOULD ANSWER` / `BORDERLINE` / `BLIND`. A
+question the base is blind to leaves no trace in the logs, and the similarity
+floor makes that worse, since a filtered-out turn looks exactly like a turn
+where nothing was relevant. `BORDERLINE` marks a hit whose margin over the floor
+is thin enough that a slightly worse phrasing would get nothing. Take the
+questions from what people actually ask — questions written by reading the facts
+match by construction and measure nothing.
+
 ## Documentation
 
 - [Architecture Overview](docs/architecture.md)
