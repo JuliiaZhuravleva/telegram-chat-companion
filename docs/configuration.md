@@ -68,6 +68,13 @@ rag:
   default_importance: 0.5
 ```
 
+The floor is applied by `RAGMemoryService`, not in SQL (R1). The repository returns the
+nearest `max_results` memories whatever they score, the service drops those below the
+threshold, and `retrieval_log` records the whole candidate set with `above_floor` per row
+— so a turn that injected nothing still says how far off the best match was. While the
+floor lived in the `WHERE` clause, that turn logged an empty result and missing by 0.001
+looked exactly like missing by 0.3.
+
 ### Knowledge Base Settings
 
 Retrieval tuning only — whether the module runs at all is `modules.knowledge_base.enabled`

@@ -33,7 +33,7 @@ from src.services.ai.router import AIRouter
 from src.services.modules.links.extractor import LinkExtractorService
 from src.services.modules.links.formatters import format_link_context_section
 from src.services.modules.sticker.responder import StickerResponderService
-from src.services.rag.memory import RAGMemoryService
+from src.services.rag.memory import RAGMemoryService, memories_above_floor
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import (
     PromptContext,
@@ -252,6 +252,10 @@ class TextProcessingPipeline:
         rag_memories: list[dict[str, Any]] = []
         rag_ms: int | None = None
         rag_error: str | None = None
+        # Read once, from the service that owns it (R1): `_safe_log_retrieval`
+        # resolves the same number, and a second literal here is how the log
+        # and the prompt start disagreeing about what was injected.
+        rag_floor = self._rag.min_similarity if self._rag is not None else 0.0
         if rag_task:
             rag_memories, rag_ms, rag_error = await rag_task
 
@@ -284,6 +288,12 @@ class TextProcessingPipeline:
                         "min_similarity": self._rag.min_similarity,
                         "max_results": self._rag.max_results,
                     },
+                    # Deliberately the UNFILTERED set, matching the `kb`
+                    # branch above: the floor is applied to the prompt below,
+                    # not here. Logging only what cleared the floor is what
+                    # made `retrieval_log` unable to answer the one question
+                    # a re-tuning asks — how far below the line the rejected
+                    # rows actually were.
                     raw=rag_memories,
                     duration_ms=rag_ms,
                     error=rag_error,
@@ -337,7 +347,10 @@ class TextProcessingPipeline:
             recent_messages=history,
             message_lengths=message_lengths,
             kb_facts=kb_facts_for_prompt,
-            rag_memories=rag_memories,
+            # Only what clears the floor reaches the model. `rag_memories`
+            # itself stays unfiltered so the log above describes the whole
+            # candidate set.
+            rag_memories=memories_above_floor(rag_memories, rag_floor),
             reply_author=reply_author,
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
@@ -540,7 +553,13 @@ class TextProcessingPipeline:
         embedding, error = await embed_task
         if self._rag and embedding is not None:
             try:
-                memories = await self._rag.search(
+                # UNFILTERED on purpose (R1) — the floor is applied by the
+                # caller, after this result has been logged. Calling `search()`
+                # here would restore exactly the blindness this slice removes:
+                # the sub-floor rows would never reach `retrieval_log`, and a
+                # turn that retrieved nothing would again be indistinguishable
+                # from a turn whose best match missed by a hair.
+                memories = await self._rag.search_unfiltered(
                     chat_id, message_text, query_embedding=embedding.embedding
                 )
             except Exception as exc:
@@ -656,13 +675,22 @@ class TextProcessingPipeline:
                     for fact in raw
                 ]
             else:
+                # Same two-field shape as `kb`, for the same reason (R1):
+                # `raw` is now the unfiltered top-k, so "was it relevant
+                # enough" has to be recorded per row rather than assumed.
+                # RAG still has no budget trim (TD-007 / ADR-0006 pending), so
+                # clearing the floor is the whole of reaching the prompt and
+                # `injected` tracks `above_floor` exactly — kept as two fields
+                # anyway, so that adding a trim later changes one of them
+                # instead of silently redefining the other.
+                floor = self._rag.min_similarity if self._rag is not None else 0.0
+                above_floor_ids = {mem.get("id") for mem in memories_above_floor(raw, floor)}
                 items = [
                     {
                         "id": mem.get("id"),
                         "sim": _round_sim(mem.get("similarity")),
-                        # RAG has no budget trim yet (TD-007 / ADR-0006
-                        # pending): everything returned reaches the prompt.
-                        "injected": True,
+                        "above_floor": mem.get("id") in above_floor_ids,
+                        "injected": mem.get("id") in above_floor_ids,
                         "head": (mem.get("content") or "")[:_RETRIEVAL_HEAD_CHARS],
                     }
                     for mem in raw

@@ -56,16 +56,30 @@ class MemoryRepository:
         chat_id: int,
         query_embedding: list[float],
         *,
-        min_similarity: float,
         max_results: int = 5,
         before: datetime | None = None,
     ) -> list[asyncpg.Record]:
-        """Search memories by cosine similarity.
+        """The top ``max_results`` memories by cosine similarity, unfiltered.
 
-        ``min_similarity`` has no default (S2-2): the config YAML is the
-        single source of truth for the threshold, and this repository method
-        must not be able to silently apply a different one than
-        ``RAGMemoryService`` (its only caller) resolves it to.
+        **No similarity floor here (R1).** It used to live in this ``WHERE``
+        as ``1 - (embedding <=> $2) >= $3``, which meant a sub-floor row was
+        never returned, never logged, and therefore never existed as far as
+        any later analysis was concerned. On a turn that retrieved nothing,
+        the data could not say whether the best match missed by 0.001 or by
+        0.3 -- and `docs/plans/rag-revision-2026-08.md` §4.2 plans to
+        "re-calibrate the floor from `retrieval_log` distributions", a
+        calibration this implementation made impossible. The floor now lives
+        in ``RAGMemoryService`` (see ``memories_above_floor``), which returns
+        the filtered set to callers while the pipeline logs everything.
+
+        The rows that reach a prompt are unchanged by the move. Both orders
+        select from the same ``ORDER BY similarity DESC`` sequence: filtering
+        first and taking ``k`` yields the same above-floor rows as taking
+        ``k`` and filtering, and where fewer than ``k`` clear the floor the
+        extra rows are sub-floor ones the caller drops. Fetching ``k``
+        unfiltered is also what makes the blind case measurable -- when
+        nothing clears the floor, all ``k`` near-misses land in the log,
+        which is exactly the population a re-tuning needs.
 
         ``before`` (S3-3) is an optional time bound: when given, only
         memories created strictly before that moment are eligible. It is
@@ -79,7 +93,7 @@ class MemoryRepository:
         Undated rows stay eligible under ``before``. ``chat_memory.created_at``
         is nullable (migration 003 declares ``TIMESTAMPTZ DEFAULT NOW()``, no
         ``NOT NULL``) and ``prompt_builder._rag_section`` already treats such
-        rows as reachable. A bare ``created_at < $5`` would evaluate to NULL
+        rows as reachable. A bare ``created_at < $4`` would evaluate to NULL
         for them -- not TRUE -- so they would drop out silently, and since the
         eval harness passes ``before`` on *every* case (``EvalCase.asked_at``
         is required), the measured recall would sag for a reason that has
@@ -105,19 +119,17 @@ class MemoryRepository:
             FROM chat_memory
             WHERE chat_id = $1
               AND embedding IS NOT NULL
-              AND 1 - (embedding <=> $2) >= $3
               AND (expires_at IS NULL OR expires_at > NOW())
               AND (
-                    $5::timestamptz IS NULL
+                    $4::timestamptz IS NULL
                     OR created_at IS NULL
-                    OR created_at < $5::timestamptz
+                    OR created_at < $4::timestamptz
               )
             ORDER BY embedding <=> $2 ASC
-            LIMIT $4
+            LIMIT $3
             """,
             chat_id,
             query_embedding,
-            min_similarity,
             max_results,
             before,
         )

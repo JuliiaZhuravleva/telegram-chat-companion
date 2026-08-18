@@ -96,51 +96,105 @@ class TestDIWiringMatchesConfig:
         assert service.min_similarity == settings.rag.min_similarity
 
 
-class TestSearchThresholdOverride:
-    """S2-2: fix for ``min_similarity or self._min_similarity``.
+def _row(memory_id: int, similarity: float) -> dict[str, object]:
+    """One repository row, in the shape ``MemoryRepository.search`` returns."""
+    return {
+        "id": memory_id,
+        "content": f"memory {memory_id}",
+        "similarity": similarity,
+        "metadata": None,
+        "created_at": None,
+        "source_message_id": None,
+    }
 
-    That pattern silently discarded an explicit ``0.0`` override (a valid
-    "accept everything" threshold) because ``0.0`` is falsy in Python.
+
+class TestSearchThresholdOverride:
+    """S2-2's concern, at the layer R1 moved the floor to.
+
+    The original pattern ``min_similarity or self._min_similarity`` silently
+    discarded an explicit ``0.0`` override (a valid "accept everything"
+    threshold) because ``0.0`` is falsy. Until R1 that was observable as an
+    argument handed to the repository; now the floor never leaves the
+    service, so the same property has to be asserted on what ``search()``
+    *returns*. Asserting the old call argument would now pass vacuously —
+    the key is simply gone.
     """
+
+    @staticmethod
+    def _service_with_rows(floor: float):
+        repo = AsyncMock(spec=MemoryRepository)
+        repo.search.return_value = [_row(1, 0.95), _row(2, 0.50)]
+        router = AsyncMock()
+        router.generate_embedding.return_value = _make_embedding_result()
+        return _make_service(min_similarity=floor, repo=repo, router=router)
 
     @pytest.mark.asyncio
     async def test_explicit_zero_override_is_honored(self) -> None:
-        repo = AsyncMock(spec=MemoryRepository)
-        repo.search.return_value = []
-        router = AsyncMock()
-        router.generate_embedding.return_value = _make_embedding_result()
-        service, _, _ = _make_service(min_similarity=0.9, repo=repo, router=router)
+        service, _, _ = self._service_with_rows(0.9)
 
-        await service.search(chat_id=1, query="hi", min_similarity=0.0)
+        results = await service.search(chat_id=1, query="hi", min_similarity=0.0)
 
-        repo.search.assert_awaited_once()
-        assert repo.search.call_args.kwargs["min_similarity"] == 0.0
+        assert [r["id"] for r in results] == [1, 2]
 
     @pytest.mark.asyncio
     async def test_no_override_falls_back_to_instance_default(self) -> None:
-        repo = AsyncMock(spec=MemoryRepository)
-        repo.search.return_value = []
-        router = AsyncMock()
-        router.generate_embedding.return_value = _make_embedding_result()
-        service, _, _ = _make_service(min_similarity=0.9, repo=repo, router=router)
+        service, _, _ = self._service_with_rows(0.9)
 
-        await service.search(chat_id=1, query="hi")
+        results = await service.search(chat_id=1, query="hi")
 
-        assert repo.search.call_args.kwargs["min_similarity"] == 0.9
+        assert [r["id"] for r in results] == [1]
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_search_ignores_the_floor_entirely(self) -> None:
+        """The whole point of R1: the caller can see what was rejected."""
+        service, _, _ = self._service_with_rows(0.9)
+
+        results = await service.search_unfiltered(chat_id=1, query="hi")
+
+        assert [r["id"] for r in results] == [1, 2]
+        assert [r["similarity"] for r in results] == [0.95, 0.50]
 
 
-class TestRepositorySearchRequiresThreshold:
-    """S2-2: ``MemoryRepository.search()``'s ``min_similarity`` default
-    (0.65) removed -- omitting it is now a hard ``TypeError`` instead of a
-    silent, wrong value that disagrees with the configured 0.7.
+class TestRepositoryDoesNotOwnTheThreshold:
+    """R1: the floor left the repository, and must not drift back.
+
+    It used to be applied in ``WHERE`` as ``1 - (embedding <=> $2) >= $3``,
+    which is why sub-floor rows never reached ``retrieval_log``. If a future
+    change re-adds the parameter, two floors exist — one in SQL and one in
+    ``RAGMemoryService`` — and the log starts describing a different
+    selection than the prompt received. A ``TypeError`` here is the cheapest
+    place to notice.
     """
 
     @pytest.mark.asyncio
-    async def test_missing_min_similarity_raises(self) -> None:
+    async def test_repository_rejects_a_similarity_floor(self) -> None:
         pool = AsyncMock()
+        pool.fetch.return_value = []
         repo = MemoryRepository(pool)
+
         with pytest.raises(TypeError):
-            await repo.search(1, [0.1] * 768)  # type: ignore[call-arg]
+            await repo.search(1, [0.1] * 768, min_similarity=0.7)  # type: ignore[call-arg]
+
+    @pytest.mark.asyncio
+    async def test_the_sql_carries_no_similarity_predicate(self) -> None:
+        """Asserting the SQL, not just the signature.
+
+        A floor could be re-introduced as a literal rather than a bind
+        parameter, which the signature check above cannot see.
+        """
+        pool = AsyncMock()
+        pool.fetch.return_value = []
+        repo = MemoryRepository(pool)
+
+        await repo.search(1, [0.1] * 768)
+
+        sql = pool.fetch.call_args.args[0]
+        # The similarity expression must appear exactly once — in the SELECT
+        # list. A floor, whether bound or hardcoded, needs a second occurrence
+        # in WHERE. Counting is deliberate: a keyword search for ">=" trips
+        # over `expires_at > NOW()` and says nothing about similarity.
+        assert "AS similarity" in sql, "the column itself must still be selected"
+        assert sql.count("1 - (embedding <=> $2)") == 1
 
 
 class TestEmbeddingDimensionGuard:
@@ -412,10 +466,10 @@ class TestRepositorySearchBeforeDefault:
         pool.fetch.return_value = []
         repo = MemoryRepository(pool)
 
-        result = await repo.search(1, [0.1] * 768, min_similarity=0.7)
+        result = await repo.search(1, [0.1] * 768)
 
         assert result == []
-        # `before` positional arg (last bind param, $5) must be None.
+        # `before` positional arg (last bind param, $4 since R1) must be None.
         assert pool.fetch.call_args.args[-1] is None
 
     @pytest.mark.asyncio
@@ -425,7 +479,7 @@ class TestRepositorySearchBeforeDefault:
         repo = MemoryRepository(pool)
         cutoff = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 
-        await repo.search(1, [0.1] * 768, min_similarity=0.7, before=cutoff)
+        await repo.search(1, [0.1] * 768, before=cutoff)
 
         assert pool.fetch.call_args.args[-1] == cutoff
 

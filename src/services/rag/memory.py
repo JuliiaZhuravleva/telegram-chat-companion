@@ -21,6 +21,39 @@ logger = structlog.get_logger(__name__)
 EXPECTED_EMBEDDING_DIMENSIONS = 768
 
 
+def memories_above_floor(
+    memories: list[dict[str, Any]], min_similarity: float
+) -> list[dict[str, Any]]:
+    """The memories whose cosine similarity clears the retrieval floor (R1).
+
+    One definition, used both to decide what reaches a prompt and to mark
+    ``above_floor`` in ``retrieval_log`` -- the two must never disagree, or
+    the log describes an injection that did not happen. Deliberately the same
+    shape as ``TextProcessingPipeline._facts_above_floor``, which does this
+    job for the knowledge base; the duplication is two call sites of one
+    documented rule rather than two rules.
+
+    ``min_similarity <= 0.0`` means *no floor* and returns the input
+    unchanged. That is not the same as testing ``sim >= 0.0``: cosine
+    similarity is defined on [-1, 1], so a ``>= 0.0`` test would still cut
+    negatively-scored rows, and "set it to 0.0 to retrieve everything" would
+    not actually do that.
+
+    A row with no usable ``similarity`` is treated as below any floor. It
+    cannot be *shown* to clear one, and letting it through would make a
+    malformed row more privileged than a genuine distant match.
+    """
+    if min_similarity <= 0.0:
+        return list(memories)
+    return [
+        memory
+        for memory in memories
+        if isinstance(memory.get("similarity"), int | float)
+        and not isinstance(memory.get("similarity"), bool)
+        and float(memory["similarity"]) >= min_similarity
+    ]
+
+
 class RAGMemoryService:
     """Retrieval-Augmented Generation memory using pgvector.
 
@@ -69,7 +102,12 @@ class RAGMemoryService:
         max_results: int | None = None,
         before: datetime | None = None,
     ) -> list[dict[str, Any]]:
-        """Search memories relevant to a query.
+        """Memories relevant to a query -- only those clearing the floor.
+
+        The filtering moved here from the repository's ``WHERE`` in R1; this
+        method's contract is unchanged, and callers that want to *see* what
+        was rejected (the pipeline, so it can log the near-misses a future
+        re-calibration needs) call ``search_unfiltered`` instead.
 
         ``query_embedding``, if given, is used as-is instead of embedding
         ``query`` again (S2-4): the pipeline computes one shared query
@@ -89,6 +127,41 @@ class RAGMemoryService:
         ("X asked: ...") is typically the top hit, and the replay circularly
         measures self-retrieval.
         """
+        # `x or default` would silently fall back to the instance default for
+        # an explicit falsy override (min_similarity=0.0 is a valid "accept
+        # everything" threshold; max_results=0 is a valid "retrieve nothing
+        # this turn") — S2-2. Both arguments get the same treatment; applying
+        # it to only one of them is what review caught here.
+        floor = min_similarity if min_similarity is not None else self._min_similarity
+        memories = await self.search_unfiltered(
+            chat_id,
+            query,
+            query_embedding=query_embedding,
+            max_results=max_results,
+            before=before,
+        )
+        return memories_above_floor(memories, floor)
+
+    async def search_unfiltered(
+        self,
+        chat_id: int,
+        query: str,
+        *,
+        query_embedding: list[float] | None = None,
+        max_results: int | None = None,
+        before: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """The top-k nearest memories, floor or no floor (R1).
+
+        Exists so the caller can record what retrieval *considered*, not only
+        what it accepted. Until R1 the floor was applied in SQL, so a turn
+        that injected nothing wrote an empty ``retrieval_log`` row and the
+        near-misses behind it were unrecoverable — including the case that
+        motivated this whole revision, where the best match sat at 0.675
+        against a 0.7 floor and nothing in the data said so.
+
+        Same argument handling as ``search`` minus the floor; see there.
+        """
         if query_embedding is not None:
             embedding = query_embedding
         else:
@@ -102,12 +175,6 @@ class RAGMemoryService:
         rows = await self._repo.search(
             chat_id=chat_id,
             query_embedding=embedding,
-            # `x or default` would silently fall back to the instance default
-            # for an explicit falsy override (min_similarity=0.0 is a valid
-            # "accept everything" threshold; max_results=0 is a valid "retrieve
-            # nothing this turn") — S2-2. Both arguments get the same treatment;
-            # applying it to only one of them is what review caught here.
-            min_similarity=(min_similarity if min_similarity is not None else self._min_similarity),
             max_results=(max_results if max_results is not None else self._max_results),
             # `before` has no instance-level default to fall back to -- `None`
             # unconditionally means "no bound" (S3-3). Written as an explicit
