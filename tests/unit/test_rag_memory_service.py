@@ -31,12 +31,13 @@ repository's ``WHERE`` ahead of ``LIMIT`` rather than postfiltered.
 
 from __future__ import annotations
 
+import pathlib
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.database.repositories.memory import MemoryRepository
+from src.database.repositories.memory import _IVFFLAT_PROBES, MemoryRepository
 from src.di import ServiceProvider
 from src.services.ai.base import EmbeddingResult
 from src.services.rag.memory import RAGMemoryService
@@ -155,6 +156,75 @@ class TestSearchThresholdOverride:
         assert [r["similarity"] for r in results] == [0.95, 0.50]
 
 
+class _AsyncCM:
+    """Minimal async context manager wrapper (pattern: test_knowledge_repository.py)."""
+
+    def __init__(self, obj: object) -> None:
+        self._obj = obj
+
+    async def __aenter__(self) -> object:
+        return self._obj
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        return False
+
+
+def _pool_with_connection() -> tuple[MagicMock, MagicMock]:
+    """A pool whose ``acquire()`` yields a mocked connection.
+
+    ``MemoryRepository.search`` runs inside ``acquire() + transaction()`` since
+    the ivfflat-probes guard, so a bare ``pool.fetch`` mock no longer sees the
+    query at all — it would make every assertion below pass vacuously against
+    an empty call list rather than fail.
+    """
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+    conn.fetch = AsyncMock(return_value=[])
+    conn.transaction = MagicMock(return_value=_AsyncCM(None))
+    pool = MagicMock()
+    pool.acquire = MagicMock(return_value=_AsyncCM(conn))
+    return pool, conn
+
+
+class TestRepositoryScanIsExact:
+    """The ivfflat index is approximate and carries no ``chat_id``.
+
+    ``idx_chat_memory_embedding`` indexes the vector alone, so an index scan
+    takes the k globally-nearest rows and only then filters to the chat: with
+    the default ``probes = 1`` of migration 003's ``lists = 100``, a chat whose
+    memories sit in unscanned partitions comes back empty while a strong match
+    is in the table. R1 makes this reachable — removing the floor predicate
+    also removed a planner input, which is what can flip the plan onto that
+    index. Asserting the call site, not the constant.
+    """
+
+    @pytest.mark.asyncio
+    async def test_probes_are_set_on_the_same_connection_before_the_query(self) -> None:
+        pool, conn = _pool_with_connection()
+        repo = MemoryRepository(pool)
+
+        await repo.search(1, [0.1] * 768)
+
+        set_calls = [c for c in conn.execute.call_args_list if "set_config" in str(c.args[0])]
+        assert len(set_calls) == 1, "probes must be set exactly once per search"
+        stmt, value = set_calls[0].args[0], set_calls[0].args[1]
+        assert "ivfflat.probes" in stmt
+        # is_local=true — must not leak onto a pooled connection.
+        assert stmt.strip().endswith("true)")
+        assert value == "100", "probes must equal the index's `lists` for an exact scan"
+        # The query runs on that same connection, inside that transaction.
+        assert conn.fetch.call_count == 1
+        assert conn.transaction.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_probes_match_the_lists_the_migration_built(self) -> None:
+        """An exact scan is probes == lists; drift between them is silent."""
+        migration = pathlib.Path("alembic/versions/003_rag_memory.py").read_text()
+
+        assert "WITH (lists = 100)" in migration
+        assert _IVFFLAT_PROBES == 100
+
+
 class TestRepositoryDoesNotOwnTheThreshold:
     """R1: the floor left the repository, and must not drift back.
 
@@ -168,8 +238,7 @@ class TestRepositoryDoesNotOwnTheThreshold:
 
     @pytest.mark.asyncio
     async def test_repository_rejects_a_similarity_floor(self) -> None:
-        pool = AsyncMock()
-        pool.fetch.return_value = []
+        pool, _conn = _pool_with_connection()
         repo = MemoryRepository(pool)
 
         with pytest.raises(TypeError):
@@ -182,13 +251,12 @@ class TestRepositoryDoesNotOwnTheThreshold:
         A floor could be re-introduced as a literal rather than a bind
         parameter, which the signature check above cannot see.
         """
-        pool = AsyncMock()
-        pool.fetch.return_value = []
+        pool, conn = _pool_with_connection()
         repo = MemoryRepository(pool)
 
         await repo.search(1, [0.1] * 768)
 
-        sql = pool.fetch.call_args.args[0]
+        sql = conn.fetch.call_args.args[0]
         # The similarity expression must appear exactly once — in the SELECT
         # list. A floor, whether bound or hardcoded, needs a second occurrence
         # in WHERE. Counting is deliberate: a keyword search for ">=" trips
@@ -462,26 +530,24 @@ class TestRepositorySearchBeforeDefault:
 
     @pytest.mark.asyncio
     async def test_omitting_before_still_executes(self) -> None:
-        pool = AsyncMock()
-        pool.fetch.return_value = []
+        pool, conn = _pool_with_connection()
         repo = MemoryRepository(pool)
 
         result = await repo.search(1, [0.1] * 768)
 
         assert result == []
         # `before` positional arg (last bind param, $4 since R1) must be None.
-        assert pool.fetch.call_args.args[-1] is None
+        assert conn.fetch.call_args.args[-1] is None
 
     @pytest.mark.asyncio
     async def test_explicit_before_is_passed_as_last_bind_param(self) -> None:
-        pool = AsyncMock()
-        pool.fetch.return_value = []
+        pool, conn = _pool_with_connection()
         repo = MemoryRepository(pool)
         cutoff = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
 
         await repo.search(1, [0.1] * 768, before=cutoff)
 
-        assert pool.fetch.call_args.args[-1] == cutoff
+        assert conn.fetch.call_args.args[-1] == cutoff
 
 
 class TestStoreEmbeddingFailure:

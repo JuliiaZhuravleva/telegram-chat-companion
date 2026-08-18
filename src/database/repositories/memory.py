@@ -8,6 +8,37 @@ from typing import Any
 
 import asyncpg
 
+# pgvector's ivfflat index is APPROXIMATE: it scans `probes` of its `lists`
+# partitions. Migration 003 built this one with `lists = 100` and nothing ever
+# set `probes`, whose default is 1.
+#
+# Two things make that dangerous here specifically, and R1 is what brings them
+# together. First, `idx_chat_memory_embedding` carries no `chat_id`: an index
+# scan on it takes the k globally-nearest rows and only then filters to the
+# chat, so a chat whose memories all sit in unscanned partitions comes back
+# empty while a strong match is in the table. Second, the floor predicate R1
+# removed was also a planner input -- Postgres estimates that opaque float
+# comparison at its default 1/3 selectivity, so dropping it makes the LIMIT-ed
+# ivfflat path look ~3x cheaper and can flip a plan that used to be exact.
+# Measured on a throwaway pgvector at ~5k rows / 10 chats: a 0.91-similarity
+# memory was injected on 200/200 turns before the change and 110/200 after, and
+# recovered to 200/200 with `enable_indexscan=off` -- i.e. the plan, not the
+# code. Production is at ~3k rows today and still takes the exact per-chat
+# bitmap path (EXPLAIN ANALYZE against the live database, 1.3 ms), so nothing
+# regresses now; `chat_memory` is exempt from retention (ADR-0011), so it only
+# grows toward the crossover.
+#
+# probes == lists is an exact scan, which removes the plan dependency rather
+# than hoping the planner keeps choosing well. The cost argument differs from
+# `chat_facts` (knowledge.py), where the table is tens of curated rows per
+# chat; here it is thousands, so this is a real trade. It is worth making
+# because the whole point of R1 is that the recorded near-miss distribution
+# feeds the S6 floor calibration, and a calibration computed from an
+# approximate candidate set is not reproducible. Revisit with `lists` if this
+# table grows past the ~100k the migration sized it for, or when S4's chunk
+# store replaces it.
+_IVFFLAT_PROBES = 100
+
 
 class MemoryRepository:
     """Data access layer for RAG vector memory."""
@@ -72,14 +103,19 @@ class MemoryRepository:
         in ``RAGMemoryService`` (see ``memories_above_floor``), which returns
         the filtered set to callers while the pipeline logs everything.
 
-        The rows that reach a prompt are unchanged by the move. Both orders
-        select from the same ``ORDER BY similarity DESC`` sequence: filtering
-        first and taking ``k`` yields the same above-floor rows as taking
-        ``k`` and filtering, and where fewer than ``k`` clear the floor the
-        extra rows are sub-floor ones the caller drops. Fetching ``k``
-        unfiltered is also what makes the blind case measurable -- when
-        nothing clears the floor, all ``k`` near-misses land in the log,
-        which is exactly the population a re-tuning needs.
+        The rows that reach a prompt are unchanged by the move, **given an
+        exact scan** -- which is what ``_IVFFLAT_PROBES`` buys, and the
+        qualifier is not decoration. Both orders then read the same
+        ``ORDER BY similarity DESC`` sequence: filtering first and taking ``k``
+        yields the same above-floor rows as taking ``k`` and filtering, and
+        where fewer than ``k`` clear the floor the extra rows are sub-floor
+        ones the caller drops. Stated unconditionally, as a first draft did,
+        the claim is false -- an approximate scan produces a different
+        sequence, and removing the floor predicate is itself one of the things
+        that can provoke one. Fetching ``k`` unfiltered is also what makes the
+        blind case measurable: when nothing clears the floor, all ``k``
+        near-misses land in the log, which is exactly the population a
+        re-tuning needs.
 
         ``before`` (S3-3) is an optional time bound: when given, only
         memories created strictly before that moment are eligible. It is
@@ -111,28 +147,36 @@ class MemoryRepository:
         the only production caller reads results by key, so an extra key is
         invisible to it.
         """
-        result: list[asyncpg.Record] = await self._pool.fetch(
-            """
-            SELECT id, content, metadata, importance_score, source_message_id,
-                   1 - (embedding <=> $2) AS similarity,
-                   created_at
-            FROM chat_memory
-            WHERE chat_id = $1
-              AND embedding IS NOT NULL
-              AND (expires_at IS NULL OR expires_at > NOW())
-              AND (
-                    $4::timestamptz IS NULL
-                    OR created_at IS NULL
-                    OR created_at < $4::timestamptz
-              )
-            ORDER BY embedding <=> $2 ASC
-            LIMIT $3
-            """,
-            chat_id,
-            query_embedding,
-            max_results,
-            before,
-        )
+        async with self._pool.acquire() as conn, conn.transaction():
+            # Transaction-local (`is_local=true`), so it never leaks onto a
+            # pooled connection some later query will reuse. Set through
+            # set_config() rather than `SET LOCAL` because only the function
+            # form accepts a bind parameter.
+            await conn.execute(
+                "SELECT set_config('ivfflat.probes', $1, true)", str(_IVFFLAT_PROBES)
+            )
+            result: list[asyncpg.Record] = await conn.fetch(
+                """
+                SELECT id, content, metadata, importance_score, source_message_id,
+                       1 - (embedding <=> $2) AS similarity,
+                       created_at
+                FROM chat_memory
+                WHERE chat_id = $1
+                  AND embedding IS NOT NULL
+                  AND (expires_at IS NULL OR expires_at > NOW())
+                  AND (
+                        $4::timestamptz IS NULL
+                        OR created_at IS NULL
+                        OR created_at < $4::timestamptz
+                  )
+                ORDER BY embedding <=> $2 ASC
+                LIMIT $3
+                """,
+                chat_id,
+                query_embedding,
+                max_results,
+                before,
+            )
         return result
 
     async def delete(self, memory_id: int, *, chat_id: int) -> None:

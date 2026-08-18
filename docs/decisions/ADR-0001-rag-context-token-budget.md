@@ -26,7 +26,10 @@ topics). The DB query caps row count but not row content length. A single long m
 
 #### 2. RAG memories — row count capped, content length unbounded
 
-`RAGMemoryService.search()` caps at **5 results** (`max_results=5`, `min_similarity=0.65`).
+`RAGMemoryService.search()` caps at **5 results** (`max_results=5`, `min_similarity=0.7`).
+(The 0.65 originally recorded here was a dead constructor default; S2-2 removed it and
+made the YAML the single source. R1 later moved the filtering itself out of SQL and into
+the service, which is where the cap is applied today.)
 Each memory is stored as a full Q&A pair:
 
 ```
