@@ -88,6 +88,39 @@ Two consequences worth knowing before reading that table:
   window that straddles the deploy. `scripts/kb_report.py` prints a warning when its own
   window does.
 
+### Chunk Index Settings (S4)
+
+```yaml
+chunk_indexer:
+  enabled: true
+  interval_seconds: 900
+  messages_per_pass: 2000   # per chat AND per thread
+  embed_per_pass: 100       # embedding calls per pass, across all chats
+```
+
+The background worker that turns saved messages into `chat_chunks` — conversation
+sessions over the *whole* chat, as opposed to `chat_memory`'s Q&A pairs, which only
+exist for turns where the bot replied (4–8% of a live chat, measured on production
+2026-08-18).
+
+Three things about it that are behaviour, not tuning:
+
+- **The gate is `save_messages`, not `rag_enabled`.** Indexing asks "is there anything
+  to index"; retrieval asks "should we search". A chat that turns saving off keeps the
+  chunks it already has and stops gaining new ones — its memory freezes rather than
+  disappears. Nothing reads chunks until S5, so today the setting has no user-visible
+  effect at all.
+- **Only closed sessions are indexed** — a conversation whose last message is younger
+  than the 3-hour session pause is left alone until it settles. Chunking a live session
+  would produce a row whose message range changes as people keep talking, and the
+  natural key would then hold both the stale and the extended version.
+- **`chat_chunks` is outside retention**, like `chat_memory` (ADR-0011). `chat_messages`
+  has a 365-day window; if chunks aged with it, the bot's memory would develop a hole
+  exactly one year deep with no observable trace.
+
+`python -m scripts.backfill_chunks <dsn>` runs the same worker in a loop when waiting
+for the schedule is not worth it — after a restore, or before a measurement.
+
 ### Knowledge Base Settings
 
 Retrieval tuning only — whether the module runs at all is `modules.knowledge_base.enabled`

@@ -32,12 +32,15 @@ from src.bot.middleware import (
 )
 from src.config import Settings
 from src.database.repositories.bot_config import BotConfigRepository
+from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
 from src.services.ai.router import AIRouter
+from src.services.chat_config import ChatConfigService
 from src.services.health.checker import HealthChecker
 from src.services.maintenance.cleanup import RetentionCleaner
 from src.services.modules.sticker.scheduler import StickerSetSyncScheduler
 from src.services.rag.backfill import EmbeddingBackfillWorker
+from src.services.rag.indexer import ChatChunkIndexer
 from src.utils import parse_admin_ids
 from src.utils.background import fire_and_forget
 
@@ -50,6 +53,11 @@ _REQUIRED_TABLES = (
     # crash on the first /remember rather than a refusal to start -- the
     # shape of the 2026-08-02 incident (schema drift, migration 016).
     "chat_facts",
+    # Added with migration 029. Nothing reads chunks until S5, so a missing
+    # table would not crash a request -- it would make the indexer log an
+    # exception every 15 minutes while the bot looked healthy, and the gap in
+    # the index would only surface as "the bot forgot" months later.
+    "chat_chunks",
 )
 
 
@@ -261,6 +269,21 @@ async def main() -> None:
     )
     await embedding_backfill.start()
 
+    # S4: chunks the saved history into `chat_chunks` and embeds it. Its own
+    # ChatConfigService, not Dishka's -- that one is request-scoped, and this
+    # worker resolves `save_messages` for every chat once per pass.
+    chunk_indexer = ChatChunkIndexer(
+        pool=pool,
+        ai_router=ai_router,
+        chat_config=ChatConfigService(
+            settings.bot,
+            BotConfigRepository(pool),
+            ChatSettingsRepository(pool),
+        ),
+        config=settings.chunk_indexer,
+    )
+    await chunk_indexer.start()
+
     try:
         logger.info("Bot started, listening for messages...")
         await dp.start_polling(bot)
@@ -272,6 +295,7 @@ async def main() -> None:
         command_sync_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await command_sync_task
+        await chunk_indexer.stop()
         await embedding_backfill.stop()
         await retention_cleaner.stop()
         await sticker_sync.stop()

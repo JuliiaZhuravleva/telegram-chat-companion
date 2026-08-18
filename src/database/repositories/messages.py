@@ -471,3 +471,64 @@ class MessageRepository:
                 limit,
             )
         return result
+
+    async def get_thread_ids(self, chat_id: int) -> list[int | None]:
+        """Every `message_thread_id` this chat has ever used, `None` included.
+
+        The chunk indexer walks threads separately (S4): a conversation
+        session is bounded per topic, and one chat-wide pass would interleave
+        two unrelated discussions into the same chunk. `NULL` is a real value
+        here -- it is where every non-forum chat's messages live.
+        """
+        rows = await self._pool.fetch(
+            "SELECT DISTINCT message_thread_id FROM chat_messages WHERE chat_id = $1",
+            chat_id,
+        )
+        return [row["message_thread_id"] for row in rows]
+
+    async def get_for_chunking(
+        self,
+        chat_id: int,
+        *,
+        thread_id: int | None,
+        after_message_id: int,
+        limit: int,
+    ) -> list[asyncpg.Record]:
+        """Messages the chunk indexer has not seen yet, oldest first (S4).
+
+        `IS NOT DISTINCT FROM` rather than `=`: `NULL` identifies the
+        non-forum thread and `message_thread_id = NULL` matches nothing, so
+        the plain equality would silently index no messages at all for every
+        chat that is not a forum -- i.e. almost all of them.
+
+        Bot messages are included on purpose. A chunk is the conversation, and
+        a question whose answer is missing reads as an unanswered question;
+        `chat_memory`'s Q&A pairs exist precisely because the bot's own side
+        is worth retrieving. `transcription` bookkeeping rows are excluded
+        here as everywhere (migration 028) -- they are content-free.
+
+        Ordered by time, then id: sessions are defined by pauses, so time is
+        the axis that decides the boundaries. The `after_message_id`
+        watermark is on the id axis, which is monotonic with time for real
+        Telegram traffic; `Chunk` takes min/max over both so an imported row
+        that violates that cannot produce a backwards range.
+        """
+        result: list[asyncpg.Record] = await self._pool.fetch(
+            """
+            SELECT message_id, user_id, username, first_name,
+                   message_type, content, is_bot_message, created_at
+            FROM chat_messages
+            WHERE chat_id = $1
+              AND message_thread_id IS NOT DISTINCT FROM $2
+              AND message_id > $3
+              AND message_type <> 'transcription'
+              AND created_at IS NOT NULL
+            ORDER BY created_at ASC, message_id ASC
+            LIMIT $4
+            """,
+            chat_id,
+            thread_id,
+            after_message_id,
+            limit,
+        )
+        return result

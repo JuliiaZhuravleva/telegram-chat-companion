@@ -183,6 +183,28 @@ class EmbeddingBackfillSettings(BaseSettings):
     batch_limit: int = 20
 
 
+class ChunkIndexerSettings(BaseSettings):
+    """Background indexer that turns saved messages into `chat_chunks` (S4).
+
+    Sized for a backfill that runs unattended rather than for a burst: the
+    first pass over a live chat has tens of thousands of messages to walk and
+    every chunk needs an embedding call, so the two batch limits are what keep
+    a cold start from looking like an outage to the embedding provider.
+    Embeddings are free, so nothing here is a cost decision -- the limits are
+    politeness and blast radius.
+
+    `messages_per_pass` is per chat *and* per thread; `embed_per_pass` is
+    global. At the defaults a 32k-message chat is fully chunked in about four
+    hours and fully embedded in about five, both while the bot serves traffic
+    and neither visible to users -- nothing reads chunks until S5.
+    """
+
+    enabled: bool = True
+    interval_seconds: int = 900
+    messages_per_pass: int = 2000
+    embed_per_pass: int = 100
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -220,6 +242,7 @@ class Settings(BaseSettings):
     ai: AISettings = Field(default_factory=AISettings)
     maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
     embedding_backfill: EmbeddingBackfillSettings = Field(default_factory=EmbeddingBackfillSettings)
+    chunk_indexer: ChunkIndexerSettings = Field(default_factory=ChunkIndexerSettings)
     modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
