@@ -9,6 +9,7 @@ import structlog
 
 from src.database.repositories.memory import MemoryRepository
 from src.services.ai.router import AIRouter
+from src.services.retrieval_floor import rows_above_floor
 
 logger = structlog.get_logger(__name__)
 
@@ -19,39 +20,6 @@ logger = structlog.get_logger(__name__)
 # application code (with the offending provider/model logged) instead of as a
 # raw asyncpg error from pgvector's own dimension check.
 EXPECTED_EMBEDDING_DIMENSIONS = 768
-
-
-def memories_above_floor(
-    memories: list[dict[str, Any]], min_similarity: float
-) -> list[dict[str, Any]]:
-    """The memories whose cosine similarity clears the retrieval floor (R1).
-
-    One definition, used both to decide what reaches a prompt and to mark
-    ``above_floor`` in ``retrieval_log`` -- the two must never disagree, or
-    the log describes an injection that did not happen. Deliberately the same
-    shape as ``TextProcessingPipeline._facts_above_floor``, which does this
-    job for the knowledge base; the duplication is two call sites of one
-    documented rule rather than two rules.
-
-    ``min_similarity <= 0.0`` means *no floor* and returns the input
-    unchanged. That is not the same as testing ``sim >= 0.0``: cosine
-    similarity is defined on [-1, 1], so a ``>= 0.0`` test would still cut
-    negatively-scored rows, and "set it to 0.0 to retrieve everything" would
-    not actually do that.
-
-    A row with no usable ``similarity`` is treated as below any floor. It
-    cannot be *shown* to clear one, and letting it through would make a
-    malformed row more privileged than a genuine distant match.
-    """
-    if min_similarity <= 0.0:
-        return list(memories)
-    return [
-        memory
-        for memory in memories
-        if isinstance(memory.get("similarity"), int | float)
-        and not isinstance(memory.get("similarity"), bool)
-        and float(memory["similarity"]) >= min_similarity
-    ]
 
 
 class RAGMemoryService:
@@ -104,10 +72,19 @@ class RAGMemoryService:
     ) -> list[dict[str, Any]]:
         """Memories relevant to a query -- only those clearing the floor.
 
-        The filtering moved here from the repository's ``WHERE`` in R1; this
-        method's contract is unchanged, and callers that want to *see* what
-        was rejected (the pipeline, so it can log the near-misses a future
-        re-calibration needs) call ``search_unfiltered`` instead.
+        The filtering moved here from the repository's ``WHERE`` in R1;
+        callers that want to *see* what was rejected (the pipeline, so it can
+        log the near-misses a future re-calibration needs) call
+        ``search_unfiltered`` instead.
+
+        The contract is unchanged for every floor the bot runs with, but not
+        literally for all of them: at ``min_similarity <= 0`` the old SQL still
+        applied ``1 - (embedding <=> $2) >= 0``, which cut negatively-scored
+        rows, while ``rows_above_floor`` treats a non-positive floor as *no
+        floor* and keeps them. That is the intended reading of "set it to 0.0
+        to retrieve everything", and it is the value a floor sweep uses as its
+        baseline — but it is a behaviour change, not a refactor, so it is said
+        out loud rather than buried.
 
         ``query_embedding``, if given, is used as-is instead of embedding
         ``query`` again (S2-4): the pipeline computes one shared query
@@ -140,7 +117,7 @@ class RAGMemoryService:
             max_results=max_results,
             before=before,
         )
-        return memories_above_floor(memories, floor)
+        return rows_above_floor(memories, floor)
 
     async def search_unfiltered(
         self,

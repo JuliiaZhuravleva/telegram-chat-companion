@@ -100,7 +100,7 @@ class MemoryRepository:
         0.3 -- and `docs/plans/rag-revision-2026-08.md` §4.2 plans to
         "re-calibrate the floor from `retrieval_log` distributions", a
         calibration this implementation made impossible. The floor now lives
-        in ``RAGMemoryService`` (see ``memories_above_floor``), which returns
+        in ``RAGMemoryService`` (see ``services/retrieval_floor.py``), which returns
         the filtered set to callers while the pipeline logs everything.
 
         The rows that reach a prompt are unchanged by the move, **given an

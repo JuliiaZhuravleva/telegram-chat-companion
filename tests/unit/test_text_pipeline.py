@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from src.database.repositories.abuse import AntiAbuseResult
 from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import AIProviderError, EmbeddingResult, TextGenerationResult
-from src.services.rag.memory import memories_above_floor
+from src.services.retrieval_floor import rows_above_floor
 from src.services.text.pipeline import TextProcessingPipeline
 
 
@@ -109,7 +109,7 @@ def _make_pipeline(
     # `search()` — restoring exactly the blindness R1 removed — passes every
     # test. Verified by control: with both returning the same list, swapping
     # the call site changed nothing.
-    rag_service.search.return_value = memories_above_floor(rag_memories or [], rag_min_similarity)
+    rag_service.search.return_value = rows_above_floor(rag_memories or [], rag_min_similarity)
     rag_service.search_unfiltered.return_value = rag_memories or []
     rag_service.store = AsyncMock()
     rag_service.min_similarity = rag_min_similarity

@@ -33,7 +33,8 @@ from src.services.ai.router import AIRouter
 from src.services.modules.links.extractor import LinkExtractorService
 from src.services.modules.links.formatters import format_link_context_section
 from src.services.modules.sticker.responder import StickerResponderService
-from src.services.rag.memory import RAGMemoryService, memories_above_floor
+from src.services.rag.memory import RAGMemoryService
+from src.services.retrieval_floor import rows_above_floor
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import (
     PromptContext,
@@ -52,34 +53,6 @@ def _round_sim(similarity: Any) -> float | None:
     if similarity is None:
         return None
     return round(float(similarity), 4)
-
-
-def _facts_above_floor(facts: list[dict[str, Any]], min_similarity: float) -> list[dict[str, Any]]:
-    """The facts whose cosine similarity clears the retrieval floor.
-
-    One definition, used both to decide what reaches the prompt and to mark
-    `above_floor` in `retrieval_log` -- the two must never disagree, or the
-    report describes an injection that did not happen.
-
-    ``min_similarity <= 0.0`` means *no floor* and returns the input unchanged.
-    That is not the same as testing ``sim >= 0.0``: cosine similarity is defined
-    on [-1, 1], so a ``>= 0.0`` test would still cut negatively-scored rows and
-    the "set it to 0.0 to roll back" path documented in ``config/default.yml``
-    would not actually restore the previous behaviour.
-
-    A row with no usable ``similarity`` is treated as below any floor. It cannot
-    be *shown* to clear one, and letting it through would make a malformed row
-    more privileged than a genuine distant match.
-    """
-    if min_similarity <= 0.0:
-        return list(facts)
-    return [
-        fact
-        for fact in facts
-        if isinstance(fact.get("similarity"), int | float)
-        and not isinstance(fact.get("similarity"), bool)
-        and float(fact["similarity"]) >= min_similarity
-    ]
 
 
 # Base max tokens for text generation
@@ -252,9 +225,10 @@ class TextProcessingPipeline:
         rag_memories: list[dict[str, Any]] = []
         rag_ms: int | None = None
         rag_error: str | None = None
-        # Read once, from the service that owns it (R1): `_safe_log_retrieval`
-        # resolves the same number, and a second literal here is how the log
-        # and the prompt start disagreeing about what was injected.
+        # The floor the prompt is filtered by. `_safe_log_retrieval` does not
+        # read it again — it takes the value out of the `params` it is about to
+        # record, so the flags in the log and the threshold beside them are one
+        # number rather than two reads that agree by luck.
         rag_floor = self._rag.min_similarity if self._rag is not None else 0.0
         if rag_task:
             rag_memories, rag_ms, rag_error = await rag_task
@@ -328,7 +302,7 @@ class TextProcessingPipeline:
         # answer without the base by default, attach facts only on a topical
         # match) — `_kb_section` is only rendered when `ctx.kb_facts` is
         # non-empty.
-        kb_facts_for_prompt = _facts_above_floor(kb_facts, self._kb_min_similarity)
+        kb_facts_for_prompt = rows_above_floor(kb_facts, self._kb_min_similarity)
 
         # Convert Record rows to dicts for prompt builder
         history = [dict(r) for r in reversed(recent_msgs)]
@@ -350,7 +324,7 @@ class TextProcessingPipeline:
             # Only what clears the floor reaches the model. `rag_memories`
             # itself stays unfiltered so the log above describes the whole
             # candidate set.
-            rag_memories=memories_above_floor(rag_memories, rag_floor),
+            rag_memories=rows_above_floor(rag_memories, rag_floor),
             reply_author=reply_author,
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
@@ -645,6 +619,14 @@ class TextProcessingPipeline:
         if self._observability is None:
             return
         try:
+            # Read off `params`, which is what this row will record, rather
+            # than off the services again. Both branches used to resolve the
+            # threshold a second time from `self`, so the flags and the number
+            # beside them were two independent reads that merely happened to
+            # agree; now they cannot disagree, and a third source gets its own
+            # floor instead of silently inheriting RAG's.
+            raw_floor = params.get("min_similarity")
+            floor = float(raw_floor) if isinstance(raw_floor, int | float) else 0.0
             if source == "kb":
                 # `raw` is the unfiltered top-N, so the two reductions the
                 # prompt path performs are replayed here IN THE SAME ORDER:
@@ -657,7 +639,7 @@ class TextProcessingPipeline:
                 # Same pure trim the renderer applies (agreement pinned by
                 # test_kb_retrieval_logs_budget_trim_as_not_injected), so
                 # `injected` states what actually reaches the prompt.
-                above_floor = _facts_above_floor(raw, self._kb_min_similarity)
+                above_floor = rows_above_floor(raw, floor)
                 above_floor_ids = {fact.get("id") for fact in above_floor}
                 kept_ids = {fact.get("id") for fact in trim_facts_to_budget(above_floor)}
                 items = [
@@ -683,8 +665,7 @@ class TextProcessingPipeline:
                 # `injected` tracks `above_floor` exactly — kept as two fields
                 # anyway, so that adding a trim later changes one of them
                 # instead of silently redefining the other.
-                floor = self._rag.min_similarity if self._rag is not None else 0.0
-                above_floor_ids = {mem.get("id") for mem in memories_above_floor(raw, floor)}
+                above_floor_ids = {mem.get("id") for mem in rows_above_floor(raw, floor)}
                 items = [
                     {
                         "id": mem.get("id"),

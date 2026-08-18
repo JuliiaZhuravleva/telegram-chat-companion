@@ -75,6 +75,19 @@ threshold, and `retrieval_log` records the whole candidate set with `above_floor
 floor lived in the `WHERE` clause, that turn logged an empty result and missing by 0.001
 looked exactly like missing by 0.3.
 
+Two consequences worth knowing before reading that table:
+
+- **It now retains short heads of memories the model never saw.** Rejected rows are the
+  point of the record, and they are chat content, kept for `maintenance.retrieval_log_days`
+  (90). Measured on production: ~60 RAG lookups per 30 days, three quarters of them blind,
+  so roughly 27 kB a month. The knowledge base has done the same since its floor shipped.
+- **Rows written before R1 mean something different**, and nothing marks the boundary
+  explicitly — but they are still distinguishable: a pre-R1 row's `results` entries carry
+  no `above_floor` key at all, and its `n_results` counts only what cleared the floor
+  rather than what was considered. Split on the presence of that key before pooling a
+  window that straddles the deploy. `scripts/kb_report.py` prints a warning when its own
+  window does.
+
 ### Knowledge Base Settings
 
 Retrieval tuning only — whether the module runs at all is `modules.knowledge_base.enabled`
