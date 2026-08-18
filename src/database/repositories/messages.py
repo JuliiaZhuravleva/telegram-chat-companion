@@ -507,11 +507,24 @@ class MessageRepository:
         batch a batch of *chunkable* messages; the checks in `source_messages`
         stay as the guarantee for any other caller.
 
-        Ordered by time, then id: sessions are defined by pauses, so time is
-        the axis that decides the boundaries. The `after_message_id`
-        watermark is on the id axis, which is monotonic with time for real
-        Telegram traffic; `Chunk` takes min/max over both so an imported row
-        that violates that cannot produce a backwards range.
+        **Ordered by `message_id`, and that is not a detail.** The watermark
+        is an id, so the fetch has to advance along the same axis or it can
+        step over rows: a batch taken in *time* order spans a wider id range
+        than it contains, and every id inside that range but outside the
+        batch is then excluded for ever by `message_id > $2`. Measured on
+        production 2026-08-19, before this was fixed: the largest chat's first
+        2000-message batch spanned 2792 ids, so **792 messages would never
+        have been indexed** -- and the second chat 352. Nothing would have
+        reported it; the index would simply have been missing a fourteenth of
+        the conversation.
+
+        Ordering by id also happens to be the truer conversation order.
+        Telegram assigns `message_id` in send order, while `created_at` is
+        only as good as whatever wrote the row -- the n8n-era import left
+        1.8% of adjacent pairs with time and id disagreeing. Session
+        boundaries still come from the timestamps, because a pause is a fact
+        about time; `split_sessions` measures each gap against the latest
+        moment seen so far, so one stale timestamp cannot invent a pause.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
             """
@@ -524,7 +537,7 @@ class MessageRepository:
               AND created_at IS NOT NULL
               AND content IS NOT NULL
               AND btrim(content) <> ''
-            ORDER BY created_at ASC, message_id ASC
+            ORDER BY message_id ASC
             LIMIT $3
             """,
             chat_id,

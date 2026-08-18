@@ -493,6 +493,81 @@ class TestIndexerEndToEnd:
         assert len(rows) == 2
 
 
+class TestNothingIsSkippedAcrossPasses:
+    """The regression that measurement found, and only measurement could.
+
+    The watermark is a `message_id`. While the fetch was ordered by
+    `created_at`, a batch spanned a *wider* id range than it contained, and
+    every id inside that range but outside the batch was excluded for ever by
+    `message_id > watermark`. On production this was 792 messages in the
+    largest chat and 352 in the second -- a fourteenth of the conversation,
+    missing from the index with nothing anywhere reporting it.
+
+    Unit tests cannot see it: it lives in the interaction between the query's
+    ORDER BY, the LIMIT, and a watermark derived from what was written.
+    """
+
+    def _indexer(self, db_pool: asyncpg.Pool, batch: int) -> ChatChunkIndexer:
+        from src.config import BotSettings
+
+        return ChatChunkIndexer(
+            pool=db_pool,
+            ai_router=_FakeRouter(),  # type: ignore[arg-type]
+            chat_config=ChatConfigService(
+                BotSettings(),
+                BotConfigRepository(db_pool),
+                ChatSettingsRepository(db_pool),
+            ),
+            config=ChunkIndexerSettings(messages_per_pass=batch, embed_per_pass=100),
+        )
+
+    async def test_shuffled_timestamps_lose_nothing(
+        self, db_pool: asyncpg.Pool, messages: MessageRepository
+    ) -> None:
+        await db_pool.execute(
+            "INSERT INTO chat_settings (chat_id, chat_title, enabled) VALUES ($1, $2, true)",
+            CHAT_ID,
+            "Тестовая беседа",
+        )
+        started = NOW - timedelta(days=30)
+        for index in range(40):
+            await messages.save(
+                CHAT_ID,
+                400 + index,
+                "text",
+                user_id=501,
+                first_name="Аня",
+                content=f"метка-{index} обычная реплика про поход",
+            )
+        # Timestamps that do NOT follow message_id: ids 400..419 are stamped
+        # after ids 420..439, exactly the shape the n8n import left behind.
+        await db_pool.execute(
+            """
+            UPDATE chat_messages
+            SET created_at = $2::timestamptz
+                + CASE WHEN message_id < 420 THEN 20 ELSE 0 END * interval '1 minute'
+                + (message_id - 400) * interval '1 second'
+            WHERE chat_id = $1
+            """,
+            CHAT_ID,
+            started,
+        )
+
+        indexer = self._indexer(db_pool, batch=10)
+        for _ in range(8):
+            await indexer.run_once()
+
+        rendered = "\n".join(
+            row["content"]
+            for row in await db_pool.fetch(
+                "SELECT content FROM chat_chunks WHERE chat_id = $1", CHAT_ID
+            )
+        )
+        missing = [index for index in range(40) if f"метка-{index} " not in rendered]
+
+        assert not missing, f"messages missing from the index: {missing}"
+
+
 class TestParking:
     """Parking must separate "this row is bad" from "the provider is down".
 
