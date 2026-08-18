@@ -101,6 +101,11 @@ knowledge_base:
   # value `rag.min_similarity` above has used for months on the same
   # embedding model, so this is the existing number rather than a new one.
   #
+  # That measurement predates R0 (TD-092), which stopped the trigger word
+  # from reaching the query embedding. The gap it was chosen inside got
+  # WIDER, not narrower — the same probes move to ~0.719 (hit) and ~0.524
+  # (miss) — so 0.70 stays valid and is due a re-measure, not a change.
+  #
   # Set to 0.0 to disable filtering and restore the pre-floor behaviour.
   min_similarity: 0.7
 

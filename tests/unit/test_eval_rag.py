@@ -39,6 +39,12 @@ def _make_embedding_result(vec: list[float] | None = None) -> EmbeddingResult:
     )
 
 
+# The harness is handed trigger words because production strips them before
+# embedding (R0/TD-092); a harness that skipped that step would measure a
+# retrieval path the bot no longer runs.
+TRIGGERS = ("бот", "bot")
+
+
 class TestRunEval:
     """S3-2: ``run_eval()`` embeds via the real AIRouter path and searches
     via the real ``RAGMemoryService.search()`` -- no reimplemented SQL."""
@@ -61,7 +67,9 @@ class TestRunEval:
             }
         ]
 
-        results = await run_eval([case], service=service, ai_router=ai_router)
+        results = await run_eval(
+            [case], service=service, ai_router=ai_router, trigger_words=TRIGGERS
+        )
 
         assert len(results) == 1
         assert results[0].case is case
@@ -93,7 +101,9 @@ class TestRunEval:
         )
         service = AsyncMock(spec=RAGMemoryService)
 
-        results = await run_eval([case], service=service, ai_router=ai_router)
+        results = await run_eval(
+            [case], service=service, ai_router=ai_router, trigger_words=TRIGGERS
+        )
 
         assert len(results) == 1
         assert results[0].hits == []
@@ -110,7 +120,9 @@ class TestRunEval:
         service = AsyncMock(spec=RAGMemoryService)
         service.search.return_value = []
 
-        results = await run_eval([case_a, case_b], service=service, ai_router=ai_router)
+        results = await run_eval(
+            [case_a, case_b], service=service, ai_router=ai_router, trigger_words=TRIGGERS
+        )
 
         assert [r.case.chat_id for r in results] == [-1, -2]
         assert service.search.await_count == 2
@@ -173,3 +185,43 @@ class TestParseArgs:
         )
         assert args.min_similarity == 0.5
         assert args.max_results == 3
+
+
+class TestRunEvalQueryHygiene:
+    """R0/TD-092 — the harness must embed what the pipeline embeds.
+
+    Auto-harvested cases take their question from ``chat_messages.content``
+    verbatim, so they carry the leading address the bot now strips. If this
+    step were missing here, every recorded baseline would describe a path
+    production stopped using, and nothing in the metrics would say so.
+    """
+
+    @pytest.mark.asyncio
+    async def test_leading_address_is_stripped_before_embedding(self) -> None:
+        case = _make_case(question="бот, где мы встречаемся?")
+        ai_router = AsyncMock(spec=AIRouter)
+        ai_router.generate_embedding.return_value = _make_embedding_result()
+        service = AsyncMock(spec=RAGMemoryService)
+        service.search.return_value = []
+
+        await run_eval([case], service=service, ai_router=ai_router, trigger_words=TRIGGERS)
+
+        assert ai_router.generate_embedding.call_args.args[0] == "где мы встречаемся?"
+        # …and the same text reaches search(), so a future change that lets
+        # search() re-embed cannot silently diverge from the embedding above.
+        assert service.search.call_args.args[1] == "где мы встречаемся?"
+
+    @pytest.mark.asyncio
+    async def test_case_question_itself_is_not_mutated(self) -> None:
+        """Reports quote the question as asked; only the query is cleaned."""
+        case = _make_case(question="бот, где мы встречаемся?")
+        ai_router = AsyncMock(spec=AIRouter)
+        ai_router.generate_embedding.return_value = _make_embedding_result()
+        service = AsyncMock(spec=RAGMemoryService)
+        service.search.return_value = []
+
+        results = await run_eval(
+            [case], service=service, ai_router=ai_router, trigger_words=TRIGGERS
+        )
+
+        assert results[0].case.question == "бот, где мы встречаемся?"

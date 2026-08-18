@@ -192,6 +192,18 @@ _QUERY = """
 """
 
 
+_REGIME_QUERY = """
+    SELECT
+        count(*) FILTER (WHERE params->>'query_stripped' = 'true')  AS stripped,
+        count(*) FILTER (WHERE params->>'query_stripped' = 'false') AS unstripped,
+        count(*) FILTER (WHERE params->>'query_stripped' IS NULL)   AS pre_r0
+    FROM retrieval_log
+    WHERE source = 'kb'
+      AND created_at >= NOW() - ($1::int * INTERVAL '1 day')
+      AND ($2::bigint IS NULL OR chat_id = $2)
+"""
+
+
 async def fetch_turns(
     pool: asyncpg.Pool, *, since_days: int, chat_id: int | None
 ) -> list[list[float]]:
@@ -201,15 +213,57 @@ async def fetch_turns(
     return [extract_sims(row["results"]) for row in rows]
 
 
+async def fetch_regime_split(
+    pool: asyncpg.Pool, *, since_days: int, chat_id: int | None
+) -> tuple[int, int, int]:
+    """How many rows in the window predate R0 query hygiene (TD-092).
+
+    Rows written before that change embedded the raw message, address and
+    all, which measurably lifts the similarity of a miss (0.524 -> 0.640 on
+    the probes in docs/kb-eval-baseline.md). Percentiles and a floor sweep
+    computed across both regimes are one number describing two populations —
+    and the floor is exactly what a reader tunes from this report. The flag
+    exists to make that visible; without reading it, the report cannot say
+    whether it is homogeneous.
+    """
+    async with pool.acquire() as conn, conn.transaction(readonly=True):
+        row = await conn.fetchrow(_REGIME_QUERY, since_days, chat_id)
+    if row is None:
+        return 0, 0, 0
+    return int(row["stripped"]), int(row["unstripped"]), int(row["pre_r0"])
+
+
 # -------------------------------------------------------------------- render
 
 
-def format_report(report: Report, *, since_days: int, markdown: bool = False) -> str:
+def format_regime_caution(stripped: int, unstripped: int, pre_r0: int) -> str | None:
+    """A one-line warning when the window straddles the R0 deploy, else None."""
+    post = stripped + unstripped
+    if not pre_r0 or not post:
+        return None
+    return (
+        f"  ⚠ mixed regimes: {pre_r0} lookup(s) predate R0 query hygiene "
+        f"(TD-092) and {post} follow it. Similarities are not comparable "
+        "across that line — narrow --since-days until this warning is gone "
+        "before tuning a floor from the sweep below."
+    )
+
+
+def format_report(
+    report: Report,
+    *,
+    since_days: int,
+    markdown: bool = False,
+    regime_caution: str | None = None,
+) -> str:
     lines: list[str] = []
     add = lines.append
 
     add(f"KB retrieval report — last {since_days} days")
     add("")
+    if regime_caution:
+        add(regime_caution)
+        add("")
     add(f"  KB lookups recorded : {report.turns_total}")
     add(
         f"  ...returned nothing : {report.turns_blind_today} "
@@ -321,6 +375,7 @@ async def main(argv: list[str] | None = None) -> int:
             print("could not create a connection pool", file=sys.stderr)
             return 2
         turns = await fetch_turns(pool, since_days=args.since_days, chat_id=args.chat_id)
+        regimes = await fetch_regime_split(pool, since_days=args.since_days, chat_id=args.chat_id)
     except (OSError, asyncpg.PostgresError) as exc:
         print(f"database error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -340,7 +395,14 @@ async def main(argv: list[str] | None = None) -> int:
         return 1
 
     report = summarize(turns, args.floors)
-    print(format_report(report, since_days=args.since_days, markdown=args.markdown))
+    print(
+        format_report(
+            report,
+            since_days=args.since_days,
+            markdown=args.markdown,
+            regime_caution=format_regime_caution(*regimes),
+        )
+    )
     return 0
 
 

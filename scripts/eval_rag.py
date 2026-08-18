@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,6 +56,7 @@ from src.database.repositories.memory import MemoryRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.rag.memory import RAGMemoryService
+from src.services.text.query_hygiene import strip_bot_address
 
 logger = structlog.get_logger(__name__)
 
@@ -118,8 +120,23 @@ async def run_eval(
     *,
     service: RAGMemoryService,
     ai_router: AIRouter,
+    trigger_words: Sequence[str],
 ) -> list[CaseResult]:
     """Replay every case through the real embed -> search path, in order.
+
+    ``trigger_words`` exists so this harness embeds what production embeds.
+    Auto-harvested questions come from ``chat_messages.content`` verbatim
+    (``harvest_auto_strata.py``), so they carry the same leading ``бот`` the
+    pipeline now strips before embedding (R0/TD-092). Measuring the raw
+    question would score a retrieval path that no longer runs anywhere, and
+    the resulting baseline would drift from production for a reason nothing
+    in the numbers would reveal.
+
+    It is a global list rather than each case's own chat config: the harness
+    talks to a throwaway seed DB with no ``chat_settings`` to merge from, and
+    every production chat currently configures the same two words. If that
+    ever stops being true, this is the line that has to learn about the
+    per-chat merge.
 
     Sequential and paced (``_INTER_CASE_DELAY_SECONDS``, mirroring
     ``q5_replay.py:136``): this hits a real embeddings provider per case,
@@ -136,10 +153,9 @@ async def run_eval(
     for index, case in enumerate(cases):
         if index:
             await asyncio.sleep(_INTER_CASE_DELAY_SECONDS)
+        query = strip_bot_address(case.question, trigger_words)
         try:
-            embedding_result = await ai_router.generate_embedding(
-                case.question, chat_id=case.chat_id
-            )
+            embedding_result = await ai_router.generate_embedding(query, chat_id=case.chat_id)
         except AIProviderError as exc:
             logger.warning(
                 "eval_rag: query embedding failed, case counted as embedding_error",
@@ -153,7 +169,7 @@ async def run_eval(
         try:
             hits = await service.search(
                 case.chat_id,
-                case.question,
+                query,
                 query_embedding=embedding_result.embedding,
                 before=case.asked_at,
             )
@@ -273,7 +289,12 @@ async def main(argv: list[str] | None = None) -> int:
                 ),
             )
 
-            results = await run_eval(cases, service=service, ai_router=ai_router)
+            results = await run_eval(
+                cases,
+                service=service,
+                ai_router=ai_router,
+                trigger_words=settings.bot.trigger_words,
+            )
             _print_results(results)
             metrics = compute_metrics(results, k=service.max_results)
             print()

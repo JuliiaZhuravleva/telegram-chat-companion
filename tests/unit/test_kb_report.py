@@ -13,6 +13,7 @@ from scripts.kb_report import (
     Report,
     extract_sims,
     fetch_turns,
+    format_regime_caution,
     format_report,
     main,
     summarize,
@@ -125,6 +126,18 @@ class _FakeConnection:
         self._recorder["query"] = query
         self._recorder["args"] = args
         return self._rows
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        """The regime-split probe (R0/TD-092).
+
+        Answers "all rows are post-R0" by default, so the existing tests keep
+        asserting exactly what they asserted before the caution line existed.
+        """
+        self._recorder["regime_query"] = query
+        self._recorder["regime_args"] = args
+        return self._regime_row
+
+    _regime_row: dict[str, Any] | None = {"stripped": 1, "unstripped": 0, "pre_r0": 0}
 
 
 class _FakeAcquire:
@@ -284,3 +297,40 @@ class TestReportInvariants:
         report = summarize([[0.1, 0.3, 0.5, 0.7, 0.9]], floors=(0.2, 0.4, 0.6, 0.8))
         kept = [row.facts_kept for row in report.floors]
         assert kept == sorted(kept, reverse=True)
+
+
+class TestRegimeCaution:
+    """R0/TD-092 — a window that straddles the deploy is two populations.
+
+    The floor sweep is what a reader tunes `knowledge_base.min_similarity`
+    from, and similarities recorded before query hygiene sit measurably
+    higher on a miss. A blended percentile table presented as one number is
+    the failure this line exists to prevent.
+    """
+
+    def test_silent_when_every_row_is_post_r0(self) -> None:
+        assert format_regime_caution(12, 3, 0) is None
+
+    def test_silent_when_every_row_is_pre_r0(self) -> None:
+        """A wholly historical window is homogeneous — nothing to warn about."""
+        assert format_regime_caution(0, 0, 9) is None
+
+    def test_silent_on_an_empty_window(self) -> None:
+        assert format_regime_caution(0, 0, 0) is None
+
+    def test_warns_and_counts_both_sides_when_the_window_straddles(self) -> None:
+        caution = format_regime_caution(4, 2, 7)
+
+        assert caution is not None
+        assert "7 lookup(s) predate" in caution
+        # 4 + 2: both post-R0 shapes count as one population, and a reader who
+        # saw only "4" would think the mix was smaller than it is.
+        assert "6 follow it" in caution
+
+    def test_the_caution_reaches_the_rendered_report(self) -> None:
+        """Asserting the call site, not the helper."""
+        report = summarize([[0.8], [0.5]], (0.7,))
+
+        rendered = format_report(report, since_days=90, regime_caution="⚠ CANARY")
+
+        assert "⚠ CANARY" in rendered

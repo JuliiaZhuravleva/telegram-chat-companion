@@ -42,6 +42,7 @@ from src.services.text.prompt_builder import (
     compute_max_tokens,
     trim_facts_to_budget,
 )
+from src.services.text.query_hygiene import strip_bot_address
 from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
@@ -221,15 +222,31 @@ class TextProcessingPipeline:
         # message_text -- an extra network round-trip plus a doubled
         # cost-log row). embed_task is awaited by both consumers below; the
         # coroutine itself still runs exactly once.
+        #
+        # R0 (TD-092): what gets embedded is the message with its leading
+        # address removed -- `message_text` itself is untouched and remains
+        # what the prompt, the stored Q&A pair, the abuse check, the link
+        # extractor and the sticker search all see. Only retrieval reads the
+        # stripped form, because only retrieval was being steered by a
+        # vocative that carries no topic. See query_hygiene for the corpus
+        # measurements behind the rule.
+        retrieval_text = strip_bot_address(message_text, config.trigger_words)
+        # Compared against the *trimmed* message: `strip_bot_address` always
+        # normalises surrounding whitespace, and Telegram delivers plenty of
+        # trailing newlines, so a raw `!=` would report an address strip on
+        # ordinary un-addressed questions and quietly poison the one field that
+        # tells the two retrieval regimes apart.
+        query_stripped = retrieval_text != message_text.strip()
+
         embed_task: asyncio.Task[tuple[EmbeddingResult | None, str | None]] | None = None
         if (config.rag_enabled and self._rag) or (config.kb_enabled and self._knowledge):
-            embed_task = asyncio.ensure_future(self._safe_embed_query(chat_id, message_text))
+            embed_task = asyncio.ensure_future(self._safe_embed_query(chat_id, retrieval_text))
 
         rag_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
         if config.rag_enabled and self._rag:
             assert embed_task is not None
             rag_task = asyncio.ensure_future(
-                self._timed_rag_search(chat_id, message_text, embed_task)
+                self._timed_rag_search(chat_id, retrieval_text, embed_task)
             )
 
         kb_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
@@ -279,10 +296,19 @@ class TextProcessingPipeline:
                     chat_id=chat_id,
                     message_id=message_id,
                     source="rag_memory",
-                    query_text=message_text,
+                    # The text that was actually embedded, not the text that
+                    # was typed. A log recording the raw message would make
+                    # every stored similarity unreproducible, and it is this
+                    # table that R2 rebuilds the golden set from -- the same
+                    # contamination would simply reappear in the next baseline.
+                    # `query_stripped` says whether the two differ, so a reader
+                    # can tell an untouched query from a peeled one without
+                    # re-deriving the rule.
+                    query_text=retrieval_text,
                     params={
                         "min_similarity": self._rag.min_similarity,
                         "max_results": self._rag.max_results,
+                        "query_stripped": query_stripped,
                     },
                     raw=rag_memories,
                     duration_ms=rag_ms,
@@ -295,10 +321,11 @@ class TextProcessingPipeline:
                     chat_id=chat_id,
                     message_id=message_id,
                     source="kb",
-                    query_text=message_text,
+                    query_text=retrieval_text,
                     params={
                         "limit": _KB_SEARCH_LIMIT,
                         "min_similarity": self._kb_min_similarity,
+                        "query_stripped": query_stripped,
                     },
                     # Deliberately the UNFILTERED set. The floor is applied to
                     # the prompt below, not here: once sub-floor rows stop being
