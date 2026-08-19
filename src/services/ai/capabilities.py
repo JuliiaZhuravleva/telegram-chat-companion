@@ -29,7 +29,7 @@ PROVIDER_CAPABILITIES: dict[str, ProviderCapabilities] = {
         "text_generation": True,  # gpt-5-nano, gpt-5-mini, gpt-5.2
         "embeddings": True,  # text-embedding-3-small, text-embedding-3-large
         "vision": True,  # gpt-5-nano+ (built-in multimodal)
-        "transcription": True,  # whisper-1
+        "transcription": True,  # gpt-4o-mini-transcribe, whisper-1
         "function_calling": True,
     },
     "gemini": {
@@ -71,7 +71,7 @@ DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "text_premium": "gpt-5.2",  # EXPENSIVE — requires approval
         "embeddings": "text-embedding-3-small",
         "vision": "gpt-5-nano",  # nano has multimodal
-        "transcription": "whisper-1",
+        "transcription": "gpt-4o-mini-transcribe",
     },
     "gemini": {
         "text": "gemini-3-flash-preview",  # cheapest

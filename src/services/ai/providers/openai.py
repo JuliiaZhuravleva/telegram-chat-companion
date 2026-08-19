@@ -221,15 +221,21 @@ class OpenAIProvider(AIProvider):
         model: str | None = None,
         **kwargs: Any,
     ) -> TranscriptionResult:
-        """Transcribe audio using OpenAI Whisper API."""
-        model = model or "whisper-1"
+        """Transcribe audio using the OpenAI transcription API."""
+        model = model or "gpt-4o-mini-transcribe"
         filename = kwargs.get("filename", "audio.ogg")
 
         # Multipart form upload — use separate headers without JSON content-type
         headers = {"Authorization": f"Bearer {self._api_key}"}
 
+        # gpt-4o-*-transcribe models reject verbose_json (400) — they support
+        # only json/text and report cost via a `usage` token object instead of
+        # `duration`. whisper-1 is the reverse: per-minute pricing, and only
+        # verbose_json carries the duration that pricing needs.
+        response_format = "verbose_json" if model.startswith("whisper") else "json"
+
         files = {"file": (filename, audio_data)}
-        data: dict[str, str] = {"model": model, "response_format": "verbose_json"}
+        data: dict[str, str] = {"model": model, "response_format": response_format}
         if language:
             data["language"] = language
 
@@ -242,13 +248,13 @@ class OpenAIProvider(AIProvider):
             )
         except httpx.TimeoutException as e:
             raise AIProviderError(
-                f"OpenAI Whisper request timed out: {e}",
+                f"OpenAI transcription request timed out: {e}",
                 provider=self.name,
                 retriable=True,
             ) from e
         except httpx.HTTPError as e:
             raise AIProviderError(
-                f"OpenAI Whisper HTTP error: {e}",
+                f"OpenAI transcription HTTP error: {e}",
                 provider=self.name,
                 retriable=True,
             ) from e
@@ -257,6 +263,21 @@ class OpenAIProvider(AIProvider):
 
         result: dict[str, Any] = resp.json()
         text = result.get("text", "")
+        usage = result.get("usage") or {}
+        tokens_input = usage.get("input_tokens")
+        tokens_output = usage.get("output_tokens")
+
+        # A token-priced model answering without usage numbers would cost-log
+        # as $0 — indistinguishable from a genuinely free model, forever, with
+        # nothing else in the chain noticing (calculate_cost skips falsy
+        # tokens, _log_usage happily writes the zero). Say it here, at the
+        # only place that knows the numbers were absent rather than zero.
+        if not model.startswith("whisper") and tokens_input is None:
+            logger.warning(
+                "Transcription response carried no usage tokens; cost will be logged as zero",
+                model=model,
+                response_keys=list(result.keys()),
+            )
 
         return TranscriptionResult(
             text=text,
@@ -264,6 +285,8 @@ class OpenAIProvider(AIProvider):
             provider=self.name,
             language=result.get("language") or language,
             duration=result.get("duration"),
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
         )
 
     async def close(self) -> None:

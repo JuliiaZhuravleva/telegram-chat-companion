@@ -45,13 +45,21 @@ class VisionResult:
 
 @dataclass
 class TranscriptionResult:
-    """Result from audio transcription."""
+    """Result from audio transcription.
+
+    Cost accounting differs by model family: whisper-1 is priced per minute
+    (`duration`, from verbose_json), gpt-4o-*-transcribe per token
+    (`tokens_input`/`tokens_output`, from the response `usage` object).
+    Whichever fields the model does not report stay None.
+    """
 
     text: str
     model: str
     provider: str
     language: str | None = None
     duration: float | None = None
+    tokens_input: int | None = None
+    tokens_output: int | None = None
 
 
 class AIProviderError(Exception):

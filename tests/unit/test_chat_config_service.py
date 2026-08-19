@@ -54,6 +54,16 @@ class TestMerge:
         assert config.random_response_chance == 0.05
         assert config.enabled is False  # dataclass default
 
+    def test_is_forum_never_enters_the_merge(self):
+        """chat_settings.is_forum is Telegram-observed metadata for offline
+        consumers (S4 chunker); keeping it out of _CHAT_CONFIG_FIELDS is what
+        prevents a hypothetical bot_config `default_is_forum` from globally
+        overriding what only Telegram decides (deep-review 2026-08-19)."""
+        service, _, _ = _make_service()
+
+        config = service._merge(chat_id=1, global_overrides={}, chat_row={"is_forum": True})
+        assert not hasattr(config, "is_forum")
+
     def test_global_overrides_yaml(self):
         service, _, _ = _make_service(yaml_trigger_words=["bot"])
         config = service._merge(

@@ -83,6 +83,46 @@ async def test_save_messages_enabled_still_generates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_id_comes_from_middleware_not_the_bot_message() -> None:
+    """TD-102's one reachable variant: the bot's own message carries the
+    thread id Telegram stamps on linked-channel discussion comments, so
+    reading it raw narrowed the refresh to ~2 messages while /summary next to
+    it covered the whole chat. The handler must use TopicMiddleware's kwarg
+    (None unless the chat is a real forum), never msg.message_thread_id."""
+    callback = _make_callback()
+    callback.message.message_thread_id = 777  # what the raw read would grab
+    summary_service = AsyncMock()
+    summary_service.generate.return_value = "<b>summary</b>"
+
+    await handle_summary_callback(
+        callback,
+        _make_chat_config(save_messages=True),
+        summary_service,
+        message_thread_id=None,
+    )
+
+    assert summary_service.generate.call_args.kwargs["message_thread_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_forum_thread_id_from_middleware_is_honored() -> None:
+    """The mirror control: a real forum topic (middleware passes the id
+    through) must still get a topic-scoped summary."""
+    callback = _make_callback()
+    summary_service = AsyncMock()
+    summary_service.generate.return_value = "<b>summary</b>"
+
+    await handle_summary_callback(
+        callback,
+        _make_chat_config(save_messages=True),
+        summary_service,
+        message_thread_id=555,
+    )
+
+    assert summary_service.generate.call_args.kwargs["message_thread_id"] == 555
+
+
+@pytest.mark.asyncio
 async def test_non_owner_is_refused_before_the_toggle_is_consulted() -> None:
     """Ordering: a stranger keeps getting "not your button" rather than being
     told about the chat's configuration."""

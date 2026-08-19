@@ -154,6 +154,7 @@ class MockAIProvider(AIProvider):
         self._error = error
         self.call_log: list[str] = []
         self.last_text_call: dict[str, Any] = {}
+        self.last_transcription_call: dict[str, Any] = {}
 
     async def generate_text(
         self,
@@ -210,6 +211,11 @@ class MockAIProvider(AIProvider):
         **kwargs: Any,
     ) -> TranscriptionResult:
         self.call_log.append("transcribe_audio")
+        self.last_transcription_call = {
+            "language": language,
+            "model": model,
+            **kwargs,
+        }
         if self._error:
             raise self._error
         if self._transcription_result:

@@ -64,6 +64,14 @@ class TestRegistryCoverage:
     def test_enabled_is_excluded(self):
         assert "enabled" not in FIELDS_BY_KEY
 
+    def test_is_forum_is_not_a_setting(self):
+        """chat_settings.is_forum (migration 030) is Telegram-observed
+        metadata for offline consumers — it must appear neither in the panel
+        registry nor in the merge, or a toggle/global default could override
+        what only Telegram decides (deep-review 2026-08-19)."""
+        assert "is_forum" not in FIELDS_BY_KEY
+        assert "is_forum" not in _CHAT_CONFIG_FIELDS
+
     def test_kb_organizer_ids_is_excluded(self):
         assert "kb_organizer_ids" not in FIELDS_BY_KEY
 

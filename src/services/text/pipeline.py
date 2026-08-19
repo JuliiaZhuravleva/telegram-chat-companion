@@ -181,7 +181,14 @@ class TextProcessingPipeline:
             return PipelineResult(should_respond=False, response_type=response_type)
 
         # --- Stage 2: Gather context in parallel ---
-        # Use topic-aware context query for forum support
+        # Topic-aware context for forums. The thread id arrives pre-gated:
+        # TopicMiddleware nulls it unless chat.is_forum (topic.py), so in an
+        # ordinary supergroup — where Telegram stamps the same field on plain
+        # reply chains averaging ~2 messages — this is always None and the
+        # query takes the flat branch. Any consumer reading the thread id
+        # RAW off a message instead of from middleware data reintroduces the
+        # collapsed-window bug (TD-102's real variant lived in the summary
+        # refresh callback for exactly that reason).
         recent_msgs_task = self._messages.get_recent_with_topic_context(
             chat_id,
             message_thread_id,

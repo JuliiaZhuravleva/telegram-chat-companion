@@ -143,19 +143,30 @@ class ChatSettingsRepository:
         chat_id: int,
         chat_title: str | None = None,
         chat_type: str = "group",
+        is_forum: bool | None = None,
     ) -> dict[str, Any]:
-        """Ensure a chat_settings row exists, return it."""
+        """Ensure a chat_settings row exists, return it.
+
+        ``is_forum`` follows the same COALESCE rule as the title: None means
+        "the caller doesn't know", a bool overwrites. Callers holding a real
+        Chat object should pass ``bool(chat.is_forum)`` rather than the raw
+        attribute — Telegram omits the field for non-forums, and passing that
+        None through would let a chat that switched forum mode off keep its
+        stale True forever (TD-102).
+        """
         await self._pool.execute(
             """
-            INSERT INTO chat_settings (chat_id, chat_title, chat_type)
-            VALUES ($1, $2, $3)
+            INSERT INTO chat_settings (chat_id, chat_title, chat_type, is_forum)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (chat_id) DO UPDATE
                 SET chat_title = COALESCE(EXCLUDED.chat_title, chat_settings.chat_title),
-                    chat_type = COALESCE(EXCLUDED.chat_type, chat_settings.chat_type)
+                    chat_type = COALESCE(EXCLUDED.chat_type, chat_settings.chat_type),
+                    is_forum = COALESCE(EXCLUDED.is_forum, chat_settings.is_forum)
             """,
             chat_id,
             chat_title,
             chat_type,
+            is_forum,
         )
         row = await self.get(chat_id)
         assert row is not None  # just inserted

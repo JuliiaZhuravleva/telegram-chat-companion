@@ -517,6 +517,103 @@ class TestVisionAndTranscriptionLogging:
         assert call_kwargs.kwargs["duration_seconds"] == 2.5
 
     @pytest.mark.asyncio
+    async def test_transcription_model_comes_from_task_config(
+        self, mock_provider, mock_router_settings
+    ):
+        """The YAML `ai.tasks.transcription.model` knob must reach the
+        provider call — it used to be dead, with the real default hardcoded
+        in the provider (found via the 2026-08 cost report: prod was on
+        whisper-1 while the config *looked* like the place that decides)."""
+        transcription_result = TranscriptionResult(
+            text="hello",
+            model="gpt-4o-mini-transcribe",
+            provider="openai",
+        )
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            transcription_result=transcription_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.model = "gpt-4o-mini-transcribe"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        router = AIRouter(mock_router_settings)
+        router._providers["openai"] = provider
+
+        await router.transcribe_audio(b"audio")
+
+        assert provider.last_transcription_call["model"] == "gpt-4o-mini-transcribe"
+
+    @pytest.mark.asyncio
+    async def test_transcription_caller_model_override_wins(
+        self, mock_provider, mock_router_settings
+    ):
+        """model= from the caller must beat task config — the CLAUDE.md
+        provider-targeting idiom. Pre-fix, the kwarg collided with the
+        router's own model= keyword and raised TypeError (deep-review
+        2026-08-19)."""
+        transcription_result = TranscriptionResult(
+            text="hello",
+            model="whisper-1",
+            provider="openai",
+        )
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            transcription_result=transcription_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.model = "gpt-4o-mini-transcribe"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        router = AIRouter(mock_router_settings)
+        router._providers["openai"] = provider
+
+        await router.transcribe_audio(b"audio", model="whisper-1")
+
+        assert provider.last_transcription_call["model"] == "whisper-1"
+
+    @pytest.mark.asyncio
+    async def test_transcription_logs_tokens(self, mock_provider, mock_router_settings):
+        """Token-priced transcribe models report usage tokens, not duration —
+        both must flow into the usage log or the cost is silently zero."""
+        transcription_result = TranscriptionResult(
+            text="hello",
+            model="gpt-4o-mini-transcribe",
+            provider="openai",
+            tokens_input=600,
+            tokens_output=40,
+        )
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            transcription_result=transcription_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        mock_repo = AsyncMock()
+        mock_repo.log = AsyncMock()
+
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["openai"] = provider
+
+        await router.transcribe_audio(b"audio")
+        await asyncio.sleep(0.05)
+
+        mock_repo.log.assert_awaited_once()
+        call_kwargs = mock_repo.log.call_args
+        assert call_kwargs.kwargs["tokens_input"] == 600
+        assert call_kwargs.kwargs["tokens_output"] == 40
+
+    @pytest.mark.asyncio
     async def test_text_generation_does_not_log(
         self,
         mock_provider,
