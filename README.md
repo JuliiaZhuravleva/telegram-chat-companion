@@ -193,6 +193,7 @@ pre-commit install           # Set up git hooks
 python -m scripts.verify_commands   # Check the bot's registered slash commands
 python -m scripts.eval_rag <dsn>    # Measure RAG retrieval quality
 python -m scripts.kb_report <dsn>   # Measure Knowledge Base retrieval, sweep the similarity floor
+python -m scripts.backfill_chunks <dsn>   # Build the conversation-chunk index now, instead of waiting
 ```
 
 The bot pushes its command menus to Telegram on every start and verifies what
@@ -222,6 +223,17 @@ floors over it. Read-only is enforced by the database rather than by
 convention — the query runs inside a `readonly=True` transaction — and an empty
 window exits non-zero, because a silent zero reads exactly like "no problems
 found". See [the KB baseline](docs/kb-eval-baseline.md).
+
+`scripts/backfill_chunks.py` belongs to a different part of the same story. Long-term
+memory has so far been Q&A pairs written only on turns where the bot replied, which on a
+live chat is 4–8% of the history — and not a random 4–8%, since it is exactly the part
+where people addressed the bot. `chat_chunks` (migration 029) indexes the conversation
+itself instead: sessions bounded by a three-hour pause, rendered as verbatim
+`Имя (ЧЧ:ММ): текст` lines under a dateline, embedded as documents rather than as
+queries. A background worker fills it every fifteen minutes; this script is the same
+worker driven in a loop, for when waiting is not worth it. **Nothing reads the table
+yet** — retrieval moves onto it in a later slice, behind a shadow period, which is what
+makes the index safe to build in production while the bot serves traffic.
 
 Both of those read what retrieval *returned*. `scripts/kb_probe.py` covers the
 side neither can see: given real questions, it reports whether the knowledge
