@@ -56,7 +56,7 @@ ai:
 
     transcription:
       provider: "openai"
-      model: "whisper-1"
+      model: "gpt-4o-mini-transcribe"
 ```
 
 ### RAG Settings
