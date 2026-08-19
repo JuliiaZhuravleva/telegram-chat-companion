@@ -214,7 +214,11 @@ measured to steer retrieval toward the bot's own memories. The database DSN is a
 argument with no default: the harness must never be able to point at a live
 database. Cases are validated by `scripts/eval_schema.py`; the tracked template
 in `tests/fixtures/eval/` is synthetic, and real cases stay out of this
-repository.
+repository. Because they do, a baseline is only as reproducible as the corpora
+behind it: the case set is regenerated deterministically from a frozen corpus
+rather than kept as a file, and both corpora are kept as verified `pg_dump`
+archives outside the repository. The exact procedure lives with the numbers, in
+[the baseline](docs/rag-eval-baseline.md#reproducing).
 
 `scripts/kb_report.py` is the Knowledge Base counterpart, and needs no cases at
 all: the bot has been recording per-fact similarity for every KB lookup since
