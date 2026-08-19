@@ -527,7 +527,11 @@ class MessageRepository:
         moment seen so far, so one stale timestamp cannot invent a pause.
         """
         result: list[asyncpg.Record] = await self._pool.fetch(
-            """
+            # Raw: the class below is written with `\u` escapes, and a plain
+            # triple-quoted string would hand Postgres the characters instead
+            # -- which is also how a "\n" inside a comment once ended the
+            # comment early and broke the whole query.
+            r"""
             SELECT message_id, user_id, username, first_name,
                    message_type, content, is_bot_message, created_at
             FROM chat_messages
@@ -536,7 +540,17 @@ class MessageRepository:
               AND message_type <> 'transcription'
               AND created_at IS NOT NULL
               AND content IS NOT NULL
-              AND btrim(content) <> ''
+              -- The class is `str.strip()`'s, spelled out. `btrim(content)`
+              -- trims only U+0020, and `[[:space:]]` adds no more than the
+              -- ASCII controls -- while `source_messages` drops everything
+              -- Python calls whitespace, so a row of NBSP or U+2028 passed
+              -- here and was dropped only after the LIMIT had counted it.
+              -- That is the starvation this predicate exists to prevent: a
+              -- full batch of such rows yields no chunk, leaves the
+              -- watermark where it was, and is re-read on every pass for
+              -- ever. Parity is checked against Python's own set, not
+              -- against a list someone typed: see the integration test.
+              AND content ~ '[^[:space:]\u001c-\u001f\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]'
             ORDER BY message_id ASC
             LIMIT $3
             """,

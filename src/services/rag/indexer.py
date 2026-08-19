@@ -314,8 +314,21 @@ def _closed_sessions(
 
 
 def _is_open(session: list[SourceMessage]) -> bool:
-    last = session[-1].created_at
+    """Whether the session can still grow, judged by its LATEST moment.
+
+    `session[-1]` is the highest `message_id`, not the newest message, and the
+    two disagree on 1.8% of adjacent production pairs (PR #52). Reading the
+    last row's timestamp therefore gets it wrong in both directions: one stale
+    row makes a minute-old conversation look closed, so the debounce this
+    function exists for is defeated and the chunk seam lands mid-sentence; one
+    row dated in the future defers the chat's tail on every pass for as long as
+    it holds the highest id. `split_sessions` already measures gaps against the
+    latest moment seen -- this is the same rule, so the two agree on where a
+    session ends.
+    """
     now = datetime.now(UTC)
-    if last.tzinfo is None:
-        last = last.replace(tzinfo=UTC)
-    return now - last <= SESSION_PAUSE
+    latest = max(
+        moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
+        for moment in (message.created_at for message in session)
+    )
+    return now - latest <= SESSION_PAUSE

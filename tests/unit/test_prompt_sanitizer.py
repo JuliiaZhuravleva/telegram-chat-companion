@@ -132,3 +132,22 @@ class TestSanitizeHistoryField:
     def test_ordinary_text_is_untouched(self):
         text = "просто сообщение с [скобками] и двоеточием: вот"
         assert sanitize_history_field(text) == text
+
+
+class TestEveryLineBreakSplitlinesKnows:
+    """The docstring names `str.splitlines()`'s class; it must be that class.
+
+    An earlier version named the standard and implemented four of its ten
+    characters, so a consumer that splits lines saw a forged line the comment
+    promised could not exist.
+    """
+
+    def test_every_splitlines_break_is_collapsed(self) -> None:
+        breaks = "\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+        survivors = [
+            repr(char)
+            for char in breaks
+            if len(sanitize_history_field(f"а{char}б").splitlines()) > 1
+        ]
+
+        assert survivors == []
