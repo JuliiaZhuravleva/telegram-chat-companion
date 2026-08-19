@@ -55,6 +55,13 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     ),
     # OpenAI transcription
     "whisper-1": ModelPricing(per_minute=Decimal("0.006")),
+    # Token-priced (audio input / text output), roughly half of whisper-1
+    # per minute of speech. Verified 2026-08-19 against the official model
+    # page (developers.openai.com/api/docs/models/gpt-4o-mini-transcribe).
+    "gpt-4o-mini-transcribe": ModelPricing(
+        input_per_1m=Decimal("1.25"),
+        output_per_1m=Decimal("5.00"),
+    ),
     # --- Gemini ---
     "gemini-3-flash-preview": ModelPricing(
         input_per_1m=Decimal("0.50"),

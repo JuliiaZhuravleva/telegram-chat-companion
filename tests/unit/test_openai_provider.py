@@ -275,17 +275,61 @@ class TestAnalyzeImage:
 class TestTranscribeAudio:
     async def test_successful_transcription(self, provider):
         mock_resp = _mock_response(
-            json_data={"text": "Hello, how are you?", "language": "en", "duration": 3.5}
+            json_data={
+                "text": "Hello, how are you?",
+                "usage": {"type": "tokens", "input_tokens": 60, "output_tokens": 8},
+            }
         )
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
             result = await provider.transcribe_audio(b"fake-audio-data")
 
         assert result.text == "Hello, how are you?"
-        assert result.model == "whisper-1"
+        assert result.model == "gpt-4o-mini-transcribe"
         assert result.provider == "openai"
+        assert result.tokens_input == 60
+        assert result.tokens_output == 8
+
+    async def test_default_model_requests_plain_json(self, provider):
+        """gpt-4o-*-transcribe rejects verbose_json with a 400 — the request
+        must ask for plain json, or every voice message fails outright."""
+        mock_resp = _mock_response(json_data={"text": "test"})
+
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
+            await provider.transcribe_audio(b"audio")
+
+        data = mock_post.call_args[1]["data"]
+        assert data["model"] == "gpt-4o-mini-transcribe"
+        assert data["response_format"] == "json"
+
+    async def test_whisper_keeps_verbose_json_and_duration(self, provider):
+        """whisper-1 is per-minute priced: only verbose_json carries the
+        duration that cost logging needs."""
+        mock_resp = _mock_response(json_data={"text": "Hello", "language": "en", "duration": 3.5})
+
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
+            result = await provider.transcribe_audio(b"audio", model="whisper-1")
+
+        data = mock_post.call_args[1]["data"]
+        assert data["response_format"] == "verbose_json"
+        assert result.model == "whisper-1"
         assert result.language == "en"
         assert result.duration == 3.5
+        assert result.tokens_input is None
+
+    async def test_missing_usage_leaves_tokens_none(self, provider):
+        mock_resp = _mock_response(json_data={"text": "test"})
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            result = await provider.transcribe_audio(b"audio")
+
+        assert result.tokens_input is None
+        assert result.tokens_output is None
+        assert result.duration is None
 
     async def test_with_language_hint(self, provider):
         mock_resp = _mock_response(json_data={"text": "Привет", "language": "ru"})

@@ -60,6 +60,32 @@ class TestCalculateCost:
         cost = calculate_cost("whisper-1", tokens_input=100)
         assert cost == Decimal("0")
 
+    def test_transcribe_model_is_token_priced(self) -> None:
+        # gpt-4o-mini-transcribe: $1.25/1M input (audio), $5/1M output
+        cost = calculate_cost(
+            "gpt-4o-mini-transcribe",
+            tokens_input=1_000_000,
+            tokens_output=100_000,
+        )
+        expected = Decimal("1.25") + Decimal("5.00") * Decimal(100_000) / Decimal(1_000_000)
+        assert cost == expected
+
+    def test_transcribe_model_ignores_duration(self) -> None:
+        # Token-priced model: a stray duration (whisper's field) must not be
+        # billed — only tokens count. Guards the calculate_cost branch order.
+        with_duration = calculate_cost(
+            "gpt-4o-mini-transcribe",
+            tokens_input=1000,
+            tokens_output=100,
+            duration_minutes=99.0,
+        )
+        without = calculate_cost(
+            "gpt-4o-mini-transcribe",
+            tokens_input=1000,
+            tokens_output=100,
+        )
+        assert with_duration == without
+
     def test_expensive_model_higher_cost(self) -> None:
         cheap = calculate_cost("gpt-5-nano", tokens_input=1000, tokens_output=1000)
         expensive = calculate_cost("gpt-5.2", tokens_input=1000, tokens_output=1000)

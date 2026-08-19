@@ -77,7 +77,11 @@ ai:
 
     transcription:
       provider: "openai"
-      model: "whisper-1"
+      # Token-priced, ~half of whisper-1 per spoken minute. Unlike the removed
+      # relevancy_check block above, this model key IS read: AIRouter's
+      # transcribe_audio resolves it per provider (2026-08 — it used to be a
+      # dead knob with the real default hardcoded in the provider).
+      model: "gpt-4o-mini-transcribe"
       # No fallback - only OpenAI supports this
 
 # RAG Memory Configuration

@@ -411,17 +411,32 @@ class AIRouter:
                 provider="none",
             )
 
+        # The YAML `ai.tasks.transcription.model` knob used to be dead: the
+        # chain only ever picked the provider, and the model fell through to
+        # the provider's hardcoded default. Resolve it here so config is what
+        # actually chooses the model (fallback_models covers non-primary
+        # providers, same shape text_generation uses).
+        task_config = self._settings.ai.tasks.get("transcription")
+
         last_error: Exception | None = None
 
         for provider_name in chain:
             if not provider_supports(provider_name, "transcription"):
                 continue
 
+            model: str | None = None
+            if task_config is not None:
+                if provider_name == task_config.provider:
+                    model = task_config.model
+                else:
+                    model = task_config.fallback_models.get(provider_name)
+
             try:
                 provider = await self._get_provider(provider_name)
                 result = await provider.transcribe_audio(
                     audio_data=audio_data,
                     language=language,
+                    model=model,
                     **kwargs,
                 )
                 fire_and_forget(
@@ -429,6 +444,8 @@ class AIRouter:
                         task_type="transcription",
                         provider=result.provider,
                         model=result.model,
+                        tokens_input=result.tokens_input,
+                        tokens_output=result.tokens_output,
                         duration_seconds=result.duration,
                     )
                 )
