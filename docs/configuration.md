@@ -103,7 +103,7 @@ sessions over the *whole* chat, as opposed to `chat_memory`'s Q&A pairs, which o
 exist for turns where the bot replied (4–8% of a live chat, measured on production
 2026-08-18).
 
-Three things about it that are behaviour, not tuning:
+Four things about it that are behaviour, not tuning:
 
 - **The gate is `save_messages`, not `rag_enabled`.** Indexing asks "is there anything
   to index"; retrieval asks "should we search". A chat that turns saving off keeps the
@@ -117,6 +117,21 @@ Three things about it that are behaviour, not tuning:
 - **`chat_chunks` is outside retention**, like `chat_memory` (ADR-0011). `chat_messages`
   has a 365-day window; if chunks aged with it, the bot's memory would develop a hole
   exactly one year deep with no observable trace.
+- **Chats are enumerated from `chat_messages`, not from `chat_settings`.** The two can
+  come apart: Telegram gives a group a new `chat_id` when it becomes a supergroup, the
+  settings row is re-keyed onto the new id and the message history deliberately is not.
+  While the worker read the settings table, that history left the index for ever and
+  retention would eventually delete it — so the enumeration follows the data. Such a
+  chat is logged on every pass (`Indexing a chat with no settings row`), because two
+  things about it are not fixed here.
+  First, its gate is the *global* `default_save_messages`, not the owner's own toggle:
+  that travelled to the new id with the row. A chat that had turned saving off before
+  upgrading keeps gaining chunks where the bullet above says its memory should freeze,
+  and no admin screen shows it. Nothing stored is destroyed and no new messages are
+  saved.
+  Second, the recovered chunks carry the *old* `chat_id`, so retrieval asking as the
+  new supergroup will not find them until they are re-keyed. Preserved, not yet
+  reachable. Both want the same missing piece — a recorded `old → new` mapping.
 
 `python -m scripts.backfill_chunks <dsn>` runs the same worker in a loop when waiting
 for the schedule is not worth it — after a restore, or before a measurement.

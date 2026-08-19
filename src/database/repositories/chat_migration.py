@@ -16,6 +16,13 @@ Scope note: only `chat_settings` and `chat_facts` move here. `chat_memory`,
 chat-keyed and are NOT re-keyed -- moving history is a larger decision (retention, ADR-0011's
 preservation invariant) than this slice should make on its own. The outcome
 names what it moved so the gap is visible in the log rather than assumed.
+
+That gap had a consequence nobody had connected to it (TD-104): the chunk
+indexer enumerated chats by their `chat_settings` row, so moving the row away
+from the messages took the un-chunked tail out of the index permanently, and a
+year later retention would have deleted it. The indexer enumerates
+`chat_messages` now, which is why leaving history behind here is survivable --
+the content still gets chunked, under the old id.
 """
 
 from __future__ import annotations

@@ -24,6 +24,7 @@ import pytest
 
 from src.config import ChunkIndexerSettings
 from src.database.repositories.bot_config import BotConfigRepository
+from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.chunks import ChunkRepository
 from src.database.repositories.messages import MessageRepository
@@ -93,6 +94,14 @@ async def _clean(db_pool: asyncpg.Pool):
             await db_pool.execute("DELETE FROM chat_chunks WHERE chat_id = $1", chat)
             await db_pool.execute("DELETE FROM chat_messages WHERE chat_id = $1", chat)
             await db_pool.execute("DELETE FROM chat_settings WHERE chat_id = $1", chat)
+        # `db_pool` is not the rolled-back `db_conn` fixture -- writes here are
+        # real and outlive the test. Migration 001 seeds this global default as
+        # true and the gate test below flips it, which without this line
+        # followed the rest of the session and turned indexing off for every
+        # later test in whatever order pytest picked.
+        await db_pool.execute(
+            "UPDATE bot_config SET value = 'true'::jsonb WHERE key = 'default_save_messages'"
+        )
 
     await wipe()
     yield
@@ -459,6 +468,77 @@ class TestIndexerEndToEnd:
         result = await self._indexer(db_pool, _FakeRouter()).run_once()
 
         assert result == {"chats": 0, "chunks": 0, "embedded": 0}
+
+    async def test_a_migrated_chats_tail_is_still_indexed(
+        self, db_pool: asyncpg.Pool, messages: MessageRepository, chunks: ChunkRepository
+    ) -> None:
+        """TD-104: a group becoming a supergroup must not orphan its history.
+
+        Driven through the real `ChatMigrationRepository.migrate()` rather
+        than a hand-written UPDATE. The defect was two correct pieces
+        disagreeing about where a chat lives, and a fixture that re-keys the
+        row its own way can easily move it somewhere production never does --
+        proving something about the fixture instead of about the migration.
+        """
+        await self._seed_closed_conversation(messages, db_pool)
+        outcome = await ChatMigrationRepository(db_pool).migrate(CHAT_ID, OTHER_CHAT)
+
+        assert outcome.status == "migrated", "fixture precondition: the settings row moved"
+        assert (
+            await db_pool.fetchval("SELECT count(*) FROM chat_messages WHERE chat_id = $1", CHAT_ID)
+            == 6
+        ), "the migration deliberately leaves messages behind -- that is the whole premise"
+
+        result = await self._indexer(db_pool, _FakeRouter()).run_once()
+
+        assert result["chunks"] == 1
+        assert await chunks.counts(CHAT_ID) == {"total": 1, "pending": 0}
+
+    async def test_a_chat_with_no_settings_row_still_obeys_the_global_gate(
+        self, db_pool: asyncpg.Pool, messages: MessageRepository
+    ) -> None:
+        """Enumerating from the message table must not become a way around
+        `save_messages`.
+
+        A chat with no row of its own is answered by the global layer, and
+        that answer has to be honoured -- otherwise the fix for TD-104 would
+        have quietly made the orphaned chats the only ones the owner cannot
+        switch off.
+        """
+        await self._seed_closed_conversation(messages, db_pool)
+        await db_pool.execute("DELETE FROM chat_settings WHERE chat_id = $1", CHAT_ID)
+        await BotConfigRepository(db_pool).set("default_save_messages", False)
+
+        assert await self._indexer(db_pool, _FakeRouter()).run_once() == {
+            "chats": 0,
+            "chunks": 0,
+            "embedded": 0,
+        }
+
+    async def test_a_chat_the_settings_table_never_heard_of_is_indexed(
+        self, db_pool: asyncpg.Pool, messages: MessageRepository, chunks: ChunkRepository
+    ) -> None:
+        """The positive half of the pair above, and it also exercises the
+        title fallback: with no settings row there is no `chat_title`, and the
+        header has to render without one rather than raise."""
+        await self._seed_closed_conversation(messages, db_pool)
+        await db_pool.execute("DELETE FROM chat_settings WHERE chat_id = $1", CHAT_ID)
+
+        assert (await self._indexer(db_pool, _FakeRouter()).run_once())["chunks"] == 1
+        assert await chunks.counts(CHAT_ID) == {"total": 1, "pending": 0}
+        content = await db_pool.fetchval(
+            "SELECT content FROM chat_chunks WHERE chat_id = $1", CHAT_ID
+        )
+        assert "реплика номер 0" in content
+        # Assert the HEADER, not merely that nothing raised. `_render_header`
+        # takes the no-title branch here, and a version that interpolated the
+        # raw value would write `Чат «None», …` into every chunk of every
+        # settings-less chat -- embedded and FTS-indexed -- while a body-only
+        # assertion passed just the same.
+        header = content.splitlines()[0]
+        assert header.startswith("Чат, "), header
+        assert "None" not in header, header
+        assert "«" not in header, header
 
     async def test_an_embedding_outage_leaves_the_chunk_pending(
         self, db_pool: asyncpg.Pool, messages: MessageRepository, chunks: ChunkRepository

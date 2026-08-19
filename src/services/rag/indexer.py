@@ -129,17 +129,46 @@ class ChatChunkIndexer:
         chats_indexed = 0
 
         settings_repo = ChatSettingsRepository(self._pool)
-        for row in await settings_repo.list_all():
-            chat_id = int(row["chat_id"])
+        messages_repo = MessageRepository(self._pool)
+        # The list of chats comes from the table this worker actually reads;
+        # titles come from settings, when there are any. Enumerating settings
+        # conflated the two, and a chat whose settings row had moved away from
+        # its messages -- what a group->supergroup upgrade does -- stopped
+        # being indexed for ever (TD-104; see `MessageRepository.list_chat_ids`
+        # for the mechanism and the deadline). A chat with settings but no
+        # messages loses nothing by being absent here: it would produce no
+        # chunk either way.
+        titles = {int(row["chat_id"]): row["chat_title"] for row in await settings_repo.list_all()}
+        for chat_id in await messages_repo.list_chat_ids():
             try:
+                # The gate is `save_messages`, not the whitelist: a chat
+                # disabled after years of saved history still owns that
+                # history, and freezing its index at the moment of a whitelist
+                # change would be a silent, unrecoverable edit to the bot's
+                # memory. For a chat with no settings row the merge resolves
+                # to the global default, which is the same answer the messages
+                # themselves were written under.
                 config = await self._chat_config.get_config(chat_id)
             except Exception:
                 logger.exception("Chunk indexer could not resolve chat config", chat_id=chat_id)
                 continue
             if not config.save_messages:
                 continue
+            if chat_id not in titles:
+                # An id with messages and no settings row is a chat whose row
+                # was re-keyed away from it -- the TD-104 case. Say so, every
+                # pass, because it is the one chat whose gate is NOT the
+                # owner's own setting (that travelled to the new id) but the
+                # global default, and there is no admin screen that shows it.
+                # TD-113 covers making it governable; until then this line is
+                # the only way to notice it exists.
+                logger.info(
+                    "Indexing a chat with no settings row -- gated by the global default",
+                    chat_id=chat_id,
+                    save_messages=config.save_messages,
+                )
             try:
-                written = await self._index_chat(chat_id, row["chat_title"])
+                written = await self._index_chat(chat_id, titles.get(chat_id))
             except Exception:
                 # One unhealthy chat must not stall every other chat's index,
                 # and the next pass retries it from the same watermark.
