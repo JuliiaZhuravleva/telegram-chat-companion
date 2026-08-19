@@ -25,9 +25,13 @@ _TAG_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
-# Any line break — including the lone \r and the U+2028/U+2029 separators that
-# str.splitlines() treats as breaks — collapses so one message stays one line.
-_NEWLINE_PATTERN = re.compile(r"[\r\n\u2028\u2029]+")
+# Any line break — the class is `str.splitlines()`'s, in full. The earlier
+# version named that standard and then listed four of its ten characters:
+# \v, \f, \x1c, \x1d, \x1e and \x85 all make `splitlines()` return two lines
+# and all survived unchanged, so a consumer that splits lines (a tokenizer, a
+# log viewer, a future reader of a chunk) saw a forged line while the comment
+# promised it could not exist.
+_NEWLINE_PATTERN = re.compile(r"[\r\n\v\f\x1c\x1d\x1e\x85\u2028\u2029]+")
 
 # The row marker of the chat-history line format (see sanitize_history_field).
 _UID_MARKER_PATTERN = re.compile(r"\[uid:", re.IGNORECASE)

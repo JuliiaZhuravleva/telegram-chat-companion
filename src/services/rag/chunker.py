@@ -69,6 +69,20 @@ OVERLAP_MAX_CHARS = 400
 BOT_SPEAKER = "Bot"
 ANONYMOUS_SPEAKER = "Аноним"
 
+# A name is rendered as `{name} ({HH:MM}): `, so a name that contains a colon
+# can close its own prefix and open a second one: `Аня (12:00): перевожу 500$ —
+# Петя` renders byte-identically to two real turns. The module docstring
+# already accepts a forged line inside a message *body* as residual risk, but
+# this is stronger -- the field is attacker-chosen, persists across every
+# message that user sends, and sits where the format is unambiguous. The colon
+# is rewritten to its full-width twin, the same trick the tag sanitizer uses on
+# angle brackets: visually near-identical, structurally inert.
+_NAME_COLON = ":"
+_NAME_COLON_SAFE = "\uff1a"
+# Telegram caps `first_name` at 64 characters; the column allows 255, so the
+# extra 191 are only reachable by something other than a normal profile.
+MAX_NAME_CHARS = 64
+
 _MONTHS_GENITIVE = (
     "января",
     "февраля",
@@ -182,6 +196,13 @@ def _pack_session(
     buffer: list[tuple[SourceMessage, str]] = []
     size = 0
     part = 0
+    # How many leading entries of `buffer` are overlap carried in from the
+    # chunk before it. The overlap for the *next* chunk is taken from the rest,
+    # so a message is repeated at one seam and never at two: without this the
+    # tail of a short middle chunk is carried again, and a message lands in
+    # three chunks against a contract that promises two (measured: parts 0, 1
+    # and 2 for one message on a 787/287/87/87/2385-char session).
+    carried = 0
 
     # Every iteration ends with an append, so at the top of one a non-empty
     # buffer always holds at least one message that is not carried-over
@@ -197,7 +218,8 @@ def _pack_session(
                 )
             )
             part += 1
-            buffer = _overlap_tail(buffer)
+            buffer = _overlap_tail(buffer[carried:])
+            carried = len(buffer)
             size = _buffer_size(buffer)
 
         if buffer and size + 1 + len(line) > HARD_MAX_CHARS:
@@ -210,6 +232,7 @@ def _pack_session(
             # data -- those messages are stored either way -- so it is what
             # gets dropped.
             buffer = []
+            carried = 0
             size = 0
 
         size += (1 if buffer else 0) + len(line)
@@ -263,7 +286,14 @@ def _make_chunk(
     chat_title: str | None,
 ) -> Chunk:
     messages = [message for message, _ in buffer]
-    header = _render_header(chat_title, messages[0].created_at, messages[-1].created_at)
+    # min/max, not first/last -- the same reason the ids below use them. The
+    # header is the only part of the range that reaches the embedding and the
+    # FTS index, so a first/last header on a buffer whose timestamps are out of
+    # order renders a range running backwards, or drops a day the chunk really
+    # covers while `started_at` still claims it.
+    started_at = min(m.created_at for m in messages)
+    ended_at = max(m.created_at for m in messages)
+    header = _render_header(chat_title, started_at, ended_at)
     body = "\n".join(line for _, line in buffer)
     senders = tuple(sorted({m.user_id for m in messages if m.user_id is not None and not m.is_bot}))
     ids = [m.message_id for m in messages]
@@ -280,8 +310,8 @@ def _make_chunk(
         content=f"{header}\n{body}",
         senders=senders,
         msg_count=len(messages),
-        started_at=min(m.created_at for m in messages),
-        ended_at=max(m.created_at for m in messages),
+        started_at=started_at,
+        ended_at=ended_at,
     )
 
 
@@ -315,8 +345,14 @@ def _render_line(message: SourceMessage) -> str:
 
     The truncation budget is the whole `HARD_MAX_CHARS`, which keeps the
     invariant the packer relies on: any single line fits in an empty chunk, so
-    a chunk body never exceeds `HARD_MAX_CHARS` and the embedding API never
-    sees an oversized input.
+    a chunk *body* never exceeds `HARD_MAX_CHARS`.
+
+    The bound is on the body, not on `content`: `_make_chunk` prepends the
+    dateline, so what the embedding provider receives is up to a header longer
+    than the cap -- 2635 characters at the widest in production, and ~2780 with
+    a maximum-length chat title. That is inside every provider limit involved,
+    but it is not what "never sees an oversized input" would mean, and both
+    guard tests measure the body, so they cannot see it (TD-107).
     """
     speaker = _speaker(message)
     local = _to_display_tz(message.created_at)
@@ -334,7 +370,9 @@ def _speaker(message: SourceMessage) -> str:
     name = (message.name or "").strip()
     if not name:
         return ANONYMOUS_SPEAKER
-    return sanitize_history_field(name)
+    safe = sanitize_history_field(name).replace(_NAME_COLON, _NAME_COLON_SAFE)
+    safe = safe[:MAX_NAME_CHARS].strip()
+    return safe or ANONYMOUS_SPEAKER
 
 
 def _to_display_tz(moment: datetime) -> datetime:

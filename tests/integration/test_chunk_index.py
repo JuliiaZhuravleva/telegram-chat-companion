@@ -258,6 +258,30 @@ class TestSourceQuery:
 
         assert [row["message_id"] for row in rows] == [101, 102, 103]
 
+    async def test_no_row_python_calls_empty_survives_the_sql_filter(
+        self, messages: MessageRepository
+    ) -> None:
+        """SQL and `source_messages` must agree on "empty", character for character.
+
+        The cases come from Python's own definition -- every code point whose
+        `.strip()` is empty -- rather than from a list matching the predicate,
+        so the test cannot be a mirror of the implementation. This is the
+        starvation `get_for_chunking`'s docstring promises to prevent: `LIMIT`
+        counts rows, not usable rows, so a batch of rows the chunker will drop
+        yields no chunk, leaves the watermark unmoved and is re-read for ever.
+        `btrim(content)` trimmed only U+0020 and let every one of these through.
+        """
+        blanks = [chr(code) for code in range(0x3001) if chr(code).strip() == ""]
+        assert "\u00a0" in blanks and "\n" in blanks  # the fixture reaches the gap
+
+        for offset, blank in enumerate(blanks):
+            await messages.save(CHAT_ID, 200 + offset, "text", user_id=501, content=blank)
+        await messages.save(CHAT_ID, 900, "text", user_id=501, content="настоящее сообщение")
+
+        rows = await messages.get_for_chunking(CHAT_ID, after_message_id=0, limit=1000)
+
+        assert [row["message_id"] for row in rows] == [900]
+
     async def test_the_watermark_excludes_what_is_already_indexed(
         self, messages: MessageRepository
     ) -> None:
