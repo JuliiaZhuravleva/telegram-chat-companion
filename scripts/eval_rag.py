@@ -52,10 +52,13 @@ from scripts.eval_metrics import compute_metrics, format_metrics
 from scripts.eval_schema import EvalCase, EvalCaseFileError, load_cases
 from src.config import Settings
 from src.database.connection import close_pool, create_pool
+from src.database.repositories.chunks import ChunkRepository
 from src.database.repositories.memory import MemoryRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
+from src.services.rag.chunk_retrieval import ChunkRetrievalService
 from src.services.rag.memory import RAGMemoryService
+from src.services.rag.protocols import SearchBackend
 from src.services.text.query_hygiene import strip_bot_address
 
 logger = structlog.get_logger(__name__)
@@ -118,7 +121,7 @@ class CaseResult:
 async def run_eval(
     cases: list[EvalCase],
     *,
-    service: RAGMemoryService,
+    service: SearchBackend,
     ai_router: AIRouter,
     trigger_words: Sequence[str],
 ) -> list[CaseResult]:
@@ -214,8 +217,25 @@ def _print_results(results: list[CaseResult]) -> None:
         elif result.search_error is not None:
             status = f"SEARCH-ERROR ({result.search_error})"
         else:
-            best_sim = max((hit["similarity"] for hit in result.hits), default=0.0)
-            status = f"{len(result.hits)} hit(s), best_sim={best_sim:.3f}"
+            # `similarity` is None for a chunk the lexical leg found while its
+            # embedding was still pending, and for every row when the query
+            # itself could not be embedded. `max()` over a list holding one
+            # None raises TypeError, and `format(None, '.3f')` raises even for
+            # a single hit -- here, at the very last step, after every provider
+            # call for the whole case set is already paid for. The identical
+            # guard exists in `compute_metrics`; this sibling one function away
+            # was missed, and two independent reviewers found it before a run
+            # against the partially-embedded S5 corpus did.
+            sims = [
+                hit["similarity"]
+                for hit in result.hits
+                if isinstance(hit.get("similarity"), int | float)
+                and not isinstance(hit.get("similarity"), bool)
+            ]
+            best = f"{max(sims):.3f}" if sims else "n/a"
+            unscored = len(result.hits) - len(sims)
+            suffix = f", {unscored} unscored" if unscored else ""
+            status = f"{len(result.hits)} hit(s), best_sim={best}{suffix}"
         print(f"[{case.stratum}] chat={case.chat_id} {case.question[:70]!r} -> {status}")
 
 
@@ -237,6 +257,18 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             f"Eval case file, repeatable (default: {DEFAULT_CASES_PATH} -- the "
             "tracked synthetic template; pass internal/eval/cases.json for the "
             "real golden set once S3b fills it in)."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("memory", "chunks"),
+        default="memory",
+        help=(
+            "Which store to replay against: 'memory' = chat_memory Q&A pairs "
+            "(the recorded baselines), 'chunks' = the chat_chunks conversation "
+            "index (S5). Both read the same DSN, so a database holding both "
+            "answers the same cases twice. Read the comparability warning that "
+            "a chunks run prints before putting the two numbers side by side."
         ),
     )
     parser.add_argument(
@@ -281,18 +313,38 @@ async def main(argv: list[str] | None = None) -> int:
     try:
         pool = await create_pool(args.dsn, min_size=_POOL_MIN_SIZE, max_size=_POOL_MAX_SIZE)
         try:
-            service = RAGMemoryService(
-                memory_repo=MemoryRepository(pool),
-                ai_router=ai_router,
-                min_similarity=(
-                    args.min_similarity
-                    if args.min_similarity is not None
-                    else settings.rag.min_similarity
-                ),
-                max_results=(
-                    args.max_results if args.max_results is not None else settings.rag.max_results
-                ),
+            max_results = (
+                args.max_results if args.max_results is not None else settings.rag.max_results
             )
+            service: SearchBackend
+            if args.backend == "chunks":
+                # No floor unless one is asked for. `rag.min_similarity` was
+                # derived on `chat_memory`, whose documents are built out of
+                # the raw exchange and so share the query's boilerplate;
+                # chunks sit on a differently-offset scale (measured, see
+                # docs/rag-eval-baseline.md). Defaulting it in here would
+                # carry a number across exactly the discontinuity that
+                # document warns about, and the resulting blind rate would
+                # look like a finding.
+                service = ChunkRetrievalService(
+                    ChunkRepository(pool),
+                    ai_router,
+                    max_results=max_results,
+                    min_similarity=(
+                        args.min_similarity if args.min_similarity is not None else 0.0
+                    ),
+                )
+            else:
+                service = RAGMemoryService(
+                    memory_repo=MemoryRepository(pool),
+                    ai_router=ai_router,
+                    min_similarity=(
+                        args.min_similarity
+                        if args.min_similarity is not None
+                        else settings.rag.min_similarity
+                    ),
+                    max_results=max_results,
+                )
 
             results = await run_eval(
                 cases,

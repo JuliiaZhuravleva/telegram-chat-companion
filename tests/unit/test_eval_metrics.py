@@ -277,3 +277,125 @@ class TestFormatMetrics:
         text = format_metrics(metrics)
 
         assert "best-sim percentiles: n/a" in text
+
+
+def _chunk_hit(msg_from: int, msg_to: int, similarity: float | None = 0.8) -> dict[str, Any]:
+    """A `chat_chunks` hit: a span of messages, not a pointer to one."""
+    return {
+        "id": 1,
+        "content": "x",
+        "similarity": similarity,
+        "rrf_score": 0.03,
+        "vec_rank": 1,
+        "fts_rank": None,
+        "msg_from": msg_from,
+        "msg_to": msg_to,
+    }
+
+
+class TestChunkHitsAreScoredByRange:
+    """S5: two stores answer through this harness and their hits differ in shape.
+
+    The failure this guards is not a wrong score but a *plausible* one: before
+    range support, every chunk hit lacked `source_message_id` and scored as a
+    miss, so a store returning perfect answers measured recall 0.000 -- a number
+    indistinguishable from genuinely terrible retrieval.
+    """
+
+    def test_a_chunk_overlapping_the_expected_range_counts(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[_chunk_hit(130, 145)])
+
+        metrics = compute_metrics([result], k=5)
+
+        assert metrics.recall_at_k == 1.0
+        assert metrics.n_range_matched == 1
+
+    def test_a_chunk_that_ends_before_the_range_is_a_miss(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[_chunk_hit(100, 139)])
+
+        metrics = compute_metrics([result], k=5)
+
+        assert metrics.recall_at_k == 0.0
+        assert metrics.n_range_matched == 0
+
+    def test_a_chunk_that_starts_after_the_range_is_a_miss(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[_chunk_hit(143, 200)])
+
+        metrics = compute_metrics([result], k=5)
+
+        assert metrics.recall_at_k == 0.0
+
+    def test_touching_the_range_by_one_message_counts(self) -> None:
+        """Overlap is inclusive at both edges: a chunk ending exactly on the
+        first expected message does contain it."""
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[_chunk_hit(100, 140)])
+
+        assert compute_metrics([result], k=5).recall_at_k == 1.0
+
+    def test_a_hit_with_neither_shape_is_a_miss_not_a_crash(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[{"id": 1, "content": "x", "similarity": 0.9}])
+
+        assert compute_metrics([result], k=5).recall_at_k == 0.0
+
+    def test_a_pointed_hit_is_not_counted_as_range_matched(self) -> None:
+        """`n_range_matched` exists to warn that a number came from the loose
+        chunk path; a `chat_memory` run must leave it at zero or the warning
+        fires on every run and stops meaning anything."""
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[_hit(141, 0.9)])
+
+        assert compute_metrics([result], k=5).n_range_matched == 0
+
+    def test_the_report_says_the_number_is_not_comparable(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 140, "end": 142}])
+        result = CaseResult(case=case, hits=[_chunk_hit(130, 145)])
+
+        text = format_metrics(compute_metrics([result], k=5))
+
+        assert "NOT COMPARABLE" in text
+        assert "upper bound" in text
+
+
+class TestRowsWithoutSimilarity:
+    """A lexical hit on a not-yet-embedded chunk has no similarity.
+
+    `max()` over a list holding one None raises TypeError, and it does so at
+    the very last step of a run -- after every provider call is already paid
+    for. That is a whole eval run lost to a row that should simply have been
+    skipped.
+    """
+
+    def test_a_none_similarity_does_not_crash_the_percentiles(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 1, "end": 999}])
+        result = CaseResult(case=case, hits=[_chunk_hit(10, 20, None), _chunk_hit(30, 40, 0.6)])
+
+        metrics = compute_metrics([result], k=5)
+
+        assert metrics.best_sim_percentiles[50] == pytest.approx(0.6)
+        assert metrics.n_no_similarity == 1
+
+    def test_a_case_whose_hits_all_lack_similarity_is_left_out_of_percentiles(self) -> None:
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 1, "end": 999}])
+        result = CaseResult(case=case, hits=[_chunk_hit(10, 20, None)])
+
+        metrics = compute_metrics([result], k=5)
+
+        assert metrics.best_sim_percentiles == {}
+        assert metrics.n_best_sim == 0
+        assert metrics.n_no_similarity == 1
+
+    def test_it_is_still_credited_as_a_hit_and_not_blind(self) -> None:
+        """No similarity is a missing *score*, not a missing answer -- the row
+        was returned and would be injected."""
+        case = _make_case(stratum="found", expected_message_id_ranges=[{"start": 1, "end": 999}])
+        result = CaseResult(case=case, hits=[_chunk_hit(10, 20, None)])
+
+        metrics = compute_metrics([result], k=5)
+
+        assert metrics.recall_at_k == 1.0
+        assert metrics.blind_rate == 0.0

@@ -164,6 +164,73 @@ stratum, no `answer-absent` negative control, percentiles over 4 hits. Treat
 deltas as directional. The value of this run is that it is *reproducible*, which
 Baseline 1 stopped being.
 
+## Why the recorded baselines cannot judge S5 on their own
+
+Recorded during S5 (2026-08-19), **before** running the comparison, because it
+changes what a number from this file is allowed to mean.
+
+The obvious way to judge the chunk index is to re-run the case file against it
+and compare with Baseline 2. That comparison is invalid, in the flattering
+direction, for two independent reasons:
+
+1. **The cases have no pinpointed answer.** `harvest_auto_strata.py` sets
+   `expected_message_id_ranges` to the widest honest bound -- "anywhere at or
+   before the question" -- because nobody has verified which message actually
+   answers any of them. A `chat_memory` row points at one message, so that
+   bound still discriminates a little; a `chat_chunks` row *spans* a range, and
+   essentially every chunk from the chat's past overlaps the bound. Recall@k
+   for chunks is therefore ~1.0 by construction. `compute_metrics` counts these
+   as `n_range_matched` and `format_metrics` prints **NOT COMPARABLE** whenever
+   it is non-zero, so the number cannot be quoted without the warning attached.
+2. **The floors are on different scales, and a floor-free run has no blind
+   rate.** Baseline 2's primary number is the blind rate at
+   `rag.min_similarity = 0.7`. Chunks have no calibrated floor (S6's job), and
+   running them without one makes the blind rate 0.000 -- which measures the
+   absence of a threshold, not the presence of an answer. Importing 0.7 instead
+   is the mistake this document already warns about one section up: the two
+   stores' similarities are offset relative to each other, because
+   `chat_memory`'s documents are built out of the raw exchange and share the
+   query's boilerplate while chunks are ordinary conversation.
+
+So Baseline 2 stays the ruler for **the Q&A store**, and S5 is judged on two
+other things instead, produced by `scripts/eval_compare.py`:
+
+- **Coverage** -- what share of the conversation each store can return at all.
+  No ground truth needed, and it is the revision's central claim.
+- **A graded side-by-side** -- both stores' floor-free top-k for the same
+  questions, written to `internal/eval/` (real chat content, gitignored) for a
+  human or judge to mark. Those marks are the pinpointed golden set S3b wants;
+  once it exists, recall@k becomes meaningful for both stores at once and this
+  section can be retired.
+
+### State of the S5 comparison (2026-08-19)
+
+Coverage is measured and recorded above. The graded side-by-side is **not yet
+run**, for a reason worth writing down rather than retrying blindly: building
+the chunk index over the eval corpus consumed the day's free-tier embedding
+allowance. 982 chunks of 2 841 embedded, after which every request — including
+a single one made after 100 seconds of zero load — came back refused. The error
+text says "rate limit" in both cases, so "the daily cap is spent" is the leading
+explanation and not a proven one; what is certain is that no further embedding,
+including the *query* embeddings the comparison itself needs, succeeded.
+
+Nothing is lost. The half-built corpus is dumped to
+`internal/dumps/s5-corpus-with-chunks.dump` (custom format, gitignored — real
+chat content) and verified the way this document requires: `pg_restore -f
+/dev/null`, which reads every data block, not `--list`, which reads only the
+table of contents and calls a truncated archive healthy.
+
+Every chat except the largest is **fully** embedded, and 5 of the 11 cases live
+in those chats — so the comparison can be run on a labelled subset the moment
+the allowance resets, and completed for the remaining 6 after the largest chat
+finishes indexing.
+
+The building of that index paid for itself before producing a number: it
+surfaced a defect in the chunk indexer, where a mid-batch rate limit charged
+failures against healthy rows and parked 58 of them in memory across two runs,
+in tables that are exempt from retention. See the router's `_is_retriable` and
+`ChatChunkIndexer._account_for_failures`.
+
 ## Reproducing
 
 The two throwaway databases are the ruler, and until 2026-08-19 they existed
@@ -189,6 +256,29 @@ python -m scripts.harvest_auto_strata postgresql://r:r@127.0.0.1:55435/n8n \
 python -m scripts.eval_rag postgresql://r:r@127.0.0.1:55434/companion \
     --cases internal/eval/cases_auto_harvest.json
 ```
+
+For the S5 comparison the two stores must live in **one** database, so that the
+same case file, the same query embedding and the same `before` bound reach both:
+
+```
+# 1. A migrated scratch database, then load both corpora into it
+docker run -d --name rag-s5-scratch -e POSTGRES_USER=r -e POSTGRES_PASSWORD=r \
+    -e POSTGRES_DB=companion -p 127.0.0.1:55437:5432 pgvector/pgvector:pg16
+DATABASE_URL=postgresql://r:r@127.0.0.1:55437/companion alembic upgrade head
+#   chat_messages from the n8n corpus, chat_memory from the seed corpus;
+#   or restore internal/dumps/s5-corpus-with-chunks.dump, which already holds
+#   both plus whatever of the chunk index was built.
+
+# 2. Build the chunk index with the real indexer (needs embedding allowance)
+python -m scripts.backfill_chunks postgresql://r:r@127.0.0.1:55437/companion
+
+# 3. Coverage + the graded side-by-side
+python -m scripts.eval_compare postgresql://r:r@127.0.0.1:55437/companion \
+    --cases internal/eval/cases_auto_harvest.json
+```
+
+`chat_settings` in the scratch database needs `save_messages = true` for every
+chat, or the indexer correctly skips them all and the run looks like a bug.
 
 The seed database is named `companion`, not `rag`. Both DSNs are required
 positional arguments with no default (decided [Q1] in

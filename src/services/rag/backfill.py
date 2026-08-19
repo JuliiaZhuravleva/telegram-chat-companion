@@ -43,6 +43,7 @@ import structlog
 from src.config import EmbeddingBackfillSettings
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
+from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.rag.memory import EXPECTED_EMBEDDING_DIMENSIONS
 
@@ -68,9 +69,20 @@ class _Source:
 _INITIAL_DELAY = 180  # let startup settle before the first pass
 
 # Consecutive failures after which a row is parked (see module docstring).
-# Small on purpose: the point is to stop one bad row blocking the queue, and
-# a genuine provider outage fails every row in the batch equally, so parking
-# during an outage costs only the next restart's retry.
+# Small on purpose: the point is to stop one bad row blocking the queue.
+#
+# The second half of that sentence used to read "and a genuine provider outage
+# fails every row in the batch equally, so parking during an outage costs only
+# the next restart's retry". Both halves were wrong, and measuring beat
+# reasoning here (2026-08-19): a per-minute quota does NOT fail every row --
+# it trips partway through, so the earlier rows succeed and the healthy rows
+# behind the limit are the ones charged. And "only the next restart" is a long
+# time in a process that runs for weeks, over tables that are exempt from
+# retention. Rows parked that way stay `embedding IS NULL`, invisible to
+# retrieval, with nothing raised.
+#
+# So a failure is only charged when the provider says it is not worth
+# retrying; see `_process`.
 _MAX_ATTEMPTS = 3
 
 
@@ -214,7 +226,25 @@ class EmbeddingBackfillWorker:
                 embedding_result = await self._ai_router.generate_embedding(
                     row[source.text_field], chat_id=row["chat_id"]
                 )
+            except AIProviderError as exc:
+                # A retriable failure is a statement about the provider, not
+                # about this row: charging it would park a healthy row for the
+                # life of the process. `RateLimitError` sets the flag and the
+                # router carries it through its fallback (`_is_retriable`).
+                logger.warning(
+                    "Embedding backfill: provider still failing, leaving pending",
+                    source=source.name,
+                    row_id=row_id,
+                    error=str(exc),
+                    retriable=exc.retriable,
+                )
+                if not exc.retriable:
+                    self._record_failure(source.name, row_id)
+                still_pending += 1
+                continue
             except Exception:
+                # Anything that is not a provider error is this row's problem
+                # until proven otherwise -- that is what parking exists for.
                 logger.warning(
                     "Embedding backfill: provider still failing, leaving pending",
                     source=source.name,

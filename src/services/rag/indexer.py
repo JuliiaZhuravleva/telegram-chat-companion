@@ -99,6 +99,9 @@ class ChatChunkIndexer:
         self._task: asyncio.Task[None] | None = None
         self._failures: dict[int, int] = {}
         self._parked: set[int] = set()
+        # Consecutive passes that had rows to embed and embedded none. Reset on
+        # any progress; see `_embed_pending`.
+        self._stalled_passes = 0
 
     async def start(self) -> None:
         """Start the indexing loop (no-op when disabled by config)."""
@@ -179,12 +182,16 @@ class ChatChunkIndexer:
 
         embedded = await self._embed_pending()
 
-        if chunks_written or embedded:
+        # Gated on there being something to say -- but a *stalled* pass has
+        # something to say, and used to be indistinguishable from a
+        # caught-up one (both log nothing at all).
+        if chunks_written or embedded or self._stalled_passes:
             logger.info(
                 "Chunk indexer pass complete",
                 chats=chats_indexed,
                 chunks_written=chunks_written,
                 embedded=embedded,
+                stalled_passes=self._stalled_passes,
             )
         return {"chats": chats_indexed, "chunks": chunks_written, "embedded": embedded}
 
@@ -238,10 +245,14 @@ class ChatChunkIndexer:
                     task_type=INDEX_TASK_TYPE,
                 )
             except AIProviderError as exc:
-                # Almost always the whole provider being down, which fails
-                # every row in the batch equally; the next pass retries.
-                logger.warning("Chunk embedding failed", chunk_id=chunk_id, error=str(exc))
-                failed.append(chunk_id)
+                logger.warning(
+                    "Chunk embedding failed",
+                    chunk_id=chunk_id,
+                    error=str(exc),
+                    retriable=exc.retriable,
+                )
+                if not exc.retriable:
+                    failed.append(chunk_id)
                 continue
 
             if len(result.embedding) != EXPECTED_EMBEDDING_DIMENSIONS:
@@ -266,18 +277,60 @@ class ChatChunkIndexer:
             embedded += 1
 
         self._account_for_failures(failed, batch=len(pending))
+
+        # A pass that had work and completed none of it is the shape a
+        # sustained quota outage now takes: nothing is parked (correctly --
+        # the rows are healthy), so the queue never drains and never shrinks.
+        # Without this counter the only trace is one WARNING per row, which
+        # looks exactly like a transient blip repeated, and the pass summary
+        # below is gated on progress so it does not fire at all.
+        if pending and embedded == 0:
+            self._stalled_passes += 1
+            logger.warning(
+                "Chunk indexer embedded nothing this pass",
+                pending_in_batch=len(pending),
+                consecutive_stalled_passes=self._stalled_passes,
+                parked=len(self._parked),
+            )
+        else:
+            self._stalled_passes = 0
         return embedded
 
     def _account_for_failures(self, failed: list[int], *, batch: int) -> None:
-        """Count failures toward parking -- unless the whole batch failed.
+        """Count failures toward parking -- unless they were passing conditions.
 
-        Parking exists for a row the provider will never accept. A provider
-        that is down, rate-limiting, or answering with the wrong vector width
-        fails every row equally, and counting those would park the entire
-        backlog after three passes: a transient outage would turn into an
-        index that stops filling until someone restarts the process. The
-        distinction is cheap to make and there is no honest way to make it
-        per-row, because from here both look like an exception.
+        Parking exists for a row the provider will never accept, so that one
+        such row cannot sit at the head of a FIFO queue for ever. What must
+        never be parked is a healthy row that happened to be in flight during
+        an outage.
+
+        The first version of this told the two apart by counting: charge a
+        failure unless *every* row in the batch failed. That reasoning assumed
+        an outage is all-or-nothing, and a per-minute quota is not -- it trips
+        partway through, so the earlier rows succeed and the later ones fail,
+        `len(failed) < batch`, and every healthy row behind the limit is
+        charged. Measured 2026-08-19 backfilling a 2841-chunk corpus on the
+        free tier: **58 healthy chunks parked** across two runs, every one
+        behind a rate limit -- neither run produced a failure of any other
+        kind. Parking is in-process state and `chat_chunks` is exempt from
+        retention, so those rows stay unembedded until someone restarts the
+        bot, with nothing raised and nothing logged beyond a per-chunk warning.
+
+        (An earlier version of this note said 1859. That was the *pending*
+        count at the moment the backfill stalled -- a different quantity, and
+        the stall was the day's quota running out, not the parking. The number
+        reached three docstrings and a public document before being
+        re-measured.)
+
+        Now the provider answers the question instead of the arithmetic:
+        `AIProviderError.retriable` is set by `RateLimitError` and propagated
+        through the router's fallback, and a retriable failure never reaches
+        this function. A wrong-width vector and a permanently-refused input
+        still do, so the starvation guard keeps working.
+
+        The whole-batch check below is kept as a second net for a provider
+        failure that arrives without the flag: it costs nothing and it is the
+        one shape that is unambiguous.
         """
         if not failed:
             return

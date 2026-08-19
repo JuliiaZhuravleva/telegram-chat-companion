@@ -31,8 +31,15 @@ Design notes that are one-way doors, so they land here rather than later:
   then filters the chat. Revisit near ~50k chunks/chat.
 - **Generated `tsv`** rather than an application-side column: the FTS leg of
   S5's hybrid retrieval must never disagree with `content`, and a generated
-  column cannot drift. ё→е is normalised at index time; the query side must
-  apply the same `translate()` or "ёлка" and "елка" stop matching each other.
+  column cannot drift. The `translate()` normalising ё→е is symmetry insurance,
+  **not** the mechanism: measured on pg16 in S5, PostgreSQL's `russian`
+  configuration already folds ё→е unconditionally, including in words its
+  stemmer cannot know ("зёшка" → 'зешк'), so the call is a no-op here. It is
+  kept because the query side applies the identical expression and the pair
+  must move together -- swap the configuration for one without that folding
+  (`simple`) and the `translate()` becomes load-bearing on both sides at once.
+  The original claim here -- that without it "ёлка" and "елка" stop matching --
+  was wrong, and the test written to guard it could not fail.
 - **`emb_model` and `emb_task_type` per row.** Embeddings here are asymmetric
   (`RETRIEVAL_DOCUMENT` at index time, `RETRIEVAL_QUERY` at query time), which
   is only valid because this index is built from scratch -- `task_type`
