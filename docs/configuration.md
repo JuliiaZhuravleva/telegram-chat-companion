@@ -121,11 +121,17 @@ Four things about it that are behaviour, not tuning:
   come apart: Telegram gives a group a new `chat_id` when it becomes a supergroup, the
   settings row is re-keyed onto the new id and the message history deliberately is not.
   While the worker read the settings table, that history left the index for ever and
-  retention would eventually delete it — so the enumeration follows the data. A chat
-  with no settings row of its own is still gated, by the *global* `save_messages`.
-  Note what is not fixed: the recovered chunks carry the old `chat_id`, so retrieval
-  asking as the new supergroup will not find them until they are re-keyed. Preserved,
-  not yet reachable.
+  retention would eventually delete it — so the enumeration follows the data. Such a
+  chat is logged on every pass (`Indexing a chat with no settings row`), because two
+  things about it are not fixed here.
+  First, its gate is the *global* `default_save_messages`, not the owner's own toggle:
+  that travelled to the new id with the row. A chat that had turned saving off before
+  upgrading keeps gaining chunks where the bullet above says its memory should freeze,
+  and no admin screen shows it. Nothing stored is destroyed and no new messages are
+  saved.
+  Second, the recovered chunks carry the *old* `chat_id`, so retrieval asking as the
+  new supergroup will not find them until they are re-keyed. Preserved, not yet
+  reachable. Both want the same missing piece — a recorded `old → new` mapping.
 
 `python -m scripts.backfill_chunks <dsn>` runs the same worker in a loop when waiting
 for the schedule is not worth it — after a restore, or before a measurement.

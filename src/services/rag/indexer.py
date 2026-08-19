@@ -154,6 +154,19 @@ class ChatChunkIndexer:
                 continue
             if not config.save_messages:
                 continue
+            if chat_id not in titles:
+                # An id with messages and no settings row is a chat whose row
+                # was re-keyed away from it -- the TD-104 case. Say so, every
+                # pass, because it is the one chat whose gate is NOT the
+                # owner's own setting (that travelled to the new id) but the
+                # global default, and there is no admin screen that shows it.
+                # TD-113 covers making it governable; until then this line is
+                # the only way to notice it exists.
+                logger.info(
+                    "Indexing a chat with no settings row -- gated by the global default",
+                    chat_id=chat_id,
+                    save_messages=config.save_messages,
+                )
             try:
                 written = await self._index_chat(chat_id, titles.get(chat_id))
             except Exception:

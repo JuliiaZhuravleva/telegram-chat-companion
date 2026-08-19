@@ -530,6 +530,15 @@ class TestIndexerEndToEnd:
             "SELECT content FROM chat_chunks WHERE chat_id = $1", CHAT_ID
         )
         assert "реплика номер 0" in content
+        # Assert the HEADER, not merely that nothing raised. `_render_header`
+        # takes the no-title branch here, and a version that interpolated the
+        # raw value would write `Чат «None», …` into every chunk of every
+        # settings-less chat -- embedded and FTS-indexed -- while a body-only
+        # assertion passed just the same.
+        header = content.splitlines()[0]
+        assert header.startswith("Чат, "), header
+        assert "None" not in header, header
+        assert "«" not in header, header
 
     async def test_an_embedding_outage_leaves_the_chunk_pending(
         self, db_pool: asyncpg.Pool, messages: MessageRepository, chunks: ChunkRepository

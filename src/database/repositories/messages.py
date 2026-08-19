@@ -489,10 +489,21 @@ class MessageRepository:
         chat was already in exactly that state on 2026-08-19 -- 2 messages, no
         settings row, zero chunks.
 
-        Enumerating here changes *which* chats are considered, not whether the
-        owner's toggle is honoured: the indexer still resolves `save_messages`
-        per chat through the ordinary three-layer merge, which for a chat with
-        no settings row of its own is the global default.
+        Enumerating here changes *which* chats are considered; the indexer
+        still resolves `save_messages` per chat through the ordinary
+        three-layer merge. Be precise about what that means for an orphan,
+        because it is not "the same gate as before": the per-chat override
+        travelled to the new id along with the row, so what remains is the
+        global `default_save_messages` -- which migration 001 seeds true, and
+        which `chat_settings.save_messages`'s SQL `DEFAULT true` shadows for
+        every chat the bot has already seen (`src/bot/settings_fields.py`
+        documents the 13 legacy columns). A chat that had turned saving off
+        and then upgraded is therefore indexed under a default it did not
+        choose. Nothing already stored is destroyed and no new messages are
+        saved, but its index keeps growing where the documented contract says
+        it should freeze. TD-113; the honest fix needs the old->new mapping
+        TD-111 also wants. The indexer logs every such chat so the state is
+        at least visible.
 
         What this does **not** fix: the chunks are written under the old
         `chat_id`, so retrieval asking as the new supergroup still will not see
