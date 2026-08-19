@@ -62,7 +62,7 @@ class ChatConfigMiddleware(BaseMiddleware):
                     # first be seen via a reaction rather than a message -- a
                     # cause specific to that path would otherwise be invisible.
                     logger.warning(
-                        "Failed to update chat title",
+                        "Failed to update chat metadata (title/type/is_forum)",
                         chat_id=chat_id,
                         error=str(exc),
                         exc_info=True,

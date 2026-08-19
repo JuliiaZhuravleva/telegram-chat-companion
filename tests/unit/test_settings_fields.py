@@ -54,23 +54,23 @@ _EXPECTED_LEGACY_KEYS = frozenset(
 _CODE_RE = re.compile(r"^[a-z0-9]{1,4}$")
 
 
-# Mergeable fields deliberately absent from the settings panel: `enabled` is
-# the whitelist (managed from the admin DM, not the panel); `is_forum` is chat
-# metadata the middleware copies from Telegram's Chat object (TD-102) — a
-# toggle for it would invite overriding what only Telegram decides, and the
-# next event would silently write the truth back anyway.
-_NON_PANEL_FIELDS = frozenset({"enabled", "is_forum"})
-
-
 class TestRegistryCoverage:
     """The registry must track ChatConfig's mergeable fields exactly."""
 
-    def test_covers_all_mergeable_fields_except_non_panel(self):
+    def test_covers_all_mergeable_fields_except_enabled(self):
         registry_keys = set(FIELDS_BY_KEY)
-        assert registry_keys | _NON_PANEL_FIELDS == _CHAT_CONFIG_FIELDS
+        assert registry_keys | {"enabled"} == _CHAT_CONFIG_FIELDS
 
-    def test_non_panel_fields_are_excluded(self):
-        assert not _NON_PANEL_FIELDS & set(FIELDS_BY_KEY)
+    def test_enabled_is_excluded(self):
+        assert "enabled" not in FIELDS_BY_KEY
+
+    def test_is_forum_is_not_a_setting(self):
+        """chat_settings.is_forum (migration 030) is Telegram-observed
+        metadata for offline consumers — it must appear neither in the panel
+        registry nor in the merge, or a toggle/global default could override
+        what only Telegram decides (deep-review 2026-08-19)."""
+        assert "is_forum" not in FIELDS_BY_KEY
+        assert "is_forum" not in _CHAT_CONFIG_FIELDS
 
     def test_kb_organizer_ids_is_excluded(self):
         assert "kb_organizer_ids" not in FIELDS_BY_KEY

@@ -55,9 +55,13 @@ MODEL_PRICING: dict[str, ModelPricing] = {
     ),
     # OpenAI transcription
     "whisper-1": ModelPricing(per_minute=Decimal("0.006")),
-    # Token-priced (audio input / text output), roughly half of whisper-1
-    # per minute of speech. Verified 2026-08-19 against the official model
-    # page (developers.openai.com/api/docs/models/gpt-4o-mini-transcribe).
+    # Token-priced, roughly half of whisper-1 per minute of speech. Verified
+    # 2026-08-19 against the official pricing page: audio input $1.25/1M,
+    # text input $5/1M, output $5/1M. `usage.input_tokens` mixes both input
+    # kinds and we bill it all at the audio rate; audio is 97-99% of input on
+    # real traffic, so the text share (priced 4x higher) under-reports total
+    # cost by low single-digit percent. Split via
+    # `usage.input_token_details.{audio,text}_tokens` if that ever matters.
     "gpt-4o-mini-transcribe": ModelPricing(
         input_per_1m=Decimal("1.25"),
         output_per_1m=Decimal("5.00"),

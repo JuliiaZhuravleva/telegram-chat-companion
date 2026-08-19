@@ -321,15 +321,35 @@ class TestTranscribeAudio:
         assert result.duration == 3.5
         assert result.tokens_input is None
 
-    async def test_missing_usage_leaves_tokens_none(self, provider):
+    async def test_missing_usage_leaves_tokens_none_and_warns(self, provider):
+        """A token-priced model answering without usage would cost-log as $0
+        forever, indistinguishable from a free model — the one place that can
+        tell 'absent' from 'zero' must say so (deep-review 2026-08-19)."""
         mock_resp = _mock_response(json_data={"text": "test"})
 
-        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+        with (
+            patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp),
+            patch("src.services.ai.providers.openai.logger") as mock_logger,
+        ):
             result = await provider.transcribe_audio(b"audio")
 
         assert result.tokens_input is None
         assert result.tokens_output is None
         assert result.duration is None
+        mock_logger.warning.assert_called_once()
+
+    async def test_whisper_without_usage_does_not_warn(self, provider):
+        """False-positive control: whisper-1 never returns usage tokens — its
+        cost comes from duration, so the absence is normal, not a silent zero."""
+        mock_resp = _mock_response(json_data={"text": "Hello", "duration": 2.0})
+
+        with (
+            patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp),
+            patch("src.services.ai.providers.openai.logger") as mock_logger,
+        ):
+            await provider.transcribe_audio(b"audio", model="whisper-1")
+
+        mock_logger.warning.assert_not_called()
 
     async def test_with_language_hint(self, provider):
         mock_resp = _mock_response(json_data={"text": "Привет", "language": "ru"})

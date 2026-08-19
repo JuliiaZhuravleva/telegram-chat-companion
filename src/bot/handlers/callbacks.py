@@ -40,6 +40,7 @@ async def handle_summary_callback(
     callback: CallbackQuery,
     chat_config: ChatConfig,
     summary_service: FromDishka[SummaryService],
+    message_thread_id: int | None = None,
 ) -> None:
     """Handle summary button press from help keyboard."""
     parts = (callback.data or "").split(":")
@@ -81,14 +82,17 @@ async def handle_summary_callback(
     processing = "⏳ Генерирую..." if lang == "ru" else "⏳ Generating..."
     await callback.answer(processing)
 
-    # Forum-aware summary: filter by topic if applicable
-    thread_id: int | None = getattr(msg, "message_thread_id", None)
-
+    # Forum-aware summary: filter by topic if applicable. The thread id MUST
+    # come from TopicMiddleware's handler kwarg, which is None unless the chat
+    # is a real forum — reading it raw off the bot's own message (as this code
+    # once did) picks up the thread id Telegram stamps on linked-channel
+    # discussion comments, silently narrowing the refresh to ~2 messages while
+    # the /summary command right next to it covers the whole chat (TD-102).
     html = await summary_service.generate(
         msg.chat.id,
         count=count,
         language=lang,
-        message_thread_id=thread_id,
+        message_thread_id=message_thread_id,
     )
 
     if not html:

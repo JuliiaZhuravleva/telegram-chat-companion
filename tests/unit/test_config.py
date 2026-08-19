@@ -72,6 +72,26 @@ class TestLoadYamlConfig:
         assert kb_module["enabled"] is False
         assert "embeddings" in kb_module["requires"]
 
+    def test_transcription_model_sources_agree(self):
+        """The default transcription model lives in three places: the YAML
+        task config (what the router actually uses), DEFAULT_MODELS (the
+        cost-policy registry tests audit), and the provider's hardcoded
+        fallback for when task config is absent. Nothing at runtime forces
+        them to match — this test does (deep-review 2026-08-19)."""
+        import inspect
+
+        from src.services.ai.capabilities import DEFAULT_MODELS
+        from src.services.ai.providers.openai import OpenAIProvider
+
+        config = load_yaml_config()
+        yaml_model = config["ai"]["tasks"]["transcription"]["model"]
+        assert yaml_model == DEFAULT_MODELS["openai"]["transcription"]
+
+        # The provider fallback is a literal in transcribe_audio; assert on
+        # the source rather than invoking the network path.
+        source = inspect.getsource(OpenAIProvider.transcribe_audio)
+        assert f'model or "{yaml_model}"' in source
+
     def test_default_config_uses_no_expensive_models(self):
         """Cost policy: default.yml must only use cheap models."""
         config = load_yaml_config()

@@ -415,7 +415,11 @@ class AIRouter:
         # chain only ever picked the provider, and the model fell through to
         # the provider's hardcoded default. Resolve it here so config is what
         # actually chooses the model (fallback_models covers non-primary
-        # providers, same shape text_generation uses).
+        # providers, same shape text_generation uses) — including
+        # generate_text's caller-override priority: a caller passing model=
+        # targets a specific provider (the CLAUDE.md idiom), and without the
+        # pop it would collide with the explicit model= kwarg below.
+        caller_model = kwargs.pop("model", None)
         task_config = self._settings.ai.tasks.get("transcription")
 
         last_error: Exception | None = None
@@ -424,8 +428,8 @@ class AIRouter:
             if not provider_supports(provider_name, "transcription"):
                 continue
 
-            model: str | None = None
-            if task_config is not None:
+            model: str | None = caller_model
+            if model is None and task_config is not None:
                 if provider_name == task_config.provider:
                     model = task_config.model
                 else:

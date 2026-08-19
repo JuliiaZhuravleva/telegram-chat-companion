@@ -264,6 +264,20 @@ class OpenAIProvider(AIProvider):
         result: dict[str, Any] = resp.json()
         text = result.get("text", "")
         usage = result.get("usage") or {}
+        tokens_input = usage.get("input_tokens")
+        tokens_output = usage.get("output_tokens")
+
+        # A token-priced model answering without usage numbers would cost-log
+        # as $0 — indistinguishable from a genuinely free model, forever, with
+        # nothing else in the chain noticing (calculate_cost skips falsy
+        # tokens, _log_usage happily writes the zero). Say it here, at the
+        # only place that knows the numbers were absent rather than zero.
+        if not model.startswith("whisper") and tokens_input is None:
+            logger.warning(
+                "Transcription response carried no usage tokens; cost will be logged as zero",
+                model=model,
+                response_keys=list(result.keys()),
+            )
 
         return TranscriptionResult(
             text=text,
@@ -271,8 +285,8 @@ class OpenAIProvider(AIProvider):
             provider=self.name,
             language=result.get("language") or language,
             duration=result.get("duration"),
-            tokens_input=usage.get("input_tokens"),
-            tokens_output=usage.get("output_tokens"),
+            tokens_input=tokens_input,
+            tokens_output=tokens_output,
         )
 
     async def close(self) -> None:

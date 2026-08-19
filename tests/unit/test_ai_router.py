@@ -548,6 +548,37 @@ class TestVisionAndTranscriptionLogging:
         assert provider.last_transcription_call["model"] == "gpt-4o-mini-transcribe"
 
     @pytest.mark.asyncio
+    async def test_transcription_caller_model_override_wins(
+        self, mock_provider, mock_router_settings
+    ):
+        """model= from the caller must beat task config — the CLAUDE.md
+        provider-targeting idiom. Pre-fix, the kwarg collided with the
+        router's own model= keyword and raised TypeError (deep-review
+        2026-08-19)."""
+        transcription_result = TranscriptionResult(
+            text="hello",
+            model="whisper-1",
+            provider="openai",
+        )
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            transcription_result=transcription_result,
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.model = "gpt-4o-mini-transcribe"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        router = AIRouter(mock_router_settings)
+        router._providers["openai"] = provider
+
+        await router.transcribe_audio(b"audio", model="whisper-1")
+
+        assert provider.last_transcription_call["model"] == "whisper-1"
+
+    @pytest.mark.asyncio
     async def test_transcription_logs_tokens(self, mock_provider, mock_router_settings):
         """Token-priced transcribe models report usage tokens, not duration —
         both must flow into the usage log or the cost is silently zero."""

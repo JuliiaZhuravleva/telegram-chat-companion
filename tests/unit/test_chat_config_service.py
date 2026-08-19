@@ -54,19 +54,15 @@ class TestMerge:
         assert config.random_response_chance == 0.05
         assert config.enabled is False  # dataclass default
 
-    def test_is_forum_comes_from_chat_row(self):
-        """TD-102: chat metadata rides the per-chat layer; NULL (not yet
-        observed) must read as False, not leak through as None."""
+    def test_is_forum_never_enters_the_merge(self):
+        """chat_settings.is_forum is Telegram-observed metadata for offline
+        consumers (S4 chunker); keeping it out of _CHAT_CONFIG_FIELDS is what
+        prevents a hypothetical bot_config `default_is_forum` from globally
+        overriding what only Telegram decides (deep-review 2026-08-19)."""
         service, _, _ = _make_service()
 
         config = service._merge(chat_id=1, global_overrides={}, chat_row={"is_forum": True})
-        assert config.is_forum is True
-
-        config = service._merge(chat_id=1, global_overrides={}, chat_row={"is_forum": None})
-        assert config.is_forum is False
-
-        config = service._merge(chat_id=1, global_overrides={}, chat_row=None)
-        assert config.is_forum is False
+        assert not hasattr(config, "is_forum")
 
     def test_global_overrides_yaml(self):
         service, _, _ = _make_service(yaml_trigger_words=["bot"])
