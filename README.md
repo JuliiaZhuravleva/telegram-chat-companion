@@ -131,7 +131,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
   from the admin panel. Facts only reach an answer when they actually match what was asked
   (`knowledge_base.min_similarity`, default 0.70): a question the base has nothing to say about is
   answered without it, rather than with the nearest few facts presented as relevant
-- **Voice transcription** — transcribe voice messages and video notes (Whisper)
+- **Voice transcription** — transcribe voice messages and video notes (gpt-4o-mini-transcribe)
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually. Each sticker carries an
   explicitness score and each chat a ceiling, so a sticker is only sent where it fits; the
