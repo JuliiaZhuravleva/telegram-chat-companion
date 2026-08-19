@@ -1,4 +1,4 @@
-"""Execute rule actions (notify_admin, warn_user, custom_response)."""
+"""Execute rule actions (notify_admin, warn_user, custom_response, set_reaction)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from aiogram.types import Message
 
 from src.database.repositories.bot_config import BotConfigRepository
 from src.models.rules import RuleAction
+from src.services.modules.reactions.responder import set_reaction
+from src.services.modules.reactions.selector import ReactionSelector
 from src.services.rules.engine import RuleActionResult
 from src.utils import parse_admin_ids
 
@@ -37,6 +39,8 @@ class RuleActionExecutor:
                 await self._warn_user(action, message=message)
             elif action.action == RuleAction.CUSTOM_RESPONSE:
                 await self._custom_response(action, message=message)
+            elif action.action == RuleAction.SET_REACTION:
+                await self._set_reaction(action, message=message, bot=bot)
         except Exception:
             logger.warning(
                 "Rule action execution failed",
@@ -106,6 +110,38 @@ class RuleActionExecutor:
             or "Warning: you triggered an automated rule."
         )
         await message.reply(warning, parse_mode=None)
+
+    @staticmethod
+    async def _set_reaction(
+        action: RuleActionResult,
+        *,
+        message: Message,
+        bot: Bot,
+    ) -> None:
+        """Set an emoji reaction on the triggering message.
+
+        Gated by ``rules_enabled`` alone, deliberately not by
+        ``reactions_enabled``: that toggle governs the bot's autonomous
+        LLM-driven reactions, while a rule is an explicit per-chat admin
+        instruction. Validation goes through ``ReactionSelector`` (fail-closed),
+        so a config emoji outside Telegram's reaction set is dropped with a
+        log line rather than sent and rejected by the API.
+        """
+        candidate = action.params.get("emoji") or action.rule.config.get("emoji")
+        resolved = ReactionSelector.select(candidate)
+        if resolved is None:
+            logger.warning(
+                "Rule reaction emoji rejected",
+                rule_id=action.rule.id,
+                emoji=candidate,
+            )
+            return
+        await set_reaction(
+            bot,
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            emoji=resolved,
+        )
 
     @staticmethod
     async def _custom_response(action: RuleActionResult, *, message: Message) -> None:

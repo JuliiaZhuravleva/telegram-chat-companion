@@ -77,7 +77,10 @@ _TYPE_SELECTED: dict[str, str] = {
         "Пример для keyword_trigger:\n"
         '<code>{{"name": "spam-words", "keywords": ["spam", "buy"], '
         '"match_type": "contains", "action": "warn_user", '
-        '"warning_message": "No spam!"}}</code>'
+        '"warning_message": "No spam!"}}</code>\n\n'
+        "Действия: <code>notify_admin</code>, <code>warn_user</code>, "
+        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊", '
+        'опционально "target_users": [id]).'
     ),
     "en": (
         "<b>Create Rule</b>\n\n"
@@ -86,7 +89,10 @@ _TYPE_SELECTED: dict[str, str] = {
         "Example for keyword_trigger:\n"
         '<code>{{"name": "spam-words", "keywords": ["spam", "buy"], '
         '"match_type": "contains", "action": "warn_user", '
-        '"warning_message": "No spam!"}}</code>'
+        '"warning_message": "No spam!"}}</code>\n\n'
+        "Actions: <code>notify_admin</code>, <code>warn_user</code>, "
+        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊", '
+        'optional "target_users": [id]).'
     ),
 }
 

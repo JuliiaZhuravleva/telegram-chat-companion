@@ -5,6 +5,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ReactionTypeEmoji
 
 from src.models.rules import Rule, RuleAction, RuleType
 from src.services.rules.engine import RuleActionResult
@@ -37,6 +39,7 @@ def _make_message(
     msg = MagicMock()
     msg.text = text
     msg.caption = None
+    msg.message_id = 42
     msg.chat = MagicMock()
     msg.chat.id = -1001
     msg.from_user = MagicMock()
@@ -237,3 +240,106 @@ class TestCustomResponse:
         await executor.execute(action, message=msg, bot=bot)
 
         msg.reply.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# set_reaction tests
+# ---------------------------------------------------------------------------
+
+
+def _reaction_action(
+    *,
+    params_emoji: str | None = None,
+    config_emoji: str | None = None,
+) -> RuleActionResult:
+    config: dict = {"name": "pill"}
+    if config_emoji is not None:
+        config["emoji"] = config_emoji
+    return RuleActionResult(
+        rule=_make_rule(config=config),
+        action=RuleAction.SET_REACTION,
+        params={"match_detail": "contains:kw", "emoji": params_emoji},
+    )
+
+
+class TestSetReaction:
+    @pytest.mark.asyncio
+    async def test_sets_reaction_on_triggering_message(self) -> None:
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+        msg = _make_message()
+
+        await executor.execute(_reaction_action(params_emoji="💊"), message=msg, bot=bot)
+
+        bot.set_message_reaction.assert_awaited_once()
+        kwargs = bot.set_message_reaction.call_args.kwargs
+        assert kwargs["chat_id"] == -1001
+        assert kwargs["message_id"] == 42
+        assert len(kwargs["reaction"]) == 1
+        reaction = kwargs["reaction"][0]
+        assert isinstance(reaction, ReactionTypeEmoji)
+        assert reaction.emoji == "💊"
+
+    @pytest.mark.asyncio
+    async def test_emoji_falls_back_to_rule_config(self) -> None:
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        await executor.execute(
+            _reaction_action(config_emoji="💊"), message=_make_message(), bot=bot
+        )
+
+        bot.set_message_reaction.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_variation_selector_form_is_canonicalized(self) -> None:
+        """Keyboards emit "❤️" (with U+FE0F); Telegram's set spells it "❤"."""
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        await executor.execute(_reaction_action(params_emoji="❤️"), message=_make_message(), bot=bot)
+
+        reaction = bot.set_message_reaction.call_args.kwargs["reaction"][0]
+        assert reaction.emoji == "❤"
+
+    @pytest.mark.asyncio
+    async def test_non_reaction_emoji_is_dropped(self) -> None:
+        """Fail-closed: an emoji outside Telegram's reaction set never reaches
+        the API (it would be rejected there with a BadRequest anyway)."""
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        await executor.execute(
+            _reaction_action(params_emoji="🚀"), message=_make_message(), bot=bot
+        )
+
+        bot.set_message_reaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_emoji_is_dropped(self) -> None:
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        await executor.execute(_reaction_action(), message=_make_message(), bot=bot)
+
+        bot.set_message_reaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_api_error_swallowed(self) -> None:
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=MagicMock(), message="Bad Request: REACTION_INVALID"
+            )
+        )
+
+        # Should not raise
+        await executor.execute(
+            _reaction_action(params_emoji="💊"), message=_make_message(), bot=bot
+        )
