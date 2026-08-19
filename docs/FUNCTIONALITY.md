@@ -246,10 +246,12 @@ Live QA: list rendered 4 enabled chats (`Julia (dev)`, `not tests`, `tests`, `te
 **Creation flow (live-tested):**
 
 1. `/admin` → Правила → select chat → `➕ Добавить правило` → select type.
-2. Bot sends a prompt: `Создание правила\n\nТип: keyword_trigger\n\nОтправьте JSON-конфиг правила.\n\nПример для keyword_trigger: {"name": "spam-words", "keywords": [...], "match_type": "contains", "action": "warn_user", "warning_message": "No spam!"}`
+2. Bot sends a prompt: `Создание правила\n\nТип: keyword_trigger\n\nОтправьте JSON-конфиг правила.\n\nПример для keyword_trigger: {"name": "spam-words", "keywords": [...], "match_type": "contains", "action": "warn_user", "warning_message": "No spam!"}` plus a list of the available actions (`notify_admin`, `warn_user`, `custom_response`, `set_reaction`).
 3. FSM state `AdminStates.awaiting_rule_config` captures the next text message.
-4. Invalid JSON → `"Невалидный JSON. Попробуйте ещё раз."` (FSM stays active).
+4. Invalid JSON → `"Невалидный JSON. Попробуйте ещё раз."` (FSM stays active). An unknown `action`, or a `set_reaction` emoji outside Telegram's reaction set, is likewise rejected before the rule is created (FSM stays active).
 5. Valid JSON → rule created, `"Правило #N создано."`.
+
+`set_reaction` (added after the live-test above) puts an emoji reaction on the triggering message: `{"action": "set_reaction", "emoji": "💊"}`. The emoji must be one of Telegram's standard reaction set; validation is fail-closed at creation time and again at execution time via `ReactionSelector`.
 
 **Live verification:** sent `{"name":"QA-test-rule","keywords":["spam"],"match_type":"contains","action":"warn_user","warning_message":"QA test"}` → got `"Правило #2 создано."`. Listed rule showed the toggle (🔄) and delete (🗑) buttons; toggle flipped ✅ ↔ ⏸; delete removed the rule immediately **without a confirmation dialog**.
 
@@ -556,7 +558,7 @@ Prioritisation: **P0** = fix now (user-facing pain or security). **P1** = clear 
 | ID | Priority | Feature | Rationale |
 |---|---|---|---|
 | F-1 | P1 | Scheduled / recurring messages | Common companion-bot expectation ("remind me every Friday"). Would build on existing `chat_messages` + a new `scheduled_messages` table + cron inside the bot. |
-| F-2 | P1 | Light moderation actions | Rules engine has `warn_user` only. Add `kick`, `ban`, `mute_N_minutes`. Requires bot to have ban/restrict rights, which users already often grant. |
+| F-2 | P1 | Light moderation actions | Rules engine has `warn_user`, `notify_admin`, `custom_response`, `set_reaction`. Add `kick`, `ban`, `mute_N_minutes`. Requires bot to have ban/restrict rights, which users already often grant. |
 | F-3 | P1 | Poll / question helper | Auto-propose polls when a user asks open questions (detected via small classifier). Cheap with `gpt-5-nano`. |
 | F-4 | P2 | Voice selection for TTS replies | Currently the bot replies in text only. Opt-in TTS (OpenAI `tts-1`) would make voice-note replies feel more natural. |
 | F-5 | P2 | Cross-chat personality | `system_prompt` is per-chat. A "shared persona" toggle would let admins point multiple chats at one common persona (currently requires copy-paste). |

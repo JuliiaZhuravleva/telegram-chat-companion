@@ -64,8 +64,11 @@ class ChatConfig:
     kb_enabled: bool = False
 
     # Reactions (opt-in per chat, ADR-0004). reactions_enabled is the master
-    # module toggle (gates everything, including R-5's bot-initiated
-    # reactions); reactions_history_enabled gates only the message_reactions
-    # INSERT, so an owner can keep the feature without behavioral logging.
+    # module toggle for the bot's AUTONOMOUS reactions (R-5's LLM-driven path
+    # and its successors); reactions_history_enabled gates only the
+    # message_reactions INSERT, so an owner can keep the feature without
+    # behavioral logging. Exception: a custom rule with action=set_reaction
+    # is an explicit admin instruction and is gated by rules_enabled instead
+    # (see RuleActionExecutor._set_reaction).
     reactions_enabled: bool = False
     reactions_history_enabled: bool = True

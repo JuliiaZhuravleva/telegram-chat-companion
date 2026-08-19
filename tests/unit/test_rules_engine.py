@@ -92,6 +92,33 @@ class TestKeywordTrigger:
         assert actions[0].action == RuleAction.NOTIFY_ADMIN
 
     @pytest.mark.asyncio
+    async def test_set_reaction_action_is_extracted(self) -> None:
+        """ "set_reaction" must survive _extract_actions' RuleAction() parse;
+        an unknown action string is silently dropped there. The emoji itself
+        is read from rule.config by the executor, not from params."""
+        engine = _make_engine(
+            [
+                _rule_row(
+                    config={
+                        "keywords": ["hello"],
+                        "match_type": "contains",
+                        "action": "set_reaction",
+                        "emoji": "💊",
+                    }
+                )
+            ]
+        )
+        actions = await engine.evaluate(
+            chat_id=-1001,
+            user_id=100,
+            message=_make_message("say hello world"),
+            rules_mode="all",
+        )
+        assert len(actions) == 1
+        assert actions[0].action == RuleAction.SET_REACTION
+        assert actions[0].rule.config["emoji"] == "💊"
+
+    @pytest.mark.asyncio
     async def test_contains_no_match(self) -> None:
         engine = _make_engine(
             [

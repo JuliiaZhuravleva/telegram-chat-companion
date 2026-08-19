@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.types import ReactionTypeEmoji
 
 from src.models.rules import Rule, RuleAction, RuleType
 from src.services.rules.engine import RuleActionResult
@@ -37,6 +38,7 @@ def _make_message(
     msg = MagicMock()
     msg.text = text
     msg.caption = None
+    msg.message_id = 42
     msg.chat = MagicMock()
     msg.chat.id = -1001
     msg.from_user = MagicMock()
@@ -237,3 +239,92 @@ class TestCustomResponse:
         await executor.execute(action, message=msg, bot=bot)
 
         msg.reply.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# set_reaction tests
+# ---------------------------------------------------------------------------
+
+
+def _reaction_action(emoji: object = None) -> RuleActionResult:
+    config: dict = {"name": "pill"}
+    if emoji is not None:
+        config["emoji"] = emoji
+    return RuleActionResult(
+        rule=_make_rule(config=config),
+        action=RuleAction.SET_REACTION,
+        params={"match_detail": "contains:kw"},
+    )
+
+
+class TestSetReaction:
+    @pytest.mark.asyncio
+    async def test_sets_reaction_on_triggering_message(self) -> None:
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+        msg = _make_message()
+
+        await executor.execute(_reaction_action(emoji="💊"), message=msg, bot=bot)
+
+        bot.set_message_reaction.assert_awaited_once()
+        kwargs = bot.set_message_reaction.call_args.kwargs
+        assert kwargs["chat_id"] == -1001
+        assert kwargs["message_id"] == 42
+        assert len(kwargs["reaction"]) == 1
+        reaction = kwargs["reaction"][0]
+        assert isinstance(reaction, ReactionTypeEmoji)
+        assert reaction.emoji == "💊"
+
+    @pytest.mark.asyncio
+    async def test_non_reaction_emoji_is_dropped(self) -> None:
+        """Fail-closed: an emoji outside Telegram's reaction set never reaches
+        the API (it would be rejected there with a BadRequest anyway)."""
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        await executor.execute(_reaction_action(emoji="🚀"), message=_make_message(), bot=bot)
+
+        bot.set_message_reaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_emoji_is_dropped(self) -> None:
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        await executor.execute(_reaction_action(), message=_make_message(), bot=bot)
+
+        bot.set_message_reaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_string_emoji_is_dropped_not_crashed(self) -> None:
+        """Free-form admin JSON can carry a non-string emoji; it must take the
+        rejection path, not blow up inside the selector's normalization.
+
+        Calls _set_reaction directly on purpose: through execute() the blanket
+        except would swallow the AttributeError and the test could not tell
+        the guard from the crash.
+        """
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        for bad in (128138, ["💊"], {"e": "💊"}):
+            await RuleActionExecutor._set_reaction(
+                _reaction_action(emoji=bad), message=_make_message(), bot=bot
+            )
+
+        bot.set_message_reaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_is_swallowed_by_executor(self) -> None:
+        """Telegram API errors are already swallowed inside the responder; a
+        non-Telegram error propagates out of it, so this exercises execute()'s
+        own try/except."""
+        executor = _make_executor()
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(side_effect=RuntimeError("boom"))
+
+        # Should not raise
+        await executor.execute(_reaction_action(emoji="💊"), message=_make_message(), bot=bot)

@@ -247,3 +247,104 @@ class TestRulesListKeyboardDeleteButton:
         assert not any(c.startswith("ar_del:") for c in callbacks), (
             "ar_del: must not appear in detail view"
         )
+
+
+# ---------------------------------------------------------------------------
+# handle_rule_config_input — create-time validation
+# ---------------------------------------------------------------------------
+
+
+def _make_config_message(text: str) -> MagicMock:
+    msg = MagicMock()
+    msg.text = text
+    msg.reply = AsyncMock()
+    return msg
+
+
+def _make_state() -> MagicMock:
+    state = MagicMock()
+    state.get_data = AsyncMock(
+        return_value={"lang": "ru", "rule_chat_id": -1001, "rule_type": "keyword_trigger"}
+    )
+    state.clear = AsyncMock()
+    return state
+
+
+class TestHandleRuleConfigInput:
+    """An invalid action / set_reaction emoji must be rejected at creation —
+    at evaluation time both are dropped with only a server-side log, so
+    "Rule created" would mean a permanent, invisible no-op."""
+
+    @pytest.mark.asyncio
+    async def test_valid_set_reaction_rule_created(self):
+        from src.bot.handlers.rules import handle_rule_config_input
+
+        msg = _make_config_message(
+            '{"name": "pill", "keywords": ["kw"], "action": "set_reaction", "emoji": "💊"}'
+        )
+        state = _make_state()
+        repo = _make_rules_repo()
+        repo.create = AsyncMock(return_value=7)
+
+        await handle_rule_config_input(msg, state, repo)
+
+        repo.create.assert_awaited_once()
+        state.clear.assert_awaited_once()
+        assert "создано" in msg.reply.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_unknown_action_rejected(self):
+        from src.bot.handlers.rules import handle_rule_config_input
+
+        msg = _make_config_message('{"keywords": ["kw"], "action": "set_reacton"}')
+        state = _make_state()
+        repo = _make_rules_repo()
+        repo.create = AsyncMock()
+
+        await handle_rule_config_input(msg, state, repo)
+
+        repo.create.assert_not_awaited()
+        state.clear.assert_not_awaited()  # FSM stays active for a retry
+        assert "set_reacton" in msg.reply.call_args.args[0]
+
+    @pytest.mark.asyncio
+    async def test_set_reaction_with_non_reaction_emoji_rejected(self):
+        from src.bot.handlers.rules import handle_rule_config_input
+
+        msg = _make_config_message('{"keywords": ["kw"], "action": "set_reaction", "emoji": "🚀"}')
+        state = _make_state()
+        repo = _make_rules_repo()
+        repo.create = AsyncMock()
+
+        await handle_rule_config_input(msg, state, repo)
+
+        repo.create.assert_not_awaited()
+        state.clear.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_set_reaction_with_non_string_emoji_rejected(self):
+        from src.bot.handlers.rules import handle_rule_config_input
+
+        msg = _make_config_message('{"keywords": ["kw"], "action": "set_reaction", "emoji": 5}')
+        state = _make_state()
+        repo = _make_rules_repo()
+        repo.create = AsyncMock()
+
+        await handle_rule_config_input(msg, state, repo)
+
+        repo.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rule_without_action_still_created(self):
+        """The action key is optional (engine defaults to notify_admin) —
+        validation must not reject configs that omit it."""
+        from src.bot.handlers.rules import handle_rule_config_input
+
+        msg = _make_config_message('{"name": "plain", "keywords": ["kw"]}')
+        state = _make_state()
+        repo = _make_rules_repo()
+        repo.create = AsyncMock(return_value=8)
+
+        await handle_rule_config_input(msg, state, repo)
+
+        repo.create.assert_awaited_once()

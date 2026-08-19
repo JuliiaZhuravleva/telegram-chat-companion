@@ -24,6 +24,7 @@ class RuleAction(StrEnum):
     NOTIFY_ADMIN = "notify_admin"
     WARN_USER = "warn_user"
     CUSTOM_RESPONSE = "custom_response"
+    SET_REACTION = "set_reaction"
 
 
 _VALID_RULE_TYPES = frozenset(RuleType)
