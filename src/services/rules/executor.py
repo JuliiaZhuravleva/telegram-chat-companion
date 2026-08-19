@@ -120,15 +120,16 @@ class RuleActionExecutor:
     ) -> None:
         """Set an emoji reaction on the triggering message.
 
-        Gated by ``rules_enabled`` alone, deliberately not by
-        ``reactions_enabled``: that toggle governs the bot's autonomous
-        LLM-driven reactions, while a rule is an explicit per-chat admin
-        instruction. Validation goes through ``ReactionSelector`` (fail-closed),
-        so a config emoji outside Telegram's reaction set is dropped with a
-        log line rather than sent and rejected by the API.
+        Fail-closed via ``ReactionSelector``: a config emoji outside
+        Telegram's reaction set is dropped with a log line rather than sent
+        and rejected by the API. Gating (``rules_enabled``) lives in
+        ``RulesMiddleware``, as for every other action.
         """
-        candidate = action.params.get("emoji") or action.rule.config.get("emoji")
-        resolved = ReactionSelector.select(candidate)
+        candidate = action.rule.config.get("emoji")
+        # Free-form admin JSON: a non-string here would crash the selector's
+        # normalization and get mislabeled as a code bug by execute()'s
+        # blanket except -- degrade it to the rejection path instead.
+        resolved = ReactionSelector.select(candidate if isinstance(candidate, str) else None)
         if resolved is None:
             logger.warning(
                 "Rule reaction emoji rejected",

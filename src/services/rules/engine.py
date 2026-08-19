@@ -276,7 +276,6 @@ class RuleEngine:
                     "match_detail": match.match_detail,
                     "warning_message": cfg.get("warning_message"),
                     "response_template": cfg.get("response_template"),
-                    "emoji": cfg.get("emoji"),
                 },
             )
         ]

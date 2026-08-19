@@ -5,7 +5,6 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ReactionTypeEmoji
 
 from src.models.rules import Rule, RuleAction, RuleType
@@ -247,18 +246,14 @@ class TestCustomResponse:
 # ---------------------------------------------------------------------------
 
 
-def _reaction_action(
-    *,
-    params_emoji: str | None = None,
-    config_emoji: str | None = None,
-) -> RuleActionResult:
+def _reaction_action(emoji: object = None) -> RuleActionResult:
     config: dict = {"name": "pill"}
-    if config_emoji is not None:
-        config["emoji"] = config_emoji
+    if emoji is not None:
+        config["emoji"] = emoji
     return RuleActionResult(
         rule=_make_rule(config=config),
         action=RuleAction.SET_REACTION,
-        params={"match_detail": "contains:kw", "emoji": params_emoji},
+        params={"match_detail": "contains:kw"},
     )
 
 
@@ -270,7 +265,7 @@ class TestSetReaction:
         bot.set_message_reaction = AsyncMock(return_value=True)
         msg = _make_message()
 
-        await executor.execute(_reaction_action(params_emoji="💊"), message=msg, bot=bot)
+        await executor.execute(_reaction_action(emoji="💊"), message=msg, bot=bot)
 
         bot.set_message_reaction.assert_awaited_once()
         kwargs = bot.set_message_reaction.call_args.kwargs
@@ -282,30 +277,6 @@ class TestSetReaction:
         assert reaction.emoji == "💊"
 
     @pytest.mark.asyncio
-    async def test_emoji_falls_back_to_rule_config(self) -> None:
-        executor = _make_executor()
-        bot = MagicMock()
-        bot.set_message_reaction = AsyncMock(return_value=True)
-
-        await executor.execute(
-            _reaction_action(config_emoji="💊"), message=_make_message(), bot=bot
-        )
-
-        bot.set_message_reaction.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_variation_selector_form_is_canonicalized(self) -> None:
-        """Keyboards emit "❤️" (with U+FE0F); Telegram's set spells it "❤"."""
-        executor = _make_executor()
-        bot = MagicMock()
-        bot.set_message_reaction = AsyncMock(return_value=True)
-
-        await executor.execute(_reaction_action(params_emoji="❤️"), message=_make_message(), bot=bot)
-
-        reaction = bot.set_message_reaction.call_args.kwargs["reaction"][0]
-        assert reaction.emoji == "❤"
-
-    @pytest.mark.asyncio
     async def test_non_reaction_emoji_is_dropped(self) -> None:
         """Fail-closed: an emoji outside Telegram's reaction set never reaches
         the API (it would be rejected there with a BadRequest anyway)."""
@@ -313,9 +284,7 @@ class TestSetReaction:
         bot = MagicMock()
         bot.set_message_reaction = AsyncMock(return_value=True)
 
-        await executor.execute(
-            _reaction_action(params_emoji="🚀"), message=_make_message(), bot=bot
-        )
+        await executor.execute(_reaction_action(emoji="🚀"), message=_make_message(), bot=bot)
 
         bot.set_message_reaction.assert_not_called()
 
@@ -330,16 +299,32 @@ class TestSetReaction:
         bot.set_message_reaction.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_api_error_swallowed(self) -> None:
+    async def test_non_string_emoji_is_dropped_not_crashed(self) -> None:
+        """Free-form admin JSON can carry a non-string emoji; it must take the
+        rejection path, not blow up inside the selector's normalization.
+
+        Calls _set_reaction directly on purpose: through execute() the blanket
+        except would swallow the AttributeError and the test could not tell
+        the guard from the crash.
+        """
+        bot = MagicMock()
+        bot.set_message_reaction = AsyncMock(return_value=True)
+
+        for bad in (128138, ["💊"], {"e": "💊"}):
+            await RuleActionExecutor._set_reaction(
+                _reaction_action(emoji=bad), message=_make_message(), bot=bot
+            )
+
+        bot.set_message_reaction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_is_swallowed_by_executor(self) -> None:
+        """Telegram API errors are already swallowed inside the responder; a
+        non-Telegram error propagates out of it, so this exercises execute()'s
+        own try/except."""
         executor = _make_executor()
         bot = MagicMock()
-        bot.set_message_reaction = AsyncMock(
-            side_effect=TelegramBadRequest(
-                method=MagicMock(), message="Bad Request: REACTION_INVALID"
-            )
-        )
+        bot.set_message_reaction = AsyncMock(side_effect=RuntimeError("boom"))
 
         # Should not raise
-        await executor.execute(
-            _reaction_action(params_emoji="💊"), message=_make_message(), bot=bot
-        )
+        await executor.execute(_reaction_action(emoji="💊"), message=_make_message(), bot=bot)

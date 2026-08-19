@@ -32,7 +32,8 @@ from src.bot.keyboards.rules import (
 from src.bot.states.admin import AdminStates
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.rules import RulesRepository
-from src.models.rules import _VALID_RULE_TYPES
+from src.models.rules import _VALID_RULE_ACTIONS, _VALID_RULE_TYPES, RuleAction
+from src.services.modules.reactions.selector import ReactionSelector
 
 logger = structlog.get_logger(__name__)
 
@@ -79,8 +80,9 @@ _TYPE_SELECTED: dict[str, str] = {
         '"match_type": "contains", "action": "warn_user", '
         '"warning_message": "No spam!"}}</code>\n\n'
         "Действия: <code>notify_admin</code>, <code>warn_user</code>, "
-        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊", '
-        'опционально "target_users": [id]).'
+        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊" — '
+        "только из набора реакций Telegram). Для keyword_trigger опционально "
+        '"target_users": [id].'
     ),
     "en": (
         "<b>Create Rule</b>\n\n"
@@ -91,8 +93,9 @@ _TYPE_SELECTED: dict[str, str] = {
         '"match_type": "contains", "action": "warn_user", '
         '"warning_message": "No spam!"}}</code>\n\n'
         "Actions: <code>notify_admin</code>, <code>warn_user</code>, "
-        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊", '
-        'optional "target_users": [id]).'
+        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊" — '
+        "Telegram's reaction set only). For keyword_trigger, optionally "
+        '"target_users": [id].'
     ),
 }
 
@@ -129,6 +132,24 @@ _RULE_TOGGLED: dict[str, str] = {
 _INVALID_JSON: dict[str, str] = {
     "ru": "Невалидный JSON. Попробуйте ещё раз.",
     "en": "Invalid JSON. Please try again.",
+}
+
+_INVALID_ACTION: dict[str, str] = {
+    "ru": "Неизвестное действие <code>{action}</code>. Доступные: {valid}.",
+    "en": "Unknown action <code>{action}</code>. Available: {valid}.",
+}
+
+_INVALID_EMOJI: dict[str, str] = {
+    "ru": (
+        "Для <code>set_reaction</code> поле <code>emoji</code> должно быть "
+        "одним из стандартных эмодзи-реакций Telegram (например 💊, 🔥, 🤡). "
+        "Попробуйте ещё раз."
+    ),
+    "en": (
+        "For <code>set_reaction</code>, <code>emoji</code> must be one of "
+        "Telegram's standard reaction emoji (e.g. 💊, 🔥, 🤡). "
+        "Please try again."
+    ),
 }
 
 
@@ -556,6 +577,29 @@ async def handle_rule_config_input(
             parse_mode="HTML",
         )
         return
+
+    # Validate what the engine would otherwise drop silently at evaluation
+    # time: an unknown action, or a set_reaction emoji outside Telegram's
+    # reaction set, both yield "Rule created" and a permanent no-op whose
+    # only trace is a server-side log line.
+    action = config.get("action")
+    if action is not None and action not in _VALID_RULE_ACTIONS:
+        await message.reply(
+            _INVALID_ACTION[lang].format(
+                action=escape(str(action)),
+                valid=", ".join(f"<code>{a}</code>" for a in RuleAction),
+            ),
+            parse_mode="HTML",
+        )
+        return
+    if action == RuleAction.SET_REACTION:
+        emoji = config.get("emoji")
+        if not isinstance(emoji, str) or ReactionSelector.select(emoji) is None:
+            await message.reply(
+                _INVALID_EMOJI[lang],
+                parse_mode="HTML",
+            )
+            return
 
     # Create rule
     rule_id = await rules_repo.create(
