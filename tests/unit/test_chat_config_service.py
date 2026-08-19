@@ -54,6 +54,20 @@ class TestMerge:
         assert config.random_response_chance == 0.05
         assert config.enabled is False  # dataclass default
 
+    def test_is_forum_comes_from_chat_row(self):
+        """TD-102: chat metadata rides the per-chat layer; NULL (not yet
+        observed) must read as False, not leak through as None."""
+        service, _, _ = _make_service()
+
+        config = service._merge(chat_id=1, global_overrides={}, chat_row={"is_forum": True})
+        assert config.is_forum is True
+
+        config = service._merge(chat_id=1, global_overrides={}, chat_row={"is_forum": None})
+        assert config.is_forum is False
+
+        config = service._merge(chat_id=1, global_overrides={}, chat_row=None)
+        assert config.is_forum is False
+
     def test_global_overrides_yaml(self):
         service, _, _ = _make_service(yaml_trigger_words=["bot"])
         config = service._merge(

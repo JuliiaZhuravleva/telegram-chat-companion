@@ -69,6 +69,30 @@ class TestEnsureExists:
         row = await repo.ensure_exists(chat_id=-100555, chat_type="supergroup")
         assert row["chat_type"] == "supergroup"
 
+    @pytest.mark.asyncio
+    async def test_is_forum_defaults_to_null_and_coalesces(
+        self, repo: ChatSettingsRepository
+    ) -> None:
+        """TD-102: NULL means "not yet observed"; a caller that doesn't know
+        (None) must not erase what an informed caller wrote."""
+        row = await repo.ensure_exists(chat_id=-100666)
+        assert row["is_forum"] is None
+
+        row = await repo.ensure_exists(chat_id=-100666, is_forum=True)
+        assert row["is_forum"] is True
+
+        # None (caller doesn't know) keeps the stored value
+        row = await repo.ensure_exists(chat_id=-100666, is_forum=None)
+        assert row["is_forum"] is True
+
+    @pytest.mark.asyncio
+    async def test_is_forum_false_overwrites_true(self, repo: ChatSettingsRepository) -> None:
+        """A chat that switched forum mode off must be corrected — False is a
+        real observation, not an absence (the middleware coerces with bool())."""
+        await repo.ensure_exists(chat_id=-100777, is_forum=True)
+        row = await repo.ensure_exists(chat_id=-100777, is_forum=False)
+        assert row["is_forum"] is False
+
 
 # ---------------------------------------------------------------------------
 # upsert

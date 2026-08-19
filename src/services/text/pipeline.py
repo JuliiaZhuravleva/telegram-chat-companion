@@ -181,10 +181,17 @@ class TextProcessingPipeline:
             return PipelineResult(should_respond=False, response_type=response_type)
 
         # --- Stage 2: Gather context in parallel ---
-        # Use topic-aware context query for forum support
+        # Topic-aware context is gated on the chat actually being a forum
+        # (TD-102): Telegram sets message_thread_id on ordinary reply chains in
+        # supergroups too, and reply chains average ~2 messages — keying forum
+        # mode off the thread id alone collapsed the history window from 20
+        # messages to those ~2 on every reply, including replies to the bot.
+        # message_thread_id itself stays untouched: answers must still be
+        # routed to the thread they came from.
+        context_thread_id = message_thread_id if config.is_forum else None
         recent_msgs_task = self._messages.get_recent_with_topic_context(
             chat_id,
-            message_thread_id,
+            context_thread_id,
             current_topic_limit=20,
             other_topics_limit=10,
         )

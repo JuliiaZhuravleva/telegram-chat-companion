@@ -130,6 +130,7 @@ class ChatConfigService:
 _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
     {
         "enabled",
+        "is_forum",
         "trigger_words",
         "random_response_chance",
         "random_response_min_interval",

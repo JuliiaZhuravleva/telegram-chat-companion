@@ -1526,3 +1526,44 @@ class TestPipelineQueryHygiene:
         )
 
         assert mocks["ai_router"].generate_embedding.call_args.args[0] == "сколько времени?"
+
+
+class TestForumContextGate:
+    """TD-102: message_thread_id marks ordinary reply chains, not just forum
+    topics. The topic-weighted history query must engage only when the chat is
+    actually a forum — otherwise every reply collapses the context window from
+    20 messages to the ~2 of its reply chain."""
+
+    async def test_reply_chain_in_regular_supergroup_keeps_full_window(self, make_chat_config):
+        config = make_chat_config(enabled=True)  # is_forum defaults to False
+        pipeline, mocks = _make_pipeline()
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.REPLY,
+            config=config,
+            message_thread_id=456,
+        )
+
+        call = mocks["message_repo"].get_recent_with_topic_context.call_args
+        assert call.args == (-100123, None)
+
+    async def test_forum_chat_uses_thread_for_context(self, make_chat_config):
+        config = make_chat_config(enabled=True, is_forum=True)
+        pipeline, mocks = _make_pipeline()
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+            message_thread_id=456,
+        )
+
+        call = mocks["message_repo"].get_recent_with_topic_context.call_args
+        assert call.args == (-100123, 456)

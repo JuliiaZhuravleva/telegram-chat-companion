@@ -50,13 +50,13 @@ class ChatConfigMiddleware(BaseMiddleware):
         chat_config = await config_service.get_config(chat_id)
         data["chat_config"] = chat_config
 
-        # On cache miss, update chat_title/chat_type from the event
+        # On cache miss, update chat_title/chat_type/is_forum from the event
         if not was_cached:
-            chat_title, chat_type = _extract_chat_info(event)
+            chat_title, chat_type, is_forum = _extract_chat_info(event)
             if chat_title:
                 try:
                     repo = await container.get(ChatSettingsRepository)
-                    await repo.ensure_exists(chat_id, chat_title, chat_type)
+                    await repo.ensure_exists(chat_id, chat_title, chat_type, is_forum)
                 except Exception as exc:
                     # Now also on the message_reaction path, where a chat can
                     # first be seen via a reaction rather than a message -- a
@@ -82,12 +82,18 @@ def _extract_chat_id(event: TelegramObject) -> int | None:
     return None
 
 
-def _extract_chat_info(event: TelegramObject) -> tuple[str | None, str]:
-    """Extract chat_title and chat_type from event."""
+def _extract_chat_info(event: TelegramObject) -> tuple[str | None, str, bool | None]:
+    """Extract chat_title, chat_type and is_forum from event.
+
+    is_forum is coerced with bool(): Telegram omits the field for non-forum
+    chats, so on an event that carries a real Chat object, None *means* "not a
+    forum" — writing False (not None) is what lets a chat that turned forum
+    mode off get corrected instead of keeping a stale True (TD-102).
+    """
     if isinstance(event, Message) and event.chat is not None:
         title = event.chat.title or event.chat.full_name
-        return title, event.chat.type or "group"
+        return title, event.chat.type or "group", bool(event.chat.is_forum)
     if isinstance(event, MessageReactionUpdated):
         title = event.chat.title or event.chat.full_name
-        return title, event.chat.type or "group"
-    return None, "group"
+        return title, event.chat.type or "group", bool(event.chat.is_forum)
+    return None, "group", None

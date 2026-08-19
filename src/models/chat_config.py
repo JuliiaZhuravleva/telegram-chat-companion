@@ -21,6 +21,13 @@ class ChatConfig:
     # Whitelist
     enabled: bool = False
 
+    # Chat metadata (not a setting — written opportunistically by
+    # ChatConfigMiddleware from the Chat object, like chat_title). False until
+    # the first event from a real forum arrives; gates the topic-weighted
+    # history query, because message_thread_id alone also marks ordinary reply
+    # chains in supergroups (TD-102).
+    is_forum: bool = False
+
     # Behavior
     trigger_words: tuple[str, ...] = ("bot", "бот")
     random_response_chance: float = 0.05
