@@ -472,6 +472,45 @@ class MessageRepository:
             )
         return result
 
+    async def list_chat_ids(self) -> list[int]:
+        """Every chat that has a message -- which is what "a chat to index" means.
+
+        The chunk indexer used to enumerate `chat_settings` instead, and that
+        was a bug with a deadline (TD-104). Telegram assigns a **new**
+        `chat_id` when a group becomes a supergroup; `ChatMigrationRepository`
+        moves the settings row onto the new id and deliberately leaves
+        `chat_messages` on the old one. Everything not yet chunked at that
+        moment therefore disappeared from the enumeration for ever -- and the
+        loss is never zero, because `_closed_sessions` always defers the
+        session that can still grow and a chat is by definition active at the
+        moment it upgrades. A year later retention deletes those rows;
+        `chat_chunks` is outside retention (ADR-0011), so chunking is the only
+        thing standing between that conversation and deletion. One production
+        chat was already in exactly that state on 2026-08-19 -- 2 messages, no
+        settings row, zero chunks.
+
+        Enumerating here changes *which* chats are considered, not whether the
+        owner's toggle is honoured: the indexer still resolves `save_messages`
+        per chat through the ordinary three-layer merge, which for a chat with
+        no settings row of its own is the global default.
+
+        What this does **not** fix: the chunks are written under the old
+        `chat_id`, so retrieval asking as the new supergroup still will not see
+        them (TD-111). That is a recoverable state -- a re-key can be applied
+        to a chunk table at any time -- whereas deleted messages are not, and
+        the two problems have different sizes.
+
+        Cost, measured on production 2026-08-19: a sequential scan, 16 ms over
+        39 975 rows to return 19 chats, once per indexer pass (default 15
+        minutes). It is linear in the table, not in the number of chats, so it
+        grows with history -- at a million rows expect a few hundred
+        milliseconds. That is still nothing for a background pass; if it ever
+        stops being nothing, the fix is a recursive loose index scan over the
+        `chat_id`-leading index rather than a different source of truth.
+        """
+        rows = await self._pool.fetch("SELECT DISTINCT chat_id FROM chat_messages ORDER BY chat_id")
+        return [int(row["chat_id"]) for row in rows]
+
     async def get_for_chunking(
         self,
         chat_id: int,

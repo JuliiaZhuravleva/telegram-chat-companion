@@ -180,11 +180,17 @@ class ChatSettingsRepository:
     async def list_all(self) -> list[asyncpg.Record]:
         """Every chat the bot has a settings row for, with its title.
 
-        Deliberately not `list_enabled()`: the chunk indexer's gate is
-        `save_messages`, not the whitelist. A chat that was disabled after
-        years of saved history still owns that history, and freezing its index
-        at the moment of a whitelist change would be a silent, unrecoverable
-        edit to the bot's memory.
+        The chunk indexer's title lookup. It used to be that worker's list of
+        *chats* as well, which is what TD-104 was: a settings row can move away
+        from its messages (a group becoming a supergroup re-keys it), and the
+        messages left behind then had no entry here and were never indexed
+        again. Chats are enumerated from `MessageRepository.list_chat_ids()`
+        now; this stays the answer to "what is that chat called", for which a
+        missing row simply means "no title".
+
+        Deliberately not `list_enabled()`, for the reason that still applies to
+        the title as much as it did to the list: a chat disabled after years of
+        saved history still owns that history.
         """
         rows: list[asyncpg.Record] = await self._pool.fetch(
             "SELECT chat_id, chat_title FROM chat_settings ORDER BY chat_id"
