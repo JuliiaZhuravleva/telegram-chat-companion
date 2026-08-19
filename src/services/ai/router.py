@@ -32,6 +32,38 @@ from src.utils.background import fire_and_forget
 logger = structlog.get_logger()
 
 
+def _is_retriable(last_error: Exception | None) -> bool:
+    """Does the router's own "all providers failed" error describe a passing condition?
+
+    The flag exists on `AIProviderError` and `RateLimitError` sets it, but the
+    router used to raise a *fresh* error here and let it default to False --
+    throwing the answer away at the one place a caller could act on it. A
+    caller then cannot tell "the provider is rate-limited, come back in a
+    minute" from "this input will be refused every time", and the two want
+    opposite handling: retry the first for ever, give up on the second.
+
+    Found from the second kind of damage, which is quieter: `ChatChunkIndexer`
+    parks a chunk after three failed embedding attempts so one permanently-bad
+    row cannot starve a FIFO queue. Under a per-minute quota the limit trips
+    partway through a batch -- earlier rows succeed, later ones fail -- so the
+    indexer's "every row failed, must be an outage" guard does not fire and
+    perfectly good chunks are charged with failures. Measured while backfilling
+    a 2841-chunk corpus: **58 healthy chunks parked** across two runs, every
+    one of them behind a rate limit (zero failures of any other kind occurred
+    in either run). Parking is in-process state, over tables that are exempt
+    from retention, so those rows stay unembedded and invisible to retrieval
+    until someone restarts the bot, with nothing raised.
+
+    The flag reflects the **last** provider tried, not the whole chain. That is
+    exact for embeddings, which have no fallback by design (`config/default.yml`
+    -- OpenAI has no comparable 768-dim model), so the chain there is length 1.
+    On a longer chain a retriable failure followed by a permanent one reports
+    non-retriable; if a consumer ever cares, "any leg said come back later" is
+    the safer aggregation.
+    """
+    return bool(getattr(last_error, "retriable", False))
+
+
 class AIRouter:
     """
     Routes AI requests to appropriate providers with automatic fallback.
@@ -264,7 +296,8 @@ class AIRouter:
         raise AIProviderError(
             f"All providers failed for text generation. Last error: {last_error}",
             provider="router",
-        )
+            retriable=_is_retriable(last_error),
+        ) from last_error
 
     async def generate_embedding(
         self,
@@ -334,7 +367,8 @@ class AIRouter:
         raise AIProviderError(
             f"All providers failed for embeddings. Last error: {last_error}",
             provider="router",
-        )
+            retriable=_is_retriable(last_error),
+        ) from last_error
 
     async def analyze_image(
         self,
@@ -394,7 +428,8 @@ class AIRouter:
         raise AIProviderError(
             f"All providers failed for vision. Last error: {last_error}",
             provider="router",
-        )
+            retriable=_is_retriable(last_error),
+        ) from last_error
 
     async def transcribe_audio(
         self,
@@ -467,7 +502,8 @@ class AIRouter:
         raise AIProviderError(
             f"All providers failed for transcription. Last error: {last_error}",
             provider="router",
-        )
+            retriable=_is_retriable(last_error),
+        ) from last_error
 
     async def close(self) -> None:
         """Close all provider connections."""

@@ -194,6 +194,7 @@ python -m scripts.verify_commands   # Check the bot's registered slash commands
 python -m scripts.eval_rag <dsn>    # Measure RAG retrieval quality
 python -m scripts.kb_report <dsn>   # Measure Knowledge Base retrieval, sweep the similarity floor
 python -m scripts.backfill_chunks <dsn>   # Build the conversation-chunk index now, instead of waiting
+python -m scripts.eval_compare <dsn> --cases <file>   # Q&A memory vs the chunk index, side by side
 ```
 
 The bot pushes its command menus to Telegram on every start and verifies what
@@ -238,6 +239,24 @@ queries. A background worker fills it every fifteen minutes; this script is the 
 worker driven in a loop, for when waiting is not worth it. **Nothing reads the table
 yet** — retrieval moves onto it in a later slice, behind a shadow period, which is what
 makes the index safe to build in production while the bot serves traffic.
+
+`scripts/eval_compare.py` is what decides that move, and it exists because the
+obvious way to decide it is wrong in the flattering direction. Re-running the
+eval cases against the chunk index and comparing with the recorded baseline
+looks like the right experiment, but the auto-harvested cases accept an answer
+found "anywhere at or before the question" — a bound a single-message memory
+row still has to hit and a chunk's *span* overlaps almost for free, so the
+chunk store scores near-perfect recall by construction. On top of that the two
+stores' similarity scales are offset relative to each other (measured: a Q&A
+row is built out of the raw exchange and shares the query's boilerplate, an
+ordinary conversation chunk does not), so their floors are not interchangeable
+and a floor-free run has no blind rate to compare at all. The script therefore
+reports two things that *are* honest without ground truth: how much of the
+conversation each store can reach at all, and both stores' floor-free top-k for
+the same questions, side by side, for a human to grade. Those judgements are the
+pinpointed golden set the case file lacks. Its output holds real chat content and
+is written outside the repository. The reasoning is recorded with the numbers, in
+[the baseline](docs/rag-eval-baseline.md).
 
 Both of those read what retrieval *returned*. `scripts/kb_probe.py` covers the
 side neither can see: given real questions, it reports whether the knowledge

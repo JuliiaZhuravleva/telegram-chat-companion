@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from scripts.eval_schema import EvalCase, MessageIdRange
 
@@ -74,6 +74,8 @@ class Metrics:
     n_best_sim: int = 0
     n_embedding_errors: int = 0
     n_search_errors: int = 0
+    n_range_matched: int = 0
+    n_no_similarity: int = 0
 
 
 def _acceptable_ranges(case: EvalCase) -> list[MessageIdRange]:
@@ -92,16 +94,46 @@ def _acceptable_ranges(case: EvalCase) -> list[MessageIdRange]:
     return list(case.expected_message_id_ranges)
 
 
+def _hit_covers(hit: dict[str, Any], ranges: list[MessageIdRange]) -> bool:
+    """Does this hit land in an acceptable range?
+
+    Two hit shapes, because two stores answer through this harness (S5). A
+    ``chat_memory`` row points at a single message (``source_message_id``); a
+    ``chat_chunks`` row spans ``msg_from..msg_to`` and counts when that span
+    *overlaps* an acceptable range -- the answer is somewhere in the chunk,
+    which is exactly what gets injected.
+
+    **A chunk with neither field is a miss, and that is not the same as a
+    chunk that missed.** Before this function existed, a chunk hit had no
+    ``source_message_id``, so every chunk case scored zero -- a store returning
+    perfect answers would have measured 0.000 recall. Reading a shape mismatch
+    as a bad score is the failure mode worth naming, because the number it
+    produces is a plausible one.
+
+    Read what this cannot tell you, on the auto-harvested set specifically:
+    those cases bound the answer as "anywhere at or before the question", so
+    almost any chunk from the chat's past overlaps and passes. Range matching
+    is correct; the *cases* are too loose for it to mean much, and only a
+    pinpointed golden set (S3b) fixes that. `compute_metrics` reports
+    ``n_range_matched`` so a run cannot quietly present such a number as
+    comparable with the Q&A store's.
+    """
+    message_id = hit.get("source_message_id")
+    if message_id is not None:
+        return any(r.start <= message_id <= r.end for r in ranges)
+    start, end = hit.get("msg_from"), hit.get("msg_to")
+    if start is None or end is None:
+        return False
+    return any(start <= r.end and end >= r.start for r in ranges)
+
+
 def _hit_rank(result: CaseResult, *, k: int) -> int | None:
     """1-based rank of the first acceptable hit within the top ``k``, else None."""
     ranges = _acceptable_ranges(result.case)
     if not ranges:
         return None
     for rank, hit in enumerate(result.hits[:k], start=1):
-        message_id = hit.get("source_message_id")
-        if message_id is None:
-            continue
-        if any(r.start <= message_id <= r.end for r in ranges):
+        if _hit_covers(hit, ranges):
             return rank
     return None
 
@@ -169,7 +201,38 @@ def compute_metrics(
         else 0.0
     )
 
-    best_sims = sorted(max(hit["similarity"] for hit in r.hits[:k]) for r in scored if r.hits[:k])
+    # How many *hits* (not cases -- a case can contribute several) were credited
+    # by *range overlap* rather than by a
+    # pointed-at message id -- i.e. how much of the recall number above comes
+    # from the chunk store, whose cases the auto-harvest bounds only as
+    # "anywhere before the question". A non-zero count here means recall@k is
+    # not comparable with a run over `chat_memory`, and `format_metrics` says
+    # so rather than leaving the two numbers side by side looking alike.
+    n_range_matched = sum(
+        1
+        for r in recall_eligible
+        for hit in r.hits[:k]
+        if _hit_covers(hit, _acceptable_ranges(r.case)) and hit.get("source_message_id") is None
+    )
+
+    # `similarity` is None for a row the lexical leg found while its embedding
+    # was still pending, and for every row when the query itself could not be
+    # embedded. Taking max() over a list holding one None raises TypeError and
+    # takes down the whole run at the very last step, after every provider call
+    # is already paid for -- so they are dropped here and counted instead.
+    per_case_best = []
+    n_no_similarity = 0
+    for r in scored:
+        sims = [
+            hit["similarity"]
+            for hit in r.hits[:k]
+            if isinstance(hit.get("similarity"), int | float)
+            and not isinstance(hit.get("similarity"), bool)
+        ]
+        n_no_similarity += len(r.hits[:k]) - len(sims)
+        if sims:
+            per_case_best.append(max(sims))
+    best_sims = sorted(per_case_best)
     best_sim_percentiles = {p: _percentile(best_sims, p) for p in percentiles} if best_sims else {}
 
     return Metrics(
@@ -185,6 +248,8 @@ def compute_metrics(
         n_best_sim=len(best_sims),
         n_embedding_errors=n_embedding_errors,
         n_search_errors=n_search_errors,
+        n_range_matched=n_range_matched,
+        n_no_similarity=n_no_similarity,
     )
 
 
@@ -198,6 +263,19 @@ def format_metrics(metrics: Metrics) -> str:
         f"negative-control rate (answer-absent, correctly empty): "
         f"{metrics.negative_control_rate:.3f} (n={metrics.n_negative_control})",
     ]
+    if metrics.n_range_matched:
+        lines.append(
+            f"NOT COMPARABLE WITH A chat_memory RUN: {metrics.n_range_matched} hit(s) were "
+            "credited by message-range overlap, not by a pointed-at message id. On the "
+            "auto-harvested cases the accepted range is 'anywhere at or before the question', "
+            "so overlap is nearly free -- read this recall as an upper bound, not as a score."
+        )
+    if metrics.n_no_similarity:
+        lines.append(
+            f"note: {metrics.n_no_similarity} returned row(s) had no similarity "
+            "(lexical-leg hit on a not-yet-embedded chunk, or no query embedding) "
+            "and were excluded from the percentiles"
+        )
     if metrics.best_sim_percentiles:
         pct_str = ", ".join(
             f"p{p}={v:.3f}" for p, v in sorted(metrics.best_sim_percentiles.items())

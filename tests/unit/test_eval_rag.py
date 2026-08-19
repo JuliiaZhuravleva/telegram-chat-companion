@@ -225,3 +225,71 @@ class TestRunEvalQueryHygiene:
         )
 
         assert results[0].case.question == "бот, где мы встречаемся?"
+
+
+class TestPrintResultsSurvivesUnscoredHits:
+    """`_print_results` runs BEFORE `compute_metrics`, so a crash here discards
+    the whole run -- after every provider call for the case set is paid for,
+    and before a single metric prints.
+
+    `--backend chunks` makes unscored hits routine: `ChunkRepository.search`
+    returns `similarity = NULL` for a chunk the lexical leg found while its
+    embedding was still pending, and for every row when the query itself could
+    not be embedded. `max()` over a list holding one None raises, and
+    `format(None, '.3f')` raises even for a single hit.
+
+    The identical guard was added to `compute_metrics` in the same change and
+    this sibling one function away was missed; two independent reviewers found
+    it, and nothing in the suite touched `_print_results` at all.
+    """
+
+    def _result(self, *sims: float | None) -> CaseResult:
+        return CaseResult(
+            case=_make_case(),
+            hits=[{"id": i, "content": "x", "similarity": s} for i, s in enumerate(sims)],
+        )
+
+    def test_a_single_unscored_hit_does_not_crash(self, capsys: pytest.CaptureFixture) -> None:
+        from scripts.eval_rag import _print_results
+
+        _print_results([self._result(None)])
+
+        out = capsys.readouterr().out
+        assert "1 hit(s)" in out
+        assert "best_sim=n/a" in out
+        assert "1 unscored" in out
+
+    def test_a_mix_reports_the_best_scored_hit(self, capsys: pytest.CaptureFixture) -> None:
+        from scripts.eval_rag import _print_results
+
+        _print_results([self._result(None, 0.42, 0.61)])
+
+        out = capsys.readouterr().out
+        assert "best_sim=0.610" in out
+        assert "1 unscored" in out
+
+    def test_all_scored_reads_exactly_as_before(self, capsys: pytest.CaptureFixture) -> None:
+        """The control: the common case must not have grown noise."""
+        from scripts.eval_rag import _print_results
+
+        _print_results([self._result(0.42, 0.61)])
+
+        out = capsys.readouterr().out
+        assert "best_sim=0.610" in out
+        assert "unscored" not in out
+
+    def test_a_blind_case_no_longer_reports_a_fake_zero_similarity(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """Behaviour change, stated rather than buried: a case that retrieved
+        nothing used to print `best_sim=0.000` because `max(..., default=0.0)`
+        supplied a number where there was none. 0.0 is a real cosine value, so
+        that line was indistinguishable from a genuine worst-possible match."""
+        from scripts.eval_rag import _print_results
+
+        _print_results([CaseResult(case=_make_case(), hits=[])])
+
+        out = capsys.readouterr().out
+        assert "0 hit(s)" in out
+        assert "best_sim=n/a" in out
+        assert "0.000" not in out
