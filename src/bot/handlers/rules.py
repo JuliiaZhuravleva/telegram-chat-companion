@@ -8,6 +8,7 @@ Callback routes (all DM-only, admin-only):
 - ``ar_del:{lang}:{rule_id}:{chat_id}:{page}`` — delete a rule
 - ``ar_add:{lang}:{chat_id}``      — start creation (select type)
 - ``ar_type:{lang}:{chat_id}:{rule_type}`` — selected type, await config
+- ``ar_cancel:{lang}:{chat_id}``   — leave the config prompt without creating
 """
 
 from __future__ import annotations
@@ -22,8 +23,10 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.rules import (
     confirm_delete_rule_keyboard,
+    rule_config_cancel_keyboard,
     rule_detail_keyboard,
     rule_type_keyboard,
     rules_chat_list_keyboard,
@@ -168,6 +171,23 @@ def _is_private(callback: CallbackQuery) -> bool:
     return False
 
 
+async def _leave_config_prompt(state: FSMContext) -> None:
+    """Drop `awaiting_rule_config` when the admin navigates away from it.
+
+    Without this the state outlives the screen that created it. Concrete
+    misfire: open the type prompt for chat A, tap «Назад», wander off, and
+    paste any valid JSON dict into the DM an hour later -- a rule is silently
+    created in chat A with the type chosen back then. `/cancel` and the cancel
+    button do not cover it, because the admin never realises a dialog is still
+    open.
+
+    Only OUR state is cleared. A rules screen has no business ending someone
+    else's dialog, and `state.clear()` is indiscriminate.
+    """
+    if await state.get_state() == AdminStates.awaiting_rule_config.state:
+        await state.clear()
+
+
 # ---------------------------------------------------------------------------
 # Entry: chat selection
 # ---------------------------------------------------------------------------
@@ -176,6 +196,7 @@ def _is_private(callback: CallbackQuery) -> bool:
 @router.callback_query(F.data.startswith("adm_rules:"))
 async def handle_rules_menu(
     callback: CallbackQuery,
+    state: FSMContext,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
@@ -183,6 +204,8 @@ async def handle_rules_menu(
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
@@ -247,6 +270,7 @@ async def handle_rules_menu(
 @router.callback_query(F.data.startswith("ar_list:"))
 async def handle_rules_list(
     callback: CallbackQuery,
+    state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
     **kwargs: Any,
 ) -> None:
@@ -254,6 +278,8 @@ async def handle_rules_list(
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
@@ -283,6 +309,7 @@ async def handle_rules_list(
 @router.callback_query(F.data.startswith("ar_view:"))
 async def handle_rule_view(
     callback: CallbackQuery,
+    state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
     **kwargs: Any,
 ) -> None:
@@ -290,6 +317,8 @@ async def handle_rule_view(
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
@@ -490,12 +519,15 @@ async def handle_rule_delete(
 @router.callback_query(F.data.startswith("ar_add:"))
 async def handle_add_rule(
     callback: CallbackQuery,
+    state: FSMContext,
     **kwargs: Any,
 ) -> None:
     """Show rule type selection."""
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
@@ -546,7 +578,47 @@ async def handle_type_selected(
     msg = callback.message
     if isinstance(msg, Message):
         text = _TYPE_SELECTED[lang].format(rule_type=escape(rule_type))
-        await msg.edit_text(text, parse_mode="HTML")
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=rule_config_cancel_keyboard(lang, chat_id),
+        )
+
+
+@router.callback_query(F.data.startswith("ar_cancel:"))
+async def handle_rule_config_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
+) -> None:
+    """Leave the config prompt without creating anything, and show the list.
+
+    Gated exactly like every other callback in this file: a cancel screen
+    re-renders a chat's rule list, so it is not "harmless navigation".
+    """
+    if not _check_admin(kwargs) or not _is_private(callback):
+        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+        return
+
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    chat_id = int(parts[2]) if len(parts) > 2 else 0
+
+    await state.clear()
+    await callback.answer()
+
+    rules, total = await rules_repo.get_rules_page(chat_id, 0, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+
+    msg = callback.message
+    if isinstance(msg, Message):
+        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
+        await msg.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=rules_list_keyboard(lang, rules, 0, total_pages, chat_id),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -554,13 +626,41 @@ async def handle_type_selected(
 # ---------------------------------------------------------------------------
 
 
-@router.message(AdminStates.awaiting_rule_config)
+@router.message(
+    AdminStates.awaiting_rule_config,
+    F.chat.type == "private",
+    IsAdmin(),
+    ~F.text.startswith("/"),
+    ~F.caption.startswith("/"),
+)
 async def handle_rule_config_input(
     message: Message,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
 ) -> None:
-    """Receive JSON config and create the rule."""
+    """Receive JSON config and create the rule.
+
+    Four filters, and each one closes a hole the body could not (TD-049):
+
+    ``IsAdmin()`` -- this handler writes a rule for whatever ``chat_id`` the
+    FSM data carries, and until now it did so with **no authority check at
+    all**, unlike both of its siblings. The FSM key binds the state to one
+    user, which is exactly the TOCTOU the security register records as S-11:
+    it binds it to the user who *was* an admin when the dialog opened.
+
+    ``F.chat.type == "private"`` -- the dialog is only ever opened from a DM
+    callback, so this costs nothing and stops the state from ever applying
+    anywhere else.
+
+    The two slash guards are one guard. aiogram resolves a command from
+    ``message.text or message.caption``, so ``/help`` sent as a photo caption
+    is a real command -- and ``~F.text.startswith("/")`` returns True for it,
+    because ``.text`` is None. Measured: with the text-only guard, a captioned
+    ``/help`` was still eaten by this handler and answered "Невалидный JSON".
+    The same shape is why the escape hatches live on the keyboard and on
+    ``/cancel`` rather than in this handler's body: a filtered-out update is
+    one this handler never sees.
+    """
     data = await state.get_data()
     lang = _get_lang(data.get("lang"))
     chat_id = data.get("rule_chat_id", 0)
@@ -575,6 +675,7 @@ async def handle_rule_config_input(
         await message.reply(
             _INVALID_JSON[lang],
             parse_mode="HTML",
+            reply_markup=rule_config_cancel_keyboard(lang, chat_id),
         )
         return
 
@@ -590,6 +691,7 @@ async def handle_rule_config_input(
                 valid=", ".join(f"<code>{a}</code>" for a in RuleAction),
             ),
             parse_mode="HTML",
+            reply_markup=rule_config_cancel_keyboard(lang, chat_id),
         )
         return
     if action == RuleAction.SET_REACTION:
@@ -598,6 +700,7 @@ async def handle_rule_config_input(
             await message.reply(
                 _INVALID_EMOJI[lang],
                 parse_mode="HTML",
+                reply_markup=rule_config_cancel_keyboard(lang, chat_id),
             )
             return
 

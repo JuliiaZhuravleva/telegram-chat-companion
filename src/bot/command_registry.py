@@ -122,6 +122,17 @@ COMMANDS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        command="cancel",
+        # ADMIN only: every FSM prompt in this bot lives in the admin DM, so
+        # this is discoverable exactly where it is needed and invisible to
+        # ordinary DM users, who have no dialog to escape from.
+        scopes=frozenset({CommandScope.ADMIN}),
+        description={"ru": "Отменить текущий диалог", "en": "Cancel the current dialog"},
+        # NOT admin_only: the handler carries no IsAdmin filter on purpose
+        # (see handlers/fsm_cancel.py -- the middleware already decides who
+        # reaches it, and the filter would only narrow the promise).
+    ),
+    CommandSpec(
         command="admin",
         scopes=frozenset({CommandScope.ADMIN}),
         description={"ru": "Панель администратора", "en": "Admin panel"},

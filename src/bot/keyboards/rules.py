@@ -35,6 +35,7 @@ _L: dict[str, dict[str, str]] = {
     },
     "rule_del_yes": {"ru": "🗑 Да, удалить", "en": "🗑 Yes, delete"},
     "rule_del_cancel": {"ru": "✖ Отмена", "en": "✖ Cancel"},
+    "cancel_input": {"ru": "✖️ Отмена", "en": "✖️ Cancel"},
 }
 
 
@@ -237,6 +238,28 @@ def rule_type_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------------
 # Rule detail view
 # ---------------------------------------------------------------------------
+
+
+def rule_config_cancel_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
+    """The escape hatch shown with every `awaiting_rule_config` prompt.
+
+    Mirrors `tolerance_cancel_keyboard` (admin_chat_panel): the input handler
+    keeps the state set on invalid input so the admin can retry, which means
+    cancelling has to be possible WITHOUT producing valid JSON. Before this,
+    the prompt was rendered with no `reply_markup` at all -- `edit_text`
+    stripped the keyboard the user arrived on, so the screen offered no way
+    back and none of the three invalid-input replies added one.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_t("cancel_input", lang),
+                    callback_data=f"ar_cancel:{lang}:{chat_id}",
+                ),
+            ],
+        ]
+    )
 
 
 def rule_detail_keyboard(lang: str, rule_id: int, chat_id: int) -> InlineKeyboardMarkup:

@@ -13,6 +13,7 @@ from src.bot.handlers.admin_sticker import router as admin_sticker_router
 from src.bot.handlers.callbacks import router as callbacks_router
 from src.bot.handlers.chat_events import router as chat_events_router
 from src.bot.handlers.commands import router as commands_router
+from src.bot.handlers.fsm_cancel import router as fsm_cancel_router
 from src.bot.handlers.media import router as media_router
 from src.bot.handlers.message import router as message_router
 from src.bot.handlers.reactions import router as reactions_router
@@ -26,7 +27,12 @@ from src.bot.handlers.rules import router as rules_router
 # which handler consumes an update, and the ordering hazard it documents is
 # precisely the one that bit `/remember` (see `admin_sticker`'s note below).
 #
-#  1. admin_sticker    — adm_stk_* callbacks + the admin's DM reply handler.
+#  1. fsm_cancel       — /cancel, the one escape from every FSM prompt (TD-049).
+#                        FIRST on purpose: the FSM-owning routers below would
+#                        otherwise consume it. Measured — appended last, /cancel
+#                        in `awaiting_rule_config` is answered «Невалидный JSON»
+#                        by rules and never reaches the cancel handler.
+#  2. admin_sticker    — adm_stk_* callbacks + the admin's DM reply handler.
 #                        Must precede media_router so an admin's own DM sticker is
 #                        never silently auto-learned by handle_sticker_message
 #                        (B-1). Its reply handler matches ANY text reply in an
@@ -35,17 +41,17 @@ from src.bot.handlers.rules import router as rules_router
 #                        the command handlers ran, and a consumed update whose
 #                        body decides to do nothing is indistinguishable from a
 #                        broken bot.
-#  2. admin_kb         — adm_kb_* callbacks + organizer-add reply handler.
-#  3. admin_reactions  — adm_react_* callbacks (R-D1).
-#  4. admin_chat_panel — adm_pnl_* callbacks (B-1; own prefix, no overlap).
-#  5. admin_defaults   — adm_defs_* / adm_defs_tgl_* callbacks (C-1; own prefix,
+#  3. admin_kb         — adm_kb_* callbacks + organizer-add reply handler.
+#  4. admin_reactions  — adm_react_* callbacks (R-D1).
+#  5. admin_chat_panel — adm_pnl_* callbacks (B-1; own prefix, no overlap).
+#  6. admin_defaults   — adm_defs_* / adm_defs_tgl_* callbacks (C-1; own prefix,
 #                        replaces the placeholder that used to live in admin).
-#  6. admin           — its own commands + adm_ callbacks.
-#  7. rules           — ar_ callbacks + FSM state.
-#  8. commands        — /start /help /summary /remember /kb + kb_view:/kb_undo:.
-#  9. callbacks
-# 10. media           — voice / photo / sticker.
-# 11. message         — the generic `F.text` catch-all, and therefore LAST: it
+#  7. admin           — its own commands + adm_ callbacks.
+#  8. rules           — ar_ callbacks + FSM state.
+#  9. commands        — /start /help /summary /remember /kb + kb_view:/kb_undo:.
+# 10. callbacks
+# 11. media           — voice / photo / sticker.
+# 12. message         — the generic `F.text` catch-all, and therefore LAST: it
 #                       matches every group text message, so anything registered
 #                       after it is unreachable.
 #
@@ -53,6 +59,7 @@ from src.bot.handlers.rules import router as rules_router
 # message_reaction -- update types no other router handles, so their position
 # among the message routers is irrelevant.
 router = Router(name="main")
+router.include_router(fsm_cancel_router)
 router.include_router(admin_sticker_router)
 router.include_router(admin_kb_router)
 router.include_router(admin_reactions_router)
