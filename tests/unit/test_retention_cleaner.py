@@ -84,6 +84,7 @@ class TestWindows:
             reactions_days=None,
             decision_log_days=None,
             retrieval_log_days=None,
+            ai_failure_log_days=None,
         )._windows()
         assert windows == {}
 

@@ -297,3 +297,52 @@ class TestDisabledCheck:
         config = await checker._load_config()
 
         assert isinstance(config, dict)
+
+
+class TestAIFailureCheck:
+    """The check the five-day video-note outage needed and did not have.
+
+    `_log_usage` writes only on success, so a failed AI call never reached
+    `response_log` -- and the fallback check above reads that table, so it can
+    only ever see a fallback that already worked. Nothing was watching the
+    case where every provider was exhausted and the user got nothing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warning_names_the_task_that_failed(self, checker, pool):
+        pool.fetchval.side_effect = [1, 5, 0]  # db ok, messages, no fallbacks
+        pool.fetch.return_value = [
+            {"task_type": "transcription", "n": 5},
+            {"task_type": "vision", "n": 1},
+        ]
+
+        result = await checker._run_check()
+
+        assert result.status == HealthStatus.WARNING
+        failure_issues = [i for i in result.issues if "failed outright" in i.message]
+        assert len(failure_issues) == 1
+        # Naming the task is the point: "transcription is down" and "the
+        # provider is down" are different incidents with different responses.
+        assert "transcription x5" in failure_issues[0].message
+        assert "vision x1" in failure_issues[0].message
+
+    @pytest.mark.asyncio
+    async def test_no_failures_raises_no_issue(self, checker, pool):
+        pool.fetchval.side_effect = [1, 5, 0]
+        pool.fetch.return_value = []
+
+        result = await checker._run_check()
+
+        assert result.status == HealthStatus.HEALTHY
+        assert not any("failed outright" in i.message for i in result.issues)
+
+    @pytest.mark.asyncio
+    async def test_query_failure_does_not_break_the_whole_check(self, checker, pool):
+        """A broken sub-check must not cost the checks around it."""
+        pool.fetchval.side_effect = [1, 5, 0]
+        pool.fetch.side_effect = RuntimeError("relation does not exist")
+
+        result = await checker._run_check()
+
+        assert result.db_ok is True
+        assert result.status == HealthStatus.HEALTHY

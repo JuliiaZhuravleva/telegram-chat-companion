@@ -26,6 +26,7 @@ RETENTION_TABLES: dict[str, str] = {
     "message_reactions": "created_at",
     "decision_log": "created_at",
     "retrieval_log": "created_at",
+    "ai_failure_log": "created_at",
 }
 
 

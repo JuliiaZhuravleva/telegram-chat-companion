@@ -79,6 +79,26 @@ class HealthRepository:
             or 0
         )
 
+    async def get_ai_failure_counts(self, interval: timedelta) -> dict[str, int]:
+        """Failed AI calls per task type within an interval (migration 031).
+
+        Counted per task so the alert can name what broke: "transcription"
+        failing while text generation is fine is a different incident from
+        the whole provider being down, and the five-day video-note outage
+        (ba8ce2c) was exactly the first kind.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT task_type, COUNT(*) AS n
+            FROM ai_failure_log
+            WHERE created_at > NOW() - $1::interval
+            GROUP BY task_type
+            ORDER BY n DESC
+            """,
+            interval,
+        )
+        return {row["task_type"]: int(row["n"]) for row in rows}
+
     async def get_message_count_30m(self) -> int:
         """Count messages in the last 30 minutes."""
         return (
