@@ -174,6 +174,26 @@ class HealthChecker:
         except Exception as exc:
             logger.warning("Failed to get fallback count", error_type=type(exc).__name__)
 
+        # 4. AI calls that failed outright (migration 031)
+        #
+        # This is the check the five-day video-note outage needed and did not
+        # have: `_log_usage` writes only on success, so failures never reach
+        # `response_log`, and check 3 above reads that table -- it can only
+        # ever see a fallback that already worked. A terminal failure means
+        # every provider for the task was exhausted and the user got nothing.
+        try:
+            failures = await health_repo.get_ai_failure_counts(timedelta(minutes=15))
+            if failures:
+                breakdown = ", ".join(f"{task} x{count}" for task, count in failures.items())
+                result.issues.append(
+                    HealthIssue(
+                        severity=HealthStatus.WARNING,
+                        message=f"AI calls failed outright in last 15 min: {breakdown}",
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Failed to get AI failure counts", error_type=type(exc).__name__)
+
         # Determine overall status
         if any(i.severity == HealthStatus.CRITICAL for i in result.issues):
             result.status = HealthStatus.CRITICAL

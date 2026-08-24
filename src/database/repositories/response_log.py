@@ -57,6 +57,38 @@ class ResponseLogRepository:
             duration_seconds,
         )
 
+    async def log_failure(
+        self,
+        *,
+        task_type: str,
+        provider: str | None = None,
+        model: str | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Record an AI call that failed outright (migration 031).
+
+        Deliberately a different table from `log()` above: `response_log`
+        feeds SpendLimitService and the /costs analytics, and a failure is not
+        a call that happened -- writing it there would change the meaning of
+        every existing aggregate, the spend cap included.
+
+        `error_message` is truncated: it carries a provider's raw error body,
+        which is unbounded and occasionally large.
+        """
+        await self._pool.execute(
+            """
+            INSERT INTO ai_failure_log
+                (task_type, provider, model, error_type, error_message)
+            VALUES ($1, $2, $3, $4, $5)
+            """,
+            task_type,
+            provider,
+            model,
+            error_type,
+            error_message[:2000] if error_message else None,
+        )
+
     # -- Cost aggregation queries --
 
     async def get_total_cost(self, interval: timedelta) -> Decimal:

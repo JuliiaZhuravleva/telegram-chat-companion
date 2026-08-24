@@ -744,3 +744,112 @@ class TestClose:
         assert "close" in p1.call_log
         assert "close" in p2.call_log
         assert router._providers == {}
+
+
+class TestFailureLogging:
+    """A failed AI call must leave a trace; a recovered one must not.
+
+    Before migration 031 nothing recorded failure at all -- `_log_usage`
+    writes only on the success path, and HealthChecker's only AI signal reads
+    that same table. Video-note transcription was dead in every chat for five
+    days behind that blindness (ba8ce2c).
+    """
+
+    @pytest.mark.asyncio
+    async def test_terminal_transcription_failure_is_recorded(
+        self, mock_provider, mock_router_settings
+    ):
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            error=AIProviderError("boom", provider="openai"),
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        mock_repo = AsyncMock()
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["openai"] = provider
+
+        with pytest.raises(AIProviderError):
+            await router.transcribe_audio(b"audio")
+        await asyncio.sleep(0.05)
+
+        mock_repo.log_failure.assert_awaited_once()
+        assert mock_repo.log_failure.call_args.kwargs["task_type"] == "transcription"
+        assert mock_repo.log_failure.call_args.kwargs["provider"] == "openai"
+
+    @pytest.mark.asyncio
+    async def test_recovered_fallback_is_not_recorded_as_a_failure(
+        self, mock_provider, mock_router_settings
+    ):
+        """A chain that fails over and then succeeds is not an outage.
+
+        Counting each provider attempt would make a healthy fallback page an
+        admin, which is how an alert stops being read.
+        """
+        failing = mock_provider(name="openai", error=AIProviderError("down", provider="openai"))
+        working = mock_provider(name="gemini")
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = ["gemini"]
+        task_config.model = None
+        task_config.max_tokens = 100
+        task_config.temperature = 0.5
+        mock_router_settings.ai.tasks = {"text_generation": task_config}
+
+        mock_repo = AsyncMock()
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["openai"] = failing
+        router._providers["gemini"] = working
+
+        result = await router.generate_text("hi")
+        await asyncio.sleep(0.05)
+
+        assert result.text == "mock response"
+        mock_repo.log_failure.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_bookkeeping_failure_never_escapes(self, mock_provider, mock_router_settings):
+        """The caller is already on its error path -- recording must not add
+        a second, different exception on top of the one it is handling."""
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            error=AIProviderError("boom", provider="openai"),
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        mock_repo = AsyncMock()
+        mock_repo.log_failure = AsyncMock(side_effect=RuntimeError("db is down"))
+        router = AIRouter(mock_router_settings, response_log_repo=mock_repo)
+        router._providers["openai"] = provider
+
+        # The transcription error, not the bookkeeping one.
+        with pytest.raises(AIProviderError, match="All providers failed"):
+            await router.transcribe_audio(b"audio")
+        await asyncio.sleep(0.05)
+
+    @pytest.mark.asyncio
+    async def test_no_repo_configured_is_not_a_crash(self, mock_provider, mock_router_settings):
+        provider = mock_provider(
+            name="openai",
+            supported_capabilities={"transcription": True},
+            error=AIProviderError("boom", provider="openai"),
+        )
+        task_config = MagicMock()
+        task_config.provider = "openai"
+        task_config.fallback = []
+        mock_router_settings.ai.tasks = {"transcription": task_config}
+
+        router = AIRouter(mock_router_settings)  # no response_log_repo
+        router._providers["openai"] = provider
+
+        with pytest.raises(AIProviderError):
+            await router.transcribe_audio(b"audio")
+        await asyncio.sleep(0.05)

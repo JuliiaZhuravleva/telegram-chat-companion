@@ -124,6 +124,11 @@ class RetentionCleaner:
                 if config.retrieval_log_days is not None
                 else None
             ),
+            "ai_failure_log": (
+                timedelta(days=config.ai_failure_log_days)
+                if config.ai_failure_log_days is not None
+                else None
+            ),
         }
         return {table: window for table, window in raw.items() if window is not None}
 

@@ -164,6 +164,11 @@ class MaintenanceSettings(BaseSettings):
     decision_log_days: int | None = 90
     retrieval_log_days: int | None = 90
 
+    # Failed AI calls (migration 031). Same window as the observability logs
+    # it sits beside -- long enough to answer "when did this start failing?",
+    # which is the question a five-day silent outage leaves behind.
+    ai_failure_log_days: int | None = 90
+
 
 class EmbeddingBackfillSettings(BaseSettings):
     """Background worker that retries embeddings for pending ``chat_memory``

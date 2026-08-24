@@ -149,6 +149,43 @@ class AIRouter:
         }
         return bool(api_keys.get(provider_name))
 
+    async def _log_failure(
+        self,
+        *,
+        task_type: str,
+        error: Exception | None,
+    ) -> None:
+        """Record that a task failed on EVERY provider. Never raises.
+
+        `_log_usage` above writes only when a call succeeds, so before this
+        existed a failed AI call left no trace in any table -- and
+        HealthChecker's only AI signal reads `response_log`, making it blind
+        to failure by construction. Video-note transcription was dead in every
+        chat for five days behind exactly that blindness (ba8ce2c).
+
+        Logged at the TERMINAL failure only, not per provider attempt: a
+        chain that fails over and then succeeds is not an outage, and counting
+        each attempt would make a healthy fallback look like one.
+        """
+        if self._response_log is None:
+            return
+        try:
+            provider = getattr(error, "provider", None)
+            await self._response_log.log_failure(
+                task_type=task_type,
+                provider=provider if isinstance(provider, str) else None,
+                error_type=type(error).__name__ if error else None,
+                error_message=str(error) if error else None,
+            )
+        except Exception:
+            # Never let bookkeeping turn a handled failure into a crash: the
+            # caller is already on its error path and has its own degradation.
+            logger.warning(
+                "Failed to record AI failure",
+                task_type=task_type,
+                exc_info=True,
+            )
+
     async def _log_usage(
         self,
         *,
@@ -293,6 +330,8 @@ class AIRouter:
                 if not e.retriable:
                     continue
 
+        fire_and_forget(self._log_failure(task_type="text_generation", error=last_error))
+
         raise AIProviderError(
             f"All providers failed for text generation. Last error: {last_error}",
             provider="router",
@@ -364,6 +403,8 @@ class AIRouter:
                 last_error = e
                 continue
 
+        fire_and_forget(self._log_failure(task_type="embeddings", error=last_error))
+
         raise AIProviderError(
             f"All providers failed for embeddings. Last error: {last_error}",
             provider="router",
@@ -424,6 +465,8 @@ class AIRouter:
                 )
                 last_error = e
                 continue
+
+        fire_and_forget(self._log_failure(task_type="vision", error=last_error))
 
         raise AIProviderError(
             f"All providers failed for vision. Last error: {last_error}",
@@ -498,6 +541,8 @@ class AIRouter:
                 )
                 last_error = e
                 continue
+
+        fire_and_forget(self._log_failure(task_type="transcription", error=last_error))
 
         raise AIProviderError(
             f"All providers failed for transcription. Last error: {last_error}",
