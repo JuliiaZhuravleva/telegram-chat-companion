@@ -7,7 +7,7 @@ Supports text generation, embeddings, vision, and transcription (Whisper).
 from __future__ import annotations
 
 import base64
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 import structlog
@@ -42,13 +42,32 @@ _BASE_URL = "https://api.openai.com/v1"
 # Derive the extension from the bytes rather than trusting a caller's label:
 # the sender of the audio is the one thing that cannot be wrong about it, and
 # a future caller transcribing anything but voice inherits the fix for free.
-_MAGIC_EXTENSIONS: tuple[tuple[int, bytes, str], ...] = (
-    (0, b"OggS", "ogg"),
-    (4, b"ftyp", "mp4"),  # ISO-BMFF: mp4/m4a, what Telegram video notes are
-    (0, b"RIFF", "wav"),
-    (0, b"fLaC", "flac"),
-    (0, b"\x1a\x45\xdf\xa3", "webm"),
-    (0, b"ID3", "mp3"),
+class _ContainerSignature(NamedTuple):
+    """One container's fingerprint: EVERY (offset, magic) pair must match.
+
+    More than one check matters. `RIFF` alone names a container family, not a
+    format -- RIFF/AVI and RIFF/WEBP carry it too -- so a single-check row
+    would confidently return "wav" for a file that is not one. That failure is
+    worse than the fallback below, because a wrong positive also skips the
+    warning, and that warning is the only way the next unknown format becomes
+    visible instead of surfacing as an unexplained 400.
+    """
+
+    checks: tuple[tuple[int, bytes], ...]
+    extension: str
+
+
+_MAGIC_EXTENSIONS: tuple[_ContainerSignature, ...] = (
+    _ContainerSignature(((0, b"OggS"),), "ogg"),
+    # ISO-BMFF: mp4/m4a, what Telegram video notes are. The `ftyp` box is
+    # required to be first, and every sample measured off Telegram puts it
+    # there; a file with a leading free/skip/wide box would fall through to
+    # the fallback rather than be mislabelled.
+    _ContainerSignature(((4, b"ftyp"),), "mp4"),
+    _ContainerSignature(((0, b"RIFF"), (8, b"WAVE")), "wav"),
+    _ContainerSignature(((0, b"fLaC"),), "flac"),
+    _ContainerSignature(((0, b"\x1a\x45\xdf\xa3"),), "webm"),
+    _ContainerSignature(((0, b"ID3"),), "mp3"),
 )
 
 # Unrecognised bytes keep the historical name: it is no worse than what every
@@ -63,11 +82,43 @@ _SUPPORTED_UPLOAD_EXTENSIONS = frozenset(
 )
 
 
-def _upload_filename(audio_data: bytes) -> str:
-    """Name the upload after the container the bytes actually are."""
-    for offset, magic, extension in _MAGIC_EXTENSIONS:
-        if audio_data[offset : offset + len(magic)] == magic:
-            return f"audio.{extension}"
+def _sniff_extension(audio_data: bytes) -> str | None:
+    """The container these bytes actually are, or None if nothing matches.
+
+    Returning None rather than a default is what makes detection testable:
+    with a default, "recognised as ogg" and "recognised as nothing" are the
+    same value, and a test asserting it cannot tell them apart.
+    """
+    for signature in _MAGIC_EXTENSIONS:
+        if all(
+            audio_data[offset : offset + len(magic)] == magic for offset, magic in signature.checks
+        ):
+            return signature.extension
+    return None
+
+
+def _upload_filename(audio_data: bytes, declared: str | None = None) -> str:
+    """Name the upload after the container the bytes actually are.
+
+    A caller-supplied `declared` name still wins -- a caller that knows more
+    than the magic table must be able to say so. But it is now checked against
+    the bytes and any disagreement is logged, because "a filename nobody
+    verifies" is precisely what caused this function to exist: the hardcoded
+    "audio.ogg" was a caller-level lie that no signal could reveal.
+    """
+    sniffed = _sniff_extension(audio_data)
+
+    if declared:
+        if sniffed and not declared.lower().endswith(f".{sniffed}"):
+            logger.warning(
+                "Declared upload filename disagrees with the container",
+                declared=declared,
+                sniffed=sniffed,
+            )
+        return declared
+
+    if sniffed:
+        return f"audio.{sniffed}"
 
     logger.warning(
         "Unrecognised audio container; falling back to a default upload name",
@@ -274,7 +325,7 @@ class OpenAIProvider(AIProvider):
     ) -> TranscriptionResult:
         """Transcribe audio using the OpenAI transcription API."""
         model = model or "gpt-4o-mini-transcribe"
-        filename = kwargs.get("filename") or _upload_filename(audio_data)
+        filename = _upload_filename(audio_data, declared=kwargs.get("filename"))
 
         # Multipart form upload — use separate headers without JSON content-type
         headers = {"Authorization": f"Bearer {self._api_key}"}
