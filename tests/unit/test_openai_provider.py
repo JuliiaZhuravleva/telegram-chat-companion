@@ -10,6 +10,7 @@ from src.services.ai.providers.openai import (
     _MAGIC_EXTENSIONS,
     _SUPPORTED_UPLOAD_EXTENSIONS,
     OpenAIProvider,
+    _sniff_extension,
     _upload_filename,
 )
 
@@ -433,8 +434,71 @@ class TestUploadFilename:
 
         Guessing an extension the API rejects would swap one 400 for another.
         """
-        emitted = {extension for _, _, extension in _MAGIC_EXTENSIONS}
+        emitted = {signature.extension for signature in _MAGIC_EXTENSIONS}
         assert emitted <= _SUPPORTED_UPLOAD_EXTENSIONS
+
+    def test_ogg_is_detected_and_not_merely_defaulted(self):
+        """The ogg row must be falsifiable, and `_upload_filename` cannot be.
+
+        Its answer for ogg ("audio.ogg") is the same string as the fallback,
+        so every assertion phrased against it passes with the OggS row
+        deleted -- verified by mutation on 2026-08-24: removing that row left
+        all six ogg assertions green, and the only tests that went red were
+        the usage-token ones, failing on an extra warning and pointing at cost
+        logging rather than at detection. Ogg is >90% of production traffic
+        and was the one path with no test that could fail. `_sniff_extension`
+        answers None when nothing matched, which is what separates the two.
+        """
+        assert _sniff_extension(OGG_HEAD) == "ogg"
+
+    def test_unknown_bytes_sniff_to_none_rather_than_a_default(self):
+        assert _sniff_extension(b"not-any-known-container") is None
+
+    def test_riff_alone_is_not_wav(self):
+        """RIFF names a container family, not a format.
+
+        RIFF/AVI and RIFF/WEBP share the leading magic. Matching on it alone
+        would return a confidently wrong "wav" AND skip the fallback warning,
+        which is the design's only signal that a format went unrecognised.
+        """
+        riff_avi = b"RIFF\x24\x08\x00\x00AVI LIST"
+        assert _sniff_extension(riff_avi) is None
+
+    def test_wav_needs_both_riff_and_wave(self):
+        assert _sniff_extension(b"RIFF\x24\x08\x00\x00WAVEfmt ") == "wav"
+
+
+class TestDeclaredFilename:
+    """A caller's name wins, but no longer passes unexamined.
+
+    The incident this module now guards against was exactly a filename nobody
+    checked against the bytes.
+    """
+
+    def test_declared_name_disagreeing_with_the_bytes_warns(self):
+        with patch("src.services.ai.providers.openai.logger") as mock_logger:
+            result = _upload_filename(MP4_HEAD, declared="voice.ogg")
+
+        assert result == "voice.ogg"
+        mock_logger.warning.assert_called_once()
+        assert mock_logger.warning.call_args.kwargs["sniffed"] == "mp4"
+        assert mock_logger.warning.call_args.kwargs["declared"] == "voice.ogg"
+
+    def test_declared_name_agreeing_with_the_bytes_is_silent(self):
+        with patch("src.services.ai.providers.openai.logger") as mock_logger:
+            result = _upload_filename(MP4_HEAD, declared="video_note.MP4")
+
+        assert result == "video_note.MP4"
+        mock_logger.warning.assert_not_called()
+
+    def test_unrecognised_bytes_do_not_accuse_the_caller(self):
+        """With nothing sniffed there is no disagreement to report -- warning
+        here would blame a caller that may well be right."""
+        with patch("src.services.ai.providers.openai.logger") as mock_logger:
+            result = _upload_filename(b"unknown-container", declared="from-caller.m4a")
+
+        assert result == "from-caller.m4a"
+        mock_logger.warning.assert_not_called()
 
 
 class TestTranscribeUploadName:
