@@ -248,7 +248,7 @@ async def handle_sticker_sets(
     keyboard = sticker_sets_keyboard(sets, lang=lang, page=page, total=total, per_page=per_page)
 
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await safe_edit_text(callback.message, text, reply_markup=keyboard)
     await callback.answer()
 
 
@@ -309,7 +309,7 @@ async def handle_sticker_set_view(
     text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
 
     if isinstance(callback.message, Message):
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=keyboard)
     await callback.answer()
 
 

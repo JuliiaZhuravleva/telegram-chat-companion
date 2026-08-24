@@ -33,6 +33,7 @@ from src.bot.keyboards.rules import (
     rules_list_keyboard,
 )
 from src.bot.states.admin import AdminStates
+from src.bot.utils import safe_edit_text
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.rules import RulesRepository
 from src.models.rules import _VALID_RULE_ACTIONS, _VALID_RULE_TYPES, RuleAction
@@ -255,7 +256,8 @@ async def handle_rules_menu(
     msg = callback.message
     if isinstance(msg, Message):
         text = _NO_CHATS[lang] if not chats else _RULES_TITLE[lang]
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=rules_chat_list_keyboard(lang, chats, page, total_pages),
@@ -294,7 +296,8 @@ async def handle_rules_list(
     msg = callback.message
     if isinstance(msg, Message):
         text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
@@ -332,7 +335,8 @@ async def handle_rule_view(
         return
 
     if rule is None:
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             {"ru": "Правило не найдено.", "en": "Rule not found."}.get(lang, ""),
             parse_mode="HTML",
         )
@@ -360,7 +364,8 @@ async def handle_rule_view(
     )
 
     chat_id = rule.get("chat_id", 0)
-    await msg.edit_text(
+    await safe_edit_text(
+        msg,
         text,
         parse_mode="HTML",
         reply_markup=rule_detail_keyboard(lang, rule_id, chat_id),
@@ -411,7 +416,8 @@ async def handle_rule_toggle(
     msg = callback.message
     if isinstance(msg, Message):
         text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
@@ -448,7 +454,8 @@ async def handle_rule_delete_ask(
         return
 
     if rule is None:
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _RULE_NOT_FOUND[lang],
             parse_mode="HTML",
         )
@@ -465,7 +472,8 @@ async def handle_rule_delete_ask(
     name = escape(config.get("name", f"#{rule_id}"))
 
     text = f"{_RULE_DEL_CONFIRM_TITLE[lang]}\n\n{name}\n\n{_RULE_DEL_CONFIRM_BODY[lang]}"
-    await msg.edit_text(
+    await safe_edit_text(
+        msg,
         text,
         parse_mode="HTML",
         reply_markup=confirm_delete_rule_keyboard(lang, rule_id, chat_id, page),
@@ -504,7 +512,8 @@ async def handle_rule_delete(
     msg = callback.message
     if isinstance(msg, Message):
         text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
@@ -537,7 +546,8 @@ async def handle_add_rule(
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             {"ru": "<b>Тип правила:</b>", "en": "<b>Rule type:</b>"}.get(lang, ""),
             parse_mode="HTML",
             reply_markup=rule_type_keyboard(lang, chat_id),
@@ -578,7 +588,8 @@ async def handle_type_selected(
     msg = callback.message
     if isinstance(msg, Message):
         text = _TYPE_SELECTED[lang].format(rule_type=escape(rule_type))
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=rule_config_cancel_keyboard(lang, chat_id),
@@ -614,7 +625,8 @@ async def handle_rule_config_cancel(
     msg = callback.message
     if isinstance(msg, Message):
         text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=rules_list_keyboard(lang, rules, 0, total_pages, chat_id),

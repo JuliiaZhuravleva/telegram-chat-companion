@@ -41,6 +41,7 @@ from src.bot.keyboards.admin import (
     whitelist_menu_keyboard,
     wl_approved_keyboard,
 )
+from src.bot.utils import safe_edit_reply_markup, safe_edit_text
 from src.config import Settings
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -286,7 +287,8 @@ async def handle_menu(callback: CallbackQuery, **kwargs: Any) -> None:
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _MENU_TITLE[lang],
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(lang),
@@ -317,7 +319,8 @@ async def handle_language_menu(callback: CallbackQuery, **kwargs: Any) -> None:
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _LANG_TITLE[lang],
             parse_mode="HTML",
             reply_markup=language_keyboard(lang),
@@ -345,7 +348,8 @@ async def handle_language_set(
     # Refresh menu in new language
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _MENU_TITLE[new_lang],
             parse_mode="HTML",
             reply_markup=main_menu_keyboard(new_lang),
@@ -397,7 +401,8 @@ async def handle_whitelist_menu(callback: CallbackQuery, **kwargs: Any) -> None:
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _WL_TITLE[lang],
             parse_mode="HTML",
             reply_markup=whitelist_menu_keyboard(lang),
@@ -458,7 +463,8 @@ async def handle_stats(
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=stats_keyboard(lang, period),
@@ -608,7 +614,8 @@ async def handle_costs(
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=costs_keyboard(lang, period),
@@ -1135,7 +1142,8 @@ async def handle_wl_remove_ask(
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=confirm_remove_chat_keyboard(lang, chat_id, page),
@@ -1263,7 +1271,8 @@ async def _render_wl_pending(
 
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=pending_list_keyboard(lang, attempts, page, total_pages, offset),
@@ -1457,7 +1466,8 @@ async def handle_wl_delete_ask(
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=confirm_delete_attempt_keyboard(lang, attempt_id, page),
@@ -1572,7 +1582,8 @@ async def handle_approve_notification(
     # Replace buttons with status indicator + settings-panel link (D-1)
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_reply_markup(
+        await safe_edit_reply_markup(
+            msg,
             reply_markup=approved_notification_keyboard(lang, attempt["chat_id"]),
         )
 
@@ -1609,7 +1620,8 @@ async def handle_reject_notification(
     # Replace buttons with status indicator
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_reply_markup(
+        await safe_edit_reply_markup(
+            msg,
             reply_markup=rejected_notification_keyboard(lang),
         )
 
@@ -1660,7 +1672,8 @@ async def handle_wl_approve(
     text = f"{_WL_APPROVED[lang]}\n\n{chat_link} <code>{chat_id}</code>"
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             text,
             parse_mode="HTML",
             reply_markup=wl_approved_keyboard(lang, chat_id, page),
@@ -1744,7 +1757,8 @@ async def handle_notifications_menu(
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _NOTIF_TITLE[lang],
             parse_mode="HTML",
             reply_markup=notifications_keyboard(lang, settings),
@@ -1780,7 +1794,8 @@ async def handle_sticker_notification_cycle(
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _NOTIF_TITLE[lang],
             parse_mode="HTML",
             reply_markup=notifications_keyboard(lang, settings),
@@ -1819,7 +1834,8 @@ async def handle_notification_toggle(
     await callback.answer()
     msg = callback.message
     if isinstance(msg, Message):
-        await msg.edit_text(
+        await safe_edit_text(
+            msg,
             _NOTIF_TITLE[lang],
             parse_mode="HTML",
             reply_markup=notifications_keyboard(lang, settings),

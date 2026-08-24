@@ -106,6 +106,7 @@ async def safe_edit_text(
     *,
     reply_markup: InlineKeyboardMarkup | None = None,
     parse_mode: str | None | Default = Default("parse_mode"),
+    disable_web_page_preview: bool | None | Default = Default("link_preview_is_disabled"),
 ) -> None:
     """edit_text that tolerates re-rendering identical content.
 
@@ -124,9 +125,54 @@ async def safe_edit_text(
                        HTML, so a caller asking for plain text got the opposite —
                        the project's documented escaping trap, one step removed.
     * an explicit mode → that mode.
+
+    `disable_web_page_preview` follows the identical three-state rule with its
+    own sentinel, `Default("link_preview_is_disabled")` — the exact value
+    `Message.edit_text` declares. aiogram resolves a `Default` **by name**
+    (`bot.default[value.name]` in its session layer), so constructing a fresh
+    one here is equivalent to omitting the argument. Defaulting it to `None`
+    instead would silently flip link-preview behaviour for every existing
+    caller: the same trap the parse_mode note above records, one parameter
+    over.
     """
     try:
-        await message.edit_text(text, parse_mode=parse_mode, reply_markup=reply_markup)
+        await message.edit_text(
+            text,
+            parse_mode=parse_mode,
+            reply_markup=reply_markup,
+            disable_web_page_preview=disable_web_page_preview,
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc):
+            raise
+
+
+async def safe_edit_reply_markup(
+    message: Message,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> None:
+    """edit_reply_markup that tolerates re-applying identical markup.
+
+    Same suppression as `safe_edit_text`, different Bot API method: Telegram
+    raises TelegramBadRequest("message is not modified") when the new markup
+    equals the current one, which is exactly what a double-tap on an
+    approve/reject notification produces.
+
+    Deliberately has NO parse_mode parameter, and that is not an oversight.
+    `Message.edit_reply_markup` declares none, and aiogram's method models are
+    built with `extra="allow"` — `EditMessageReplyMarkup(..., parse_mode="HTML")`
+    constructs happily and *sends* the field rather than raising. A "harmless"
+    parse_mode passed through here would reach the Bot API silently instead of
+    failing loudly, so the Default() dance `safe_edit_text` needs has no
+    counterpart here.
+
+    `reply_markup` is keyword-only on purpose too: the first positional
+    parameter of `Message.edit_reply_markup` is `inline_message_id`, not the
+    markup.
+    """
+    try:
+        await message.edit_reply_markup(reply_markup=reply_markup)
     except TelegramBadRequest as exc:
         if "message is not modified" not in str(exc):
             raise

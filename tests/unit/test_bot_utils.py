@@ -13,7 +13,12 @@ from aiogram.client.default import Default
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
 
-from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
+from src.bot.utils import (
+    check_admin_direct,
+    is_bot_chat_admin,
+    safe_edit_reply_markup,
+    safe_edit_text,
+)
 
 # Distinguishes "passed None" from "not passed at all" — the whole point here.
 _ABSENT = object()
@@ -175,3 +180,81 @@ class TestSafeEditTextParseMode:
 
         with pytest.raises(TelegramBadRequest):
             await safe_edit_text(message, "x", parse_mode=None)
+
+
+class TestSafeEditTextLinkPreview:
+    """The link-preview parameter follows the same three-state rule as parse_mode.
+
+    It exists because three real call sites pass `disable_web_page_preview=True`
+    and could not have been converted otherwise (TD-048).
+    """
+
+    @pytest.mark.asyncio
+    async def test_omitted_inherits_the_bot_default(self) -> None:
+        """Not `None`. Defaulting to None would silently flip link-preview
+        behaviour for every caller that never asked about it — the same trap
+        the parse_mode note records, one parameter over."""
+        message = MagicMock()
+        message.edit_text = AsyncMock()
+
+        await safe_edit_text(message, "https://example.com")
+
+        passed = message.edit_text.await_args.kwargs.get("disable_web_page_preview", _ABSENT)
+        assert isinstance(passed, Default), f"expected aiogram's Default sentinel, got {passed!r}"
+        assert passed.name == "link_preview_is_disabled", (
+            "aiogram resolves a Default BY NAME (bot.default[value.name]), so the "
+            f"wrong name silently resolves to the wrong setting; got {passed.name!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_explicit_true_is_passed_through(self) -> None:
+        message = MagicMock()
+        message.edit_text = AsyncMock()
+
+        await safe_edit_text(message, "https://example.com", disable_web_page_preview=True)
+
+        assert message.edit_text.await_args.kwargs["disable_web_page_preview"] is True
+
+
+class TestSafeEditReplyMarkup:
+    """Its own Bot API method, and the one a double-tapped approve/reject hits."""
+
+    @pytest.mark.asyncio
+    async def test_not_modified_is_suppressed(self) -> None:
+        message = MagicMock()
+        message.edit_reply_markup = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=MagicMock(), message="message is not modified: nothing changed"
+            )
+        )
+
+        await safe_edit_reply_markup(message, reply_markup=None)  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_other_bad_requests_still_propagate(self) -> None:
+        """`method=` is a REQUIRED positional on TelegramBadRequest.
+
+        Omit it and the test dies with TypeError in its own body — red either
+        way, which makes the control unfalsifiable rather than passing.
+        """
+        message = MagicMock()
+        message.edit_reply_markup = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="message can't be edited")
+        )
+
+        with pytest.raises(TelegramBadRequest):
+            await safe_edit_reply_markup(message, reply_markup=None)
+
+    @pytest.mark.asyncio
+    async def test_markup_is_passed_by_keyword(self) -> None:
+        """The first positional of Message.edit_reply_markup is
+        `inline_message_id`, not the markup — passing it positionally would
+        send the keyboard as an inline message id."""
+        message = MagicMock()
+        message.edit_reply_markup = AsyncMock()
+        markup = MagicMock()
+
+        await safe_edit_reply_markup(message, reply_markup=markup)
+
+        assert message.edit_reply_markup.await_args.args == ()
+        assert message.edit_reply_markup.await_args.kwargs["reply_markup"] is markup
