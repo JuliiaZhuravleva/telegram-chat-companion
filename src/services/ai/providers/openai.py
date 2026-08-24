@@ -27,6 +27,57 @@ logger = structlog.get_logger(__name__)
 _BASE_URL = "https://api.openai.com/v1"
 
 
+# -- Upload filename ---------------------------------------------------
+#
+# The multipart filename is not cosmetic: /audio/transcriptions picks its
+# demuxer from the extension, and a mismatch is a hard 400 ("Audio file might
+# be corrupted or unsupported"). Every caller used to receive the same
+# hardcoded "audio.ogg", which is a lie for Telegram video notes -- those are
+# MP4. whisper-1 sniffed the container and transcribed them regardless, so the
+# lie was free until 2026-08-19, when the switch to gpt-4o-mini-transcribe
+# (which trusts the extension) silently killed video-note transcription in
+# every chat while voice -- genuinely ogg -- kept working. Measured against the
+# live API: identical MP4 bytes give 400 as "audio.ogg" and 200 as "audio.mp4".
+#
+# Derive the extension from the bytes rather than trusting a caller's label:
+# the sender of the audio is the one thing that cannot be wrong about it, and
+# a future caller transcribing anything but voice inherits the fix for free.
+_MAGIC_EXTENSIONS: tuple[tuple[int, bytes, str], ...] = (
+    (0, b"OggS", "ogg"),
+    (4, b"ftyp", "mp4"),  # ISO-BMFF: mp4/m4a, what Telegram video notes are
+    (0, b"RIFF", "wav"),
+    (0, b"fLaC", "flac"),
+    (0, b"\x1a\x45\xdf\xa3", "webm"),
+    (0, b"ID3", "mp3"),
+)
+
+# Unrecognised bytes keep the historical name: it is no worse than what every
+# caller got before, and the log line below is what makes the next such format
+# visible instead of surfacing as an unexplained 400.
+_FALLBACK_EXTENSION = "ogg"
+
+# All extensions above are in the endpoint's supported set (flac, m4a, mp3,
+# mp4, mpeg, mpga, oga, ogg, wav, webm).
+_SUPPORTED_UPLOAD_EXTENSIONS = frozenset(
+    {"flac", "m4a", "mp3", "mp4", "mpeg", "mpga", "oga", "ogg", "wav", "webm"}
+)
+
+
+def _upload_filename(audio_data: bytes) -> str:
+    """Name the upload after the container the bytes actually are."""
+    for offset, magic, extension in _MAGIC_EXTENSIONS:
+        if audio_data[offset : offset + len(magic)] == magic:
+            return f"audio.{extension}"
+
+    logger.warning(
+        "Unrecognised audio container; falling back to a default upload name",
+        head=audio_data[:12].hex(),
+        size=len(audio_data),
+        fallback=_FALLBACK_EXTENSION,
+    )
+    return f"audio.{_FALLBACK_EXTENSION}"
+
+
 class OpenAIProvider(AIProvider):
     """OpenAI API provider (GPT, Whisper, embeddings, vision)."""
 
@@ -223,7 +274,7 @@ class OpenAIProvider(AIProvider):
     ) -> TranscriptionResult:
         """Transcribe audio using the OpenAI transcription API."""
         model = model or "gpt-4o-mini-transcribe"
-        filename = kwargs.get("filename", "audio.ogg")
+        filename = kwargs.get("filename") or _upload_filename(audio_data)
 
         # Multipart form upload — use separate headers without JSON content-type
         headers = {"Authorization": f"Bearer {self._api_key}"}
