@@ -6,7 +6,21 @@ import httpx
 import pytest
 
 from src.services.ai.base import AIProviderError, RateLimitError
-from src.services.ai.providers.openai import OpenAIProvider
+from src.services.ai.providers.openai import (
+    _MAGIC_EXTENSIONS,
+    _SUPPORTED_UPLOAD_EXTENSIONS,
+    OpenAIProvider,
+    _upload_filename,
+)
+
+# Real container heads, not invented ones: an MP4 declares `ftyp` at offset 4
+# (the first four bytes are the box size), which is exactly the offset a naive
+# `startswith` check would miss. Transcription tests upload these rather than
+# b"audio" so that the provider's own container sniffing sees a real format --
+# with placeholder bytes it legitimately warns about an unknown container, and
+# the warning assertions below would be measuring the fixture, not the code.
+MP4_HEAD = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41"
+OGG_HEAD = b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00"
 
 
 @pytest.fixture
@@ -331,7 +345,7 @@ class TestTranscribeAudio:
             patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp),
             patch("src.services.ai.providers.openai.logger") as mock_logger,
         ):
-            result = await provider.transcribe_audio(b"audio")
+            result = await provider.transcribe_audio(OGG_HEAD)
 
         assert result.tokens_input is None
         assert result.tokens_output is None
@@ -347,7 +361,7 @@ class TestTranscribeAudio:
             patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp),
             patch("src.services.ai.providers.openai.logger") as mock_logger,
         ):
-            await provider.transcribe_audio(b"audio", model="whisper-1")
+            await provider.transcribe_audio(OGG_HEAD, model="whisper-1")
 
         mock_logger.warning.assert_not_called()
 
@@ -374,6 +388,89 @@ class TestTranscribeAudio:
         call_kwargs = mock_post.call_args[1]
         assert "files" in call_kwargs
         assert call_kwargs["files"]["file"][0] == "voice.ogg"
+
+
+class TestUploadFilename:
+    """The upload name decides which demuxer the endpoint uses.
+
+    Regression guard for 2026-08-24: every caller was handed a hardcoded
+    "audio.ogg", so Telegram video notes (MP4) were uploaded under an ogg
+    name. whisper-1 tolerated it; gpt-4o-mini-transcribe answers 400
+    ("Audio file might be corrupted or unsupported"), which is a silent loss
+    -- the handler drops the transcription and the chat sees nothing at all.
+    Verified against the live API: the same MP4 bytes give 400 as "audio.ogg"
+    and 200 as "audio.mp4".
+    """
+
+    def test_video_note_bytes_are_named_mp4(self):
+        assert _upload_filename(MP4_HEAD) == "audio.mp4"
+
+    def test_voice_bytes_are_named_ogg(self):
+        assert _upload_filename(OGG_HEAD) == "audio.ogg"
+
+    @pytest.mark.parametrize(
+        ("head", "expected"),
+        [
+            (b"RIFF\x24\x08\x00\x00WAVEfmt ", "audio.wav"),
+            (b"fLaC\x00\x00\x00\x22", "audio.flac"),
+            (b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81", "audio.webm"),
+            (b"ID3\x04\x00\x00\x00", "audio.mp3"),
+        ],
+    )
+    def test_other_containers(self, head, expected):
+        assert _upload_filename(head) == expected
+
+    def test_unrecognised_bytes_fall_back_without_raising(self):
+        assert _upload_filename(b"not-any-known-container") == "audio.ogg"
+
+    def test_short_input_does_not_raise(self):
+        """A truncated download must not take the slicing out of bounds."""
+        assert _upload_filename(b"Og") == "audio.ogg"
+        assert _upload_filename(b"") == "audio.ogg"
+
+    def test_every_emitted_extension_is_accepted_by_the_endpoint(self):
+        """A new magic entry is only useful if /audio/transcriptions takes it.
+
+        Guessing an extension the API rejects would swap one 400 for another.
+        """
+        emitted = {extension for _, _, extension in _MAGIC_EXTENSIONS}
+        assert emitted <= _SUPPORTED_UPLOAD_EXTENSIONS
+
+
+class TestTranscribeUploadName:
+    """The name must survive all the way into the multipart request."""
+
+    async def test_mp4_reaches_the_api_as_mp4(self, provider):
+        mock_resp = _mock_response(json_data={"text": "test"})
+
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
+            await provider.transcribe_audio(MP4_HEAD)
+
+        assert mock_post.call_args[1]["files"]["file"][0] == "audio.mp4"
+
+    async def test_ogg_reaches_the_api_as_ogg(self, provider):
+        mock_resp = _mock_response(json_data={"text": "test"})
+
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
+            await provider.transcribe_audio(OGG_HEAD)
+
+        assert mock_post.call_args[1]["files"]["file"][0] == "audio.ogg"
+
+    async def test_explicit_filename_still_wins_over_sniffing(self, provider):
+        """Callers that know better keep the override -- the sniff is a
+        default, not a policy."""
+        mock_resp = _mock_response(json_data={"text": "test"})
+
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=mock_resp
+        ) as mock_post:
+            await provider.transcribe_audio(MP4_HEAD, filename="from-caller.m4a")
+
+        assert mock_post.call_args[1]["files"]["file"][0] == "from-caller.m4a"
 
 
 # -- Rate Limiting --
