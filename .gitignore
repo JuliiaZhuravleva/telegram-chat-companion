@@ -87,7 +87,12 @@ HANDOFF-*.md
 
 # PM registries (internal coordination, not for public repo)
 _registry.md
-_tech-debt.md
+# Glob, not the literal name: the ledger was split by priority on 2026-08-24
+# (_tech-debt-backlog.md / _tech-debt-archive.md, see agent_docs/task-pool-design.md),
+# which moved ~85% of the content out of the one ignored filename and into two
+# tracked ones -- carrying real Telegram ids and absolute paths with it. gitleaks
+# cannot catch either shape. The glob covers the next split by construction.
+_tech-debt*.md
 
 # n8n migration artifacts
 n8n-migration/
