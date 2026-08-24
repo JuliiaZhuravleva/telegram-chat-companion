@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -11,17 +10,12 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from dishka import AsyncContainer
 
-from src.bot.keyboards.admin import access_keyboard
-from src.database.repositories.admin import AdminRepository
+from src.bot.access_requests import AccessRequest, AccessRequestService
 from src.database.repositories.bot_config import BotConfigRepository
 from src.models.chat_config import ChatConfig
-from src.services.abuse.notifications import AbuseNotificationService
 from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
-
-# Cooldown: max 1 notification per chat every 30 minutes
-_NOTIFY_COOLDOWN_SECONDS = 1800
 
 
 class AccessControlMiddleware(BaseMiddleware):
@@ -33,10 +27,6 @@ class AccessControlMiddleware(BaseMiddleware):
 
     Depends on ``ChatConfigMiddleware`` running first (to set ``chat_config``).
     """
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._last_notify: dict[int, float] = {}
 
     async def __call__(
         self,
@@ -90,89 +80,49 @@ class AccessControlMiddleware(BaseMiddleware):
         admin_ids_raw = await bot_config_repo.get("admin_ids")
         return user_id in parse_admin_ids(admin_ids_raw)
 
+    @staticmethod
     async def _notify_unauthorized(
-        self,
         data: dict[str, Any],
         event: TelegramObject,
         chat_id: int,
         user_id: int | None,
     ) -> None:
-        """Send admin notification about unauthorized access (with cooldown).
+        """Queue this chat for approval and tell the admins.
 
-        Skips notification AND DB logging entirely if the chat has a previous
-        rejected attempt (admin-imposed blacklist). Admin must explicitly
-        restore or delete the rejection via the admin panel to lift the block.
+        Extracting the event shape is the middleware's business; everything
+        after it — the cooldown, the rejection blacklist, the DB row, the card —
+        lives in `AccessRequestService` so the `my_chat_member` handler can
+        reach the same path (TD-025). The cooldown is shared through a single
+        `Scope.APP` instance, which is what stops add-then-post from producing
+        two cards for one chat.
         """
-        now = time.monotonic()
-        last = self._last_notify.get(chat_id)
-        if last is not None and now - last < _NOTIFY_COOLDOWN_SECONDS:
-            return
+        user_first_name: str | None = None
+        user_last_name: str | None = None
+        user_username: str | None = None
+        chat_title: str | None = None
+        chat_type_str: str | None = None
+        chat_username: str | None = None
+        message_text: str | None = None
 
-        # Prune expired entries to prevent unbounded memory growth
-        if len(self._last_notify) > 1000:
-            self._last_notify = {
-                k: v for k, v in self._last_notify.items() if now - v < _NOTIFY_COOLDOWN_SECONDS
-            }
-
-        try:
-            container: AsyncContainer = data["dishka_container"]
-            notifier = await container.get(AbuseNotificationService)
-            admin_repo = await container.get(AdminRepository)
-            bot = data.get("bot")
-
-            # Blacklist check: skip if chat has a prior rejected attempt.
-            # Still bump the cooldown so we don't hit the DB on every message.
-            if await admin_repo.has_rejected_attempt(chat_id):
-                self._last_notify[chat_id] = now
-                logger.info(
-                    "Suppressing notification — chat has prior rejection",
-                    chat_id=chat_id,
-                )
-                return
-
-            # Extract all available info from the event
-            user_first_name: str | None = None
-            user_last_name: str | None = None
-            user_username: str | None = None
-            chat_title: str | None = None
-            chat_type_str: str | None = None
-            chat_username: str | None = None
-            message_text: str | None = None
-
-            if isinstance(event, Message):
-                if event.from_user:
-                    user_first_name = event.from_user.first_name
-                    user_last_name = event.from_user.last_name
-                    user_username = event.from_user.username
-                if event.chat:
-                    chat_title = event.chat.title or event.chat.full_name
-                    chat_type_str = event.chat.type
-                    chat_username = event.chat.username
-                message_text = (event.text or event.caption or "")[:100] or None
-            elif isinstance(event, CallbackQuery) and event.from_user:
+        if isinstance(event, Message):
+            if event.from_user:
                 user_first_name = event.from_user.first_name
                 user_last_name = event.from_user.last_name
                 user_username = event.from_user.username
+            if event.chat:
+                chat_title = event.chat.title or event.chat.full_name
+                chat_type_str = event.chat.type
+                chat_username = event.chat.username
+            message_text = (event.text or event.caption or "")[:100] or None
+        elif isinstance(event, CallbackQuery) and event.from_user:
+            user_first_name = event.from_user.first_name
+            user_last_name = event.from_user.last_name
+            user_username = event.from_user.username
 
-            # Log to DB and build inline keyboard for approve/reject
-            keyboard = None
-            try:
-                bot_config_repo = await container.get(BotConfigRepository)
-                attempt_id = await admin_repo.log_unauthorized(
-                    chat_id=chat_id,
-                    chat_title=chat_title,
-                    chat_type=chat_type_str,
-                    user_id=user_id,
-                    user_first_name=user_first_name,
-                    user_username=user_username,
-                    message_text=message_text,
-                )
-                lang = await admin_repo.get_admin_language(bot_config_repo)
-                keyboard = access_keyboard(lang, attempt_id)
-            except Exception:
-                logger.warning("Failed to log unauthorized attempt to DB", exc_info=True)
-
-            await notifier.notify_unauthorized(
+        container: AsyncContainer = data["dishka_container"]
+        access_requests = await container.get(AccessRequestService)
+        await access_requests.submit(
+            AccessRequest(
                 chat_id=chat_id,
                 chat_title=chat_title,
                 chat_type=chat_type_str,
@@ -182,12 +132,10 @@ class AccessControlMiddleware(BaseMiddleware):
                 user_last_name=user_last_name,
                 user_username=user_username,
                 message_text=message_text,
-                bot=bot,
-                reply_markup=keyboard,
-            )
-            self._last_notify[chat_id] = now
-        except Exception:
-            logger.warning("Failed to send unauthorized notification", exc_info=True)
+                reason="message",
+            ),
+            bot=data.get("bot"),
+        )
 
 
 def _extract_event_info(

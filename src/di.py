@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 import asyncpg
 from dishka import Provider, Scope, from_context, provide
 
+from src.bot.access_requests import AccessRequestService, NotifyCooldown
 from src.config import Settings
 from src.database.connection import close_pool, create_pool
 from src.database.repositories.abuse import AbuseRepository
@@ -58,6 +59,14 @@ class AppProvider(Provider):
         pool = await create_pool(settings.database_url)
         yield pool
         await close_pool(pool)
+
+    @provide
+    def notify_cooldown(self) -> NotifyCooldown:
+        """One per process — that is the whole reason it is here and not in
+        ServiceProvider. The cooldown used to be per-middleware-instance state;
+        with the `my_chat_member` handler now filing access requests too, two
+        callers each holding their own would notify twice for one chat."""
+        return NotifyCooldown()
 
     @provide
     async def get_ai_router(
@@ -188,6 +197,21 @@ class ServiceProvider(Provider):
         bot_config_repo: BotConfigRepository,
     ) -> AbuseNotificationService:
         return AbuseNotificationService(bot_config_repo)
+
+    @provide
+    def access_request_service(
+        self,
+        admin_repo: AdminRepository,
+        bot_config_repo: BotConfigRepository,
+        notifier: AbuseNotificationService,
+        cooldown: NotifyCooldown,
+    ) -> AccessRequestService:
+        return AccessRequestService(
+            admin_repo=admin_repo,
+            bot_config_repo=bot_config_repo,
+            notifier=notifier,
+            cooldown=cooldown,
+        )
 
     @provide
     def summary_service(
