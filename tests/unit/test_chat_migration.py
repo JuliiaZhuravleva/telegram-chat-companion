@@ -10,9 +10,14 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from src.bot.handlers.chat_events import handle_chat_migration
-from src.database.repositories.chat_migration import ChatMigrationRepository, _rows_affected
+from src.database.repositories.chat_migration import (
+    ChatMigrationRepository,
+    MigrationOutcome,
+    _rows_affected,
+)
 
 OLD_ID = -1009999990001
 NEW_ID = -1009999990002
@@ -51,7 +56,7 @@ class TestMigrate:
     async def test_moves_settings_and_facts(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12"]
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 0"]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
@@ -64,14 +69,42 @@ class TestMigrate:
         assert any("UPDATE chat_facts" in sql for sql in tables)
 
     @pytest.mark.asyncio
-    async def test_both_tables_move_in_one_transaction(
+    async def test_moves_custom_rules_too(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        """A half-applied move leaves settings and knowledge on different ids."""
+        """TD-112: curated moderation rules were left on the old id.
+
+        Worse than a plain gap — re-keying `chat_settings` away also removes
+        the chat from the rules menu, which enumerates chats by their settings
+        row. So the rules stopped firing AND became unreachable.
+        """
+        await repo.migrate(OLD_ID, NEW_ID)
+
+        tables = [call.args[0] for call in conn.execute.call_args_list]
+        assert any("UPDATE custom_rules" in sql for sql in tables), (
+            f"custom_rules was never re-keyed; statements were: {tables}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reports_how_many_rules_moved(
+        self, repo: ChatMigrationRepository, conn: MagicMock
+    ) -> None:
+        """The count is the only in-prod signal that the third table moved."""
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 4"]
+
+        outcome = await repo.migrate(OLD_ID, NEW_ID)
+
+        assert outcome.rules_moved == 4
+
+    @pytest.mark.asyncio
+    async def test_all_three_tables_move_in_one_transaction(
+        self, repo: ChatMigrationRepository, conn: MagicMock
+    ) -> None:
+        """A half-applied move leaves settings, knowledge and rules on different ids."""
         await repo.migrate(OLD_ID, NEW_ID)
 
         conn.transaction.assert_called_once()
-        assert conn.execute.await_count == 2
+        assert conn.execute.await_count == 3
 
     @pytest.mark.asyncio
     async def test_locks_the_source_row_before_deciding(
@@ -195,6 +228,84 @@ class TestHandler:
         )
 
         config_service.invalidate.assert_not_called()
+
+
+class TestMigrationLogTellsTheTruth:
+    """The log line is the only in-prod evidence of what a re-key touched.
+
+    Every test here builds a REAL ``MigrationOutcome``. The handler tests above
+    pass ``MagicMock(status="migrated")``, and a Mock's ``.rules_moved`` is a
+    truthy Mock — asserting on that would pass with the third UPDATE deleted.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reports_the_rules_it_moved(self) -> None:
+        migration_repo = AsyncMock()
+        migration_repo.migrate = AsyncMock(
+            return_value=MigrationOutcome(
+                status="migrated", settings_moved=1, facts_moved=12, rules_moved=4
+            )
+        )
+
+        with capture_logs() as logs:
+            await handle_chat_migration(
+                _make_message(chat_id=OLD_ID, to_id=NEW_ID, from_id=None),
+                migration_repo,
+                MagicMock(),
+            )
+
+        moved = [entry for entry in logs if entry.get("rules_moved") is not None]
+        assert moved, f"the re-key log never reported rules_moved; logs were: {logs}"
+        assert moved[0]["rules_moved"] == 4
+
+    @pytest.mark.asyncio
+    async def test_names_exactly_what_stayed_on_the_old_id(self) -> None:
+        """Spelled out as a literal, not imported from the module under test.
+
+        Importing ``NOT_MOVED`` would mirror the implementation and pass for
+        any value. Written out, the assertion goes red on drift in EITHER
+        direction — a table quietly dropped from the list, or a table that
+        started moving without the list being updated.
+        """
+        migration_repo = AsyncMock()
+        migration_repo.migrate = AsyncMock(
+            return_value=MigrationOutcome(status="migrated", settings_moved=1)
+        )
+
+        with capture_logs() as logs:
+            await handle_chat_migration(
+                _make_message(chat_id=OLD_ID, to_id=NEW_ID, from_id=None),
+                migration_repo,
+                MagicMock(),
+            )
+
+        left_behind = [entry["not_moved"] for entry in logs if "not_moved" in entry]
+        assert left_behind == [
+            "chat_memory, chat_messages, chat_chunks, unauthorized_attempts, observability logs"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_migration_says_the_rules_stayed_too(self) -> None:
+        """`target_occupied` is the one outcome where TD-112's symptom survives.
+
+        Nothing moves, so the rules are still stranded — the warning has to
+        say so, or the operator reads "settings already exist" as cosmetic.
+        """
+        migration_repo = AsyncMock()
+        migration_repo.migrate = AsyncMock(return_value=MigrationOutcome(status="target_occupied"))
+
+        with capture_logs() as logs:
+            await handle_chat_migration(
+                _make_message(chat_id=OLD_ID, to_id=NEW_ID, from_id=None),
+                migration_repo,
+                MagicMock(),
+            )
+
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert warnings, f"a refused migration must warn; logs were: {logs}"
+        assert "rules" in warnings[0]["event"].lower(), (
+            f"the refusal warning does not mention rules: {warnings[0]['event']!r}"
+        )
 
 
 class TestHandlerIsFilteredNotBodyGuarded:

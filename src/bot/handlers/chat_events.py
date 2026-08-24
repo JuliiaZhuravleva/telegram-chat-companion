@@ -25,6 +25,13 @@ _GONE_STATUSES = frozenset({"left", "kicked"})
 # Bot is present (plain member or admin).
 _PRESENT_STATUSES = frozenset({"member", "administrator", "creator", "restricted"})
 
+# What a supergroup re-key leaves on the OLD chat_id, named in full so the gap
+# is a log field rather than an assumption. `custom_rules` was silently in this
+# set until TD-112 and belonged in the moved set instead; `unauthorized_attempts`
+# is here on purpose (a rejection is a ban record — re-keying it is its own
+# decision, see ChatMigrationRepository's module docstring).
+NOT_MOVED = "chat_memory, chat_messages, chat_chunks, unauthorized_attempts, observability logs"
+
 
 @router.edited_message()
 async def handle_edited_message(message: Message) -> None:
@@ -104,7 +111,7 @@ async def handle_chat_migration(
     migration_repo: FromDishka[ChatMigrationRepository],
     chat_config_service: FromDishka[ChatConfigService],
 ) -> None:
-    """Re-key a chat's settings and knowledge base when it becomes a supergroup.
+    """Re-key a chat's settings, knowledge base and rules on supergroup upgrade.
 
     Telegram issues a NEW ``chat_id`` on upgrade and announces it twice: once
     in the old chat (``migrate_to_chat_id`` set, ``chat.id`` = old) and once in
@@ -122,6 +129,17 @@ async def handle_chat_migration(
     this handler. That is acceptable today -- a disabled chat cannot run
     ``/remember``, so it has no facts to strand -- but it stops being true the
     moment anything writes ``chat_facts`` outside the enabled path.
+
+    Second consequence of that same gate, and it is live rather than
+    hypothetical: an admin's *rejection* of a chat lives in
+    ``unauthorized_attempts`` and is never re-keyed from here. For a currently
+    rejected chat that is unreachable anyway (``enabled`` is false, so the
+    update never arrives). But approval only flips rows that are still
+    ``pending``, so a chat that accumulated two attempts and was then rejected
+    on one and approved on the other is ENABLED while still carrying a
+    ``status='rejected'`` row -- that chat does reach this handler, and its
+    ban record stays on the old id, lifting the moment the chat is later
+    de-whitelisted under the new one.
     """
     old_chat_id = message.chat.id
     new_chat_id = message.migrate_to_chat_id
@@ -141,16 +159,18 @@ async def handle_chat_migration(
         # longer exists.
         chat_config_service.invalidate(old_chat_id)
         logger.info(
-            "Chat migrated to supergroup: settings and knowledge base re-keyed",
+            "Chat migrated to supergroup: settings, knowledge base and rules re-keyed",
             old_chat_id=old_chat_id,
             new_chat_id=new_chat_id,
             settings_moved=outcome.settings_moved,
             facts_moved=outcome.facts_moved,
-            not_moved="chat_memory, chat_messages, observability logs",
+            rules_moved=outcome.rules_moved,
+            not_moved=NOT_MOVED,
         )
     elif outcome.status == "target_occupied":
         logger.warning(
-            "Chat migration needs a human: the new chat already has settings",
+            "Chat migration needs a human: the new chat already has settings — "
+            "settings, knowledge base AND rules all stayed on the old id",
             old_chat_id=old_chat_id,
             new_chat_id=new_chat_id,
         )
