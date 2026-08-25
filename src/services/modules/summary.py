@@ -27,6 +27,10 @@ _MENTION_TOKEN_RE = re.compile(r"@@u(\d+)@@")
 # ordinary prose that happens to read like "@u0" is left alone rather than
 # silently turned into a mention.
 _LOOSE_MENTION_TOKEN_RE = re.compile(r"(?<![\w@])@u(\d+)(?![\w@])")
+# Both forms in ONE alternation, matched in a single pass. Order matters only
+# in that the strict form is tried first at each position, so the leading `@`
+# of `@@u1@@` opens a strict match and the loose branch never sees its inside.
+_ANY_MENTION_TOKEN_RE = re.compile(r"@@u(?P<strict>\d+)@@|(?<![\w@])@u(?P<loose>\d+)(?![\w@])")
 # Telegram DROPS nested entities inside code/pre: the Bot API states that bold,
 # italic, underline, strikethrough and spoiler entities "can contain and can be
 # part of any other entities, except pre and code". Confirmed against a real
@@ -37,6 +41,7 @@ _LOOSE_MENTION_TOKEN_RE = re.compile(r"(?<![\w@])@u(\d+)(?![\w@])")
 _CODE_WRAPPED_TOKEN_RE = re.compile(r"<(code|pre)>(@@u\d+@@)</\1>")
 _CODE_REGION_RE = re.compile(r"<(code|pre)>.*?</\1>", re.DOTALL)
 _UNKNOWN_MENTION_FALLBACK = {"ru": "участник", "en": "participant"}
+
 
 # Conservative safety net on the conversation text sent to the model
 # (E-1: /summary <n> can now request up to 1000 messages). No per-provider
@@ -90,19 +95,34 @@ def _resolve_mentions(
         return f'<a href="tg://user?id={user_id}">{escaped_name}</a>'
 
     def _resolve_region(chunk: str, *, linked: bool) -> str:
-        def _strict(match: re.Match[str]) -> str:
-            # A hallucinated index still must not leak the placeholder syntax.
-            return _resolve(match.group(1), linked=linked) or fallback
+        def _either(match: re.Match[str]) -> str:
+            strict = match.group("strict")
+            if strict is not None:
+                # A hallucinated index still must not leak the placeholder
+                # syntax.
+                return _resolve(strict, linked=linked) or fallback
+            # Loose form, unknown index: this is far likelier to be ordinary
+            # text than a mangled token, so leave it exactly as written.
+            return _resolve(match.group("loose"), linked=linked) or match.group(0)
 
-        def _loose(match: re.Match[str]) -> str:
-            # Unknown index: this is far likelier to be ordinary text than a
-            # mangled token, so leave it exactly as written.
-            return _resolve(match.group(1), linked=linked) or match.group(0)
-
-        # Strict first: it consumes every "@@uN@@" before the loose pattern
-        # could see the inner "@uN" of one.
-        chunk = _MENTION_TOKEN_RE.sub(_strict, chunk)
-        return _LOOSE_MENTION_TOKEN_RE.sub(_loose, chunk)
+        # ONE pass over the model's own output, never two. `re.sub` does not
+        # re-scan what it inserted, so a participant's NAME can no longer be
+        # read as a token.
+        #
+        # This used to be strict-then-loose, justified as "strict consumes
+        # every `@@uN@@` before the loose pattern could see the inner `@uN` of
+        # one" -- which was both unnecessary and beside the point. Unnecessary
+        # because the loose pattern's `@` lookarounds already refuse to match
+        # inside `@@u1@@`. Beside the point because the text the second pass
+        # scanned was not the model's output any more: it contained the names
+        # spliced in by the first. An alias or a `first_name` of `@u0` was
+        # therefore expanded a second time, nesting one member's anchor inside
+        # another's -- reproduced as
+        # `<a href="…111"><a href="…222">Боб</a></a>`, where user 111's own
+        # name is gone and the reader is shown the wrong person. Nested `<a>`
+        # is also a plausible Telegram rejection, and a rejected summary is a
+        # frozen "⏳" placeholder rather than a degraded message.
+        return _ANY_MENTION_TOKEN_RE.sub(_either, chunk)
 
     text = _CODE_WRAPPED_TOKEN_RE.sub(r"\2", text)
 
@@ -198,9 +218,12 @@ class SummaryService:
                     # identified participant -- it gets the opaque `@@uN@@`
                     # token above -- so the alias changes nothing the model
                     # reasons about and everything the reader sees. The
-                    # escaping below already covers it: an alias is
+                    # escaping below covers the markup half, and mention
+                    # resolution covers the other: an alias is
                     # attacker-controlled text exactly like `first_name`, and
-                    # it is rendered inside an anchor.
+                    # `html.escape` leaves `@` alone -- what stops a name being
+                    # read back as a token is that resolution is a single pass
+                    # (see `_resolve_region`).
                     display_name = (
                         primary_alias(aliases, user_id)
                         or row["first_name"]
