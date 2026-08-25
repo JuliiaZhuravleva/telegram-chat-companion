@@ -9,7 +9,7 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.reply_flow import finish_reply, relevancy_allows_reply
+from src.bot.reply_flow import finish_reply, relevancy_allows_reply, send_quoted_reply
 from src.bot.utils import extract_reply_context, should_respond
 from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
@@ -121,17 +121,23 @@ async def handle_text_message(
 
     # Send to correct topic in forum chats
     # Note: message.answer() inherits message_thread_id from the original message
-    sent = await message.answer(
-        result.html_text,
-        parse_mode="HTML",
+    # Splitting sender, not a bare `message.answer`: a long answer used to
+    # raise "message is too long" straight out of the handler, and since the
+    # global error handler only replies to CallbackQuery events the chat saw
+    # nothing at all -- while post_send below, the only writer of the cost
+    # row, never ran either.
+    sent = await send_quoted_reply(
+        message=message,
+        html_text=result.html_text,
         reply_to_message_id=reply_to,
+        language=chat_config.language,
     )
 
     # Sticker -> post_send -> spend warning, shared with the photo path.
     await finish_reply(
         message=message,
         result=result,
-        sent_message_id=sent.message_id,
+        sent_message_id=sent.message_id if sent else None,
         chat_config=chat_config,
         pipeline=pipeline,
         spend_limit_svc=spend_limit_svc,

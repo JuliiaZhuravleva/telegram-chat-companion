@@ -11,7 +11,12 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.reply_flow import finish_reply, relevancy_allows_reply, send_quoted_reply
+from src.bot.progress import MIN_SECONDS_TO_ANNOUNCE, ProgressNotice
+from src.bot.reply_flow import (
+    finish_reply,
+    relevancy_allows_reply,
+    send_quoted_reply,
+)
 from src.bot.utils import ReplyContext, extract_reply_context, should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -31,6 +36,22 @@ from src.utils.telegram import TelegramFileError, download_telegram_file, typing
 
 router = Router(name="media")
 logger = structlog.get_logger(__name__)
+
+_TRANSCRIBING = {
+    "ru": "🎙 Расшифровываю голосовое ({duration})…",
+    "en": "🎙 Transcribing voice message ({duration})…",
+}
+_TRANSCRIBE_FAILED = {
+    "ru": "⚠️ Не удалось расшифровать это голосовое. Попробуйте ещё раз.",
+    "en": "⚠️ Could not transcribe this voice message. Please try again.",
+}
+
+
+def _format_duration(seconds: int) -> str:
+    """``m:ss`` for the progress notice — Telegram shows the same on the bubble."""
+    minutes, secs = divmod(max(seconds, 0), 60)
+    return f"{minutes}:{secs:02d}"
+
 
 # TTL cache for sticker sets that failed registration (avoid repeated API calls)
 _FAILED_SET_REGISTRATION: dict[str, float] = {}
@@ -92,7 +113,25 @@ async def handle_voice_message(
     user_name = (user.first_name if user else None) or "Unknown"
     message_type = "voice" if is_voice else "video_note"
 
-    async with typing_indicator(bot, message.chat.id, message_thread_id):
+    # A long voice note takes ten to twenty seconds to come back, and until it
+    # does the chat sees only the typing indicator -- which Telegram also shows
+    # for a human typing, and which says nothing about *what* is happening.
+    # Announce the work for anything long enough that the wait is noticeable;
+    # below that threshold the round trip is about a second and a placeholder
+    # that appears and vanishes reads as a glitch.
+    duration = getattr(media, "duration", 0) or 0
+    notice_text = _TRANSCRIBING.get(chat_config.language, _TRANSCRIBING["en"]).format(
+        duration=_format_duration(duration)
+    )
+    async with (
+        ProgressNotice(
+            message,
+            text=notice_text,
+            enabled=duration >= MIN_SECONDS_TO_ANNOUNCE,
+            reply_to_message_id=message.message_id,
+        ) as notice,
+        typing_indicator(bot, message.chat.id, message_thread_id),
+    ):
         result = await voice_service.transcribe(
             audio_data=audio_data,
             chat_id=message.chat.id,
@@ -105,6 +144,11 @@ async def handle_voice_message(
         )
 
     if result is None:
+        # Only speaks when the notice was enabled, i.e. when we already told
+        # the chat we were working on something. Leaving a "🎙 Расшифровываю…"
+        # standing over a transcription that will never arrive is the same
+        # silent-failure shape this whole change exists to remove.
+        await notice.fail(_TRANSCRIBE_FAILED.get(chat_config.language, _TRANSCRIBE_FAILED["en"]))
         return
 
     # Send the transcription through the same deletion-tolerant sender as the
@@ -115,30 +159,51 @@ async def handle_voice_message(
     # only replies to CallbackQuery events, never to a Message — so the
     # transcription is lost with no explanation, Whisper is paid for anyway,
     # and the link row below never gets written either.
-    reply_text = VoiceTranscriptionService.format_reply(user_name, result.text)
-    sent = await send_quoted_reply(
-        message=message,
-        html_text=reply_text,
-        reply_to_message_id=message.message_id,
-        language=chat_config.language,
-    )
-    if sent is None:
+    # Parts, not one string: a transcript longer than Telegram's 4096-character
+    # limit was rejected outright, and because the rejection was re-raised out
+    # of the handler the chat got no transcription, no error, and no hint that
+    # anything had happened -- while Whisper had been paid for and the words
+    # were already in the database. Any voice message over roughly four
+    # minutes hits this; four such transcripts were lost in production before
+    # this call learned to split.
+    reply_parts = VoiceTranscriptionService.format_reply_parts(user_name, result.text)
+    # `finish` turns the placeholder into the first part, so the transcription
+    # lands where the reader was already looking rather than further down the
+    # chat. With no placeholder (a short voice note) it degrades to an ordinary
+    # quoted send.
+    sent = await notice.finish(reply_parts, language=chat_config.language)
+    if not sent:
         logger.warning(
             "Transcription could not be delivered",
             chat_id=message.chat.id,
             message_id=message.message_id,
+            part_count=len(reply_parts),
         )
         return
 
-    # Record what that message IS, before anything else can fail. This one row
-    # is how a later reply to it gets routed to the speaker instead of the bot
-    # (migration 028); without it the bot answers every such reply.
-    await voice_service.record_transcription_message(
-        chat_id=message.chat.id,
-        message_id=sent.message_id,
-        source_message_id=message.message_id,
-        message_thread_id=message_thread_id,
-    )
+    if len(sent) < len(reply_parts):
+        logger.warning(
+            "Transcription was delivered only in part",
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            delivered=len(sent),
+            part_count=len(reply_parts),
+        )
+
+    # Record what those messages ARE, before anything else can fail. These rows
+    # are how a later reply to one gets routed to the speaker instead of the bot
+    # (migration 028); without them the bot answers every such reply. Written
+    # for EVERY part, not just the first: someone replying to the tail of a long
+    # transcript is quoting the speaker just as much as someone replying to its
+    # head, and a row that exists for only one of three messages makes the
+    # routing depend on which part the reader happened to hit.
+    for part in sent:
+        await voice_service.record_transcription_message(
+            chat_id=message.chat.id,
+            message_id=part.message_id,
+            source_message_id=message.message_id,
+            message_thread_id=message_thread_id,
+        )
 
     await _maybe_answer_transcript(
         message=message,
@@ -423,16 +488,20 @@ async def handle_photo_message(
 
         # Send to correct topic in forum chats
         # Note: message.answer() inherits message_thread_id from the original message
-        sent = await message.answer(
-            result.html_text,
-            parse_mode="HTML",
+        # Same splitting sender as the text and voice paths. A photo caption
+        # can draw a long answer just as a message can, and this site was the
+        # last bare `message.answer` carrying model output.
+        sent = await send_quoted_reply(
+            message=message,
+            html_text=result.html_text,
             reply_to_message_id=reply_to,
+            language=chat_config.language,
         )
 
         await finish_reply(
             message=message,
             result=result,
-            sent_message_id=sent.message_id,
+            sent_message_id=sent.message_id if sent else None,
             chat_config=chat_config,
             pipeline=pipeline,
             spend_limit_svc=spend_limit_svc,

@@ -18,6 +18,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.admin_kb import kb_undo_keyboard, kb_view_keyboard
 from src.bot.keyboards.help import help_keyboard
+from src.bot.progress import ProgressNotice
 from src.bot.utils import resolve_display_name, safe_edit_text
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -39,6 +40,7 @@ from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import MAX_FACT_CHARS
 from src.utils import parse_admin_ids, parse_user_id_list
 from src.utils.telegram import typing_indicator
+from src.utils.telegram_text import split_html
 
 router = Router(name="commands")
 logger = structlog.get_logger(__name__)
@@ -428,26 +430,27 @@ async def _deliver_summary(
     placeholder copy, forum-topic filtering or the too-long-to-edit fallback.
     """
     processing = "⏳ Генерирую саммари..." if lang == "ru" else "⏳ Generating summary..."
-    placeholder = await message.answer(processing)
 
-    # Topic-filtered summary in forum chats
-    html = await summary_service.generate(
-        message.chat.id,
-        count=count,
-        language=lang,
-        message_thread_id=message_thread_id,
-    )
+    # The placeholder ticks while the model works. Summarising 500 messages is
+    # not fast, and a frozen "⏳" for that long is indistinguishable from a bot
+    # that has died -- which, on the path this replaces, is roughly what had
+    # happened: the old fallback deleted the placeholder and re-sent the very
+    # same body that Telegram had just rejected, so a long summary destroyed
+    # its own progress message and then raised, leaving the chat with nothing.
+    async with ProgressNotice(message, text=processing) as notice:
+        # Topic-filtered summary in forum chats
+        html = await summary_service.generate(
+            message.chat.id,
+            count=count,
+            language=lang,
+            message_thread_id=message_thread_id,
+        )
 
     if html:
-        try:
-            await placeholder.edit_text(html, parse_mode="HTML")
-        except Exception:
-            # If edit fails (e.g., message too long), send as new message
-            await placeholder.delete()
-            await message.answer(html, parse_mode="HTML")
+        await notice.finish(split_html(html), language=lang)
     else:
         fail_msg = "Не удалось создать саммари." if lang == "ru" else "Failed to generate summary."
-        await safe_edit_text(placeholder, fail_msg)
+        await notice.fail(fail_msg)
 
 
 @router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))

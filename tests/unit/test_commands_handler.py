@@ -16,6 +16,7 @@ from src.bot.handlers.commands import (
     handle_summary500_dm,
     handle_summary_dm,
 )
+from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -389,3 +390,56 @@ class TestCopyIsHtmlSafe:
         assert self._offending_tags(original) == ["число"]
         assert self._offending_tags("Формат: /summary <number from 20 to 1000>.") == ["number"]
         assert self._offending_tags("<b>bold</b> and <code>x</code>") == []
+
+
+class TestSummaryDelivery:
+    """A summary too long for one message must arrive, not vanish.
+
+    `/summary 500` generates with ``max_tokens=8000``; only the *input* is
+    capped. The previous fallback caught the rejection, DELETED the placeholder
+    and re-sent the identical body — so an over-long summary destroyed its own
+    progress message and then raised out of the handler, and since the global
+    error handler answers CallbackQuery events only, the chat was left with
+    nothing at all.
+    """
+
+    @staticmethod
+    def _bodies(msg: MagicMock, placeholder: MagicMock) -> list[str]:
+        """Every body the chat received — fresh sends and edits of the placeholder."""
+        sent = [c.args[0] for c in msg.answer.await_args_list if c.args]
+        edited = [c.args[0] for c in placeholder.edit_text.await_args_list if c.args]
+        return sent + edited
+
+    @pytest.mark.asyncio
+    async def test_an_over_long_summary_is_delivered_in_parts(self) -> None:
+        placeholder = _make_placeholder()
+        msg = _make_message(chat_type="group", text="/summary 500")
+        msg.answer = AsyncMock(return_value=placeholder)
+        html = "<b>Итоги</b>\n\n" + ("пункт обсуждения " * 900)
+        assert parsed_length(html) > TELEGRAM_MESSAGE_LIMIT
+
+        await handle_summary(
+            msg, chat_config=_make_chat_config(), summary_service=_make_summary_service(html)
+        )
+
+        bodies = [b for b in self._bodies(msg, placeholder) if "⏳" not in b]
+        assert len(bodies) > 1, "an over-long summary must be split, not sent whole"
+        for body in bodies:
+            assert parsed_length(body) <= TELEGRAM_MESSAGE_LIMIT
+        # The placeholder BECOMES the summary; it is not deleted out from under it.
+        placeholder.delete.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_short_summary_still_arrives_as_one_message(self) -> None:
+        """Control: the split path must not have changed the ordinary case."""
+        placeholder = _make_placeholder()
+        msg = _make_message(chat_type="group", text="/summary")
+        msg.answer = AsyncMock(return_value=placeholder)
+
+        await handle_summary(
+            msg,
+            chat_config=_make_chat_config(),
+            summary_service=_make_summary_service("<b>Summary</b>"),
+        )
+
+        placeholder.edit_text.assert_awaited_once_with("<b>Summary</b>", parse_mode="HTML")

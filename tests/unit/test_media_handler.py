@@ -1,14 +1,18 @@
 """Tests for media handlers (voice, photo, sticker)."""
 
+import re
 from contextlib import ExitStack
+from itertools import chain, count
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import TranscriptionResult
+from src.services.modules.voice.transcription import _HEADER_LABEL
 from src.services.relevancy.gate import GateDecision
 from src.services.text.pipeline import PipelineResult
+from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
 
 def _make_message(
@@ -109,6 +113,21 @@ def _make_sticker_repo():
 BOT_ID = 999
 
 
+def _sent_message(message_id: int):
+    """What Telegram hands back from sendMessage — with awaitable methods.
+
+    `edit_text` and `delete` must be AsyncMocks, not bare MagicMock attributes:
+    the progress placeholder is edited *into* the result, and the code that
+    does it deliberately never raises. A non-awaitable attribute therefore does
+    not fail the test — it makes the handler silently take its fallback path,
+    so a test would pass while proving something else entirely.
+    """
+    sent = MagicMock(message_id=message_id)
+    sent.edit_text = AsyncMock(return_value=sent)
+    sent.delete = AsyncMock()
+    return sent
+
+
 def _make_voice_deps(
     *,
     transcript: str | None = "Hello world",
@@ -116,16 +135,38 @@ def _make_voice_deps(
     random_chance: float = 0.0,
     gate_allows: bool = True,
     voice_message_id: int = 42,
+    duration: int = 3,
 ):
     message = _make_message(message_id=voice_message_id)
     voice = MagicMock()
     voice.file_id = "voice-file-id"
+    # Explicit, like every other field on these mocks: the handler compares
+    # `duration` against MIN_SECONDS_TO_ANNOUNCE to decide whether to post a
+    # progress placeholder, and a bare MagicMock makes that comparison raise
+    # TypeError inside the handler. The default is short on purpose -- most
+    # tests here are about transcription, not about the placeholder, and a
+    # short note posts none, so their message-id arithmetic is unchanged.
+    voice.duration = duration
     message.voice = voice
     message.video_note = None
     # Both sends now go through send_quoted_reply -> message.answer: the
     # transcription first (id 43), then the AI reply (id 77).
-    _sent_ids = iter([43, 77, 78, 79])
-    message.answer = AsyncMock(side_effect=lambda *_a, **_kw: MagicMock(message_id=next(_sent_ids)))
+    # Chained onto an unbounded counter: a transcript over Telegram's limit is
+    # delivered as several messages, and a fixed list of four ids turns "the
+    # handler sent a fifth message" into StopIteration — a crash that reads as
+    # a bug in the handler rather than as the fixture running out.
+    _sent_ids = chain([43, 77, 78, 79], count(80))
+    # Keep the objects we handed back: a body can reach the chat as a fresh
+    # send OR as an edit of one, and only these mocks know about the second.
+    sent_messages: list = []
+
+    def _answer(*_a, **_kw):
+        sent = _sent_message(next(_sent_ids))
+        sent_messages.append(sent)
+        return sent
+
+    message.answer = AsyncMock(side_effect=_answer)
+    message.sent_messages = sent_messages
 
     chat_config = _make_chat_config(
         trigger_words=tuple(trigger_words), random_response_chance=random_chance
@@ -398,6 +439,7 @@ async def test_a_video_note_transcript_is_decided_the_same_way():
     deps["message"].voice = None
     note = MagicMock()
     note.file_id = "note-file-id"
+    note.duration = 3  # explicit for the same reason as voice.duration above
     deps["message"].video_note = note
 
     await _run_voice_handler(deps)
@@ -1440,3 +1482,134 @@ async def test_cost_is_still_recorded_when_the_answer_cannot_be_delivered():
 
     deps["pipeline"].post_send.assert_awaited_once()
     assert deps["pipeline"].post_send.call_args.kwargs["bot_message_id"] is None
+
+
+# ── Long transcripts and progress (the production regression) ─────────
+
+
+def _part_number(part: str) -> int:
+    """The N from a '(N/M)' transcription header — 1 when there is no counter."""
+    match = re.search(r"\((\d+)/(\d+)\):", part)
+    return int(match.group(1)) if match else 1
+
+
+def _sent_texts(message) -> list[str]:
+    """Every body the chat ended up with, in order.
+
+    Two channels, because the progress placeholder is *edited into* the first
+    part of a result rather than being deleted and re-sent: a body can arrive
+    either as a fresh `answer` or as an `edit_text` on something answered
+    earlier. Reading only the first channel would miss exactly the part this
+    change added.
+
+    Order is the order the MOCKS recorded, which is not the order the reader
+    sees: part 1 of a split result arrives by editing the placeholder, so it is
+    recorded last. Callers that care about reading order must sort by the
+    header counter (see `_part_number`).
+    """
+    bodies: list[str] = []
+    for call in message.answer.await_args_list:
+        if call.args:
+            bodies.append(call.args[0])
+    for sent in message.sent_messages:
+        for edit in sent.edit_text.await_args_list:
+            if edit.args:
+                bodies.append(edit.args[0])
+    return bodies
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_over_the_telegram_limit_is_delivered_in_parts():
+    """The exact production failure: a six-minute voice note lost entirely.
+
+    Whisper returned 4648 characters, `sendMessage` answered "message is too
+    long", `send_quoted_reply` re-raised it because it matches none of the
+    reply-target-gone markers, and the global error handler only replies to
+    CallbackQuery events. The transcript reached the database and the bill,
+    and never reached the chat. It happened four times.
+    """
+    # Every word distinct. "слово " * 1500 would have compared a multiset with
+    # one distinct value, so it could detect loss and duplication but NOT
+    # reordering or mis-numbering — reversing the parts left it green.
+    words = [f"слово{index}" for index in range(1500)]
+    transcript = " ".join(words)
+    deps = _make_voice_deps(transcript=transcript, duration=372)
+
+    await _run_voice_handler(deps)
+
+    bodies = _sent_texts(deps["message"])
+    # The progress placeholder is plain text; the transcription parts are not.
+    parts = [body for body in bodies if _HEADER_LABEL in body]
+    assert len(parts) > 1, "a transcript this long must be split, not sent whole"
+    for part in parts:
+        assert parsed_length(part) <= TELEGRAM_MESSAGE_LIMIT
+
+    # Ordered by the counter the READER sees, not by the order the mocks
+    # recorded: part 1 arrives by editing the placeholder, so the raw call order
+    # really is (2/N), (3/N), (1/N). Sorting by the header makes the counter
+    # itself load-bearing — a mis-numbered or reversed split now fails here.
+    numbered = sorted((_part_number(part), part) for part in parts)
+    assert [n for n, _ in numbered] == list(range(1, len(parts) + 1))
+
+    spoken = " ".join(part.split("\n\n", 1)[1] for _, part in numbered)
+    assert spoken.split() == words
+
+
+@pytest.mark.asyncio
+async def test_every_part_of_a_split_transcription_is_linked_to_its_audio():
+    """Migration 028's link row decides whether a reply goes to the speaker.
+
+    Recorded for the first part only, a reply to the tail of a long transcript
+    would be treated as addressed to the bot — so the routing would depend on
+    which message the reader happened to answer.
+    """
+    deps = _make_voice_deps(transcript="слово " * 1500, duration=372)
+
+    await _run_voice_handler(deps)
+
+    recorded = deps["voice_service"].record_transcription_message.await_args_list
+    parts = [b for b in _sent_texts(deps["message"]) if _HEADER_LABEL in b]
+    assert len(recorded) == len(parts) > 1
+    for call in recorded:
+        assert call.kwargs["source_message_id"] == deps["message"].message_id
+
+
+@pytest.mark.asyncio
+async def test_a_long_voice_note_says_it_is_working():
+    """Fifteen silent seconds are indistinguishable from a bot that ignored you."""
+    deps = _make_voice_deps(duration=372)
+
+    await _run_voice_handler(deps)
+
+    assert any("Расшифровываю" in body for body in _sent_texts(deps["message"]))
+
+
+@pytest.mark.asyncio
+async def test_a_short_voice_note_does_not():
+    """A placeholder that appears and vanishes inside a second reads as a glitch."""
+    deps = _make_voice_deps(duration=3)
+
+    await _run_voice_handler(deps)
+
+    assert not any("Расшифровываю" in body for body in _sent_texts(deps["message"]))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_transcription_of_a_long_note_is_reported():
+    """Leaving the placeholder standing over work that never arrives is the
+    same silent failure in a new costume."""
+    deps = _make_voice_deps(transcript=None, duration=372)
+
+    await _run_voice_handler(deps)
+
+    assert any("Не удалось расшифровать" in text for text in _sent_texts(deps["message"]))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_transcription_of_a_short_note_stays_quiet():
+    """Control for the test above: it must not have made the bot chattier."""
+    deps = _make_voice_deps(transcript=None, duration=3)
+
+    await _run_voice_handler(deps)
+
+    deps["message"].answer.assert_not_awaited()
