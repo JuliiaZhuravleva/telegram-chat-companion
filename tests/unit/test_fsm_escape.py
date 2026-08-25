@@ -340,6 +340,34 @@ class TestTheCancelButtonWorks:
         callback.message.edit_text.assert_awaited_once()
         assert callback.message.edit_text.await_args.kwargs["reply_markup"] is not None
 
+    async def test_it_does_not_end_an_unrelated_dialog(self) -> None:
+        """These cancel buttons ride on standalone reply messages that nothing
+        ever edits, so they stay tappable indefinitely. Tapping a stale one
+        while parked in a DIFFERENT dialog must not wipe that dialog — the rule
+        the sibling helper in this same file states out loud."""
+        from src.bot.handlers.rules import handle_rule_config_cancel
+
+        state = _FakeState(AdminStates.awaiting_kb_organizer)
+        await state.update_data(kb_chat_id=-100123, kb_lang="ru")
+
+        callback = MagicMock()
+        callback.data = "ar_cancel:ru:-100123"
+        callback.answer = AsyncMock()
+        callback.message = MagicMock(spec=Message)
+        callback.message.chat = MagicMock()
+        callback.message.chat.type = "private"
+        callback.message.edit_text = AsyncMock()
+        rules_repo = AsyncMock()
+        rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
+
+        await handle_rule_config_cancel(callback, state, rules_repo, is_admin=True)  # type: ignore[arg-type]
+
+        assert state.clear_calls == 0
+        assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
+        assert (await state.get_data())["kb_chat_id"] == -100123, (
+            "the other dialog's data was wiped along with its state"
+        )
+
     async def test_a_non_admin_cannot_drive_it(self) -> None:
         """It re-renders a chat's rule list, so it is not harmless navigation."""
         from src.bot.handlers.rules import handle_rule_config_cancel
@@ -388,6 +416,93 @@ class TestForwardingStillWorksForOrganizers:
 
         data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
         assert data["chat_settings_repo"].set_field.await_args.args[1] == "kb_organizer_ids"  # type: ignore[union-attr]
+
+
+class TestCommandsEscapeTheOrganizerPrompt:
+    """The other half of admin_kb's guard.
+
+    `TestForwardingStillWorksForOrganizers` proves the guard did not BREAK the
+    forward path. That says nothing about whether it still lets a typed command
+    out — and a guard written as `F.forward_origin.is_not(None) | ...` fails
+    open on exactly that side if the right-hand clause is dropped.
+    """
+
+    async def test_a_typed_command_is_not_swallowed(self) -> None:
+        """`check_admin_direct` is patched TRUE on purpose.
+
+        Left unpatched it resolves against an AsyncMock repo, comes back falsy,
+        and the handler returns before replying — so the test passes with the
+        slash guard deleted, proving nothing. Measured: that is exactly what
+        happened, and the control caught it. With the admin check satisfied,
+        swallowing `/help` produces a visible «Не нашёл такого участника».
+        """
+        from src.bot.handlers import admin_kb
+
+        msg, data, bot = _make_message(text="/help")
+        state = _FakeState(AdminStates.awaiting_kb_organizer)
+        await state.update_data(kb_chat_id=-100123, kb_lang="ru")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
+            await _propagate(msg, data, state)
+
+        assert "Не нашёл такого участника" not in " ".join(_sent_texts(bot)), (
+            "the organizer prompt ate a typed command"
+        )
+
+    async def test_a_command_in_a_photo_caption_is_not_swallowed(self) -> None:
+        """Same caption hole as the rules prompt: `.text` is None for these."""
+        from src.bot.handlers import admin_kb
+
+        msg, data, bot = _make_message(caption="/help")
+        state = _FakeState(AdminStates.awaiting_kb_organizer)
+        await state.update_data(kb_chat_id=-100123, kb_lang="ru")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
+            await _propagate(msg, data, state)
+
+        assert "Не нашёл такого участника" not in " ".join(_sent_texts(bot)), (
+            "the organizer prompt ate a command sent as a photo caption"
+        )
+
+    async def test_a_typed_username_still_reaches_the_handler(self) -> None:
+        """The paired positive: the guard must not disable the typed path."""
+        from src.bot.handlers import admin_kb
+
+        msg, data, bot = _make_message(text="@someone")
+        state = _FakeState(AdminStates.awaiting_kb_organizer)
+        await state.update_data(kb_chat_id=-100123, kb_lang="ru")
+        data["message_repo"].find_by_username = AsyncMock(return_value={"user_id": 77})  # type: ignore[union-attr]
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
+            await _propagate(msg, data, state)
+
+        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
+
+
+class TestCancelIsNotEatenWhenItIsContent:
+    async def test_a_forwarded_cancel_is_treated_as_content(self) -> None:
+        """`/cancel` sits at router position 1 with no state filter, so without a
+        forward guard it would eat the very input admin_kb carves forwards out
+        for: forwarding someone's message to add them as an organizer. aiogram's
+        Command filter reads `text or caption` and never looks at forward_origin.
+        """
+        from src.bot.handlers import admin_kb
+
+        msg, data, bot = _make_message(text="/cancel", forwarded=True)
+        state = _FakeState(AdminStates.awaiting_kb_organizer)
+        await state.update_data(kb_chat_id=-100123, kb_lang="ru")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
+            await _propagate(msg, data, state)
+
+        assert "Отменено." not in _sent_texts(bot), (
+            "a forwarded message reading /cancel was treated as the cancel command"
+        )
+        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
 
 
 class TestDemotionDoesNotStrandTheOrganizerPrompt:

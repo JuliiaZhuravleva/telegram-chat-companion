@@ -141,7 +141,8 @@ class TestItDoesNotCryWolf:
         )
 
         access_requests.submit.assert_not_awaited()
-        repo.ensure_exists.assert_awaited_once(), "the chat is still recorded, just not queued"
+        # The chat is still RECORDED — only the approval card is withheld.
+        repo.ensure_exists.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_a_promotion_inside_the_chat_files_nothing(self) -> None:
@@ -224,12 +225,46 @@ class TestTheServiceItself:
 
         assert result.suppressed == "error"
 
-    def test_the_cooldown_window_is_bounded_and_prunes(self) -> None:
+    def test_the_cooldown_window_ends_exactly_where_it_says(self) -> None:
         cooldown = NotifyCooldown()
         cooldown.mark(GROUP_ID, now=1000.0)
 
         assert cooldown.is_cooling(GROUP_ID, now=1000.0 + NOTIFY_COOLDOWN_SECONDS - 1)
         assert not cooldown.is_cooling(GROUP_ID, now=1000.0 + NOTIFY_COOLDOWN_SECONDS)
+
+    def test_expired_entries_are_pruned_so_the_dict_stays_bounded(self) -> None:
+        """The prune branch, actually driven.
+
+        This lives in a long-running process and is keyed by chat_id, so without
+        pruning it grows for the life of the bot. The previous version of this
+        test never crossed the 1000-entry threshold, so the branch it was named
+        after never executed.
+        """
+        cooldown = NotifyCooldown()
+        for chat in range(1001):
+            cooldown.mark(chat, now=1000.0)
+        assert len(cooldown._last) == 1001, "precondition: over the prune threshold"
+
+        # One more mark, long after those expired.
+        cooldown.mark(GROUP_ID, now=1000.0 + NOTIFY_COOLDOWN_SECONDS + 1)
+
+        assert len(cooldown._last) == 1, (
+            f"expired entries were not pruned: {len(cooldown._last)} still held"
+        )
+        assert cooldown.is_cooling(GROUP_ID, now=1000.0 + NOTIFY_COOLDOWN_SECONDS + 1)
+
+    def test_a_still_live_entry_survives_the_prune(self) -> None:
+        """The paired negative: pruning must not drop a cooldown still in force,
+        or the prune itself becomes a way to double-notify."""
+        cooldown = NotifyCooldown()
+        for chat in range(1001):
+            cooldown.mark(chat, now=1000.0)
+
+        cooldown.mark(GROUP_ID, now=1000.0 + 10)
+
+        assert cooldown.is_cooling(0, now=1000.0 + 10), (
+            "an entry only 10s old was pruned — the window is 30 minutes"
+        )
 
 
 class TestNotifiedIsNotAssumed:

@@ -17,6 +17,11 @@ with the real `main_router.propagate_event`: appended LAST, `/cancel` in
 JSON" -- the cancel handler never runs. At position 1 it fires in every state.
 Registration is not firing; position is the entire fix.
 
+It does carry ONE content filter, and only one: a forwarded message is content
+rather than a command, so `/cancel` arriving as a forward falls through to
+whichever dialog is open — `admin_kb`'s organizer handler exists precisely to
+accept such a forward.
+
 **It carries no state filter,** and that is deliberate rather than an omission.
 aiogram applies no implicit state check to a handler, so `Command("cancel")`
 already matches in every state including `None` -- a `StateFilter("*")` here
@@ -56,7 +61,16 @@ _NOTHING_TO_CANCEL: dict[str, str] = {
 }
 
 
-@router.message(Command("cancel"), F.chat.type == "private")
+@router.message(
+    Command("cancel"),
+    F.chat.type == "private",
+    # A FORWARDED message is content, not a command — even when its text reads
+    # "/cancel". aiogram's Command filter takes `message.text or message.caption`
+    # and never looks at `forward_origin`, so without this the escape hatch
+    # would eat the very input `admin_kb`'s organizer handler carves forwards
+    # out for: forwarding someone's message to add them as an organizer.
+    F.forward_origin.is_(None),
+)
 async def handle_cancel(message: Message, state: FSMContext) -> None:
     """Clear whatever dialog the user is parked in, and say which."""
     current = await state.get_state()

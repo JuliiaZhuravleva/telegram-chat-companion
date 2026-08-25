@@ -28,12 +28,13 @@ which is the point.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from pathlib import Path
 
 import aiogram
 from aiogram.types import Message
 
-HANDLERS_DIR = Path(__file__).resolve().parents[2] / "src" / "bot" / "handlers"
+BOT_DIR = Path(__file__).resolve().parents[2] / "src" / "bot"
 
 # Derived from the installed aiogram rather than typed out, so a method added
 # by an upgrade is covered on the day it appears. Both directions matter: the
@@ -44,31 +45,47 @@ EDIT_METHODS = frozenset(
     | {name for name in dir(aiogram.Bot) if name.startswith("edit_")}
 )
 
-# (module, enclosing function) pairs that edit raw on purpose. Every entry is a
-# decision someone made and can defend; nothing here is "we did not get to it".
-DELIBERATE_RAW_EDITS: dict[tuple[str, str], str] = {
-    ("admin.py", "_edit_verify_screen"): "hand-rolled not-modified guard, predates the helper",
-    ("admin.py", "handle_health"): "hand-rolled not-modified guard, predates the helper",
-    ("admin.py", "_render_wl_chats"): "hand-rolled not-modified guard, predates the helper",
-    ("admin.py", "_render_wl_rejected"): "hand-rolled not-modified guard, predates the helper",
+# (module, enclosing function) -> (how many raw edits it may contain, why).
+#
+# The COUNT is load-bearing. Keyed on the function alone, this allowlist would
+# permit a brand-new unguarded edit added inside an already-listed function —
+# reproduced: a second, bare `msg.edit_text(...)` dropped into `handle_health`
+# was detected by the scan and then silently filtered out. Pinning the number
+# means a new one has to be declared, which is a code review.
+DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
+    ("admin.py", "_edit_verify_screen"): (1, "hand-rolled not-modified guard, predates the helper"),
+    ("admin.py", "handle_health"): (1, "hand-rolled not-modified guard, predates the helper"),
+    ("admin.py", "_render_wl_chats"): (1, "hand-rolled not-modified guard, predates the helper"),
+    ("admin.py", "_render_wl_rejected"): (
+        1,
+        "hand-rolled not-modified guard, predates the helper",
+    ),
     ("admin_sticker.py", "handle_run_analysis"): (
-        "swallows ANY TelegramBadRequest and continues — the ⏳ progress edit is "
-        "cosmetic and must never abort the analysis (ADR-0003 lifecycle)"
+        2,
+        "swallows ANY TelegramBadRequest and continues — the progress edit is cosmetic "
+        "and must never abort the analysis (ADR-0003 lifecycle)",
     ),
     ("admin_sticker.py", "handle_admin_sticker_dm_analyze"): (
-        "same edit-in-place lifecycle as handle_run_analysis; the progress edit "
-        "failing must not abort the analysis"
+        3,
+        "same edit-in-place lifecycle as handle_run_analysis; the progress edit failing "
+        "must not abort the analysis",
     ),
-    ("admin_sticker.py", "handle_clear_ask"): "contextlib.suppress already in place",
-    ("admin_sticker.py", "handle_clear"): "contextlib.suppress already in place",
-    (
-        "callbacks.py",
-        "handle_summary_callback",
-    ): "broad except that logs; summary refresh is best-effort",
+    ("admin_sticker.py", "handle_clear_ask"): (1, "contextlib.suppress already in place"),
+    ("admin_sticker.py", "handle_clear"): (1, "contextlib.suppress already in place"),
+    ("callbacks.py", "handle_summary_callback"): (
+        1,
+        "broad except that logs; summary refresh is best-effort",
+    ),
     ("commands.py", "_deliver_summary"): (
-        "the except body DELETES the placeholder and resends — a genuine fallback, "
-        "not a suppression, so the helper's semantics are wrong here"
+        1,
+        "the except body DELETES the placeholder and resends — a genuine fallback, not a "
+        "suppression, so the helper's semantics are wrong here",
     ),
+    # The helpers themselves. They are the compliant route, so they must contain
+    # the only raw edits left in src/bot/ — and pinning them here means the scan
+    # can cover the WHOLE bot layer instead of just handlers/.
+    ("utils.py", "safe_edit_text"): (1, "this IS the guarded implementation"),
+    ("utils.py", "safe_edit_reply_markup"): (1, "this IS the guarded implementation"),
 }
 
 
@@ -106,9 +123,15 @@ def _raw_edit_sites(source: str, module: str) -> list[tuple[str, int, str, str]]
 
 
 def _handler_files() -> list[Path]:
-    # rglob, not glob: `src/bot/handlers/` has no subpackages today, and the day
-    # someone adds one a non-recursive glob would stop covering it in silence.
-    return sorted(HANDLERS_DIR.rglob("*.py"))
+    # The WHOLE bot layer, not just `handlers/`. Every raw edit this project has
+    # ever had lived under handlers/ (41 of 42 on origin/main, the 42nd being the
+    # helper itself), but the helpers now carry an allowlist entry, so widening
+    # the root costs nothing and covers the sibling modules — `access_requests.py`,
+    # `middleware/`, `keyboards/` — where the next one could appear.
+    #
+    # rglob, not glob: a non-recursive glob would stop covering a new subpackage
+    # the day someone adds one, in silence.
+    return sorted(BOT_DIR.rglob("*.py"))
 
 
 class TestTheScanItselfIsNotVacuous:
@@ -125,8 +148,16 @@ class TestTheScanItselfIsNotVacuous:
 
     def test_the_handler_files_were_actually_found(self) -> None:
         names = {p.name for p in _handler_files()}
-        assert names, f"no handler files found under {HANDLERS_DIR} — the path is wrong"
-        assert {"admin.py", "rules.py", "admin_sticker.py", "commands.py", "callbacks.py"} <= names
+        assert names, f"no files found under {BOT_DIR} — the path is wrong"
+        assert {
+            "admin.py",
+            "rules.py",
+            "admin_sticker.py",
+            "commands.py",
+            "callbacks.py",
+            "utils.py",
+            "access_requests.py",
+        } <= names
 
     def test_the_detector_catches_the_shapes_that_actually_slip_through(self) -> None:
         """Positive controls derived from the THREAT, not from the implementation.
@@ -173,17 +204,35 @@ class TestTheScanItselfIsNotVacuous:
 
 
 class TestNoNewRawEdits:
-    def test_every_raw_edit_in_handlers_is_a_declared_exception(self) -> None:
+    def test_every_raw_edit_is_a_declared_exception(self) -> None:
+        sites = [
+            site
+            for path in _handler_files()
+            for site in _raw_edit_sites(path.read_text(), path.name)
+        ]
+
         offenders = [
             f"{module}:{line} in {func}() — {call}"
-            for path in _handler_files()
-            for module, line, func, call in _raw_edit_sites(path.read_text(), path.name)
+            for module, line, func, call in sites
             if (module, func) not in DELIBERATE_RAW_EDITS
         ]
-        assert offenders == [], (
+
+        # A function already on the list must not grow EXTRA raw edits. Keyed on
+        # the function alone, the allowlist filters out every call inside it —
+        # reproduced: a second, bare `msg.edit_text(...)` dropped into
+        # `handle_health` was detected by the scan and then silently permitted.
+        seen = Counter((module, func) for module, _line, func, _call in sites)
+        overruns = [
+            f"{module}:{func}() has {seen[(module, func)]} raw edits, {allowed} declared"
+            for (module, func), (allowed, _why) in DELIBERATE_RAW_EDITS.items()
+            if seen[(module, func)] > allowed
+        ]
+
+        assert offenders + overruns == [], (
             "raw message edits found outside the declared exceptions. Route them "
             "through safe_edit_text / safe_edit_reply_markup (src/bot/utils.py), or "
-            "add an entry to DELIBERATE_RAW_EDITS with the reason:\n  " + "\n  ".join(offenders)
+            "add/raise an entry in DELIBERATE_RAW_EDITS with the reason:\n  "
+            + "\n  ".join(offenders + overruns)
         )
 
     def test_the_allowlist_has_not_gone_stale(self) -> None:
@@ -199,3 +248,17 @@ class TestNoNewRawEdits:
         }
         stale = sorted(set(DELIBERATE_RAW_EDITS) - live)
         assert stale == [], f"DELIBERATE_RAW_EDITS names sites that no longer exist: {stale}"
+
+    def test_the_declared_counts_are_not_inflated(self) -> None:
+        """An allowlist entry claiming more edits than exist is slack for free."""
+        seen = Counter(
+            (module, func)
+            for path in _handler_files()
+            for module, _line, func, _call in _raw_edit_sites(path.read_text(), path.name)
+        )
+        inflated = [
+            f"{module}:{func}() declares {allowed} raw edits but has {seen[(module, func)]}"
+            for (module, func), (allowed, _why) in DELIBERATE_RAW_EDITS.items()
+            if seen[(module, func)] < allowed
+        ]
+        assert inflated == [], "\n  ".join(inflated)

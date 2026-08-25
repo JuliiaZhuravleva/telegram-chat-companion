@@ -616,7 +616,13 @@ async def handle_rule_config_cancel(
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
     chat_id = int(parts[2]) if len(parts) > 2 else 0
 
-    await state.clear()
+    # NOT a bare `state.clear()`. These cancel buttons ride on standalone reply
+    # messages (the three invalid-input re-prompts) that nothing ever edits, so
+    # they stay tappable indefinitely — an admin who later opens a DIFFERENT
+    # dialog and scrolls up to an old «✖️ Отмена» would otherwise have that
+    # dialog silently wiped, state and data. Same rule the sibling helper
+    # states: a rules screen has no business ending someone else's dialog.
+    await _leave_config_prompt(state)
     await callback.answer()
 
     rules, total = await rules_repo.get_rules_page(chat_id, 0, _PER_PAGE)
