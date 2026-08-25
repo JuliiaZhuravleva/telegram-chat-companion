@@ -50,7 +50,10 @@ Two consequences that are easy to break:
   registered, loaded and never reached. Note the slash guards that make commands escape an
   FSM prompt must test `caption` as well as `text`: aiogram resolves a command from
   `text or caption`, so `/help` under a photo is a real command that `~F.text.startswith("/")`
-  lets straight through.
+  lets straight through. `/cancel` itself carries one content filter for the same family of
+  reason — `F.forward_origin.is_(None)`. A FORWARDED message reading "/cancel" is content, not
+  a command, and without the guard the escape hatch swallowed exactly the input `admin_kb`'s
+  organizer handler carves forwards out for.
 
 ---
 
