@@ -636,3 +636,117 @@ class TestSummaryConversationTruncation:
 
         mock_logger.warning.assert_not_called()
         assert "(1 сообщений)" in result
+
+
+# --- Participant aliases in a summary (TD-150) ------------------------------
+
+
+def _alias_repo(rows=None, error=None):
+    repo = AsyncMock()
+    if error is not None:
+        repo.load_active.side_effect = error
+    else:
+        repo.load_active.return_value = rows or []
+    return repo
+
+
+async def _summary_text(message_repo, ai_router, alias_repo=None, rows=None):
+    """Drive a real summary and return what the user would read.
+
+    The model's own output is a fixed string, so anything a participant's name
+    appears in comes from the mention-resolution step -- which is the only
+    place a name reaches the reader, since identified people are handed to the
+    model as opaque `@@uN@@` tokens.
+    """
+    if rows is not None:
+        message_repo.get_for_summary.return_value = rows
+    ai_router.generate_text.return_value = _make_text_result("Говорили @@u0@@ и всё.")
+    service = SummaryService(message_repo, ai_router, alias_repo)
+    return await service.generate(chat_id=-100123, language="ru")
+
+
+class TestSummaryUsesAliases:
+    @pytest.mark.asyncio
+    async def test_the_mention_carries_the_alias_not_the_account(self, message_repo, ai_router):
+        text = await _summary_text(
+            message_repo,
+            ai_router,
+            _alias_repo([{"user_id": 111, "alias": "Аня", "role": "primary"}]),
+        )
+
+        assert "Аня" in text
+        assert "Alice" not in text
+        assert "alice" not in text
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_is_scoped_to_this_chat(self, message_repo, ai_router):
+        repo = _alias_repo([{"user_id": 111, "alias": "Аня", "role": "primary"}])
+
+        await _summary_text(message_repo, ai_router, repo)
+
+        repo.load_active.assert_awaited_once_with(-100123)
+
+    @pytest.mark.asyncio
+    async def test_without_an_alias_the_old_fallback_order_is_untouched(
+        self, message_repo, ai_router
+    ):
+        """`first_name` before `username` — this method's own order, which is
+        the opposite of the prompt history block's. Sharing one helper between
+        them would have silently rewritten this for every person with no alias.
+        """
+        text = await _summary_text(message_repo, ai_router, _alias_repo([]))
+
+        assert "Alice" in text
+        assert "alice</a>" not in text
+
+    @pytest.mark.asyncio
+    async def test_no_alias_repository_at_all_still_summarises(self, message_repo, ai_router):
+        """A hand-built service (tests, scripts) must keep working."""
+        text = await _summary_text(message_repo, ai_router, None)
+
+        assert "Alice" in text
+
+    @pytest.mark.asyncio
+    async def test_a_failing_alias_lookup_still_produces_a_summary(self, message_repo, ai_router):
+        """The user is watching a placeholder. Account names are a cosmetic
+        regression; no summary at all is a broken command.
+        """
+        text = await _summary_text(
+            message_repo, ai_router, _alias_repo(error=RuntimeError("db gone"))
+        )
+
+        assert text is not None
+        assert "Alice" in text
+
+    @pytest.mark.asyncio
+    async def test_an_alias_cannot_inject_markup_into_the_mention_anchor(
+        self, message_repo, ai_router
+    ):
+        """An alias is attacker-controlled text rendered inside an
+        `<a href="tg://user?id=...">` anchor, exactly like `first_name` — and
+        the whole message is parsed as HTML, so an unescaped `<` does not
+        degrade the summary, it makes Telegram reject it entirely.
+        """
+        text = await _summary_text(
+            message_repo,
+            ai_router,
+            _alias_repo([{"user_id": 111, "alias": "Аня</a><b>x", "role": "primary"}]),
+        )
+
+        assert "</a><b>x" not in text
+        assert "&lt;" in text or "&gt;" in text
+
+    @pytest.mark.asyncio
+    async def test_an_anonymous_author_is_unaffected(self, message_repo, ai_router):
+        """A row with no `user_id` cannot be looked up by one; it must keep
+        rendering its raw name rather than crashing the summary.
+        """
+        rows = [_make_message_row(user_id=None, first_name="Аноним", username=None)]
+        text = await _summary_text(
+            message_repo,
+            ai_router,
+            _alias_repo([{"user_id": 111, "alias": "Аня", "role": "primary"}]),
+            rows=rows,
+        )
+
+        assert text is not None

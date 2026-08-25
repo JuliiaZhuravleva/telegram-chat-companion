@@ -20,7 +20,7 @@ from typing import Any
 from src.models.enums import ResponseType
 from src.services.text.adaptive_length import compute_length_instruction
 from src.services.text.prompt_sanitizer import sanitize_history_field, sanitize_prompt_content
-from src.utils.aliases import MAX_ALIAS_CHARS, AliasView
+from src.utils.aliases import MAX_ALIAS_CHARS, AliasView, primary_alias
 from src.utils.display_tz import DISPLAY_TZ
 
 # --- KB (Knowledge Base) budget constants (ADR-0003 Part 2, addendum to ADR-0001) ---
@@ -364,9 +364,9 @@ def render_participant_name(
     default would have silently rewritten one of them -- the tail would have
     started rendering the literal ``None`` for an unidentified speaker.
     """
-    alias = aliases.primary_by_user.get(user_id) if isinstance(user_id, int) else None
+    alias = primary_alias(aliases, user_id)
     if alias:
-        return alias[:MAX_ALIAS_CHARS]
+        return alias
     return username or first_name or fallback
 
 

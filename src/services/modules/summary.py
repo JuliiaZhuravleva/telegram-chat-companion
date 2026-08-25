@@ -7,11 +7,13 @@ from html import escape as html_escape
 
 import structlog
 
+from src.database.repositories.aliases import AliasRepository
 from src.database.repositories.messages import MessageRepository
 from src.services.ai.base import AIProviderError
 from src.services.ai.router import AIRouter
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_sanitizer import sanitize_prompt_content
+from src.utils.aliases import AliasView, build_alias_view, primary_alias
 from src.utils.background import fire_and_forget
 from src.utils.display_tz import DISPLAY_TZ
 
@@ -121,9 +123,27 @@ class SummaryService:
         self,
         message_repo: MessageRepository,
         ai_router: AIRouter,
+        alias_repo: AliasRepository | None = None,
     ) -> None:
         self._messages = message_repo
         self._ai = ai_router
+        self._aliases = alias_repo
+
+    async def _load_aliases(self, chat_id: int) -> AliasView:
+        """The names this chat uses, or an empty view (TD-150).
+
+        Degrades on every failure. A summary that renders account names is a
+        cosmetic regression; a summary that does not appear because the alias
+        table was briefly unreachable is a broken command, and the user is
+        watching a placeholder while it decides.
+        """
+        if self._aliases is None:
+            return AliasView()
+        try:
+            return build_alias_view(await self._aliases.load_active(chat_id))
+        except Exception:
+            logger.warning("summary_alias_load_failed", chat_id=chat_id, exc_info=True)
+            return AliasView()
 
     async def generate(
         self,
@@ -156,6 +176,7 @@ class SummaryService:
         # an opaque @@uN@@ token instead of their real name — the model echoes
         # the token back when it wants to mention someone, and we resolve it
         # into a safe inline mention after formatting (see _resolve_mentions).
+        aliases = await self._load_aliases(chat_id)
         participants: dict[int, tuple[int, str]] = {}
         user_id_to_idx: dict[int, int] = {}
 
@@ -172,7 +193,20 @@ class SummaryService:
                 if idx is None:
                     idx = len(participants)
                     user_id_to_idx[user_id] = idx
-                    display_name = row["first_name"] or row["username"] or "?"
+                    # The alias wins, then this method's own fallback order.
+                    # Note where this lands: the model never sees a name for an
+                    # identified participant -- it gets the opaque `@@uN@@`
+                    # token above -- so the alias changes nothing the model
+                    # reasons about and everything the reader sees. The
+                    # escaping below already covers it: an alias is
+                    # attacker-controlled text exactly like `first_name`, and
+                    # it is rendered inside an anchor.
+                    display_name = (
+                        primary_alias(aliases, user_id)
+                        or row["first_name"]
+                        or row["username"]
+                        or "?"
+                    )
                     participants[idx] = (user_id, html_escape(display_name))
                 prefix = f"@@u{idx}@@"
             # Converted, not formatted raw: asyncpg returns TIMESTAMPTZ in UTC, so

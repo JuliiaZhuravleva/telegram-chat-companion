@@ -281,10 +281,23 @@ another **primary** returns "that name is taken", and the reply says who holds i
 never used the feature gets a byte-identical prompt. There is deliberately no fourth per-chat
 flag.
 
-**Not yet done:** alias-aware retrieval. A question about "Костя" still searches an archive
-filed under account names, and the lexical leg misses. Deferred until after S6 on purpose:
-changing the query text changes the embedding, and therefore every similarity number S6 will
-calibrate the chunk floor from. When it lands it must touch the FTS leg only.
+**Where the alias applies, and where it does not.** The main conversation pipeline (history
+rows, the `<user_message>` tail, the roster) and `/summary`'s mention resolution. It does *not*
+reach the relevancy gate — which renders names for a respond/stay-silent decision nobody reads —
+and it does not reach the **archive**: `chunker.py` writes `chat_chunks` with account names and
+those rows are never rewritten.
+
+That last one is deliberate, not a gap. Rewriting the archive would falsify quotes (people
+really did say "Капитан" to each other) and would mean re-embedding the whole corpus against a
+1000/day project cap. The roster is what bridges the two instead — it tells the model that the
+name in the question and the name in the retrieved fragment are one person.
+
+**Not yet done (TD-152):** alias-aware *retrieval*. A question about "Костя" still searches text
+filed under account names, so the lexical leg misses by construction. The fix expands the
+**query** across every variant of a person's name rather than touching the archive, and it is
+gated on S6: changing the query text changes the embedding, and with it every similarity number
+S6 calibrates the chunk floor from. When it lands it must touch the FTS leg and the `senders`
+filter only.
 
 ### 2.8 Forum Topics
 
