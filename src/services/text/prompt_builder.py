@@ -20,6 +20,7 @@ from typing import Any
 from src.models.enums import ResponseType
 from src.services.text.adaptive_length import compute_length_instruction
 from src.services.text.prompt_sanitizer import sanitize_history_field, sanitize_prompt_content
+from src.utils.aliases import MAX_ALIAS_CHARS, AliasView
 from src.utils.display_tz import DISPLAY_TZ
 
 # --- KB (Knowledge Base) budget constants (ADR-0003 Part 2, addendum to ADR-0001) ---
@@ -67,6 +68,14 @@ HISTORY_QUOTE_MAX_CHARS = 200
 # RRF's fusion has anything to add.
 CHUNKS_BUDGET_TOKENS = 900
 MAX_CHUNK_CHARS = 1300
+
+# The roster renders on EVERY turn, unlike a retrieval section that only
+# appears when something matched, so its cost is paid forever rather than
+# occasionally. 25 people covers every chat this bot is in by a wide margin
+# (the largest has 13 active posters); 4 alternates is enough for a real
+# nickname pile without letting one person dominate the block.
+MAX_ROSTER_ENTRIES = 25
+MAX_ROSTER_ALTERNATES = 4
 
 # Characters per token for Cyrillic text. ADR-0001's `chars // 4` was written
 # for English and undercounts Russian by roughly a third — the corpus this
@@ -131,6 +140,15 @@ class PromptContext:
     # Sticker candidates (for AI-conscious sticker responses)
     sticker_candidates: str | None = None
 
+    # Participant aliases (TD-150). `aliases` is what the chat calls its
+    # people; `user_id` is here only so the speaker of the current message can
+    # be looked up in it. Without that id, `<user_message>` would keep
+    # rendering the raw first_name while the history block above it rendered
+    # the alias, and the model would see one person under two names on the
+    # same turn.
+    aliases: AliasView = field(default_factory=AliasView)
+    user_id: int | None = None
+
     # User message
     user_name: str = ""
     user_message: str = ""
@@ -193,6 +211,16 @@ def build_system_prompt(ctx: PromptContext) -> str:
     # 9. Sticker candidates
     if ctx.sticker_candidates:
         sections.append(_sticker_section())
+
+    # 9b. Who is who (TD-150). Ahead of the retrieval group on purpose: it is
+    # not retrieval, it did not come from a search, and putting it inside that
+    # group would make the shared fence below claim it as one more thing that
+    # "was found" -- which is also why it carries its own framing instead of
+    # joining `present`. Empty roster, no section: a chat where nobody has set
+    # a name gets a byte-identical prompt to the one it got before this
+    # feature existed.
+    if ctx.aliases:
+        sections.append(_roster_section(ctx.aliases))
 
     # 10. Knowledge Base facts (curated, higher priority than RAG episodic memory)
     if ctx.kb_facts:
@@ -263,7 +291,7 @@ def build_user_prompt(ctx: PromptContext) -> str:
                 parts.append("Messages in this topic:")
                 parts.append("<current_topic>")
                 for msg in current_msgs:
-                    parts.append(_format_message(msg))
+                    parts.append(_format_message(msg, ctx.aliases))
                 parts.append("</current_topic>")
                 parts.append("")
 
@@ -271,7 +299,7 @@ def build_user_prompt(ctx: PromptContext) -> str:
                 parts.append("Recent messages from other topics (for context):")
                 parts.append("<other_topics>")
                 for msg in other_msgs:
-                    parts.append(_format_message(msg))
+                    parts.append(_format_message(msg, ctx.aliases))
                 parts.append("</other_topics>")
                 parts.append("")
         else:
@@ -279,7 +307,7 @@ def build_user_prompt(ctx: PromptContext) -> str:
             parts.append("Chat history (last messages):")
             parts.append("<chat_history>")
             for msg in ctx.recent_messages:
-                parts.append(_format_message(msg))
+                parts.append(_format_message(msg, ctx.aliases))
             parts.append("</chat_history>")
             parts.append("")
 
@@ -289,14 +317,60 @@ def build_user_prompt(ctx: PromptContext) -> str:
         parts.append("")
 
     parts.append("Last message to respond to:")
-    safe_name = sanitize_prompt_content(ctx.user_name)
+    # Same resolution as every history row above (see render_participant_name):
+    # naming the speaker one way in `<chat_history>` and another way here is
+    # the failure this shared helper exists to prevent.
+    safe_name = sanitize_prompt_content(
+        render_participant_name(ctx.aliases, user_id=ctx.user_id, first_name=ctx.user_name)
+    )
     safe_msg = sanitize_prompt_content(ctx.user_message)
     parts.append(f"<user_message>{safe_name}: {safe_msg}</user_message>")
 
     return "\n".join(parts)
 
 
-def _format_message(msg: dict[str, Any]) -> str:
+def render_participant_name(
+    aliases: AliasView,
+    *,
+    user_id: Any,
+    username: str | None = None,
+    first_name: str | None = None,
+    fallback: str = "",
+) -> str:
+    """The one name a person is rendered under, wherever they are rendered.
+
+    Named for the prompt and not ``resolve_display_name``, which already exists
+    in ``src/bot/utils.py`` and is a different animal: that one is an async Bot
+    API call producing a label for the admin UI. This one is pure, and the alias
+    it prefers is something the Bot API knows nothing about.
+
+    Exists so ``_format_message`` and the ``<user_message>`` tail cannot
+    disagree. They already disagree when no alias is set -- history prefers
+    ``username`` and the tail carries a ``first_name`` from a different source
+    entirely -- and that split is left alone here on purpose: changing it would
+    rewrite the prompt of every chat that never asked for this feature. What
+    this guarantees is narrower and is the part that matters: once somebody has
+    an alias, *both* surfaces use it.
+
+    The alias is truncated even though the write path already bounds it. A row
+    can reach this table without passing ``parse_alias`` -- a hand-written
+    UPDATE, or the autocollector a later slice adds -- and a name renders once
+    per history row on every single turn, so an unbounded one is unbounded
+    prompt growth rather than one ugly line.
+
+    ``fallback`` is what each call site used before this helper existed, and it
+    differs between them: the history row falls back to the raw user id, the
+    ``<user_message>`` tail falls back to an empty string. Folding both into one
+    default would have silently rewritten one of them -- the tail would have
+    started rendering the literal ``None`` for an unidentified speaker.
+    """
+    alias = aliases.primary_by_user.get(user_id) if isinstance(user_id, int) else None
+    if alias:
+        return alias[:MAX_ALIAS_CHARS]
+    return username or first_name or fallback
+
+
+def _format_message(msg: dict[str, Any], aliases: AliasView) -> str:
     """Format a single message for the prompt."""
     # Every interpolated field here is user-controlled and lands in a
     # line-oriented block, so all of them go through sanitize_history_field()
@@ -305,7 +379,19 @@ def _format_message(msg: dict[str, Any]) -> str:
     # hole long before the quote annotation was added; see the sanitizer's
     # docstring.
     user_id = msg.get("user_id", "?")
-    name = sanitize_history_field(msg.get("username") or msg.get("first_name") or str(user_id))
+    # The alias joins this chain as its highest-priority branch and stays
+    # INSIDE sanitize_history_field: it is user-typed text like the two fields
+    # it displaces, so a newline in it forges an extra `[uid:N] Name: ...` row
+    # exactly the way a username would.
+    name = sanitize_history_field(
+        render_participant_name(
+            aliases,
+            user_id=user_id,
+            username=msg.get("username"),
+            first_name=msg.get("first_name"),
+            fallback=str(user_id),
+        )
+    )
     content = sanitize_history_field(msg.get("content", ""))
     is_bot = msg.get("is_bot_message", False)
 
@@ -653,6 +739,69 @@ def _chunks_section(chunks: list[dict[str, Any]]) -> str:
         content = sanitize_prompt_content(chunk.get("content") or "")
         parts.append(f"[fragment {index}]\n{content}")
     return "\n\n".join(parts)
+
+
+def _roster_section(view: AliasView) -> str:
+    """Who is who in this chat, so the bot can be *asked* about a person.
+
+    The history block already renders each speaker under their alias, which is
+    what makes the bot address people correctly. This block does the other
+    half: it tells the bot that "Костя" and "Капитан" are one person, so a
+    question about a name nobody's account carries is answerable at all.
+
+    Three rendering properties, and each of them is load-bearing:
+
+    * **One person is one bullet.** An alias is user-typed text landing in a
+      line-oriented block, exactly like a knowledge-base fact -- and
+      `_kb_section` learned the hard way that `sanitize_prompt_content` alone
+      does not stop a payload with a newline and a `- ` from rendering as a
+      second bullet. The cell guard here is `sanitize_history_field`, which
+      does the whole job on its own: it rewrites every character `splitlines()`
+      treats as a break, not just `\n`, and neutralises the `[uid:` marker
+      too. `parse_alias` already collapsed on the write path; this is the read
+      path, and a row can reach the table without passing it.
+
+      The extra `" ".join(...split())` is **cosmetic here and load-bearing in
+      `_kb_section`** -- the difference is which sanitizer precedes it. Said
+      out loud because the two lines look identical, and this repo already has
+      one guard whose stated justification outran its evidence (see the
+      ё-normalisation note in `ChunkRepository.search`); a mutation removing
+      this collapse breaks no security property and should not be expected to.
+    * **Bounded.** This renders on every single turn, so an unbounded roster is
+      unbounded cost forever. Entries and per-person alternates are both
+      capped, and the caps are stated to the model rather than silently
+      truncating a list it would otherwise read as complete.
+    * **No bot entry.** Bot messages render as a bare `Bot:` with no uid and no
+      name (see `_format_message`), and the chunker uses the same token. A
+      roster line for the bot under any other label would introduce a second
+      name for the one participant the model must not be confused about.
+
+    Deliberately placed *before* the retrieval sections rather than among them,
+    so the shared REMINDER fence below stays a statement about retrieval. This
+    block carries its own framing instead: these are names people chose, which
+    is both what the model needs to know and the fact that marks them as
+    user-supplied.
+    """
+    lines = [
+        "Names the people in this chat go by (each person chose their own; "
+        "use the first name when addressing or referring to them):"
+    ]
+    for entry in view.entries[:MAX_ROSTER_ENTRIES]:
+        primary = _roster_cell(entry.primary)
+        if not primary:
+            continue
+        alternates = [c for c in (_roster_cell(a) for a in entry.alternates) if c]
+        if alternates:
+            shown = alternates[:MAX_ROSTER_ALTERNATES]
+            lines.append(f"- {primary} (also called: {', '.join(shown)})")
+        else:
+            lines.append(f"- {primary}")
+    return "\n".join(lines)
+
+
+def _roster_cell(value: str) -> str:
+    """One roster cell: newline-collapsed, marker-neutralised, length-capped."""
+    return " ".join(sanitize_history_field(value).split())[:MAX_ALIAS_CHARS]
 
 
 def _kb_section(facts: list[dict[str, Any]]) -> str:

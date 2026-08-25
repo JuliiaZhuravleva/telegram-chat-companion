@@ -56,7 +56,7 @@ class TestMigrate:
     async def test_moves_settings_and_facts(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 0"]
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 0", "UPDATE 0"]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
@@ -86,25 +86,43 @@ class TestMigrate:
         )
 
     @pytest.mark.asyncio
+    async def test_moves_participant_aliases_too(
+        self, repo: ChatMigrationRepository, conn: MagicMock
+    ) -> None:
+        """TD-150: the names a chat chose for its people are curated too.
+
+        Same failure shape as the rules above and just as quiet: the bot would
+        simply go back to calling everyone by their account handle, in a chat
+        that had already told it what to use, with nothing logged to say why.
+        """
+        await repo.migrate(OLD_ID, NEW_ID)
+
+        tables = [call.args[0] for call in conn.execute.call_args_list]
+        assert any("UPDATE chat_user_aliases" in sql for sql in tables), (
+            f"chat_user_aliases was never re-keyed; statements were: {tables}"
+        )
+
+    @pytest.mark.asyncio
     async def test_reports_how_many_rules_moved(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
         """The count is the only in-prod signal that the third table moved."""
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 4"]
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 4", "UPDATE 2"]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
         assert outcome.rules_moved == 4
 
     @pytest.mark.asyncio
-    async def test_all_three_tables_move_in_one_transaction(
+    async def test_all_four_tables_move_in_one_transaction(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        """A half-applied move leaves settings, knowledge and rules on different ids."""
+        """A half-applied move leaves settings, knowledge, rules and names on
+        different ids."""
         await repo.migrate(OLD_ID, NEW_ID)
 
         conn.transaction.assert_called_once()
-        assert conn.execute.await_count == 3
+        assert conn.execute.await_count == 4
 
     @pytest.mark.asyncio
     async def test_locks_the_source_row_before_deciding(

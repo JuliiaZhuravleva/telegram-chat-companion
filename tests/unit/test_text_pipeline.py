@@ -61,6 +61,9 @@ def _make_pipeline(
     chunks=None,
     chunks_min_similarity=0.0,
     chunk_search_error=None,
+    aliases=None,
+    history_rows=None,
+    alias_load_error=None,
 ):
     """Build a pipeline with mocked dependencies.
 
@@ -107,8 +110,23 @@ def _make_pipeline(
 
     message_repo = AsyncMock()
     message_repo.get_recent.return_value = recent_msgs or []
+    # `recent_msgs` above is a DEAD KNOB and is left alone only because every
+    # existing test already depends on its being dead (TD-151). `process()`
+    # calls `get_recent_with_topic_context`, never `get_recent`, so awaiting
+    # the unconfigured attribute yields another AsyncMock and
+    # `[dict(r) for r in reversed(that)]` quietly evaluates to `[]` -- which is
+    # why `<chat_history>` is absent from every pipeline-level prompt assertion
+    # in this file. Anything that needs a real history row must use
+    # `history_rows`, which points at the method the pipeline actually calls.
+    message_repo.get_recent_with_topic_context.return_value = history_rows or []
     message_repo.get_recent_lengths.return_value = lengths or []
     message_repo.save = AsyncMock()
+
+    alias_repo = AsyncMock()
+    if alias_load_error:
+        alias_repo.load_active.side_effect = alias_load_error
+    else:
+        alias_repo.load_active.return_value = aliases or []
 
     response_log_repo = AsyncMock()
     response_log_repo.log = AsyncMock()
@@ -160,9 +178,11 @@ def _make_pipeline(
         link_service=link_service,
         knowledge_repo=knowledge_repo,
         observability_repo=observability_repo,
+        alias_repo=alias_repo,
         kb_min_similarity=kb_min_similarity,
     )
     return pipeline, {
+        "alias_repo": alias_repo,
         "abuse_checker": abuse_checker,
         "ai_router": ai_router,
         "message_repo": message_repo,
@@ -2098,3 +2118,107 @@ class TestChunkRetrievalDegraded:
         system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
         assert "проектор" not in system_prompt, "sub-floor rows must not reach the prompt"
         assert "nothing matched" not in system_prompt
+
+
+# --- Participant aliases reaching the prompt (TD-150) ------------------------
+
+
+async def _run_with_aliases(make_chat_config, *, user_id=42, user_name="Капитан", **kwargs):
+    """Drive one turn and return the mocks, with a real history row present.
+
+    `history_rows` and not `recent_msgs`: the latter configures a method
+    `process()` never calls, so a history assertion built on it passes without
+    the block ever rendering (see the note in `_make_pipeline`).
+    """
+    config = make_chat_config(enabled=True, **kwargs.pop("config", {}))
+    pipeline, mocks = _make_pipeline(**kwargs)
+    await pipeline.process(
+        chat_id=-100123,
+        user_id=user_id,
+        user_name=user_name,
+        message_text="что я делал месяц назад?",
+        trigger_type=TriggerType.TRIGGER,
+        config=config,
+        message_id=777,
+    )
+    await asyncio.sleep(0)
+    return mocks
+
+
+def _prompts(mocks) -> tuple[str, str]:
+    kwargs = mocks["ai_router"].generate_text.call_args.kwargs
+    return kwargs["system_prompt"], kwargs["prompt"]
+
+
+_ALIAS_ROWS = [
+    {"user_id": 42, "alias": "Костя", "role": "primary"},
+    {"user_id": 42, "alias": "Капитан", "role": "alternate"},
+]
+_HISTORY = [{"user_id": 42, "username": "kapitan_k", "content": "привет"}]
+
+
+class TestAliasesReachThePrompt:
+    async def test_the_roster_is_built_from_the_repository(self, make_chat_config):
+        system_prompt, _ = _prompts(await _run_with_aliases(make_chat_config, aliases=_ALIAS_ROWS))
+
+        assert "- Костя (also called: Капитан)" in system_prompt
+
+    async def test_the_history_row_and_the_current_message_both_use_it(self, make_chat_config):
+        """The end-to-end version of the two-surfaces invariant: it is the
+        pipeline that supplies both `aliases` and `user_id`, and supplying one
+        without the other is what makes the model see two names for one person.
+        """
+        system_prompt, user_prompt = _prompts(
+            await _run_with_aliases(make_chat_config, aliases=_ALIAS_ROWS, history_rows=_HISTORY)
+        )
+
+        assert "[uid:42] Костя: привет" in user_prompt
+        assert "<user_message>Костя:" in user_prompt
+        assert "kapitan_k" not in user_prompt
+        assert "kapitan_k" not in system_prompt
+
+    async def test_the_lookup_is_scoped_to_this_chat(self, make_chat_config):
+        mocks = await _run_with_aliases(make_chat_config, aliases=_ALIAS_ROWS)
+
+        mocks["alias_repo"].load_active.assert_awaited_once_with(-100123)
+
+    async def test_a_chat_with_no_aliases_gets_the_old_prompt(self, make_chat_config):
+        """Nobody has to opt out of this feature; an empty table IS opted out."""
+        system_prompt, user_prompt = _prompts(
+            await _run_with_aliases(make_chat_config, history_rows=_HISTORY)
+        )
+
+        assert "Names the people in this chat go by" not in system_prompt
+        assert "[uid:42] kapitan_k: привет" in user_prompt
+        assert "<user_message>Капитан:" in user_prompt
+
+    async def test_a_failing_lookup_still_answers_the_user(self, make_chat_config):
+        """The read sits inside a bare `asyncio.gather` with no
+        `return_exceptions`, so an exception escaping it would abort the turn
+        and the chat would get silence — not a reply missing one section.
+        """
+        mocks = await _run_with_aliases(
+            make_chat_config,
+            alias_load_error=RuntimeError("database went away"),
+            history_rows=_HISTORY,
+        )
+
+        mocks["ai_router"].generate_text.assert_awaited()
+        system_prompt, user_prompt = _prompts(mocks)
+        assert "Names the people in this chat go by" not in system_prompt
+        assert "[uid:42] kapitan_k: привет" in user_prompt
+
+    async def test_no_retrieval_log_row_is_written_for_aliases(self, make_chat_config):
+        """`retrieval_log`'s non-KB/chunks branch is RAG-shaped: it reads
+        `similarity` and `content`. An alias row would land there as a
+        similarity-less entry and pollute the very distribution S6 will
+        calibrate the chunk floor from (TD-147).
+        """
+        mocks = await _run_with_aliases(make_chat_config, aliases=_ALIAS_ROWS)
+
+        sources = [
+            call.kwargs.get("source")
+            for call in mocks["observability_repo"].log_retrieval.await_args_list
+        ]
+        assert "aliases" not in sources
+        assert "alias" not in sources

@@ -122,6 +122,26 @@ COMMANDS: tuple[CommandSpec, ...] = (
         ),
     ),
     CommandSpec(
+        command="callme",
+        scopes=frozenset({CommandScope.GROUPS}),
+        description={
+            "ru": "Как боту вас звать: /callme Костя",
+            "en": "Set the name the bot calls you: /callme Kostya",
+        },
+        # Deliberately NOT admin_only. The common path -- naming yourself --
+        # is open to every member, and the audit reads admin_only as "every
+        # handler for this command carries an IsAdmin filter", which would be
+        # false and is cross-checked three ways. The narrow branch that renames
+        # somebody else is gated inside the body by a live chat-admin check the
+        # audit cannot see, which is the right place for it: an IsAdmin filter
+        # would refuse the self-service path too.
+        #
+        # GROUPS only, because an alias is per-chat: there is no "this chat" in
+        # a DM. The private-chat handler exists anyway and says so, since
+        # without it the message falls through to the AI pipeline and the user
+        # gets a conversational non-answer instead of an explanation.
+    ),
+    CommandSpec(
         command="cancel",
         # ADMIN only: every FSM prompt in this bot lives in the admin DM, so
         # this is discoverable exactly where it is needed and invisible to

@@ -62,6 +62,7 @@ class MigrationOutcome:
     settings_moved: int = 0
     facts_moved: int = 0
     rules_moved: int = 0
+    aliases_moved: int = 0
 
 
 class ChatMigrationRepository:
@@ -152,12 +153,23 @@ class ChatMigrationRepository:
                 old_chat_id,
                 new_chat_id,
             )
+            # Same argument a third time (TD-150): people typed these names in
+            # and nothing regenerates them. Left behind, the bot would go back
+            # to addressing everyone by their account handle in a chat that had
+            # already told it otherwise -- a silent regression with no error and
+            # no row anywhere saying why.
+            aliases_result = await conn.execute(
+                "UPDATE chat_user_aliases SET chat_id = $2 WHERE chat_id = $1",
+                old_chat_id,
+                new_chat_id,
+            )
 
         return MigrationOutcome(
             status="migrated",
             settings_moved=_rows_affected(settings_result),
             facts_moved=_rows_affected(facts_result),
             rules_moved=_rows_affected(rules_result),
+            aliases_moved=_rows_affected(aliases_result),
         )
 
 
