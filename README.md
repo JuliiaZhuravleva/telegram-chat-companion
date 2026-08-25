@@ -131,7 +131,11 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
   from the admin panel. Facts only reach an answer when they actually match what was asked
   (`knowledge_base.min_similarity`, default 0.70): a question the base has nothing to say about is
   answered without it, rather than with the nearest few facts presented as relevant
-- **Voice transcription** — transcribe voice messages and video notes (gpt-4o-mini-transcribe)
+- **Voice transcription** — transcribe voice messages and video notes (gpt-4o-mini-transcribe).
+  Anything over roughly four minutes exceeds Telegram's 4096-character message limit, so the
+  transcript arrives split across numbered messages rather than being rejected whole; a note
+  long enough for the wait to be noticeable announces itself first, and that announcement is
+  then edited into the transcript in place
 - **Image analysis** — understand and comment on images
 - **Sticker intelligence** — learn and use stickers contextually. Each sticker carries an
   explicitness score and each chat a ceiling, so a sticker is only sent where it fits; the
@@ -220,6 +224,18 @@ behind it: the case set is regenerated deterministically from a frozen corpus
 rather than kept as a file, and both corpora are kept as verified `pg_dump`
 archives outside the repository. The exact procedure lives with the numbers, in
 [the baseline](docs/rag-eval-baseline.md#reproducing).
+
+`scripts/probe_telegram_limits.py` answers a question no unit test in this
+repository can. Every send is an `AsyncMock` in the suite, so it accepts a
+severed HTML entity, an unclosed tag and an over-length body identically — the
+rejection exists only on Telegram's side. The probe drives the real Bot API with
+the real split output and asserts on the *entities* that come back, not merely on
+HTTP 200, because Telegram answers 200 while silently dropping markup it
+dislikes. It ends with a negative control: one deliberately un-split body that
+must be rejected, so a probe that had stopped exercising anything cannot report
+success. Not in CI — it posts to, and then deletes from, a real chat, and it
+requires `PROBE_CHAT_ID` from the environment rather than defaulting, because a
+chat id committed to a public repository cannot be taken back.
 
 `scripts/kb_report.py` is the Knowledge Base counterpart, and needs no cases at
 all: the bot has been recording per-fact similarity for every KB lookup since
