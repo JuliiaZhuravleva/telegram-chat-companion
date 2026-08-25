@@ -80,7 +80,12 @@ class JudgeResult:
     tokens_output: int | None = None
     model: str = ""
     provider: str = ""
-    cost_usd: Decimal = Decimal("0")
+    # `None` when the call could not be priced (unknown model, or a
+    # response carrying no usage tokens). Deliberately not coerced to zero:
+    # this value is written straight to `response_log.cost_usd`, which
+    # SpendLimitService sums, and a fake zero there is an under-report
+    # nothing can detect afterwards. See `calculate_cost`.
+    cost_usd: Decimal | None = Decimal("0")
     suggested_emoji: str | None = None  # only meaningful when should_respond is False (R-5)
 
 

@@ -76,10 +76,12 @@ DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
         1,
         "broad except that logs; summary refresh is best-effort",
     ),
-    ("commands.py", "_deliver_summary"): (
+    ("progress.py", "finish"): (
         1,
-        "the except body DELETES the placeholder and resends — a genuine fallback, not a "
-        "suppression, so the helper's semantics are wrong here",
+        "turns the progress placeholder INTO the result, and must know whether that "
+        "worked: on failure it drops the stale placeholder and sends the result fresh. "
+        "safe_edit_text returns None and re-raises anything that is not "
+        "'not modified', so it cannot express either half of that",
     ),
     # The helpers themselves. They are the compliant route, so they must contain
     # the only raw edits left in src/bot/ — and pinning them here means the scan

@@ -13,6 +13,7 @@ import structlog
 from src.database.repositories.messages import MessageRepository
 from src.services.ai.base import AIProviderError, TranscriptionResult
 from src.services.ai.router import AIRouter
+from src.utils.telegram_text import DEFAULT_SPLIT_LIMIT, parsed_length, split_html
 
 logger = structlog.get_logger(__name__)
 
@@ -190,8 +191,48 @@ class VoiceTranscriptionService:
         Returns HTML (the bot's default parse mode) with both interpolated
         values escaped -- see the header note above for why this is not
         Markdown any more.
+
+        Kept for callers that want the whole thing as one string. Anything
+        that actually sends it should use `format_reply_parts`, because a
+        transcript long enough to exceed Telegram's 4096-character limit is
+        not a rare edge: it is any voice message over roughly four minutes.
         """
         return (
             f"{_HEADER_EMOJI} <b>{_HEADER_LABEL}</b> {html.escape(user_first_name)}:"
             f"\n\n{html.escape(transcription_text)}"
         )
+
+    @staticmethod
+    def format_reply_parts(user_first_name: str, transcription_text: str) -> list[str]:
+        """The same reply, split into messages Telegram will accept.
+
+        A six-minute voice note transcribes to well over 4096 characters, and
+        the un-split version of this was rejected outright -- costing the chat
+        the transcription entirely, and the bot the bookkeeping row that tells
+        it a later reply belongs to the speaker rather than to itself.
+
+        Every part carries the header, because on Telegram the parts arrive as
+        separate messages and a reader scrolling into the middle of a long
+        transcript should still see whose words these are. The ``(2/3)``
+        counter appears only when there is more than one part, so the ordinary
+        short voice message is byte-identical to what `format_reply` produced
+        before.
+        """
+        # A display name is user-controlled and can be 64 characters; the
+        # header budget has to be derived from the real one, not assumed.
+        name = html.escape(user_first_name)
+        head = f"{_HEADER_EMOJI} <b>{_HEADER_LABEL}</b> {name}"
+
+        # Reserve room for the longest counter this will realistically render
+        # plus the blank line under the header. Reserving too much only costs
+        # an extra message; reserving too little costs the whole thing.
+        reserve = parsed_length(head) + len(" (99/99):") + 2
+        budget = max(DEFAULT_SPLIT_LIMIT - reserve, 512)
+
+        bodies = split_html(html.escape(transcription_text), limit=budget)
+        if len(bodies) == 1:
+            return [f"{head}:\n\n{bodies[0]}"]
+        total = len(bodies)
+        return [
+            f"{head} ({index}/{total}):\n\n{body}" for index, body in enumerate(bodies, start=1)
+        ]

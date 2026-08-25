@@ -439,9 +439,19 @@ class TestPipelinePostSend:
         mocks["response_log_repo"].log.assert_called_once()
 
     async def test_post_send_log_includes_task_type_and_cost(self, make_chat_config):
+        """A REAL priced model, not the default "test-model".
+
+        This used to run on a model absent from MODEL_PRICING and assert only
+        that the logged cost was some Decimal — which the old calculate_cost
+        satisfied by returning zero for anything it could not price. The
+        assertion therefore passed on a fabricated number, and its own comment
+        said so ("test-model might not be in pricing, so 0 is ok").
+        """
+        from decimal import Decimal
+
         config = make_chat_config(enabled=True)
         pipeline, mocks = _make_pipeline(
-            ai_result=_make_ai_result("Ok", tokens_input=100, tokens_output=50),
+            ai_result=_make_ai_result("Ok", model="gpt-5-nano", tokens_input=100, tokens_output=50),
         )
 
         result = await pipeline.process(
@@ -457,11 +467,34 @@ class TestPipelinePostSend:
 
         call_kwargs = mocks["response_log_repo"].log.call_args.kwargs
         assert call_kwargs["task_type"] == "text"
-        assert call_kwargs["cost_usd"] is not None
-        # Cost should be a Decimal > 0 (test-model might not be in pricing, so 0 is ok)
-        from decimal import Decimal
+        assert call_kwargs["cost_usd"] > Decimal("0"), (
+            "a priced model with real token counts must log a real cost"
+        )
 
-        assert isinstance(call_kwargs["cost_usd"], Decimal)
+    async def test_an_unpriceable_call_logs_null_not_a_fake_zero(self, make_chat_config):
+        """The sibling that makes the assertion above load-bearing.
+
+        NULL and 0 sum identically, so totals do not change — but the rows
+        become countable, which is the difference between an under-report you
+        can measure and one nobody can see.
+        """
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline(
+            ai_result=_make_ai_result("Ok", model="a-model-nobody-priced"),
+        )
+
+        result = await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="Hey bot!",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        await pipeline.post_send(result, bot_message_id=999)
+
+        assert mocks["response_log_repo"].log.call_args.kwargs["cost_usd"] is None
 
     async def test_post_send_saves_bot_message(self, make_chat_config):
         config = make_chat_config(enabled=True)

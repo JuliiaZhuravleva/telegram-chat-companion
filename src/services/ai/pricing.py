@@ -13,6 +13,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+import structlog
+
+logger = structlog.get_logger(__name__)
+
 _ZERO = Decimal("0")
 _ONE_MILLION = Decimal("1000000")
 
@@ -116,18 +120,64 @@ def calculate_cost(
     tokens_input: int | None = None,
     tokens_output: int | None = None,
     duration_minutes: float | None = None,
-) -> Decimal:
-    """Calculate cost in USD for a single AI operation.
+) -> Decimal | None:
+    """Cost in USD for a single AI operation, or ``None`` when it is unknowable.
 
-    Returns Decimal("0") for unknown or free models.
+    **"Free" and "we do not know" are different answers, and this used to give
+    the same one to both.** Every path that could not price a call returned
+    ``Decimal("0")``: a model missing from the table, a token-priced model whose
+    response carried no usage object, a per-minute model with no duration. That
+    zero is written to ``response_log.cost_usd``, which is what
+    ``SpendLimitService`` sums and what /costs reports — so an unpriceable call
+    was permanently indistinguishable from a genuinely free one, and the daily
+    cap under-counted with nothing anywhere saying so. The provider layer
+    already knew this was a hazard and warned about it for transcription
+    (``providers/openai.py``); the zero was written anyway.
+
+    ``None`` means "not priceable", and the column is nullable, so it lands as
+    SQL NULL. Totals are unaffected — ``SUM`` ignores NULL exactly as it ignores
+    zero — but the rows are now countable, which is the whole point: an
+    under-report you can measure is a different thing from one you cannot see.
+
+    This matters more the moment anything streams: a stream that ends without a
+    usage object is precisely the "priced model, no numbers" case, and it would
+    have logged $0 for every streamed reply.
+
+    Returns:
+        ``Decimal("0")`` only when the cost is genuinely zero — a model marked
+        free, or a priced model that measurably consumed zero tokens.
+        ``None`` when the cost cannot be determined.
     """
     pricing = MODEL_PRICING.get(model)
-    if pricing is None or pricing.is_free:
+    if pricing is None:
+        # Not in the table. It may be free, it may be the most expensive model
+        # the provider sells; we have no way to tell, so we must not assert.
+        logger.warning("Cannot price a call to an unknown model", model=model)
+        return None
+    if pricing.is_free:
         return _ZERO
 
-    # Audio: per-minute pricing (Whisper)
-    if pricing.per_minute is not None and duration_minutes is not None:
+    # Audio: per-minute pricing (Whisper). `per_minute` set is what makes a
+    # model per-minute-billed, so a missing duration is unpriceable here rather
+    # than falling through to the token branches below (which would silently
+    # bill a per-minute model at its unset $0/1M token rates).
+    if pricing.per_minute is not None:
+        if duration_minutes is None:
+            logger.warning(
+                "Per-minute model returned no duration; cost cannot be computed",
+                model=model,
+            )
+            return None
         return pricing.per_minute * Decimal(str(duration_minutes))
+
+    # `is None`, not falsiness: a measured zero tokens genuinely costs zero and
+    # must stay a zero, while an absent count must not.
+    if tokens_input is None and tokens_output is None:
+        logger.warning(
+            "Priced model returned no usage tokens; cost cannot be computed",
+            model=model,
+        )
+        return None
 
     cost = _ZERO
     if tokens_input and pricing.input_per_1m:

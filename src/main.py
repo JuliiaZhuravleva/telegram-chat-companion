@@ -26,6 +26,7 @@ from src.bot.middleware import (
     AccessControlMiddleware,
     ActivityTrackerMiddleware,
     ChatConfigMiddleware,
+    FloodControlMiddleware,
     MessageSaverMiddleware,
     RulesMiddleware,
     TopicMiddleware,
@@ -152,6 +153,14 @@ async def main() -> None:
         token=settings.telegram_bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
+
+    # On the SESSION, not the dispatcher: this wraps every outgoing Bot API
+    # call, including the ones made outside any handler (the progress ticker,
+    # the sticker-set scheduler, startup command sync) and the ones added by
+    # code written after this. A dispatcher middleware would see updates coming
+    # in, which is the wrong direction. See the module docstring for why it
+    # retries `TelegramRetryAfter` and nothing else.
+    bot.session.middleware(FloodControlMiddleware())
 
     # Initialize dispatcher
     dp = Dispatcher()

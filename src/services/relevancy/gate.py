@@ -36,7 +36,10 @@ class GateDecision:
     should_respond: bool
     tier: str  # "fast_rules" | "engagement" | "llm_judge" | "disabled"
     reason: str
-    cost_usd: Decimal = Decimal("0")
+    # `Decimal | None` for the same reason as JudgeResult.cost_usd: None is
+    # "not priceable", and it must reach the database as NULL rather than
+    # as a zero that reads like a free call.
+    cost_usd: Decimal | None = Decimal("0")
     # Tier-3 reaction piggyback (R-5, ADR-0004 Decision 4): the emoji
     # `llm_judge` suggests when it says NO, at zero extra token cost. Only
     # ever set when tier == "llm_judge"; None on every other tier.
@@ -187,7 +190,7 @@ class RelevancyGate:
         provider: str,
         tokens_input: int | None,
         tokens_output: int | None,
-        cost_usd: Decimal,
+        cost_usd: Decimal | None,
     ) -> None:
         try:
             await self._response_log.log(
