@@ -46,6 +46,10 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from dishka.integrations.aiogram import FromDishka
+
+from src.database.repositories.admin import AdminRepository
+from src.database.repositories.bot_config import BotConfigRepository
 
 router = Router(name="fsm_cancel")
 logger = structlog.get_logger(__name__)
@@ -71,12 +75,26 @@ _NOTHING_TO_CANCEL: dict[str, str] = {
     # out for: forwarding someone's message to add them as an organizer.
     F.forward_origin.is_(None),
 )
-async def handle_cancel(message: Message, state: FSMContext) -> None:
-    """Clear whatever dialog the user is parked in, and say which."""
+async def handle_cancel(
+    message: Message,
+    state: FSMContext,
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Clear whatever dialog the user is parked in, and say which.
+
+    The language comes from `admin_settings`, the same place every other
+    admin-facing string resolves it — NOT from the client's `language_code`.
+    Two reasons: an admin who set the panel to English while running a Russian
+    Telegram client would get one Russian string among English ones, and a
+    region-qualified locale (`en-US`, `pt-br` are real values Telegram sends)
+    matches neither key and silently falls through to Russian, making the
+    English string unreachable for those clients.
+    """
     current = await state.get_state()
     await state.clear()
 
-    lang = (message.from_user.language_code or "ru") if message.from_user else "ru"
+    lang = await admin_repo.get_admin_language(bot_config_repo)
     texts = _CANCELLED if current is not None else _NOTHING_TO_CANCEL
     await message.answer(texts.get(lang, texts["ru"]), parse_mode=None)
 

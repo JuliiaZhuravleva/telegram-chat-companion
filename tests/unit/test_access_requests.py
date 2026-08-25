@@ -225,6 +225,72 @@ class TestTheServiceItself:
 
         assert result.suppressed == "error"
 
+    @pytest.mark.asyncio
+    async def test_the_cooldown_is_marked_before_any_await(self) -> None:
+        """Check-and-set, or the gate is open for the whole submit.
+
+        `start_polling` runs every update as its own task. With the mark at the
+        END, three messages pasted into an unauthorized group in quick
+        succession all pass `is_cooling()` while the first is still awaiting its
+        INSERT and its send_message — three rows, three identical admin cards.
+        The class docstring claims one card per chat, so the claim has to hold.
+        """
+        service, admin_repo, _ = self._service()
+        seen_while_working: list[bool] = []
+
+        # Signature-faithful (*args/**kw) rather than a renamed parameter: this
+        # project has been bitten by a stub whose renamed arg broke a keyword
+        # call, raising TypeError inside code that swallows it — so the miss
+        # rendered as a clean result.
+        async def _slow_check(*_args: object, **_kw: object) -> bool:
+            # Stands in for everything that happens after the gate: by the time
+            # the first submit reaches here, a concurrent one must already be
+            # locked out.
+            seen_while_working.append(service._cooldown.is_cooling(GROUP_ID))
+            return False
+
+        admin_repo.has_rejected_attempt = AsyncMock(side_effect=_slow_check)
+
+        await service.submit(AccessRequest(chat_id=GROUP_ID), bot=MagicMock())
+
+        assert seen_while_working == [True], (
+            "the cooldown was still open while submit() was mid-flight — a "
+            "concurrent update for the same chat would file a second card"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_keyboard_is_not_reported_as_the_happy_path(self) -> None:
+        """The row and the card fail independently.
+
+        Sharing one `except` made "row written, keyboard raised" report
+        `attempt_id` set and `suppressed=None` — indistinguishable from full
+        success — while logging "failed to log to the DB", which was false, and
+        sending the admin a card with no Approve/Reject buttons. A log
+        asserting an outcome that did not happen is the exact defect this
+        module exists to end.
+        """
+        service, admin_repo, notifier = self._service()
+        admin_repo.get_admin_language = AsyncMock(side_effect=RuntimeError("blip"))
+
+        result = await service.submit(AccessRequest(chat_id=GROUP_ID), bot=MagicMock())
+
+        assert result.attempt_id == 42, "the row WAS written — do not report db_error"
+        assert result.suppressed == "keyboard_error"
+        assert notifier.notify_unauthorized.await_args.kwargs["reply_markup"] is None, (
+            "precondition: this is the case where the card goes out button-less"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_failed_row_still_reports_db_error(self) -> None:
+        """Paired control for the split: the two failures must stay distinct."""
+        service, admin_repo, _ = self._service()
+        admin_repo.log_unauthorized = AsyncMock(side_effect=RuntimeError("db down"))
+
+        result = await service.submit(AccessRequest(chat_id=GROUP_ID), bot=MagicMock())
+
+        assert result.attempt_id is None
+        assert result.suppressed == "db_error"
+
     def test_the_cooldown_window_ends_exactly_where_it_says(self) -> None:
         cooldown = NotifyCooldown()
         cooldown.mark(GROUP_ID, now=1000.0)

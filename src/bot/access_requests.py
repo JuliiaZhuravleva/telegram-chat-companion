@@ -81,7 +81,12 @@ class SubmitResult:
 
     attempt_id: int | None = None
     notified: bool = False
-    # None on the happy path; otherwise "cooldown" | "rejected" | "db_error" | "error"
+    # None on the happy path. Otherwise, in the order they can occur:
+    #   "cooldown"       — inside the per-chat notification window, nothing done
+    #   "rejected"       — an admin had already rejected this chat
+    #   "db_error"       — the queue row could not be written
+    #   "keyboard_error" — row written, but the card has no Approve/Reject buttons
+    #   "error"          — anything else; see the log
     suppressed: str | None = None
 
 
@@ -129,23 +134,38 @@ class AccessRequestService:
 
     async def submit(self, request: AccessRequest, *, bot: Any = None) -> SubmitResult:
         """Queue the chat and notify admins. Never raises."""
+        # Check AND set, with no await in between. Marking at the end instead
+        # leaves four awaits — two queries, an INSERT and one HTTP call per
+        # admin — between the gate and the flag, and `start_polling` runs every
+        # update as its own task: three messages pasted into an unauthorized
+        # group in quick succession would all pass the gate and produce three
+        # rows and three identical cards. The middleware this replaced had the
+        # same window, but the class docstring now claims one card per chat, so
+        # the claim has to be true rather than nearly true.
         if self._cooldown.is_cooling(request.chat_id):
             return SubmitResult(suppressed="cooldown")
+        self._cooldown.mark(request.chat_id)
 
         try:
             # A prior REJECTION is an admin-imposed blacklist: skip the row and
-            # the card entirely, but still bump the cooldown so a spamming chat
-            # does not hit the database on every update.
+            # the card entirely. The cooldown is already marked above, which is
+            # what keeps a spamming chat off the database.
             if await self._admin_repo.has_rejected_attempt(request.chat_id):
-                self._cooldown.mark(request.chat_id)
                 logger.info(
                     "Suppressing access request — chat has a prior rejection",
                     chat_id=request.chat_id,
                 )
                 return SubmitResult(suppressed="rejected")
 
+            # Two separate failures, deliberately not one try. The row and the
+            # keyboard fail independently: `log_unauthorized` can succeed and
+            # `get_admin_language` / `access_keyboard` still raise, and sharing
+            # one except made that case report `attempt_id` set, `suppressed`
+            # None — the happy path — while logging "failed to log to the DB"
+            # (false) and sending the admin a card with no Approve/Reject
+            # buttons. That is a log asserting an outcome that did not happen,
+            # which is the exact defect this whole module was written to end.
             attempt_id: int | None = None
-            keyboard = None
             try:
                 attempt_id = await self._admin_repo.log_unauthorized(
                     chat_id=request.chat_id,
@@ -156,10 +176,22 @@ class AccessRequestService:
                     user_username=request.user_username,
                     message_text=request.message_text,
                 )
-                lang = await self._admin_repo.get_admin_language(self._bot_config_repo)
-                keyboard = access_keyboard(lang, attempt_id)
             except Exception:
                 logger.warning("Failed to log the access request to the DB", exc_info=True)
+
+            keyboard = None
+            if attempt_id is not None:
+                try:
+                    lang = await self._admin_repo.get_admin_language(self._bot_config_repo)
+                    keyboard = access_keyboard(lang, attempt_id)
+                except Exception:
+                    logger.warning(
+                        "Access request queued but its approve/reject keyboard could not "
+                        "be built — the admin card will arrive without buttons",
+                        chat_id=request.chat_id,
+                        attempt_id=attempt_id,
+                        exc_info=True,
+                    )
 
             notified = await self._notifier.notify_unauthorized(
                 chat_id=request.chat_id,
@@ -175,11 +207,16 @@ class AccessRequestService:
                 bot=bot,
                 reply_markup=keyboard,
             )
-            self._cooldown.mark(request.chat_id)
+            if attempt_id is None:
+                suppressed = "db_error"
+            elif keyboard is None:
+                suppressed = "keyboard_error"
+            else:
+                suppressed = None
             return SubmitResult(
                 attempt_id=attempt_id,
                 notified=bool(notified),
-                suppressed=None if attempt_id is not None else "db_error",
+                suppressed=suppressed,
             )
         except Exception:
             logger.warning("Failed to submit the access request", exc_info=True)

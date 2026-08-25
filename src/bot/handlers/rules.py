@@ -380,6 +380,7 @@ async def handle_rule_view(
 @router.callback_query(F.data.startswith("ar_tog:"))
 async def handle_rule_toggle(
     callback: CallbackQuery,
+    state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
     **kwargs: Any,
 ) -> None:
@@ -387,6 +388,8 @@ async def handle_rule_toggle(
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
@@ -432,6 +435,7 @@ async def handle_rule_toggle(
 @router.callback_query(F.data.startswith("ar_del_ask:"))
 async def handle_rule_delete_ask(
     callback: CallbackQuery,
+    state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
     **kwargs: Any,
 ) -> None:
@@ -439,6 +443,8 @@ async def handle_rule_delete_ask(
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
@@ -488,6 +494,7 @@ async def handle_rule_delete_ask(
 @router.callback_query(F.data.startswith("ar_del:"))
 async def handle_rule_delete(
     callback: CallbackQuery,
+    state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
     **kwargs: Any,
 ) -> None:
@@ -495,6 +502,8 @@ async def handle_rule_delete(
     if not _check_admin(kwargs) or not _is_private(callback):
         await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
         return
+
+    await _leave_config_prompt(state)
 
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)

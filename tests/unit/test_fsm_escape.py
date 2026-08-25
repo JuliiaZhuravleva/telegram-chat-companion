@@ -77,10 +77,12 @@ def _make_message(
     caption: str | None = None,
     forwarded: bool = False,
     is_admin: bool = True,
+    language_code: str | None = None,
 ) -> tuple[Message, dict[str, object], AsyncMock]:
     bot = AsyncMock()
     chat = Chat(id=CHAT_ID, type="private")
-    user = User(id=ADMIN_ID, is_bot=False, first_name="Admin")
+    # aiogram models are frozen, so the locale has to be set at construction.
+    user = User(id=ADMIN_ID, is_bot=False, first_name="Admin", language_code=language_code)
     date = datetime(2026, 8, 24, 12, 0, tzinfo=UTC)
 
     photo = (
@@ -117,7 +119,10 @@ def _make_message(
         "message_thread_id": None,
         "rules_repo": AsyncMock(),
         "chat_settings_repo": chat_settings_repo,
+        # `/cancel` resolves its language the way the rest of the admin surface
+        # does, so the handler now takes both of these from DI.
         "bot_config_repo": AsyncMock(),
+        "admin_repo": _admin_repo(),
         "message_repo": AsyncMock(),
         "knowledge_repo": AsyncMock(),
         "sticker_repo": MagicMock(),
@@ -138,6 +143,12 @@ def _make_message(
         "knowledge_service": AsyncMock(),
     }
     return msg, data, bot
+
+
+def _admin_repo(lang: str = "ru") -> AsyncMock:
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value=lang)
+    return repo
 
 
 def _sent_texts(bot: AsyncMock) -> list[str]:
@@ -254,6 +265,113 @@ class TestRuleCreationRequiresAuthorityAtTheTime_Of_Writing:
         await _propagate(msg, data, state)
 
         data["rules_repo"].create.assert_not_awaited()  # type: ignore[union-attr]
+
+
+class TestEveryRulesCallbackLeavesTheDialog:
+    """The structural guard against the next omission.
+
+    The first version of this fix wired `_leave_config_prompt` into four of the
+    eight rules callbacks. Tapping 🔄 or 🗑 on an older, still-interactive
+    rules-list message re-rendered that list — visually leaving the prompt —
+    while the FSM state survived, so the next plain message either drew a
+    stray «Невалидный JSON» or silently created a rule in the earlier chat.
+
+    Asserting per-handler rather than by behaviour on purpose: a behavioural
+    test only covers the handlers someone remembered to write one for, which is
+    the same failure mode one level up.
+    """
+
+    def test_all_of_them_call_the_helper(self) -> None:
+        import ast
+        import inspect
+
+        from src.bot.handlers import rules
+
+        tree = ast.parse(inspect.getsource(rules))
+        missing = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                continue
+            if not any("callback_query" in ast.unparse(d) for d in node.decorator_list):
+                continue
+            # The one handler that must NOT clear: it is what SETS the state.
+            if node.name == "handle_type_selected":
+                continue
+            if "_leave_config_prompt" not in ast.unparse(node):
+                missing.append(f"{node.name}() at rules.py:{node.lineno}")
+
+        assert missing == [], (
+            "these rules callbacks navigate away from the rule-config prompt without "
+            "ending it, so a later message is misapplied to the earlier chat:\n  "
+            + "\n  ".join(missing)
+        )
+
+    def test_the_state_setter_is_excluded_for_a_reason(self) -> None:
+        """Paired negative: the exclusion above must be one handler, not a hole.
+
+        If `handle_type_selected` ever started clearing, the dialog would end
+        the instant it opened — so the exclusion is load-bearing and this
+        pins it.
+        """
+        import inspect
+
+        from src.bot.handlers.rules import handle_type_selected
+
+        source = inspect.getsource(handle_type_selected)
+        assert "_leave_config_prompt" not in source
+        assert "set_state" in source, (
+            "handle_type_selected no longer sets the state — the exclusion in the "
+            "test above is now unjustified and hides whatever replaced it"
+        )
+
+
+class TestCancelSpeaksTheAdminsLanguage:
+    async def test_it_reads_the_configured_panel_language(self) -> None:
+        """Not the client locale.
+
+        `language_code` carries region subtags — `en-US`, `pt-br` are real
+        values — which match neither key and fall through to Russian, making
+        the English string unreachable. And an admin who set the panel to
+        English on a Russian client would get one Russian string among English
+        ones.
+        """
+        msg, data, bot = _make_message(text="/cancel")
+        data["admin_repo"] = _admin_repo("en")
+        state = _FakeState(AdminStates.awaiting_rule_config)
+
+        await _propagate(msg, data, state)
+
+        assert _sent_texts(bot) == ["Cancelled."]
+
+    async def test_the_client_locale_does_not_override_the_panel(self) -> None:
+        """The discriminating case, and it has to be chosen carefully.
+
+        `language_code="en-US"` + panel Russian is NOT discriminating: the
+        client-locale implementation looks up "en-US", misses both keys, and
+        falls back to Russian — the same answer the correct implementation
+        gives. (Measured: that version of this test passed against the very
+        implementation it was meant to reject.) Panel English + a Russian
+        client separates them: only reading the panel yields English.
+        """
+        msg, data, bot = _make_message(text="/cancel", language_code="ru")
+        data["admin_repo"] = _admin_repo("en")
+        state = _FakeState(AdminStates.awaiting_rule_config)
+
+        await _propagate(msg, data, state)
+
+        assert _sent_texts(bot) == ["Cancelled."]
+
+    async def test_a_region_subtag_does_not_silently_fall_back_to_russian(self) -> None:
+        """`en-US`, `pt-br` are real values Telegram sends. Under a client-locale
+        lookup they match neither key, so the English string is unreachable for
+        those clients — panel language or not."""
+        msg, data, bot = _make_message(text="/cancel", language_code="en-US")
+        data["admin_repo"] = _admin_repo("en")
+        state = _FakeState(AdminStates.awaiting_rule_config)
+
+        await _propagate(msg, data, state)
+
+        assert _sent_texts(bot) == ["Cancelled."]
 
 
 class TestNavigatingAwayEndsTheDialog:
