@@ -36,6 +36,11 @@ this item's own title — this ADR is that confirmed schema, formalized for B-2 
 `FieldGroup` currently has 6 members; per-group field counts (`fields_by_group()`, verified by running it
 against `CHAT_SETTINGS_FIELDS`):
 
+> **Counts below are as of this ADR (25 fields, `MODULES` 8).** They are a snapshot of the decision, not
+> a live index — S5b later added `chunks_enabled` to `MODULES` (26 fields, `MODULES` 9), and more will
+> follow. The authoritative count is `len(CHAT_SETTINGS_FIELDS)`, pinned by
+> `tests/unit/test_settings_fields.py`. The design conclusions here do not depend on the exact numbers.
+
 | Group | Fields | Field types |
 |---|---|---|
 | `BEHAVIOR` | 5 | all non-BOOL (STR_LIST, FLOAT, INT, STR, STR) |

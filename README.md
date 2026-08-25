@@ -12,7 +12,7 @@ An AI-powered Telegram bot that acts as a **chat participant**, not just a comma
 Unlike traditional command-based bots, Telegram Chat Companion:
 
 - **Participates in conversations** — responds to triggers and mentions, not just `/commands`
-- **Remembers context** — RAG-based memory for each chat using pgvector
+- **Remembers context** — pgvector memory per chat: the bot's own Q&A pairs, plus a searchable index of the chat's whole conversation history
 - **Multi-provider AI** — Gemini and OpenAI today, with automatic fallback; Grok, DeepSeek and Anthropic planned
 - **Adaptive responses** — matches conversation tone and message length
 - **Modular design** — enable only the features you need
@@ -236,9 +236,14 @@ where people addressed the bot. `chat_chunks` (migration 029) indexes the conver
 itself instead: sessions bounded by a three-hour pause, rendered as verbatim
 `Имя (ЧЧ:ММ): текст` lines under a dateline, embedded as documents rather than as
 queries. A background worker fills it every fifteen minutes; this script is the same
-worker driven in a loop, for when waiting is not worth it. **Nothing reads the table
-yet** — retrieval moves onto it in a later slice, behind a shadow period, which is what
-makes the index safe to build in production while the bot serves traffic.
+worker driven in a loop, for when waiting is not worth it. **The bot reads that table
+since S5b**, per chat, behind the `chunks_enabled` toggle — hybrid retrieval (a vector
+leg and a full-text leg fused by RRF in one SQL statement), reusing the query embedding
+the turn already computed, and with the whole unfiltered candidate set written to
+`retrieval_log` so the floor it deliberately does not have can be calibrated later.
+Writing and reading stayed independent halves the whole way, which is what let the index
+be built in production while the bot served traffic and switched on afterwards by a
+single row.
 
 `scripts/eval_compare.py` is what decides that move, and it exists because the
 obvious way to decide it is wrong in the flattering direction. Re-running the

@@ -1,15 +1,16 @@
 """Registry of per-chat settings fields — shared by the chat settings panel
 (B-1) and the "settings by default" screen (C-1).
 
-Single source of truth for how each of the 25 per-chat settings fields (a
+Single source of truth for how each of the 26 per-chat settings fields (a
 subset of ``ChatConfig`` / ``ChatConfigService._CHAT_CONFIG_FIELDS``, see
 ``src/services/chat_config.py``) is grouped, labeled, typed, and addressed in
 inline-keyboard ``callback_data``. Both consumer screens must render the same
 grouping/labels/legacy split, so it lives here once rather than drifting
 between two handler modules.
 
-Excluded from this registry (25 = 26 mergeable ``ChatConfig`` fields, minus
-these two):
+Excluded from this registry — 26 of the 27 mergeable ``ChatConfig`` fields
+(``_CHAT_CONFIG_FIELDS``) appear here; the two names below do not, and only the
+first of them is in the merge at all:
 
 - ``enabled`` — the whitelist gate itself, managed by the approve/reject/
   remove flow (``adm_approve:`` / ``adm_wl_rm:``), not a "setting" a chat or
@@ -19,12 +20,12 @@ these two):
   (``adm_kb_orgs:``) per the A-2 ADR; not part of ``ChatConfig`` either (it's
   written straight through ``ChatSettingsRepository``, never merged).
 
-Legacy vs. new (``FieldSpec.legacy``): 13 of these 25 columns still carry a
+Legacy vs. new (``FieldSpec.legacy``): 13 of these 26 columns still carry a
 SQL ``DEFAULT`` from migration 001 (``alembic/versions/001_initial_schema.py``),
 so ``ensure_exists()`` materializes a per-chat value on first contact and
 permanently shadows ``bot_config.default_*`` for that field on every chat the
 bot has already seen — the "inherited from default" story is false for them
-until the forward-only migration in C-2 (deferred to tech debt). The other 12
+until the forward-only migration in C-2 (deferred to tech debt). The other 13
 are nullable, no-DEFAULT columns (CLAUDE.md "Per-chat columns: nullable, no
 DEFAULT") where NULL honestly means "inherited". Consumers:
 
@@ -101,7 +102,7 @@ class FieldSpec:
 
     legacy: bool
     """True for the 13 migration-001 columns that still carry a SQL DEFAULT
-    (see module docstring). False for the 11 new nullable/no-DEFAULT columns."""
+    (see module docstring). False for the 13 new nullable/no-DEFAULT columns."""
 
     def label_for(self, lang: str) -> str:
         """Resolve the i18n label, falling back to ru then the raw key."""
@@ -190,6 +191,14 @@ CHAT_SETTINGS_FIELDS: tuple[FieldSpec, ...] = (
         "af",
         FieldType.BOOL,
         legacy=True,
+    ),
+    FieldSpec(
+        "chunks_enabled",
+        FieldGroup.MODULES,
+        {"ru": "Поиск по архиву чата", "en": "Chat archive retrieval"},
+        "ch",
+        FieldType.BOOL,
+        legacy=False,
     ),
     FieldSpec(
         "save_messages",
@@ -348,7 +357,7 @@ def fields_by_group() -> tuple[tuple[FieldGroup, tuple[FieldSpec, ...]], ...]:
 
 
 def new_fields() -> tuple[FieldSpec, ...]:
-    """The 12 fields eligible for the defaults screen (C-1) and the
+    """The 13 fields eligible for the defaults screen (C-1) and the
     "inherited from default" marker (B-2) — the 13 legacy columns lie about
     inheritance until migration C-2 lands."""
     return tuple(field for field in CHAT_SETTINGS_FIELDS if not field.legacy)

@@ -32,6 +32,7 @@ def _pipeline_with_configured_floor(floor: float):
         message_repo=MagicMock(),
         response_log_repo=MagicMock(),
         rag_service=MagicMock(),
+        chunk_service=MagicMock(),
         link_service=MagicMock(),
         sticker_service=MagicMock(),
         knowledge_repo=MagicMock(),
@@ -55,6 +56,55 @@ def test_kb_floor_is_read_per_construction_not_captured_once() -> None:
     """
     assert _pipeline_with_configured_floor(0.0)._kb_min_similarity == 0.0
     assert _pipeline_with_configured_floor(0.7)._kb_min_similarity == 0.7
+
+
+def _chunk_service(**knobs: float | int):
+    settings = MagicMock()
+    for name, value in knobs.items():
+        setattr(settings.chunk_retrieval, name, value)
+    return ServiceProvider().chunk_retrieval_service(
+        settings=settings,
+        chunk_repo=MagicMock(),
+        ai_router=MagicMock(),
+    )
+
+
+def test_chunk_retrieval_knobs_reach_the_service_from_settings() -> None:
+    """Same call-site argument as the KB floor above, and it bites harder here.
+
+    `ChunkRetrievalService` carries a default for every one of these, so a
+    provider that stopped passing them would construct a service that works,
+    retrieves, and logs — just with numbers nobody configured. Every unit test
+    of the service hands them in directly, so all of them stay green in exactly
+    that state, and `retrieval_log.params` would then record the defaults as if
+    they were the configuration S6 is about to sweep.
+    """
+    service = _chunk_service(
+        max_results=9,
+        min_similarity=0.42,
+        rrf_k=77,
+        vector_weight=2.5,
+        fts_weight=0.25,
+        depth_multiplier=4,
+    )
+
+    assert service.max_results == 9
+    assert service.min_similarity == 0.42
+    assert service.params == {
+        "backend": "chunks",
+        "max_results": 9,
+        "min_similarity": 0.42,
+        "rrf_k": 77,
+        "vector_weight": 2.5,
+        "fts_weight": 0.25,
+        "depth_multiplier": 4,
+    }
+
+
+def test_chunk_retrieval_knobs_are_read_per_construction() -> None:
+    """Not frozen at import time — a second service sees different settings."""
+    assert _chunk_service(min_similarity=0.0).min_similarity == 0.0
+    assert _chunk_service(min_similarity=0.61).min_similarity == 0.61
 
 
 def test_the_notify_cooldown_is_process_wide_not_per_request() -> None:

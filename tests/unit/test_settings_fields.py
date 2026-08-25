@@ -78,8 +78,8 @@ class TestRegistryCoverage:
     def test_all_registry_keys_are_writable_columns(self):
         assert set(FIELDS_BY_KEY) <= _WRITABLE_COLUMNS
 
-    def test_field_count_is_25(self):
-        assert len(CHAT_SETTINGS_FIELDS) == 25
+    def test_field_count_is_26(self):
+        assert len(CHAT_SETTINGS_FIELDS) == 26
 
     def test_no_duplicate_keys(self):
         keys = [f.key for f in CHAT_SETTINGS_FIELDS]
@@ -96,8 +96,8 @@ class TestLegacySplit:
     def test_legacy_count_is_13(self):
         assert sum(1 for f in CHAT_SETTINGS_FIELDS if f.legacy) == 13
 
-    def test_new_fields_count_is_12(self):
-        assert len(new_fields()) == 12
+    def test_new_fields_count_is_13(self):
+        assert len(new_fields()) == 13
 
     def test_new_fields_are_exactly_the_non_legacy_fields(self):
         # FieldSpec.label is a dict (unhashable) so compare by key, not identity-in-a-set.
@@ -170,11 +170,11 @@ class TestFieldTypes:
         assert all(f.type is FieldType.BOOL for f in bool_fields())
 
     def test_bool_field_count(self):
-        # 25 total, 10 non-bool (trigger_words, random_response_chance,
+        # 26 total, 10 non-bool (trigger_words, random_response_chance,
         # random_response_min_interval, system_prompt, language,
         # sticker_response_chance, sticker_reply_to_sticker_chance,
-        # image_comment_sticker_chance, tolerance_level, rules_mode) => 15 bool.
-        assert len(bool_fields()) == 15
+        # image_comment_sticker_chance, tolerance_level, rules_mode) => 16 bool.
+        assert len(bool_fields()) == 16
 
     def test_every_field_has_a_valid_type(self):
         assert all(isinstance(f.type, FieldType) for f in CHAT_SETTINGS_FIELDS)

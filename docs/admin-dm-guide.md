@@ -314,7 +314,7 @@ admin pops an immediate warning, and the status line repeats it on every visit.
 
 ## 9. Chat settings and Global settings
 
-These two screens are the same 25 per-chat options at two layers, and telling them apart is
+These two screens are the same 26 per-chat options at two layers, and telling them apart is
 the single most important thing in the panel.
 
 ### ⚙️ Chat settings (per chat)
@@ -336,7 +336,7 @@ Pick a chat, get every option grouped into 💬 Behaviour, 🧩 Modules, 🎨 St
 - **Every other non-boolean option is read-only for now** (trigger words, prompt, chances,
   intervals, rules mode). They are displayed so the panel tells the whole truth about the
   chat; a generic editor for them is not built yet.
-- **`· inherited`** appears on an option whose per-chat value is unset. Twelve of the 25
+- **`· inherited`** appears on an option whose per-chat value is unset. Thirteen of the 26
   options can show it. The other thirteen are older columns that always materialise a value
   of their own, so they cannot honestly claim to inherit — and, for the same reason, they are
   absent from the global screen.

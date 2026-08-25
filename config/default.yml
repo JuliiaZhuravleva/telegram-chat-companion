@@ -171,6 +171,23 @@ chunk_indexer:
   # Embedding calls per pass, across all chats.
   embed_per_pass: 100
 
+# Hybrid retrieval over those chunks (S5b). Whether a given chat is searched
+# at all is `chunks_enabled` in the three-layer merge, not here; these are the
+# knobs S6 sweeps. min_similarity: 0.0 means NO floor on purpose — the 0.7 RAG
+# and KB use was calibrated on `chat_memory`, whose documents share the query's
+# boilerplate and sit on a different cosine scale. What bounds injection until
+# S6 is the prompt budget plus the "ignore what is off-topic" framing.
+chunk_retrieval:
+  max_results: 5
+  min_similarity: 0.0
+  rrf_k: 60
+  vector_weight: 1.0
+  fts_weight: 1.0
+  # How deep each leg goes before RRF fusion, as a multiple of max_results.
+  # Must be >= 2: fusing two top-k lists can only return rows some leg already
+  # had in its top k, which discards the one thing RRF is for.
+  depth_multiplier: 2
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:

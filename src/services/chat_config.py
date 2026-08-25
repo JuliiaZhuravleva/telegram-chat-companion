@@ -148,6 +148,7 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "tolerance_level",
         "image_analysis_enabled",
         "save_messages",
+        "chunks_enabled",
         "rules_enabled",
         "rules_mode",
         "link_comments_enabled",

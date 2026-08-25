@@ -33,6 +33,7 @@ from src.services.ai.router import AIRouter
 from src.services.modules.links.extractor import LinkExtractorService
 from src.services.modules.links.formatters import format_link_context_section
 from src.services.modules.sticker.responder import StickerResponderService
+from src.services.rag.chunk_retrieval import ChunkRetrievalService
 from src.services.rag.memory import RAGMemoryService
 from src.services.retrieval_floor import rows_above_floor
 from src.services.text.formatter import markdown_to_html
@@ -41,6 +42,7 @@ from src.services.text.prompt_builder import (
     build_system_prompt,
     build_user_prompt,
     compute_max_tokens,
+    trim_chunks_to_budget,
     trim_facts_to_budget,
 )
 from src.services.text.query_hygiene import strip_bot_address
@@ -103,6 +105,7 @@ class TextProcessingPipeline:
         message_repo: MessageRepository,
         response_log_repo: ResponseLogRepository,
         rag_service: RAGMemoryService | None = None,
+        chunk_service: ChunkRetrievalService | None = None,
         link_service: LinkExtractorService | None = None,
         sticker_service: StickerResponderService | None = None,
         knowledge_repo: KnowledgeRepository | None = None,
@@ -115,6 +118,7 @@ class TextProcessingPipeline:
         self._messages = message_repo
         self._response_log = response_log_repo
         self._rag = rag_service
+        self._chunks = chunk_service
         self._links = link_service
         self._sticker = sticker_service
         self._knowledge = knowledge_repo
@@ -218,8 +222,19 @@ class TextProcessingPipeline:
         # tells the two retrieval regimes apart.
         query_stripped = retrieval_text != message_text.strip()
 
+        # S5b: the chunk index is gated by its own per-chat flag, not by
+        # `rag_enabled`. The two stores answer different questions -- the Q&A
+        # pairs are the bot's own dialogue log, the chunks are the chat's whole
+        # history -- so all four combinations have to be expressible, including
+        # "chunks only", which is what the eventual store swap looks like.
+        chunks_wanted = config.chunks_enabled and self._chunks is not None
+
         embed_task: asyncio.Task[tuple[EmbeddingResult | None, str | None]] | None = None
-        if (config.rag_enabled and self._rag) or (config.kb_enabled and self._knowledge):
+        if (
+            (config.rag_enabled and self._rag)
+            or (config.kb_enabled and self._knowledge)
+            or (chunks_wanted)
+        ):
             embed_task = asyncio.ensure_future(self._safe_embed_query(chat_id, retrieval_text))
 
         rag_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None]] | None = None
@@ -233,6 +248,13 @@ class TextProcessingPipeline:
         if config.kb_enabled and self._knowledge:
             assert embed_task is not None
             kb_task = asyncio.ensure_future(self._timed_kb_facts(chat_id, embed_task))
+
+        chunks_task: asyncio.Task[tuple[list[dict[str, Any]], int, str | None, bool]] | None = None
+        if chunks_wanted:
+            assert embed_task is not None
+            chunks_task = asyncio.ensure_future(
+                self._timed_chunk_search(chat_id, retrieval_text, embed_task)
+            )
 
         link_task: asyncio.Task[str | None] | None = None
         if config.link_comments_enabled and self._links:
@@ -262,6 +284,19 @@ class TextProcessingPipeline:
         kb_error: str | None = None
         if kb_task:
             kb_facts, kb_ms, kb_error = await kb_task
+
+        chunk_rows: list[dict[str, Any]] = []
+        chunks_ms: int | None = None
+        chunks_error: str | None = None
+        chunks_degraded = False
+        # The floor the fragments are filtered by, read from the service that
+        # owns it — same arrangement as `rag_floor` above, and for the same
+        # reason: `_safe_log_retrieval` takes its copy out of `params`, so the
+        # number in the log and the number that filtered the prompt cannot be
+        # two independent reads that merely agree.
+        chunks_floor = self._chunks.min_similarity if self._chunks is not None else 0.0
+        if chunks_task:
+            chunk_rows, chunks_ms, chunks_error, chunks_degraded = await chunks_task
 
         link_context_str: str | None = None
         if link_task:
@@ -331,6 +366,38 @@ class TextProcessingPipeline:
                 )
             )
 
+        if self._observability is not None and chunks_task is not None and self._chunks is not None:
+            fire_and_forget(
+                self._safe_log_retrieval(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    source="chunks",
+                    query_text=retrieval_text,
+                    # Every knob that shaped the ranking, straight off the
+                    # service (`ChunkRetrievalService.params`). S6 sweeps these
+                    # against the eval set, and a log row that recorded only
+                    # "chunks" could not tell a weight change from a floor
+                    # change months later — both will have happened.
+                    params={
+                        **self._chunks.params,
+                        "query_stripped": query_stripped,
+                        # Whether this turn ran on the lexical leg alone. Per
+                        # row it would be unreadable on a turn with no rows —
+                        # which is exactly the turn a floor calibration must be
+                        # able to discard.
+                        "vector_leg_skipped": chunks_degraded,
+                    },
+                    # UNFILTERED, like the two branches above. This one matters
+                    # most of the three: S6's whole job is to derive a floor for
+                    # this store from live data, and a log that only kept what
+                    # already cleared the current floor could never show where
+                    # the next one belongs.
+                    raw=chunk_rows,
+                    duration_ms=chunks_ms,
+                    error=chunks_error,
+                )
+            )
+
         # What actually reaches the model. A turn where everything is below the
         # floor gets NO knowledge-base block at all (owner decision 2026-08-18:
         # answer without the base by default, attach facts only on a topical
@@ -359,6 +426,31 @@ class TextProcessingPipeline:
             # itself stays unfiltered so the log above describes the whole
             # candidate set.
             rag_memories=rows_above_floor(rag_memories, rag_floor),
+            # Two reductions in the order `_safe_log_retrieval` replays them:
+            # floor first, budget second. `trim_chunks_to_budget` returns the
+            # kept rows with their text already capped, so what is rendered is
+            # exactly what was budgeted.
+            #
+            # S6, BEFORE YOU RAISE THE FLOOR ABOVE 0.0: `rows_above_floor` is
+            # shared with RAG and KB, where a missing `similarity` means a
+            # malformed row and is correctly treated as below any floor. Here it
+            # does not mean that. `ChunkRepository.search` returns
+            # `similarity = NULL` for a row whose own embedding is still NULL,
+            # and for *every* row on a turn whose query vector is missing — the
+            # degraded, lexical-only turn this store exists to survive. A
+            # non-zero floor therefore deletes exactly the results the FTS leg
+            # was added to provide, and `chunks_searched` does not notice,
+            # because it is computed before this line. Chunks need their own
+            # predicate (apply the floor only to rows that carry a cosine)
+            # in the same commit that first sets a floor. TD-147.
+            chunks=trim_chunks_to_budget(rows_above_floor(chunk_rows, chunks_floor)),
+            # "The index was consulted and answered", not "something was
+            # found" — an errored search is not evidence the chat never
+            # discussed this, so it must not license the "I do not remember"
+            # notice. See PromptContext.chunks_searched.
+            chunks_searched=(
+                chunks_task is not None and chunks_error is None and not chunks_degraded
+            ),
             reply_author=reply_author,
             reply_text=reply_text,
             reply_is_bot=reply_is_bot,
@@ -575,6 +667,66 @@ class TextProcessingPipeline:
                 logger.warning("RAG search failed", chat_id=chat_id, error=str(exc), exc_info=True)
         return memories, int((time.monotonic() - start) * 1000), error
 
+    async def _timed_chunk_search(
+        self,
+        chat_id: int,
+        message_text: str,
+        embed_task: asyncio.Task[tuple[EmbeddingResult | None, str | None]],
+    ) -> tuple[list[dict[str, Any]], int, str | None, bool]:
+        """Chunk search plus ms, failure detail and whether it ran degraded.
+
+        **Unfiltered on purpose**, like `_timed_rag_search`: `min_similarity=0.0`
+        overrides the service's own floor so every candidate reaches
+        `retrieval_log`, and the caller applies the real floor before the
+        prompt. The floor is 0.0 today anyway, so this changes nothing now —
+        it changes what happens the day S6 sets one, which is precisely the
+        day the log must not go blind (R1 fixed exactly this for the Q&A
+        store, and the argument is stronger here: S6 derives the chunk floor
+        *from this table*).
+
+        **A failed shared embedding does not end the turn here.** The Q&A path
+        has no choice — a vector store with no vector retrieves nothing — but
+        the chunk index has a lexical leg that answers on its own, and the
+        service accepts `query_embedding=None` as "FTS only". Passing None also
+        lets the service attempt its own embedding once, with the explicit
+        `RETRIEVAL_QUERY` task type; that retry is deliberate, since a single
+        failed call is not proof of a provider outage, and its cost is one free
+        API call on a turn that has already lost RAG and KB.
+
+        `degraded` is what the caller needs to decide whether the empty case is
+        *evidence*. It is read off the rows, which each carry
+        `vector_leg_skipped`; with no rows there is nothing to read, so a turn
+        that started without an embedding is called degraded even though the
+        service may have re-embedded successfully. That direction is
+        deliberate: it suppresses "the chat never discussed this" on a turn we
+        cannot prove searched properly, rather than asserting it.
+        """
+        start = time.monotonic()
+        chunks: list[dict[str, Any]] = []
+        error: str | None = None
+        embedding, embed_error = await embed_task
+        if self._chunks is not None:
+            try:
+                chunks = await self._chunks.search(
+                    chat_id,
+                    message_text,
+                    query_embedding=embedding.embedding if embedding is not None else None,
+                    min_similarity=0.0,
+                )
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "Chunk search failed", chat_id=chat_id, error=str(exc), exc_info=True
+                )
+        degraded = any(chunk.get("vector_leg_skipped") for chunk in chunks)
+        # The embedding error is reported only when it actually cost us the
+        # result. A degraded-but-answered turn is not an outage row: it carries
+        # `vector_leg_skipped` instead, and burying it in `error` would make
+        # every embeddings hiccup look like a broken retrieval source.
+        if error is None and not chunks and embed_error is not None:
+            error = embed_error
+        return chunks, int((time.monotonic() - start) * 1000), error, degraded
+
     async def _timed_kb_facts(
         self,
         chat_id: int,
@@ -689,6 +841,35 @@ class TextProcessingPipeline:
                         "head": (fact.get("fact_text") or "")[:_RETRIEVAL_HEAD_CHARS],
                     }
                     for fact in raw
+                ]
+            elif source == "chunks":
+                # The same two reductions as `kb`, replayed IN THE SAME ORDER
+                # the prompt path performs them: floor first, budget second.
+                # Trimming `raw` directly would mark a sub-floor fragment
+                # `injected` whenever the budget happened to have room, and the
+                # budget here binds far more often than KB's does (two chunks
+                # fill it), so the mistake would not be rare — it would be the
+                # normal case.
+                above_floor = rows_above_floor(raw, floor)
+                above_floor_ids = {chunk.get("id") for chunk in above_floor}
+                kept_ids = {chunk.get("id") for chunk in trim_chunks_to_budget(above_floor)}
+                items = [
+                    {
+                        "id": chunk.get("id"),
+                        # Cosine of the vector leg, which is NULL for a
+                        # fragment only the lexical leg found. Recorded beside
+                        # the fusion score rather than instead of it: S6 needs
+                        # to know both what a floor on `sim` would have cut and
+                        # what the ranking actually used.
+                        "sim": _round_sim(chunk.get("similarity")),
+                        "rrf": _round_sim(chunk.get("rrf_score")),
+                        "vec_rank": chunk.get("vec_rank"),
+                        "fts_rank": chunk.get("fts_rank"),
+                        "above_floor": chunk.get("id") in above_floor_ids,
+                        "injected": chunk.get("id") in kept_ids,
+                        "head": (chunk.get("content") or "")[:_RETRIEVAL_HEAD_CHARS],
+                    }
+                    for chunk in raw
                 ]
             else:
                 # Same two-field shape as `kb`, for the same reason (R1):

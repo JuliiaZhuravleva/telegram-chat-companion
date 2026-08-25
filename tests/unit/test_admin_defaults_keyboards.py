@@ -35,6 +35,7 @@ def _all_values(**overrides: object) -> dict[str, object]:
         "image_comment_sticker_chance": 0.3,
         "rules_enabled": False,
         "rules_mode": "all",
+        "chunks_enabled": False,
         "kb_enabled": False,
         "reactions_enabled": False,
         "reactions_history_enabled": True,
