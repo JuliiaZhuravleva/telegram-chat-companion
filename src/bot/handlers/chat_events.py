@@ -9,10 +9,11 @@ noticed it had been removed from a chat.
 from __future__ import annotations
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.types import ChatMemberUpdated, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.access_requests import AccessRequest, AccessRequestService, SubmitResult
 from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
@@ -23,7 +24,30 @@ logger = structlog.get_logger(__name__)
 # Bot is no longer able to read/post in the chat.
 _GONE_STATUSES = frozenset({"left", "kicked"})
 # Bot is present (plain member or admin).
+#
+# `restricted` is a status-string approximation and is known to be one:
+# aiogram's ChatMemberRestricted carries `is_member`, which can be False — a bot
+# restricted OUT of the chat. So a `restricted(is_member=False) -> member`
+# transition is a real join that `_is_join` below reads as "already present"
+# and does not queue. Narrow, deliberate, and written down rather than
+# discovered later.
 _PRESENT_STATUSES = frozenset({"member", "administrator", "creator", "restricted"})
+
+# Chat types an admin can meaningfully whitelist. A DM is NOT one of them, and
+# the gate is load-bearing rather than tidy: Telegram delivers `my_chat_member`
+# in a private chat when a user blocks or unblocks the bot, and an unblock is
+# `kicked -> member`, i.e. exactly the shape of a join. Without this, every
+# unblock by any stranger would file an access request and DM every admin a
+# card for a "chat" that is one person's DM. A stranger who actually writes
+# still produces a card through the message path.
+_WHITELISTABLE_CHAT_TYPES = frozenset({"group", "supergroup", "channel"})
+
+# What a supergroup re-key leaves on the OLD chat_id, named in full so the gap
+# is a log field rather than an assumption. `custom_rules` was silently in this
+# set until TD-112 and belonged in the moved set instead; `unauthorized_attempts`
+# is here on purpose (a rejection is a ban record — re-keying it is its own
+# decision, see ChatMigrationRepository's module docstring).
+NOT_MOVED = "chat_memory, chat_messages, chat_chunks, unauthorized_attempts, observability logs"
 
 
 @router.edited_message()
@@ -53,13 +77,33 @@ async def handle_my_chat_member(
     event: ChatMemberUpdated,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     chat_config_service: FromDishka[ChatConfigService],
+    access_requests: FromDishka[AccessRequestService],
+    bot: Bot,
 ) -> None:
     """Track the bot being added to or removed from a chat.
 
     Removal flips ``enabled`` off so the bot stops counting a chat it can no
-    longer reach as whitelisted.  Being added only records the chat's metadata —
-    it deliberately does NOT enable anything, because access stays opt-in via
-    the admin approval flow.
+    longer reach as whitelisted. Being added still does NOT enable anything —
+    access stays opt-in — but it now QUEUES the chat for approval and tells the
+    admins (TD-025). Before, a group the bot had just joined was invisible in
+    the «Ожидают» tab (which reads ``unauthorized_attempts``) until some human
+    happened to post in it, and the log line claimed otherwise.
+
+    No middleware is registered on ``dp.my_chat_member`` and none should be:
+    ``AccessControlMiddleware._extract_event_info`` returns ``(None, None, None)``
+    for a ``ChatMemberUpdated`` and would gate nothing while looking like a
+    whitelist check — and if it ever learned the type it would short-circuit on
+    ``enabled = false`` and kill the very handler that records the chat.
+
+    Three guards decide whether to file a request, and each closes a distinct
+    way of crying wolf: ``joined`` (a member→administrator promotion is not a
+    new chat), ``whitelistable`` (a DM block/unblock is not a chat an admin
+    whitelists — see ``_WHITELISTABLE_CHAT_TYPES``), and ``already_enabled``
+    (re-adding the bot to an approved chat is not an unauthorized access).
+    Note the deliberate asymmetry in the last one: a chat that was approved,
+    then REMOVED, comes back disabled and therefore files a fresh request. That
+    is re-consent on purpose — auto-restoring would let anyone who can add the
+    bot re-enable a chat with no admin in the loop.
     """
     chat = event.chat
     status = event.new_chat_member.status
@@ -82,7 +126,7 @@ async def handle_my_chat_member(
 
     if status in _PRESENT_STATUSES:
         try:
-            await chat_settings_repo.ensure_exists(
+            row = await chat_settings_repo.ensure_exists(
                 chat.id,
                 chat.title or chat.full_name,
                 chat.type or "group",
@@ -90,11 +134,44 @@ async def handle_my_chat_member(
         except Exception:
             logger.exception("Failed to record chat after bot was added", chat_id=chat.id)
             return
+
+        joined = event.old_chat_member.status not in _PRESENT_STATUSES
+        whitelistable = (chat.type or "") in _WHITELISTABLE_CHAT_TYPES
+        already_enabled = bool(row.get("enabled")) if row else False
+
+        result = SubmitResult()
+        if joined and whitelistable and not already_enabled:
+            result = await access_requests.submit(
+                AccessRequest(
+                    chat_id=chat.id,
+                    chat_title=chat.title or chat.full_name,
+                    chat_type=chat.type,
+                    chat_username=chat.username,
+                    user_id=event.from_user.id if event.from_user else None,
+                    user_first_name=event.from_user.first_name if event.from_user else None,
+                    user_last_name=event.from_user.last_name if event.from_user else None,
+                    user_username=event.from_user.username if event.from_user else None,
+                    reason="added",
+                ),
+                bot=bot,
+            )
+
+        # Every field states an outcome that was actually observed. The old line
+        # here claimed the chat was "awaiting whitelist approval" while nothing
+        # had been enqueued for approval and no admin had been told — TD-025 was
+        # that sentence being false. `access_request_id` proves only the row;
+        # `notified` is the separate question of whether a human heard about it.
         logger.info(
-            "Bot added to chat — awaiting whitelist approval",
+            "Bot membership changed",
             chat_id=chat.id,
             chat_title=chat.title,
             status=status,
+            joined=joined,
+            whitelistable=whitelistable,
+            already_enabled=already_enabled,
+            access_request_id=result.attempt_id,
+            notified=result.notified,
+            suppressed=result.suppressed,
         )
 
 
@@ -104,7 +181,7 @@ async def handle_chat_migration(
     migration_repo: FromDishka[ChatMigrationRepository],
     chat_config_service: FromDishka[ChatConfigService],
 ) -> None:
-    """Re-key a chat's settings and knowledge base when it becomes a supergroup.
+    """Re-key a chat's settings, knowledge base and rules on supergroup upgrade.
 
     Telegram issues a NEW ``chat_id`` on upgrade and announces it twice: once
     in the old chat (``migrate_to_chat_id`` set, ``chat.id`` = old) and once in
@@ -122,6 +199,17 @@ async def handle_chat_migration(
     this handler. That is acceptable today -- a disabled chat cannot run
     ``/remember``, so it has no facts to strand -- but it stops being true the
     moment anything writes ``chat_facts`` outside the enabled path.
+
+    Second consequence of that same gate, and it is live rather than
+    hypothetical: an admin's *rejection* of a chat lives in
+    ``unauthorized_attempts`` and is never re-keyed from here. For a currently
+    rejected chat that is unreachable anyway (``enabled`` is false, so the
+    update never arrives). But approval only flips rows that are still
+    ``pending``, so a chat that accumulated two attempts and was then rejected
+    on one and approved on the other is ENABLED while still carrying a
+    ``status='rejected'`` row -- that chat does reach this handler, and its
+    ban record stays on the old id, lifting the moment the chat is later
+    de-whitelisted under the new one.
     """
     old_chat_id = message.chat.id
     new_chat_id = message.migrate_to_chat_id
@@ -141,16 +229,18 @@ async def handle_chat_migration(
         # longer exists.
         chat_config_service.invalidate(old_chat_id)
         logger.info(
-            "Chat migrated to supergroup: settings and knowledge base re-keyed",
+            "Chat migrated to supergroup: settings, knowledge base and rules re-keyed",
             old_chat_id=old_chat_id,
             new_chat_id=new_chat_id,
             settings_moved=outcome.settings_moved,
             facts_moved=outcome.facts_moved,
-            not_moved="chat_memory, chat_messages, observability logs",
+            rules_moved=outcome.rules_moved,
+            not_moved=NOT_MOVED,
         )
     elif outcome.status == "target_occupied":
         logger.warning(
-            "Chat migration needs a human: the new chat already has settings",
+            "Chat migration needs a human: the new chat already has settings — "
+            "settings, knowledge base AND rules all stayed on the old id",
             old_chat_id=old_chat_id,
             new_chat_id=new_chat_id,
         )

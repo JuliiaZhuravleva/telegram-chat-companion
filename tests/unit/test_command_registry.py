@@ -85,6 +85,7 @@ EXPECTED_SCOPES: dict[str, set[str]] = {
     "summary500": {"groups"},  # E-2 shortcut: /summary 500 as its own command
     "kb": {"groups", "private", "admin"},
     "remember": set(),  # deliberately hidden — see the spec's hidden_reason
+    "cancel": {"admin"},  # TD-049: the escape from any FSM prompt
     "admin": {"admin"},
     "settings": {"admin"},
     "costs": {"admin"},

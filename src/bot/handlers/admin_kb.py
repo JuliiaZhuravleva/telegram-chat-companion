@@ -563,7 +563,21 @@ async def handle_kb_organizer_pick(
     await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0, parse_origin(parts, 4))
 
 
-@router.message(AdminStates.awaiting_kb_organizer, F.chat.type == "private")
+@router.message(
+    AdminStates.awaiting_kb_organizer,
+    F.chat.type == "private",
+    # A slash guard that does NOT break the forward path (TD-049). This
+    # handler serves two inputs: a forwarded message, and a typed `@username`.
+    # A bare `~F.text.startswith("/")` -- the pattern used elsewhere -- would
+    # also reject a FORWARDED message whose own text happens to start with a
+    # slash, and that is a legitimate organizer add: measured, forwarding a
+    # message reading "/kb" currently adds the organizer, and the bare guard
+    # sends it to the /kb command handler instead while leaving the state set.
+    # So the guard applies only when the admin is TYPING. Captions count too:
+    # aiogram reads a command from `text or caption`, so `/help` under a photo
+    # is a real command that a text-only guard lets through.
+    F.forward_origin.is_not(None) | (~F.text.startswith("/") & ~F.caption.startswith("/")),
+)
 async def handle_kb_organizer_add_reply(
     message: Message,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
@@ -584,15 +598,20 @@ async def handle_kb_organizer_add_reply(
       already seen post in this chat; distinguishes "never seen this
       username anywhere" from "seen it, just not in this chat".
     """
-    if not await check_admin_direct(
-        bot_config_repo, message.from_user.id if message.from_user else None
-    ):
-        return
-
+    # Read the context, then clear BEFORE the authority check. Hoisted
+    # deliberately (TD-049): with the clear below the early return, an admin
+    # removed from `bot_config.admin_ids` between opening this prompt and
+    # answering it left the state set for the lifetime of the process --
+    # `MemoryStorage` has no TTL, so only a restart cleared it.
     data = await state.get_data()
     chat_id = data.get("kb_chat_id")
     lang = _get_lang(data.get("kb_lang"))
     await state.clear()
+
+    if not await check_admin_direct(
+        bot_config_repo, message.from_user.id if message.from_user else None
+    ):
+        return
 
     if chat_id is None:
         return

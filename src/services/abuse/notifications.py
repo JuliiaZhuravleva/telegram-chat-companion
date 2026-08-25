@@ -144,21 +144,29 @@ class AbuseNotificationService:
         user_last_name: str | None = None,
         user_username: str | None = None,
         message_text: str | None = None,
+        reason: str = "message",
         bot: Any = None,
         reply_markup: InlineKeyboardMarkup | None = None,
         # Legacy compat
         username: str | None = None,
-    ) -> None:
-        """Notify admins about unauthorized access attempt."""
+    ) -> bool:
+        """Tell the admins a chat wants in. Returns whether anyone was told.
+
+        The return value is load-bearing, not decoration: there are three ways
+        this sends nothing at all — no bot object, the `unauthorized`
+        notification type switched off, an empty `admin_ids`. A caller that
+        logged "queued and notified" off the DB row alone would assert an
+        outcome that did not happen, which is the very defect TD-025 is about.
+        """
         if bot is None:
-            return
+            return False
 
         if not await self._is_notification_enabled("unauthorized"):
-            return
+            return False
 
         admin_ids = await self._get_admin_ids()
         if not admin_ids:
-            return
+            return False
 
         text = self._format_unauthorized(
             chat_id=chat_id,
@@ -170,8 +178,10 @@ class AbuseNotificationService:
             user_last_name=user_last_name,
             user_username=user_username,
             message_text=message_text,
+            reason=reason,
         )
 
+        sent = False
         for admin_id in admin_ids:
             try:
                 await bot.send_message(
@@ -180,12 +190,14 @@ class AbuseNotificationService:
                     parse_mode="HTML",
                     reply_markup=reply_markup,
                 )
+                sent = True
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin",
                     admin_id=admin_id,
                     error_type=type(exc).__name__,
                 )
+        return sent
 
     @staticmethod
     def _format_unauthorized(
@@ -199,9 +211,20 @@ class AbuseNotificationService:
         user_last_name: str | None,
         user_username: str | None,
         message_text: str | None,
+        reason: str = "message",
     ) -> str:
-        """Build detailed HTML notification for unauthorized access."""
-        lines: list[str] = ["🔒 <b>Unauthorized access</b>", ""]
+        """Build the detailed HTML card for a chat waiting on approval.
+
+        The heading follows `reason`: a card produced by the bot being ADDED to
+        a chat is not an access *attempt*, and calling it one sends the admin
+        looking for a message that does not exist.
+        """
+        heading = (
+            "➕ <b>Bot added to a new chat</b>"
+            if reason == "added"
+            else "🔒 <b>Unauthorized access</b>"
+        )
+        lines: list[str] = [heading, ""]
 
         # -- Chat info --
         chat_label = escape(chat_title) if chat_title else str(chat_id)

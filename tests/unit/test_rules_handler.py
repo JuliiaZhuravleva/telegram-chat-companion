@@ -58,6 +58,19 @@ _SAMPLE_RULE = {
 # ---------------------------------------------------------------------------
 
 
+def _state():
+    """FSMContext stand-in for handlers that now clear a stale rule prompt.
+
+    `_leave_config_prompt` reads `get_state()` and clears only when it matches
+    `awaiting_rule_config`, so a context reporting None is the right neutral
+    for these tests — they are about deletion, not about the FSM.
+    """
+    ctx = MagicMock()
+    ctx.get_state = AsyncMock(return_value=None)
+    ctx.clear = AsyncMock()
+    return ctx
+
+
 class TestHandleRuleDeleteAsk:
     @pytest.mark.asyncio
     async def test_shows_confirm_screen_for_admin(self):
@@ -65,7 +78,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:ru:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete_ask(cb, repo, is_admin=True)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
 
         cb.answer.assert_awaited_once()
         cb.message.edit_text.assert_awaited_once()
@@ -80,7 +93,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:ru:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete_ask(cb, repo, is_admin=True)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "spam-words" in text
@@ -91,7 +104,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:ru:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete_ask(cb, repo, is_admin=True)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
 
         keyboard = cb.message.edit_text.call_args.kwargs.get("reply_markup")
         assert keyboard is not None
@@ -110,7 +123,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:en:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete_ask(cb, repo, is_admin=True)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "Delete" in text
@@ -121,7 +134,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:ru:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete_ask(cb, repo, is_admin=False)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=False)
 
         cb.answer.assert_awaited_once()
         assert cb.answer.call_args.kwargs.get("show_alert") is True
@@ -134,7 +147,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:ru:42:99:0")
         repo = _make_rules_repo(None)  # rule not found
 
-        await handle_rule_delete_ask(cb, repo, is_admin=True)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
 
         cb.message.edit_text.assert_awaited_once()
         text = cb.message.edit_text.call_args.args[0]
@@ -150,7 +163,7 @@ class TestHandleRuleDeleteAsk:
         cb = _make_callback("ar_del_ask:ru:42:99:0")
         repo = _make_rules_repo(rule_with_json_config)
 
-        await handle_rule_delete_ask(cb, repo, is_admin=True)
+        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "json-rule" in text
@@ -168,7 +181,7 @@ class TestHandleRuleDelete:
         cb = _make_callback("ar_del:ru:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete(cb, repo, is_admin=True)
+        await handle_rule_delete(cb, _state(), repo, is_admin=True)
 
         repo.delete.assert_awaited_once_with(42)
         cb.answer.assert_awaited_once()
@@ -181,7 +194,7 @@ class TestHandleRuleDelete:
         cb = _make_callback("ar_del:ru:42:99:0")
         repo = _make_rules_repo(_SAMPLE_RULE)
 
-        await handle_rule_delete(cb, repo, is_admin=False)
+        await handle_rule_delete(cb, _state(), repo, is_admin=False)
 
         repo.delete.assert_not_awaited()
         assert cb.answer.call_args.kwargs.get("show_alert") is True

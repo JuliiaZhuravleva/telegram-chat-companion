@@ -32,7 +32,7 @@ grammar, state machines, storage, and the traps that have already bitten.
 in aiogram the first handler whose filters match **consumes** the update:
 
 ```
-admin_sticker → admin_kb → admin_reactions → admin_chat_panel → admin_defaults
+fsm_cancel → admin_sticker → admin_kb → admin_reactions → admin_chat_panel → admin_defaults
 → admin → rules → commands → callbacks → chat_events → reactions → media → message
 ```
 
@@ -44,6 +44,16 @@ Two consequences that are easy to break:
 - `admin_chat_panel` precedes `commands`, which is why the tolerance FSM handler carries
   `~F.text.startswith("/")` — without it the open state would swallow every admin command
   until a valid float arrived.
+- `fsm_cancel` precedes **everything**, which is the only reason `/cancel` works at all.
+  Measured (TD-049): appended last instead, `/cancel` sent while `awaiting_rule_config`
+  is open is consumed by `rules` and answered «Невалидный JSON» — the cancel handler is
+  registered, loaded and never reached. Note the slash guards that make commands escape an
+  FSM prompt must test `caption` as well as `text`: aiogram resolves a command from
+  `text or caption`, so `/help` under a photo is a real command that `~F.text.startswith("/")`
+  lets straight through. `/cancel` itself carries one content filter for the same family of
+  reason — `F.forward_origin.is_(None)`. A FORWARDED message reading "/cancel" is content, not
+  a command, and without the guard the escape hatch swallowed exactly the input `admin_kb`'s
+  organizer handler carves forwards out for.
 
 ---
 
@@ -109,7 +119,7 @@ otherwise `adm_wl` also matches `adm_wl_chats`. Two handlers additionally re-che
 | `adm_stk_reanalyze:` / `adm_stk_clr_ask:` / `adm_stk_clr:` | `lang:file_unique_id` | re-analyse / confirm clear / clear |
 | `adm_stk_dmchk:` | `lang:file_unique_id` | analyse a DM-checked sticker |
 | `adm_rules:` | `lang:page` | rules chat list |
-| `ar_list:` / `ar_view:` / `ar_tog:` / `ar_del_ask:` / `ar_del:` / `ar_add:` / `ar_type:` | see [rules.py](../src/bot/handlers/rules.py) module docstring | rules CRUD |
+| `ar_list:` / `ar_view:` / `ar_tog:` / `ar_del_ask:` / `ar_del:` / `ar_add:` / `ar_type:` / `ar_cancel:` | see [rules.py](../src/bot/handlers/rules.py) module docstring | rules CRUD (`ar_cancel:` leaves the config prompt) |
 | `noop` | — | inert buttons (section headers, page counters, status badges) |
 
 ---
@@ -120,9 +130,9 @@ otherwise `adm_wl` also matches `adm_wl_chats`. Two handlers additionally re-che
 
 | State | Set by | Consumed by | Escape |
 |---|---|---|---|
-| `awaiting_setting_value` | `adm_pnl_tol:` | `admin_chat_panel.handle_chat_panel_tolerance_input` | `adm_pnl_tolcancel:` button, or any `/command` (filtered out) |
-| `awaiting_kb_organizer` | `adm_kb_org_add:` | `admin_kb.handle_kb_organizer_add_reply` (clears state on entry) | picking from the participant list clears it |
-| `awaiting_rule_config` | `ar_type:` | `rules.handle_rule_config_input` | none — invalid JSON re-prompts and keeps the state |
+| `awaiting_setting_value` | `adm_pnl_tol:` | `admin_chat_panel.handle_chat_panel_tolerance_input` | `adm_pnl_tolcancel:` button, `/cancel`, or a typed `/command` (filtered out — but see the caption caveat in §1) |
+| `awaiting_kb_organizer` | `adm_kb_org_add:` | `admin_kb.handle_kb_organizer_add_reply` (clears state on entry, **before** the authority check) | picking from the participant list, `/cancel`, or a typed `/command`; a forwarded message whose text starts with `/` is still an organizer add, not a command |
+| `awaiting_rule_config` | `ar_type:` | `rules.handle_rule_config_input` (`IsAdmin`-gated since TD-049) | `ar_cancel:` button, `/cancel`, any `/command` incl. in a caption, or navigating back to any rules screen |
 | `awaiting_sticker_edit`, `awaiting_sticker` | — | — | declared, currently unused |
 
 Validation posture is *reject, do not clamp*: tolerance input outside `[0.0, 1.0]` and

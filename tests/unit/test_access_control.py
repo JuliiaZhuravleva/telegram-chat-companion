@@ -173,10 +173,26 @@ def _make_data_with_services(
     if notifier is None:
         notifier = AsyncMock()
 
+    # A REAL AccessRequestService built on the mocked repos, not a mock of it.
+    # The blacklist short-circuit and the cooldown moved out of the middleware
+    # into that service (TD-025); mapping a bare AsyncMock here would make both
+    # tests below assert nothing at all while staying green. Note it needs
+    # `bot_config_repo` too — `get_admin_language` takes it, and an AttributeError
+    # there lands inside a swallow and renders as a clean pass with no keyboard.
+    from src.bot.access_requests import AccessRequestService, NotifyCooldown
+
+    access_requests = AccessRequestService(
+        admin_repo=admin_repo,
+        bot_config_repo=bot_config_repo,
+        notifier=notifier,
+        cooldown=NotifyCooldown(),
+    )
+
     mapping = {
         BotConfigRepository: bot_config_repo,
         AdminRepository: admin_repo,
         AbuseNotificationService: notifier,
+        AccessRequestService: access_requests,
     }
 
     container = AsyncMock()

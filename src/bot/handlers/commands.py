@@ -447,7 +447,7 @@ async def _deliver_summary(
             await message.answer(html, parse_mode="HTML")
     else:
         fail_msg = "Не удалось создать саммари." if lang == "ru" else "Failed to generate summary."
-        await placeholder.edit_text(fail_msg)
+        await safe_edit_text(placeholder, fail_msg)
 
 
 @router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))

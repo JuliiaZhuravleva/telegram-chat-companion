@@ -112,10 +112,31 @@ The bot answers only in chats whose `chat_settings.enabled` is true. Everything 
 
 ### How a chat arrives here
 
-Someone writes in a chat the bot has not been approved for. The bot stays silent, records an
-attempt (chat, user, first 200 characters of the message) and DMs every admin a card with
-**✅ Одобрить / ❌ Отклонить**. To avoid flooding, at most one notification per chat every
-**30 minutes**; the cooldown is in memory, so a restart clears it.
+Two ways, and both produce the same card with **✅ Одобрить / ❌ Отклонить**.
+
+**Someone writes** in a chat the bot has not been approved for. The bot stays silent, records
+an attempt (chat, user, first 200 characters of the message) and DMs every admin.
+
+**The bot is added to a group** (since TD-025). Previously this queued nothing and notified
+nobody — the group was invisible here until a human happened to post in it, while the server
+log claimed it was "awaiting whitelist approval". Now the membership update itself files the
+request, and the card is headed **➕ Bot added to a new chat** rather than *Unauthorized
+access*, because there is no message to go looking for.
+
+Three things deliberately do NOT produce a card: a promotion inside a chat the bot is already
+in (member → administrator is not a new chat); re-adding the bot to a chat that is still
+enabled; and anything happening in a **private chat** — Telegram sends the same membership
+update when a user blocks or unblocks the bot, and an unblock looks exactly like a join. A
+stranger who actually writes still produces a card through the first path.
+
+Re-adding the bot to a chat that was approved and then removed DOES file a fresh request: the
+removal disabled the chat, and re-consent is intentional — otherwise anyone able to add the
+bot could re-enable a chat with no admin in the loop.
+
+To avoid flooding, at most one notification per chat every **30 minutes**, shared across both
+paths — so "added, then someone posted" is one card, not two. The cooldown is in memory, so a
+restart clears it and a chat can end up with two pending rows; approving either one clears
+them all.
 
 ### The three lists
 
