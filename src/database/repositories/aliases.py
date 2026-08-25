@@ -16,6 +16,15 @@ changing their mind, which must work -- so the guard is narrower and aimed at
 the case that is genuinely wrong: the *same* command arriving twice, which
 would otherwise retire a row and insert an identical one, writing a
 supersession record for an event that never happened.
+
+**One rule decides every name conflict: a `primary` outranks an `alternate`,
+whoever owns it.** ``set_primary`` supersedes a blocking alternate and proceeds;
+``add_alternate`` yields to every active row and displaces nothing. That
+asymmetry is what makes automation safe to point at the second method, and it
+is not decoration -- without it, promoting your own auto-seeded account name
+raised a duplicate-key error that the retry loop repeated for ever, and a
+second member could be permanently refused a name only a machine-written
+recognition row was holding.
 """
 
 from __future__ import annotations
@@ -24,6 +33,8 @@ from enum import StrEnum
 
 import asyncpg
 import structlog
+
+from src.utils.aliases import normalize_alias
 
 logger = structlog.get_logger(__name__)
 
@@ -85,26 +96,12 @@ class AliasRepository:
             )
         )
 
-    async def active_owner(self, chat_id: int, alias_norm: str) -> int | None:
-        """Which user currently answers to this name here, if anyone."""
-        row = await self._pool.fetchrow(
-            """
-            SELECT user_id FROM chat_user_aliases
-            WHERE chat_id = $1 AND alias_norm = $2 AND status = 'active'
-            LIMIT 1
-            """,
-            chat_id,
-            alias_norm,
-        )
-        return int(row["user_id"]) if row is not None else None
-
     async def set_primary(
         self,
         *,
         chat_id: int,
         user_id: int,
         alias: str,
-        alias_norm: str,
         source: str,
         source_message_id: int | None = None,
         source_user_id: int | None = None,
@@ -116,7 +113,14 @@ class AliasRepository:
         partial unique would refuse the insert anyway, but a raised
         ``UniqueViolationError`` cannot tell the caller *who* holds the name,
         and "that name is already Борис's" is the only reply that helps.
+
+        **The comparison form is derived here, never passed in.** It used to be
+        a second parameter, which made "``alias_norm`` is ``normalize_alias``
+        of ``alias``" a promise every call site had to keep and nothing
+        enforced -- and a row whose norm disagrees with the application's is a
+        row that lookups cannot find and the unique index cannot protect.
         """
+        alias_norm = normalize_alias(alias)
         for attempt in (1, 2):
             try:
                 return await self._set_primary_once(
@@ -131,10 +135,17 @@ class AliasRepository:
             except asyncpg.UniqueViolationError:
                 if attempt == 2:
                     raise
+                # Retried once, because the only conflict this can still be
+                # is two writers racing past the in-transaction checks. Every
+                # DETERMINISTIC conflict is resolved above rather than retried
+                # -- a retry of a deterministic failure just repeats it, and
+                # logging it as a race sends the next reader hunting for
+                # concurrency that was never involved.
                 logger.warning(
                     "alias_set_primary_unique_race_retry",
                     chat_id=chat_id,
                     user_id=user_id,
+                    alias_norm=alias_norm,
                 )
         raise AssertionError("unreachable")  # pragma: no cover
 
@@ -161,17 +172,55 @@ class AliasRepository:
                 str(chat_id),
             )
 
-            owner = await conn.fetchrow(
+            # `role` is selected, and that is the whole fix for the defect this
+            # method shipped with. The check used to ask only *who* holds the
+            # name and let it through when the holder was this same user -- but
+            # the row it found could be their own ALTERNATE, which the
+            # primary-scoped query below cannot see either. The INSERT then hit
+            # `uq_chat_user_aliases_name` (partial on status, blind to role),
+            # the retry repeated the identical deterministic sequence, and the
+            # user was told "try again" for ever. It was not hypothetical: the
+            # handler seeds every renamed person's own account names as
+            # alternates, so `/callme <my own first name>` reproduced it.
+            blocking = await conn.fetchrow(
                 """
-                SELECT user_id FROM chat_user_aliases
+                SELECT id, user_id, role FROM chat_user_aliases
                 WHERE chat_id = $1 AND alias_norm = $2 AND status = 'active'
                 FOR UPDATE
                 """,
                 chat_id,
                 alias_norm,
             )
-            if owner is not None and int(owner["user_id"]) != user_id:
-                return AliasWriteOutcome.TAKEN, int(owner["user_id"])
+            if blocking is not None:
+                holder = int(blocking["user_id"])
+                if str(blocking["role"]) == "primary":
+                    if holder != user_id:
+                        return AliasWriteOutcome.TAKEN, holder
+                    # Their own primary: the equality check below decides, and
+                    # reports UNCHANGED rather than superseding a row with an
+                    # identical name.
+                else:
+                    # **A primary outranks an alternate, whoever owns it.** One
+                    # rule, and it resolves two separate failures: promoting
+                    # your own seeded alternate (above), and a second member
+                    # being refused a name that only a machine-written
+                    # recognition row was holding -- two people called Аня,
+                    # where the first to rename had "Аня" auto-seeded and the
+                    # second could then never claim it. A name the bot SAYS is
+                    # a stronger claim than a name it merely also understands,
+                    # so the alternate yields.
+                    await conn.execute(
+                        "UPDATE chat_user_aliases SET status = 'superseded' WHERE id = $1",
+                        int(blocking["id"]),
+                    )
+                    if holder != user_id:
+                        logger.info(
+                            "alias_alternate_yielded_to_primary",
+                            chat_id=chat_id,
+                            alias_norm=alias_norm,
+                            previous_holder=holder,
+                            new_holder=user_id,
+                        )
 
             existing = await conn.fetchrow(
                 """
@@ -219,7 +268,6 @@ class AliasRepository:
         chat_id: int,
         user_id: int,
         alias: str,
-        alias_norm: str,
         source: str,
         source_message_id: int | None = None,
         source_user_id: int | None = None,
@@ -237,7 +285,13 @@ class AliasRepository:
         they once dropped gets a new row with its own provenance. The partial
         unique index cannot see the retired row, which is precisely why this
         method decides the question instead of leaving it to the index.
+
+        An alternate never displaces anything -- it yields to every active row,
+        primary or alternate. That is the mirror of ``set_primary``'s rule and
+        the reason automation is safe to point at this method: the worst a
+        machine-written recognition name can do is fail to be stored.
         """
+        alias_norm = normalize_alias(alias)
         async with self._pool.acquire() as conn, conn.transaction():
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
@@ -272,13 +326,14 @@ class AliasRepository:
             )
             return AliasWriteOutcome.SET, user_id
 
-    async def retire(self, chat_id: int, alias_norm: str) -> int:
+    async def retire(self, chat_id: int, alias: str) -> int:
         """Drop a name from use, keeping the row as history.
 
         Returns how many rows were retired -- 0 means nobody in this chat
         answers to that name, which the caller reports rather than pretending
         a removal happened.
         """
+        alias_norm = normalize_alias(alias)
         status = await self._pool.execute(
             """
             UPDATE chat_user_aliases SET status = 'rejected'

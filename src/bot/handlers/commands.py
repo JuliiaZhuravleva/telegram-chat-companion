@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from html import escape as html_escape
@@ -44,7 +45,6 @@ from src.utils.aliases import (
     MAX_ALIAS_CHARS,
     AliasRejection,
     build_alias_view,
-    normalize_alias,
     parse_alias,
 )
 from src.utils.telegram import typing_indicator
@@ -1432,6 +1432,46 @@ _CALLME_FAILED = {
     "en": "Could not save that — please try again.",
 }
 
+
+@dataclass(frozen=True)
+class _CallmeTarget:
+    """Who a `/callme` is about, decided before anyone asks who may do it.
+
+    Bundled because the four fields always travel together and were previously
+    four parallel locals reassigned inside the branch that also performed the
+    authority check -- which is how a failed check ended up renaming the wrong
+    person.
+    """
+
+    user_id: int
+    label: str | None
+    username: str | None
+    first_name: str | None
+
+    @property
+    def display(self) -> str:
+        """A label for a confirmation. Never empty, never an id if avoidable."""
+        return self.label or self.first_name or self.username or str(self.user_id)
+
+
+_CALLME_CHECK_FAILED = {
+    "ru": "Не смог проверить права в этом чате — попробуйте ещё раз.",
+    "en": "Could not check your rights in this chat — please try again.",
+}
+
+_CALLME_CURRENT_OTHER = {
+    "ru": "Сейчас бот зовёт {who} <b>{name}</b>.",
+    "en": "Right now the bot calls {who} <b>{name}</b>.",
+}
+_CALLME_CLEARED_OTHER = {
+    "ru": "Убрал имя для {who} — бот снова зовёт по аккаунту.",
+    "en": "Removed the name for {who} — the bot is back to their account name.",
+}
+_CALLME_NOTHING_TO_CLEAR_OTHER = {
+    "ru": "У {who} и не было имени.",
+    "en": "{who} did not have a name set.",
+}
+
 _CALLME_REJECTION_COPY = {
     AliasRejection.EMPTY: _CALLME_EMPTY,
     AliasRejection.TOO_LONG: _CALLME_TOO_LONG,
@@ -1510,49 +1550,69 @@ async def handle_callme(
     args = command.args or "" if command is not None else ""
     handle, rest = _split_target_handle(args)
 
-    target_id = sender.id
-    target_label: str | None = None
-    target_username = sender.username
-    target_first_name = sender.first_name
-    explicit_target = False
+    # WHO first, MAY-THEY second, and never interleaved. The authority check
+    # used to live inside the boolean chain that picked the target, which meant
+    # a `get_chat_member` that merely failed to answer read as "not an admin",
+    # the branch did not fire, and the command silently renamed the SENDER --
+    # with a confirmation saying it had worked.
+    myself = _CallmeTarget(sender.id, None, sender.username, sender.first_name)
+    proposed: _CallmeTarget | None = None
 
     if handle is not None:
         found = await message_repo.find_by_username(chat_id, handle)
         if found is None:
             await message.reply(_CALLME_NOT_FOUND[lang])
             return
-        target_id = int(found["user_id"])
-        target_username = handle
-        target_first_name = found["first_name"]
-        target_label = f"@{handle}"
-        explicit_target = target_id != sender.id
+        proposed = _CallmeTarget(
+            user_id=int(found["user_id"]),
+            label=f"@{handle}",
+            username=handle,
+            first_name=found["first_name"],
+        )
         args = rest
     elif (
         message.reply_to_message is not None
         and message.reply_to_message.from_user is not None
         and message.reply_to_message.from_user.id != sender.id
         and not message.reply_to_message.from_user.is_bot
-        and await is_user_chat_admin(bot, chat_id, sender.id)
     ):
         replied = message.reply_to_message.from_user
-        target_id = replied.id
-        target_username = replied.username
-        target_first_name = replied.first_name
-        target_label = f"@{replied.username}" if replied.username else replied.first_name
-        explicit_target = True
+        proposed = _CallmeTarget(
+            user_id=replied.id,
+            label=f"@{replied.username}" if replied.username else replied.first_name,
+            username=replied.username,
+            first_name=replied.first_name,
+        )
         args = rest
 
-    if explicit_target and not await is_user_chat_admin(bot, chat_id, sender.id):
-        await message.reply(_CALLME_NOT_ADMIN[lang])
-        return
+    target = myself
+    if proposed is not None and proposed.user_id != sender.id:
+        allowed = await is_user_chat_admin(bot, chat_id, sender.id)
+        if allowed is None:
+            # Unresolved, not refused. Doing anything else here writes to a
+            # user id nobody chose.
+            await message.reply(_CALLME_CHECK_FAILED[lang])
+            return
+        if allowed:
+            target = proposed
+        elif handle is not None:
+            # An explicit @handle has no forgiving reading available: it can
+            # only have meant that person.
+            await message.reply(_CALLME_NOT_ADMIN[lang])
+            return
+        # A reply from an ordinary member falls through to naming themselves,
+        # which is the forgiving reading -- see the docstring.
 
+    about_sender = target.user_id == sender.id
     body = args.strip()
     if not body:
-        await _reply_callme_usage(message, alias_repo, chat_id, target_id, lang)
+        await _reply_callme_usage(
+            message, alias_repo, chat_id, target, lang, about_sender=about_sender
+        )
         return
 
     if body == "-":
-        await _clear_callme(message, alias_repo, chat_id, target_id, lang)
+        await _clear_callme(message, alias_repo, chat_id, target, lang, about_sender=about_sender)
         return
 
     parsed = parse_alias(body)
@@ -1561,13 +1621,13 @@ async def handle_callme(
         await message.reply(copy[lang].format(limit=MAX_ALIAS_CHARS))
         return
 
+    renaming_somebody_else = target.user_id != sender.id
     try:
-        outcome, owner = await alias_repo.set_primary(
+        outcome, _owner = await alias_repo.set_primary(
             chat_id=chat_id,
-            user_id=target_id,
+            user_id=target.user_id,
             alias=parsed.display,
-            alias_norm=parsed.norm,
-            source="admin" if explicit_target else "self",
+            source="admin" if renaming_somebody_else else "self",
             source_message_id=message.message_id,
             source_user_id=sender.id,
         )
@@ -1575,7 +1635,7 @@ async def handle_callme(
         logger.error(
             "callme_set_primary_failed",
             chat_id=chat_id,
-            user_id=target_id,
+            user_id=target.user_id,
             error=str(exc),
             exc_info=True,
         )
@@ -1598,7 +1658,7 @@ async def handle_callme(
     # automation is allowed to write (migration 033) -- and a failure here
     # must never lose the rename that already succeeded, which is why each is
     # swallowed individually.
-    for candidate in (target_username, target_first_name):
+    for candidate in (target.username, target.first_name):
         if not candidate:
             continue
         seeded = parse_alias(candidate)
@@ -1607,21 +1667,23 @@ async def handle_callme(
         try:
             await alias_repo.add_alternate(
                 chat_id=chat_id,
-                user_id=target_id,
+                user_id=target.user_id,
                 alias=seeded.display,
-                alias_norm=seeded.norm,
-                source="self",
+                source="admin" if renaming_somebody_else else "self",
                 source_message_id=message.message_id,
                 source_user_id=sender.id,
             )
         except Exception:
-            logger.warning("callme_seed_alternate_failed", chat_id=chat_id, user_id=target_id)
-
-    if explicit_target:
-        await message.reply(
-            _CALLME_SET_OTHER[lang].format(
-                who=html_escape(target_label or str(target_id)), name=safe_name
+            logger.warning(
+                "callme_seed_alternate_failed",
+                chat_id=chat_id,
+                user_id=target.user_id,
+                exc_info=True,
             )
+
+    if renaming_somebody_else:
+        await message.reply(
+            _CALLME_SET_OTHER[lang].format(who=html_escape(target.display), name=safe_name)
         )
     else:
         await message.reply(_CALLME_SET[lang].format(name=safe_name))
@@ -1631,19 +1693,38 @@ async def _reply_callme_usage(
     message: Message,
     alias_repo: AliasRepository,
     chat_id: int,
-    user_id: int,
+    target: _CallmeTarget,
     lang: str,
+    *,
+    about_sender: bool,
 ) -> None:
-    """Usage, plus the name currently in force if there is one."""
+    """Usage, plus the name currently in force if there is one.
+
+    ``about_sender`` picks second or third person. Both helpers used to be
+    handed only a user id and answer in the second person unconditionally, so
+    an admin asking about somebody else was told *their own* name was that
+    person's -- a fact about a third party, phrased as a fact about the reader.
+    """
     current: str | None = None
     try:
         view = build_alias_view(await alias_repo.load_active(chat_id))
-        current = view.primary_by_user.get(user_id)
+        current = view.primary_by_user.get(target.user_id)
     except Exception:
-        logger.warning("callme_read_current_failed", chat_id=chat_id, user_id=user_id)
+        logger.warning(
+            "callme_read_current_failed",
+            chat_id=chat_id,
+            user_id=target.user_id,
+            exc_info=True,
+        )
     text = _CALLME_USAGE[lang]
     if current:
-        text = f"{_CALLME_CURRENT[lang].format(name=html_escape(current))}\n\n{text}"
+        safe = html_escape(current)
+        head = (
+            _CALLME_CURRENT[lang].format(name=safe)
+            if about_sender
+            else _CALLME_CURRENT_OTHER[lang].format(who=html_escape(target.display), name=safe)
+        )
+        text = f"{head}\n\n{text}"
     await message.reply(text)
 
 
@@ -1651,21 +1732,40 @@ async def _clear_callme(
     message: Message,
     alias_repo: AliasRepository,
     chat_id: int,
-    user_id: int,
+    target: _CallmeTarget,
     lang: str,
+    *,
+    about_sender: bool,
 ) -> None:
-    """Retire whatever primary this person currently holds."""
+    """Retire whatever primary this person currently holds.
+
+    Only the primary. Their alternates stay, and that is deliberate: an
+    alternate is a name the bot should still *recognise*, and since a primary
+    request now outranks any alternate (see ``AliasRepository.set_primary``),
+    a leftover alternate can no longer block anybody from claiming that name.
+    """
+    who = html_escape(target.display)
     try:
         view = build_alias_view(await alias_repo.load_active(chat_id))
-        current = view.primary_by_user.get(user_id)
+        current = view.primary_by_user.get(target.user_id)
         if not current:
-            await message.reply(_CALLME_NOTHING_TO_CLEAR[lang])
+            await message.reply(
+                _CALLME_NOTHING_TO_CLEAR[lang]
+                if about_sender
+                else _CALLME_NOTHING_TO_CLEAR_OTHER[lang].format(who=who)
+            )
             return
-        await alias_repo.retire(chat_id, normalize_alias(current))
+        await alias_repo.retire(chat_id, current)
     except Exception as exc:
         logger.error(
-            "callme_clear_failed", chat_id=chat_id, user_id=user_id, error=str(exc), exc_info=True
+            "callme_clear_failed",
+            chat_id=chat_id,
+            user_id=target.user_id,
+            error=str(exc),
+            exc_info=True,
         )
         await message.reply(_CALLME_FAILED[lang])
         return
-    await message.reply(_CALLME_CLEARED[lang])
+    await message.reply(
+        _CALLME_CLEARED[lang] if about_sender else _CALLME_CLEARED_OTHER[lang].format(who=who)
+    )

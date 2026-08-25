@@ -270,6 +270,13 @@ The asymmetry is the safety argument for the auto-collection planned later:
 calling somebody by a name it chose for them; a wrong recognition name costs one missed
 retrieval.
 
+It also decides every name conflict: **a `primary` outranks an `alternate`, whoever owns it.**
+Setting a name supersedes any alternate holding it; adding an alternate yields to every active
+row. Both halves are load-bearing — without the first, promoting your own auto-seeded account
+name to primary was a permanent dead end reported to the user as "try again", and a second
+member could be refused a name that only a machine-written recognition row was holding. Only
+another **primary** returns "that name is taken", and the reply says who holds it.
+
 **Self-gating** — an empty table renders no roster and substitutes no name, so a chat that
 never used the feature gets a byte-identical prompt. There is deliberately no fourth per-chat
 flag.

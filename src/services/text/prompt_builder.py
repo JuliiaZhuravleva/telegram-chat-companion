@@ -793,9 +793,18 @@ def _roster_section(view: AliasView) -> str:
         alternates = [c for c in (_roster_cell(a) for a in entry.alternates) if c]
         if alternates:
             shown = alternates[:MAX_ROSTER_ALTERNATES]
-            lines.append(f"- {primary} (also called: {', '.join(shown)})")
+            more = len(alternates) - len(shown)
+            tail = f", and {more} more" if more else ""
+            lines.append(f"- {primary} (also called: {', '.join(shown)}{tail})")
         else:
             lines.append(f"- {primary}")
+
+    # Say so when the list is partial. A silently truncated roster reads as
+    # complete, and a model told "these are the people" will answer "nobody in
+    # this chat is called X" about somebody who simply fell off the end.
+    hidden = len(view.entries) - MAX_ROSTER_ENTRIES
+    if hidden > 0:
+        lines.append(f"(and {hidden} more people not listed here)")
     return "\n".join(lines)
 
 

@@ -26,11 +26,14 @@ import pytest
 import pytest_asyncio
 
 from src.database.repositories.aliases import AliasRepository, AliasWriteOutcome
-from src.utils.aliases import build_alias_view, parse_alias
+from src.utils.aliases import build_alias_view, normalize_alias, parse_alias
 
-# A band no other integration test uses. These tests cannot roll back (see the
-# module docstring), so they must not collide with anyone else's rows.
-CHAT_BASE = -940_001
+# These tests cannot roll back (see the module docstring), so the chat ids must
+# collide with nothing else in tests/integration. Checked, not assumed --
+# `grep -rhoE '\-[0-9]{4,}' tests/integration/*.py` shows the -95xxxxx band is
+# entirely unused, while the -94xxxxx band this file first claimed overlaps
+# test_kb_capture.py at eight ids. Re-run that grep before moving it again.
+CHAT_BASE = -950_001
 ANNA = 111_001
 BORIS = 111_002
 
@@ -48,11 +51,7 @@ async def _set(repo: AliasRepository, chat_id: int, user_id: int, name: str):
     parsed = parse_alias(name)
     assert parsed.ok, f"fixture name is not storable: {name!r}"
     return await repo.set_primary(
-        chat_id=chat_id,
-        user_id=user_id,
-        alias=parsed.display,
-        alias_norm=parsed.norm,
-        source="self",
+        chat_id=chat_id, user_id=user_id, alias=parsed.display, source="self"
     )
 
 
@@ -60,11 +59,7 @@ async def _add(repo: AliasRepository, chat_id: int, user_id: int, name: str):
     parsed = parse_alias(name)
     assert parsed.ok, f"fixture name is not storable: {name!r}"
     return await repo.add_alternate(
-        chat_id=chat_id,
-        user_id=user_id,
-        alias=parsed.display,
-        alias_norm=parsed.norm,
-        source="self",
+        chat_id=chat_id, user_id=user_id, alias=parsed.display, source="self"
     )
 
 
@@ -139,6 +134,106 @@ class TestSetPrimary:
         assert outcome is AliasWriteOutcome.SET
 
 
+class TestPrimaryOutranksAlternate:
+    """The rule that resolves the defect this file shipped without covering.
+
+    Found by five independent review lenses and reproduced before it was fixed:
+    the ownership pre-check asked only WHO holds a name, so a row belonging to
+    the same user fell through -- but that row could be their own *alternate*,
+    which the primary-scoped query cannot see either. The INSERT then hit the
+    chat-wide name index, the retry repeated the identical deterministic
+    sequence, and the user was told "try again" for ever. The handler seeds
+    every renamed person's own account names as alternates, so the feature
+    manufactured its own dead end.
+    """
+
+    async def test_you_can_promote_your_own_seeded_alternate(self, repo: AliasRepository) -> None:
+        """The exact reproduction: rename, get your account name seeded, then
+        ask for that account name.
+        """
+        chat_id = _chat(20)
+        await _set(repo, chat_id, ANNA, "Нюра")
+        await _add(repo, chat_id, ANNA, "Аня")  # what the seeding loop writes
+
+        outcome, _ = await _set(repo, chat_id, ANNA, "Аня")
+
+        assert outcome is AliasWriteOutcome.SET
+        assert build_alias_view(await repo.load_active(chat_id)).primary_by_user == {ANNA: "Аня"}
+
+    async def test_a_second_member_may_claim_a_name_only_an_alternate_held(
+        self, repo: AliasRepository
+    ) -> None:
+        """Two people called Аня. The first renames themselves to something
+        else and the seeding loop quietly claims "Аня" for them as a
+        recognition name; the second must still be able to BE Аня.
+        """
+        chat_id = _chat(21)
+        await _set(repo, chat_id, ANNA, "Нюра")
+        await _add(repo, chat_id, ANNA, "Аня")
+
+        outcome, _ = await _set(repo, chat_id, BORIS, "Аня")
+
+        assert outcome is AliasWriteOutcome.SET
+        view = build_alias_view(await repo.load_active(chat_id))
+        assert view.primary_by_user[BORIS] == "Аня"
+        # ...and the alternate yielded rather than lingering as a second active
+        # row, which the chat-wide index would have rejected anyway.
+        assert "Аня" not in view.entries[0].alternates
+
+    async def test_a_primary_still_loses_to_another_primary(self, repo: AliasRepository) -> None:
+        """The mirror. Only an ALTERNATE yields; a name somebody is actually
+        called stays theirs, and the caller is told who holds it.
+        """
+        chat_id = _chat(22)
+        await _set(repo, chat_id, ANNA, "Аня")
+
+        outcome, owner = await _set(repo, chat_id, BORIS, "Аня")
+
+        assert outcome is AliasWriteOutcome.TAKEN
+        assert owner == ANNA
+
+    async def test_an_alternate_never_displaces_anything(self, repo: AliasRepository) -> None:
+        """Automation writes alternates, so the alternate path must be the
+        harmless one: it yields to every active row rather than taking a name.
+        """
+        chat_id = _chat(23)
+        await _set(repo, chat_id, ANNA, "Аня")
+
+        outcome, owner = await _add(repo, chat_id, BORIS, "Аня")
+
+        assert outcome is AliasWriteOutcome.TAKEN
+        assert owner == ANNA
+        assert build_alias_view(await repo.load_active(chat_id)).primary_by_user == {ANNA: "Аня"}
+
+
+class TestNormalisationIsTheRepositorysJob:
+    async def test_the_stored_norm_is_derived_not_supplied(
+        self, repo: AliasRepository, db_pool: asyncpg.Pool
+    ) -> None:
+        """`alias_norm` used to be a second parameter, i.e. a promise every
+        call site had to keep. A row whose norm disagrees with the
+        application's is invisible to lookups and unprotected by the index.
+        """
+        chat_id = _chat(24)
+        await repo.set_primary(chat_id=chat_id, user_id=ANNA, alias="  АЛЁНА  ", source="self")
+
+        row = await db_pool.fetchrow(
+            "SELECT alias, alias_norm FROM chat_user_aliases WHERE chat_id = $1", chat_id
+        )
+        # The display form is stored verbatim; only the comparison form is folded.
+        assert row["alias"] == "  АЛЁНА  "
+        assert row["alias_norm"] == normalize_alias("  АЛЁНА  ") == "алена"
+
+    async def test_case_and_yo_collide_through_the_repository(self, repo: AliasRepository) -> None:
+        chat_id = _chat(25)
+        await _set(repo, chat_id, ANNA, "Алёна")
+
+        outcome, owner = await _set(repo, chat_id, BORIS, "АЛЕНА")
+
+        assert outcome is AliasWriteOutcome.TAKEN
+        assert owner == ANNA
+
+
 class TestPartialIndexesAreActuallyPartial:
     """The property the repository's pre-checks exist because of."""
 
@@ -147,7 +242,7 @@ class TestPartialIndexesAreActuallyPartial:
     ) -> None:
         chat_id = _chat(7)
         await _set(repo, chat_id, ANNA, "Аня")
-        assert await repo.retire(chat_id, "аня") == 1
+        assert await repo.retire(chat_id, "Аня") == 1
 
         outcome, _ = await _set(repo, chat_id, BORIS, "Аня")
         assert outcome is AliasWriteOutcome.SET
@@ -159,7 +254,7 @@ class TestPartialIndexesAreActuallyPartial:
         """
         chat_id = _chat(8)
         await _set(repo, chat_id, ANNA, "Аня")
-        await repo.retire(chat_id, "аня")
+        await repo.retire(chat_id, "Аня")
 
         outcome, _ = await _set(repo, chat_id, ANNA, "Аня")
 
@@ -256,12 +351,12 @@ class TestRetire:
         """The caller needs to tell "removed" from "there was nothing there",
         or it reports a removal that did not happen.
         """
-        assert await repo.retire(_chat(15), "несуществующее") == 0
+        assert await repo.retire(_chat(15), "Несуществующее") == 0
 
     async def test_a_retired_primary_leaves_the_roster(self, repo: AliasRepository) -> None:
         chat_id = _chat(16)
         await _set(repo, chat_id, ANNA, "Аня")
-        await repo.retire(chat_id, "аня")
+        await repo.retire(chat_id, "Аня")
 
         assert not build_alias_view(await repo.load_active(chat_id))
 

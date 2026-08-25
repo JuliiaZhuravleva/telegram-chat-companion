@@ -1533,11 +1533,25 @@ class TestAliasRoster:
 
         assert "[uid:999]" not in prompt
 
-    def test_the_number_of_people_is_capped(self):
+    def test_the_number_of_people_is_capped_and_the_cut_is_declared(self):
+        """Truncating silently is the failure, not truncating. A model handed
+        "these are the people" answers "nobody here is called X" about anyone
+        who fell off the end -- with the same confidence it uses for a name it
+        really can see.
+        """
         rows = [{"user_id": i, "alias": f"Имя{i}", "role": "primary"} for i in range(60)]
         block = _roster_block(build_system_prompt(_ctx_with_roster(rows)))
 
-        assert len(block) == MAX_ROSTER_ENTRIES
+        assert len(block) == MAX_ROSTER_ENTRIES + 1  # the people, plus the notice
+        assert block[-1] == f"(and {60 - MAX_ROSTER_ENTRIES} more people not listed here)"
+
+    def test_a_complete_roster_carries_no_notice(self):
+        """The mirror: announcing a cut that did not happen is its own lie."""
+        rows = [{"user_id": i, "alias": f"Имя{i}", "role": "primary"} for i in range(3)]
+        block = _roster_block(build_system_prompt(_ctx_with_roster(rows)))
+
+        assert len(block) == 3
+        assert not any("not listed" in line for line in block)
 
     def test_one_person_cannot_fill_the_block_with_alternates(self):
         rows = [{"user_id": 5, "alias": "Костя", "role": "primary"}]
@@ -1545,7 +1559,7 @@ class TestAliasRoster:
         block = _roster_block(build_system_prompt(_ctx_with_roster(rows)))
 
         assert len(block) == 1
-        assert block[0].count(",") == MAX_ROSTER_ALTERNATES - 1
+        assert f"and {40 - MAX_ROSTER_ALTERNATES} more" in block[0]
 
     def test_a_very_long_alias_is_capped(self):
         rows = [{"user_id": 5, "alias": "я" * 500, "role": "primary"}]

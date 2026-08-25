@@ -42,15 +42,25 @@ one active primary per `(chat_id, user_id)`, and one owner per
 chat -- which is also what stops someone assigning themselves a name another
 member already answers to.
 
-Both are scoped `WHERE status = 'active'`, and that carries the same hole the
-knowledge base already hit (`KnowledgeRepository.append_fact`): a row that is
-superseded or rejected **leaves the index**, so a re-add after a removal, or a
-redelivered command, inserts a duplicate and resurrects a name someone just
-dropped. The index only backstops the concurrent create-create race, which
-application-level locking cannot cover because with no existing row there is
-nothing to lock. The repository must pre-check on the FULL key across every
-status before inserting. Said here because a test that exercises only the
-index will pass while that bug ships.
+Both are scoped `WHERE status = 'active'`, so a retired row leaves the index
+entirely -- which is what lets somebody take a name back after dropping it, and
+is also why the index alone decides nothing. The repository resolves every
+deterministic conflict in Python, under an advisory lock, before inserting; the
+index is left as the backstop for the one case locking cannot cover, two
+writers racing when no row exists yet.
+
+**The rule it enforces in Python is that a `primary` outranks an `alternate`,
+whoever owns it.** That single sentence closes two failures that the first
+version of this table shipped with, both found by review and both reproduced:
+promoting your own auto-seeded account name to primary raised a duplicate-key
+error the retry loop then repeated for ever, and a second member could be
+refused a name that only a machine-written recognition row was holding. A name
+the bot *says* is a stronger claim than one it merely also understands, so the
+alternate yields. An `alternate` yields to everything and displaces nothing,
+which is what makes automation safe to point at it.
+
+Said here because a test that exercises only the index will pass while both of
+those bugs ship.
 
 **Deviations from what a fresh reader might expect, each deliberate:**
 
@@ -113,16 +123,20 @@ def upgrade() -> None:
         )
     """)
 
-    # Full-key lookups, unpartitioned on purpose: the repository's pre-check
-    # has to see superseded and rejected rows, which neither partial unique
-    # below contains.
+    # Serves the per-turn read (`WHERE chat_id = $1 AND status = 'active'`, on
+    # the leading column) and the primary lookup keyed by both columns.
+    #
+    # There is deliberately NO second plain index on `(chat_id, alias_norm)`.
+    # An earlier draft added one, justified by a pre-check that had to see
+    # retired rows -- and then the pre-check was rewritten to be role-aware
+    # instead, so no query looks up a retired row by name any more. All three
+    # `alias_norm` queries in the repository are scoped `status = 'active'`,
+    # which is exactly `uq_chat_user_aliases_name`'s predicate, so that partial
+    # unique already serves them and is the smaller index. An index kept for a
+    # reason that has stopped being true is write cost with a comment on it.
     op.execute("""
         CREATE INDEX IF NOT EXISTS idx_chat_user_aliases_chat_user
         ON chat_user_aliases(chat_id, user_id)
-    """)
-    op.execute("""
-        CREATE INDEX IF NOT EXISTS idx_chat_user_aliases_chat_norm
-        ON chat_user_aliases(chat_id, alias_norm)
     """)
 
     # DB-level backstop for "exactly one active primary per person"

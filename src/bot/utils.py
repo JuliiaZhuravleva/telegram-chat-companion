@@ -77,7 +77,7 @@ async def is_bot_chat_admin(bot: Bot, chat_id: int, bot_id: int) -> bool:
     return member.status in _ADMIN_STATUSES
 
 
-async def is_user_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+async def is_user_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool | None:
     """Live-check whether *a person* administrates the chat they are writing in.
 
     Not to be confused with any of the four admin checks that already exist
@@ -95,8 +95,17 @@ async def is_user_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     only on the branch that acts on *someone else* -- renaming yourself needs
     no authority and must stay free.
 
-    Fails **closed**: an API error means the answer is unknown, and an unknown
-    answer to an authority question is "no".
+    **Three answers, not two**, and the third is the point. ``True``/``False``
+    are real verdicts; ``None`` means the API did not answer and the question
+    is unresolved. Collapsing ``None`` into ``False`` -- which this function
+    did at first, "failing closed" -- is only safe when the caller's
+    no-authority branch is a refusal. It is not always: ``/callme``'s
+    no-authority branch deliberately falls back to *naming the sender
+    instead*, so one timed-out ``get_chat_member`` turned an admin's attempt to
+    rename somebody else into a silent rename of themselves, confirmed as a
+    success. A caller that genuinely wants fail-closed writes
+    ``if await is_user_chat_admin(...) is not True``; a caller whose fallback
+    performs a different action has to tell the two apart.
     """
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -107,7 +116,7 @@ async def is_user_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
             user_id=user_id,
             error=str(exc),
         )
-        return False
+        return None
     return member.status in _ADMIN_STATUSES
 
 

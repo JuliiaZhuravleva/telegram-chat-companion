@@ -71,6 +71,19 @@ def _bot_where_admin_is(is_admin: bool):
     return bot
 
 
+def _bot_that_cannot_answer():
+    """A bot whose `get_chat_member` fails — the THIRD answer.
+
+    Not the same as "not an admin", and the difference is a real production
+    failure: while the check collapsed the two, one timed-out API call turned
+    an admin's attempt to rename somebody else into a silent rename of
+    themselves, reported as a success.
+    """
+    bot = AsyncMock()
+    bot.get_chat_member.side_effect = RuntimeError("Telegram is having a moment")
+    return bot
+
+
 class TestNamingYourself:
     async def test_a_plain_name_is_stored_for_the_sender(self) -> None:
         msg, command = _message(text_args="Костя")
@@ -176,6 +189,7 @@ class TestNamingSomebodyElse:
         await handle_callme(msg, _config(), repo, message_repo, _bot_where_admin_is(True), command)
 
         repo.set_primary.assert_not_awaited()
+        msg.reply.assert_awaited_once()
 
     async def test_the_bot_itself_is_never_a_target(self) -> None:
         """Bot messages render as a bare `Bot:` with no name; giving the bot a
@@ -204,6 +218,79 @@ class TestNamingSomebodyElse:
         assert repo.set_primary.await_args.kwargs["user_id"] == SENDER
 
 
+class TestWhenAuthorityCannotBeDetermined:
+    """ "Could not check" is a third answer, and treating it as "no" wrote to
+    the wrong user id with a confirmation that said it had worked.
+    """
+
+    async def test_a_failed_check_refuses_instead_of_renaming_the_sender(self) -> None:
+        msg, command = _message(text_args="Босс", reply_to=OTHER)
+        repo = _alias_repo()
+
+        await handle_callme(msg, _config(), repo, AsyncMock(), _bot_that_cannot_answer(), command)
+
+        repo.set_primary.assert_not_awaited()
+        assert "попробуйте" in msg.reply.await_args.args[0].lower()
+
+    async def test_a_failed_check_refuses_on_the_handle_path_too(self) -> None:
+        msg, command = _message(text_args="@target_handle Босс")
+        repo = _alias_repo()
+        message_repo = AsyncMock()
+        message_repo.find_by_username.return_value = {"user_id": OTHER, "first_name": "Цель"}
+
+        await handle_callme(msg, _config(), repo, message_repo, _bot_that_cannot_answer(), command)
+
+        repo.set_primary.assert_not_awaited()
+        msg.reply.assert_awaited_once()
+
+    async def test_the_check_runs_once_per_command(self) -> None:
+        """It used to run twice on the reply path -- once inside the boolean
+        chain that picked the target and once in the guard after it -- so every
+        admin rename paid for two API round trips.
+        """
+        msg, command = _message(text_args="Босс", reply_to=OTHER)
+        bot = _bot_where_admin_is(True)
+
+        await handle_callme(msg, _config(), _alias_repo(owner=OTHER), AsyncMock(), bot, command)
+
+        assert bot.get_chat_member.await_count == 1
+
+
+class TestTalkingAboutSomebodyElse:
+    """Copy written in the second person, used for a third party, tells the
+    reader a fact about themselves that is actually about another member.
+    """
+
+    async def test_clearing_someone_elses_name_does_not_say_yours(self) -> None:
+        msg, command = _message(text_args="-", reply_to=OTHER)
+        repo = _alias_repo(active=[{"user_id": OTHER, "alias": "Босс", "role": "primary"}])
+
+        await handle_callme(msg, _config(), repo, AsyncMock(), _bot_where_admin_is(True), command)
+
+        repo.retire.assert_awaited_once_with(CHAT, "Босс")
+        sent = msg.reply.await_args.args[0]
+        assert "вас" not in sent.lower(), sent
+
+    async def test_showing_someone_elses_name_does_not_say_yours(self) -> None:
+        msg, command = _message(text_args="", reply_to=OTHER)
+        repo = _alias_repo(active=[{"user_id": OTHER, "alias": "Босс", "role": "primary"}])
+
+        await handle_callme(msg, _config(), repo, AsyncMock(), _bot_where_admin_is(True), command)
+
+        sent = msg.reply.await_args.args[0]
+        assert "Босс" in sent
+        assert "зовёт вас" not in sent, sent
+
+    async def test_naming_yourself_still_speaks_in_the_second_person(self) -> None:
+        """The mirror -- the third-person switch must not swallow the common case."""
+        msg, command = _message(text_args="")
+        repo = _alias_repo(active=[{"user_id": SENDER, "alias": "Костя", "role": "primary"}])
+
+        await handle_callme(msg, _config(), repo, AsyncMock(), AsyncMock(), command)
+
+        assert "зовёт вас" in msg.reply.await_args.args[0]
+
+
 class TestWhatTheUserIsTold:
     @pytest.mark.parametrize(
         ("outcome", "needle"),
@@ -228,6 +315,11 @@ class TestWhatTheUserIsTold:
         await handle_callme(msg, _config(), repo, AsyncMock(), AsyncMock(), command)
 
         repo.set_primary.assert_not_awaited()
+        # AND the user is told why. Asserting only that no write happened would
+        # stay green if the reply were deleted, i.e. if the command silently
+        # did nothing — which is the failure mode this bot's handlers are most
+        # prone to, since the global error handler answers only CallbackQuery.
+        msg.reply.assert_awaited_once()
         assert str(MAX_ALIAS_CHARS) in msg.reply.await_args.args[0]
 
     async def test_a_forgery_payload_is_refused_before_any_write(self) -> None:
@@ -237,6 +329,9 @@ class TestWhatTheUserIsTold:
         await handle_callme(msg, _config(), repo, AsyncMock(), AsyncMock(), command)
 
         repo.set_primary.assert_not_awaited()
+        # Same reason as above: silence is not a refusal.
+        msg.reply.assert_awaited_once()
+        assert msg.reply.await_args.args[0].strip()
 
     async def test_a_name_with_html_is_escaped_in_the_confirmation(self) -> None:
         """The bot sets parse_mode=HTML globally, so an unescaped `<` makes
@@ -268,7 +363,9 @@ class TestWhatTheUserIsTold:
 
         await handle_callme(msg, _config(), repo, AsyncMock(), AsyncMock(), command)
 
-        repo.retire.assert_awaited_once_with(CHAT, "костя")
+        # The DISPLAY name, not a hand-folded one: `alias_norm` is derived
+        # inside the repository so the two forms cannot drift apart.
+        repo.retire.assert_awaited_once_with(CHAT, "Костя")
 
     async def test_clearing_nothing_says_so(self) -> None:
         msg, command = _message(text_args="-")
