@@ -256,8 +256,13 @@ class ServiceProvider(Provider):
         self,
         message_repo: MessageRepository,
         ai_router: AIRouter,
+        alias_repo: AliasRepository,
     ) -> SummaryService:
-        return SummaryService(message_repo, ai_router)
+        # Wired unconditionally, like the pipeline's. The `| None = None` on
+        # the service exists for hand-built instances in tests; a provider that
+        # quietly stopped passing it would put account names back into every
+        # summary with nothing failing.
+        return SummaryService(message_repo, ai_router, alias_repo)
 
     @provide
     def link_extractor_service(self, settings: Settings) -> LinkExtractorService:

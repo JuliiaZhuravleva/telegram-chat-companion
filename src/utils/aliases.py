@@ -149,6 +149,26 @@ class AliasView:
         return bool(self.entries)
 
 
+def primary_alias(aliases: AliasView, user_id: Any) -> str | None:
+    """The name this chat calls ``user_id``, length-capped, or ``None``.
+
+    Every surface that renders a participant goes through here so the cap
+    cannot drift between them, while each keeps its own *fallback* order --
+    the prompt's history block prefers ``username`` next, the summary prefers
+    ``first_name``, and folding those together would silently rewrite one of
+    them for every person who has no alias at all.
+
+    The cap is applied on read even though ``parse_alias`` bounds the write
+    path: a row can reach the table without passing it (a hand-written UPDATE,
+    or the autocollector a later slice adds), and a name renders once per
+    history row on every turn.
+    """
+    if not isinstance(user_id, int):
+        return None
+    alias = aliases.primary_by_user.get(user_id)
+    return alias[:MAX_ALIAS_CHARS] if alias else None
+
+
 def build_alias_view(rows: Iterable[Mapping[str, Any]]) -> AliasView:
     """Fold ``(user_id, alias, role)`` rows into the two projections above.
 

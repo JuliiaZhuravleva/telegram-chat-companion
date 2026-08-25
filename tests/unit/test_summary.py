@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -636,3 +637,211 @@ class TestSummaryConversationTruncation:
 
         mock_logger.warning.assert_not_called()
         assert "(1 сообщений)" in result
+
+
+# --- Participant aliases in a summary (TD-150) ------------------------------
+
+
+def _alias_repo(rows=None, error=None):
+    repo = AsyncMock()
+    if error is not None:
+        repo.load_active.side_effect = error
+    else:
+        repo.load_active.return_value = rows or []
+    return repo
+
+
+async def _summary_text(message_repo, ai_router, alias_repo=None, rows=None, reply=None):
+    """Drive a real summary and return what the user would read.
+
+    The model's own output is a fixed string, so anything a participant's name
+    appears in comes from the mention-resolution step -- which is the only
+    place a name reaches the reader, since identified people are handed to the
+    model as opaque `@@uN@@` tokens.
+    """
+    if rows is not None:
+        message_repo.get_for_summary.return_value = rows
+    ai_router.generate_text.return_value = _make_text_result(reply or "Говорили @@u0@@ и всё.")
+    service = SummaryService(message_repo, ai_router, alias_repo)
+    return await service.generate(chat_id=-100123, language="ru")
+
+
+# A model reply that mentions BOTH participants. The default reply in
+# `_summary_text` names only `@@u0@@`, so an assertion about participant 1's
+# anchor would have nothing to look at and would pass by absence.
+_BOTH = "Говорили @@u0@@ и @@u1@@."
+
+
+class TestAnAliasCannotLookLikeAMentionToken:
+    """`_resolve_region` runs the loose `@uN` pattern over text the strict pass
+    has ALREADY rewritten, so a name containing `@u1` is expanded a second time.
+    Its comment says strict-first makes that safe, which is true of the token
+    and untrue of the name spliced in where the token was.
+
+    Reachable by typing: `_split_target_handle` only peels a leading `@handle`
+    of 5-32 word characters, so `@u1` is too short to be read as a target and
+    is stored verbatim as the alias.
+    """
+
+    def _two_people(self, first_alias: str):
+        rows = [
+            _make_message_row(user_id=111, username="a", first_name="A"),
+            _make_message_row(user_id=222, username="b", first_name="B"),
+        ]
+        # The loop walks `reversed(rows)`, so 222 becomes participant 0 and 111
+        # becomes participant 1. Spelled out because getting it backwards makes
+        # this test look like it is asserting something it is not.
+        aliases = [
+            {"user_id": 111, "alias": first_alias, "role": "primary"},
+            {"user_id": 222, "alias": "Боб", "role": "primary"},
+        ]
+        return rows, aliases
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_nest_anchors(self, message_repo, ai_router):
+        """Nested `<a>` in a message sent with the default HTML parse_mode is a
+        plausible Telegram rejection — and a rejected summary is not a degraded
+        summary, it is a frozen "⏳" placeholder and nothing else.
+        """
+        rows, aliases = self._two_people("@u1")
+        text = await _summary_text(
+            message_repo, ai_router, _alias_repo(aliases), rows=rows, reply=_BOTH
+        )
+
+        depth = 0
+        for tag in re.findall(r"<a\b[^>]*>|</a>", text):
+            depth += -1 if tag == "</a>" else 1
+            assert depth <= 1, f"nested anchor in: {text}"
+
+    @pytest.mark.asyncio
+    async def test_it_does_not_put_another_member_inside_your_mention(
+        self, message_repo, ai_router
+    ):
+        """The sharper half: when the alias names a DIFFERENT index, the second
+        pass replaces the holder's own name with that other person's, so the
+        reader is shown the wrong member entirely.
+        """
+        rows, aliases = self._two_people("@u0")
+        text = await _summary_text(
+            message_repo, ai_router, _alias_repo(aliases), rows=rows, reply=_BOTH
+        )
+
+        # user 111's mention must carry user 111's own name, not user 222's.
+        mention = re.search(r'<a href="tg://user\?id=111">([^<]*)</a>', text)
+        assert mention is not None, text
+        assert "Боб" not in mention.group(1), text
+
+    @pytest.mark.asyncio
+    async def test_the_name_still_renders_exactly_as_typed(self, message_repo, ai_router):
+        """The fix is in HOW resolution runs, not in rewriting the name, so a
+        name containing `@` reaches the reader unchanged.
+
+        An earlier attempt escaped every `@` to `&#64;`. It worked and it was
+        wrong: it silently altered the wire form of every name containing an
+        `@`, and it broke the pre-existing `@@u1@@` case two classes up. The
+        mechanism was the thing that needed fixing, not the data.
+        """
+        rows, aliases = self._two_people("@u1")
+        text = await _summary_text(
+            message_repo, ai_router, _alias_repo(aliases), rows=rows, reply=_BOTH
+        )
+
+        assert ">@u1<" in text
+        assert "&#64;" not in text
+
+
+class TestSummaryUsesAliases:
+    @pytest.mark.asyncio
+    async def test_the_mention_carries_the_alias_not_the_account(self, message_repo, ai_router):
+        text = await _summary_text(
+            message_repo,
+            ai_router,
+            _alias_repo([{"user_id": 111, "alias": "Аня", "role": "primary"}]),
+        )
+
+        assert "Аня" in text
+        assert "Alice" not in text
+        assert "alice" not in text
+
+    @pytest.mark.asyncio
+    async def test_the_lookup_is_scoped_to_this_chat(self, message_repo, ai_router):
+        repo = _alias_repo([{"user_id": 111, "alias": "Аня", "role": "primary"}])
+
+        await _summary_text(message_repo, ai_router, repo)
+
+        repo.load_active.assert_awaited_once_with(-100123)
+
+    @pytest.mark.asyncio
+    async def test_without_an_alias_the_old_fallback_order_is_untouched(
+        self, message_repo, ai_router
+    ):
+        """`first_name` before `username` — this method's own order, which is
+        the opposite of the prompt history block's. Sharing one helper between
+        them would have silently rewritten this for every person with no alias.
+        """
+        text = await _summary_text(message_repo, ai_router, _alias_repo([]))
+
+        assert "Alice" in text
+        assert "alice</a>" not in text
+
+    @pytest.mark.asyncio
+    async def test_no_alias_repository_at_all_still_summarises(self, message_repo, ai_router):
+        """A hand-built service (tests, scripts) must keep working."""
+        text = await _summary_text(message_repo, ai_router, None)
+
+        assert "Alice" in text
+
+    @pytest.mark.asyncio
+    async def test_a_failing_alias_lookup_still_produces_a_summary(self, message_repo, ai_router):
+        """The user is watching a placeholder. Account names are a cosmetic
+        regression; no summary at all is a broken command.
+        """
+        text = await _summary_text(
+            message_repo, ai_router, _alias_repo(error=RuntimeError("db gone"))
+        )
+
+        assert text is not None
+        assert "Alice" in text
+
+    @pytest.mark.asyncio
+    async def test_an_alias_cannot_inject_markup_into_the_mention_anchor(
+        self, message_repo, ai_router
+    ):
+        """An alias is attacker-controlled text rendered inside an
+        `<a href="tg://user?id=...">` anchor, exactly like `first_name` — and
+        the whole message is parsed as HTML, so an unescaped `<` does not
+        degrade the summary, it makes Telegram reject it entirely.
+        """
+        text = await _summary_text(
+            message_repo,
+            ai_router,
+            _alias_repo([{"user_id": 111, "alias": "Аня</a><b>x", "role": "primary"}]),
+        )
+
+        assert "</a><b>x" not in text
+        assert "&lt;" in text or "&gt;" in text
+
+    @pytest.mark.asyncio
+    async def test_an_anonymous_author_keeps_its_raw_name_in_the_prompt(
+        self, message_repo, ai_router
+    ):
+        """A row with no `user_id` cannot be looked up by one, and unlike an
+        identified participant its name goes to the MODEL rather than to the
+        reader -- anonymous authors get no `@@uN@@` token.
+
+        Asserted on the prompt for that reason. The first version of this test
+        asserted `text is not None`, which `generate()` satisfies on every
+        non-raising path including the provider-error one, so it could not fail
+        for the reason its own docstring gave.
+        """
+        rows = [_make_message_row(user_id=None, first_name="Аноним", username=None)]
+        await _summary_text(
+            message_repo,
+            ai_router,
+            _alias_repo([{"user_id": 111, "alias": "Аня", "role": "primary"}]),
+            rows=rows,
+        )
+
+        prompt = ai_router.generate_text.call_args.kwargs["prompt"]
+        assert "Аноним" in prompt
+        assert "@@u" not in prompt  # no token is minted for a user we cannot link

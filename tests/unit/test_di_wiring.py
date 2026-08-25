@@ -78,6 +78,24 @@ def test_kb_floor_is_read_per_construction_not_captured_once() -> None:
     assert _pipeline_with_configured_floor(0.7)._kb_min_similarity == 0.7
 
 
+def test_alias_repo_reaches_the_summary_service_from_the_provider() -> None:
+    """Same call-site argument as the pipeline's, and it bites the same way.
+
+    `SummaryService` carries `alias_repo: AliasRepository | None = None` so a
+    hand-built instance still works, and `_load_aliases` returns an empty view
+    when it is None. A provider that stopped passing it would put account names
+    back into every summary with nothing raising -- and every other summary
+    test constructs the service itself, so all of them stay green.
+    """
+    sentinel = MagicMock()
+
+    service = ServiceProvider().summary_service(
+        message_repo=MagicMock(), ai_router=MagicMock(), alias_repo=sentinel
+    )
+
+    assert service._aliases is sentinel
+
+
 def _chunk_service(**knobs: float | int):
     settings = MagicMock()
     for name, value in knobs.items():
