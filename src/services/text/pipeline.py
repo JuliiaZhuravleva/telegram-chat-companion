@@ -20,6 +20,7 @@ from typing import Any
 
 import structlog
 
+from src.database.repositories.aliases import AliasRepository
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.observability import ObservabilityRepository
@@ -46,6 +47,7 @@ from src.services.text.prompt_builder import (
     trim_facts_to_budget,
 )
 from src.services.text.query_hygiene import strip_bot_address
+from src.utils.aliases import AliasView, build_alias_view
 from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
@@ -110,6 +112,7 @@ class TextProcessingPipeline:
         sticker_service: StickerResponderService | None = None,
         knowledge_repo: KnowledgeRepository | None = None,
         observability_repo: ObservabilityRepository | None = None,
+        alias_repo: AliasRepository | None = None,
         *,
         kb_min_similarity: float,
     ) -> None:
@@ -123,6 +126,7 @@ class TextProcessingPipeline:
         self._sticker = sticker_service
         self._knowledge = knowledge_repo
         self._observability = observability_repo
+        self._aliases = alias_repo
         # No default, mirroring `RAGMemoryService.__init__` (S2-2): the YAML is
         # the single source for this number, and a dropped wiring must fail
         # loudly at construction rather than silently retrieve at some other
@@ -266,7 +270,22 @@ class TextProcessingPipeline:
                 self._safe_get_sticker_candidates(message_text, config.tolerance_level)
             )
 
-        recent_msgs, message_lengths = await asyncio.gather(recent_msgs_task, lengths_task)
+        # The alias read joins this gather rather than the `_timed_*` retrieval
+        # fan-out below: it is one indexed `WHERE chat_id = $1`, not a search,
+        # and the timing/error triple those helpers return exists only to feed
+        # `retrieval_log` — a row this lookup must never write, because that
+        # table's non-KB/chunks branch is RAG-shaped and would record a
+        # similarity-less garbage entry into the very distribution S6 will
+        # calibrate the chunk floor from.
+        #
+        # Note `asyncio.gather` here has no `return_exceptions=True`: a raw
+        # coroutine that raises would propagate out of `process()`, the
+        # handler's `send_quoted_reply` would never run, and the chat would see
+        # nothing at all. `_safe_load_aliases` degrades to an empty map, like
+        # every other optional source in this pipeline.
+        recent_msgs, message_lengths, alias_view = await asyncio.gather(
+            recent_msgs_task, lengths_task, self._safe_load_aliases(chat_id)
+        )
 
         rag_memories: list[dict[str, Any]] = []
         rag_ms: int | None = None
@@ -421,6 +440,12 @@ class TextProcessingPipeline:
             jailbreak_hint=abuse_result.jailbreak_hint,
             recent_messages=history,
             message_lengths=message_lengths,
+            # Both alias fields together: the view renders the roster and every
+            # history row, `user_id` lets the `<user_message>` tail resolve the
+            # *speaker* through the same helper. Passing one without the other
+            # is what makes the prompt call one person two names in one turn.
+            aliases=alias_view,
+            user_id=user_id,
             kb_facts=kb_facts_for_prompt,
             # Only what clears the floor reaches the model. `rag_memories`
             # itself stays unfiltered so the log above describes the whole
@@ -945,6 +970,28 @@ class TextProcessingPipeline:
         except Exception:
             logger.warning("Link extraction failed")
             return None
+
+    async def _safe_load_aliases(self, chat_id: int) -> AliasView:
+        """The names this chat uses for its people (TD-150), or an empty view.
+
+        Degrades to empty on every failure, like the other optional sources
+        here, and for a sharper reason than usual: this coroutine is awaited
+        inside a bare `asyncio.gather`, so an exception escaping it would take
+        the whole turn down and the chat would get silence rather than a reply
+        missing one prompt section.
+
+        Empty is also the correct answer when the repository is absent (a
+        hand-built pipeline in a test) and when the chat has simply never used
+        the feature -- and an empty view renders no roster and substitutes no
+        name, so the prompt is byte-identical to the pre-feature one.
+        """
+        if self._aliases is None:
+            return AliasView()
+        try:
+            return build_alias_view(await self._aliases.load_active(chat_id))
+        except Exception:
+            logger.warning("Alias load failed", chat_id=chat_id, exc_info=True)
+            return AliasView()
 
     async def _safe_update_cooldown(self, chat_id: int, user_id: int) -> None:
         try:

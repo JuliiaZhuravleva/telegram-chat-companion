@@ -124,6 +124,14 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
   rules?" with three of twelve in the confident tone of a curated base, whereas one fact is either
   complete or visibly truncated
 - `/kb` — browse the facts remembered for this chat
+- `/callme <name>` — the name the bot should call you **in this chat**. `/callme Костя` and the
+  bot stops addressing you by your Telegram handle: the name replaces yours everywhere the model
+  reads the conversation, and a short "who is who" line lets it understand a question *about* you
+  under that name too. `/callme -` clears it. A chat administrator can name somebody else by
+  replying to their message or with `/callme @handle Костя` — everyone else can only name
+  themselves. Your account's own handle and first name are kept as alternates, so the bot still
+  recognises the name your older messages are filed under. A chat where nobody has set a name is
+  completely unaffected: there is no flag to turn this on, an empty list simply changes nothing
 
 ### Optional Modules
 - **Knowledge base** — per-chat facts the bot remembers and reuses as context; captured by chat

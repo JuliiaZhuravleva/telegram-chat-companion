@@ -22,7 +22,7 @@ from src.bot.access_requests import NotifyCooldown
 from src.di import AppProvider, ServiceProvider
 
 
-def _pipeline_with_configured_floor(floor: float):
+def _built_pipeline(floor: float = 0.7, alias_repo: object | None = None):
     settings = MagicMock()
     settings.knowledge_base.min_similarity = floor
     return ServiceProvider().text_pipeline(
@@ -37,7 +37,27 @@ def _pipeline_with_configured_floor(floor: float):
         sticker_service=MagicMock(),
         knowledge_repo=MagicMock(),
         observability_repo=MagicMock(),
+        alias_repo=alias_repo if alias_repo is not None else MagicMock(),
     )
+
+
+def _pipeline_with_configured_floor(floor: float):
+    return _built_pipeline(floor)
+
+
+def test_alias_repo_reaches_the_pipeline_from_the_provider() -> None:
+    """The provider must actually hand the repository over.
+
+    `TextProcessingPipeline` declares `alias_repo: AliasRepository | None =
+    None`, and `_safe_load_aliases` returns an empty view when it is None --
+    which is correct behaviour for a hand-built test instance and a silent
+    catastrophe here. A provider that stopped passing it would keep every chat
+    on account names for ever: no exception, no log line, no failing unit test,
+    because every other test constructs the pipeline itself.
+    """
+    sentinel = MagicMock()
+
+    assert _built_pipeline(alias_repo=sentinel)._aliases is sentinel
 
 
 def test_kb_floor_reaches_the_pipeline_from_settings() -> None:

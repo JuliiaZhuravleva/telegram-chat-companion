@@ -19,6 +19,7 @@ from src.database.connection import close_pool, create_pool
 from src.database.repositories.abuse import AbuseRepository
 from src.database.repositories.activity import ActivityRepository
 from src.database.repositories.admin import AdminRepository
+from src.database.repositories.aliases import AliasRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -111,6 +112,10 @@ class RepositoryProvider(Provider):
     @provide
     def chunk_repo(self, pool: asyncpg.Pool) -> ChunkRepository:
         return ChunkRepository(pool)
+
+    @provide
+    def alias_repo(self, pool: asyncpg.Pool) -> AliasRepository:
+        return AliasRepository(pool)
 
     @provide
     def abuse_repo(self, pool: asyncpg.Pool) -> AbuseRepository:
@@ -272,6 +277,7 @@ class ServiceProvider(Provider):
         sticker_service: StickerResponderService,
         knowledge_repo: KnowledgeRepository,
         observability_repo: ObservabilityRepository,
+        alias_repo: AliasRepository,
     ) -> TextProcessingPipeline:
         return TextProcessingPipeline(
             ai_router=ai_router,
@@ -284,6 +290,11 @@ class ServiceProvider(Provider):
             sticker_service=sticker_service,
             knowledge_repo=knowledge_repo,
             observability_repo=observability_repo,
+            # Wired unconditionally. The `| None = None` default on the
+            # pipeline exists for hand-built instances in tests, not to make
+            # this optional -- a provider that quietly stopped passing it would
+            # leave every chat's aliases unread with nothing failing.
+            alias_repo=alias_repo,
             kb_min_similarity=settings.knowledge_base.min_similarity,
         )
 

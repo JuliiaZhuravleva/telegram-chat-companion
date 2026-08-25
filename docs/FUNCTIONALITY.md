@@ -37,6 +37,7 @@ Handled in [src/bot/handlers/commands.py:89-157](src/bot/handlers/commands.py#L8
 | `/start` | Any chat type | Any user | Returns a short greeting ("Привет! Я чат-компаньон…" / "Hello! I'm a chat companion…") in the chat's configured language. | [commands.py:89-93](src/bot/handlers/commands.py#L89-L93) |
 | `/help` | Any chat type | Any user | Dynamic feature list (hides rows for modules disabled in `ChatConfig`), lists configured trigger words, and attaches an inline keyboard with `Summary (100)`, `Summary (500)` (groups only), and `Close`. | [commands.py:96-115](src/bot/handlers/commands.py#L96-L115) |
 | `/summary` | **Groups & supergroups only** (filter `F.chat.type.in_({"group","supergroup"})`) | Any user | Generates an AI summary of up to 100 recent messages. Returns `"Сохранение сообщений отключено…"` / `"Message saving is disabled…"` if `save_messages=False`. In forum supergroups, filters by current topic via `message_thread_id`. Uses a placeholder "⏳ Generating summary…" that is later edited into the final summary, with a fallback send-new-message path if `edit_text` fails (oversize messages). | [commands.py:118-157](src/bot/handlers/commands.py#L118-L157), [src/services/modules/summary.py](src/services/modules/summary.py) |
+| `/callme` | **Groups & supergroups** (a DM handler explains why) | Any member for themselves; a **chat administrator** (live `get_chat_member`) to name somebody else | Sets the name the bot uses for a person in this chat. `/callme Костя` names yourself, `/callme -` clears it, `/callme @ник Костя` or a reply names someone else. The account's own `username`/`first_name` are auto-added as *alternates* so the bot still recognises the name the archive is filed under. | [commands.py](src/bot/handlers/commands.py), [src/utils/aliases.py](src/utils/aliases.py) |
 | `/settings` (alias of `/admin`) | **Private DM only** | Admin only (`IsAdmin` filter) | Opens the admin panel. Non-admins and non-DM chats silently fall through. | [src/bot/handlers/admin.py:189-204](src/bot/handlers/admin.py#L189-L204) |
 
 Live QA observations:
@@ -245,6 +246,45 @@ the *prompt's* forum branch fire on ordinary replies — tracked as TD-102, not 
 **What has not moved.** The Q&A store still writes on every answered turn, so a chat with
 both flags on searches both. Retiring `chat_memory` writes is a separate decision (owner,
 2026-08-18: chats with `save_messages = false` keep them as their only memory).
+
+### 2.7b Participant Aliases (TD-150)
+
+A chat rarely calls people what their accounts say. Before this, the bot rendered every
+speaker as `username or first_name or user_id`, so it addressed people by their handle and
+could not answer a question about a name nobody's account carries.
+
+Two roles in one table (`chat_user_aliases`, migration 033), and they are not
+interchangeable:
+
+- **`primary`** — what the bot *says*. Exactly one active row per person per chat, enforced by
+  a partial unique index, and set only by a human. It replaces the rendered name in
+  `<chat_history>` **and** in the `<user_message>` tail, through one shared helper
+  (`render_participant_name`) so the two surfaces cannot name the same person differently on
+  one turn.
+- **`alternate`** — what the bot *understands*. Any number. Rendered in a compact roster
+  section (`- Костя (also called: Капитан)`) placed ahead of the retrieval group, so the
+  shared REMINDER fence stays a statement about retrieval.
+
+The asymmetry is the safety argument for the auto-collection planned later:
+**automation may write `alternate` and never `primary`.** A wrong production name has the bot
+calling somebody by a name it chose for them; a wrong recognition name costs one missed
+retrieval.
+
+It also decides every name conflict: **a `primary` outranks an `alternate`, whoever owns it.**
+Setting a name supersedes any alternate holding it; adding an alternate yields to every active
+row. Both halves are load-bearing — without the first, promoting your own auto-seeded account
+name to primary was a permanent dead end reported to the user as "try again", and a second
+member could be refused a name that only a machine-written recognition row was holding. Only
+another **primary** returns "that name is taken", and the reply says who holds it.
+
+**Self-gating** — an empty table renders no roster and substitutes no name, so a chat that
+never used the feature gets a byte-identical prompt. There is deliberately no fourth per-chat
+flag.
+
+**Not yet done:** alias-aware retrieval. A question about "Костя" still searches an archive
+filed under account names, and the lexical leg misses. Deferred until after S6 on purpose:
+changing the query text changes the embedding, and therefore every similarity number S6 will
+calibrate the chunk floor from. When it lands it must touch the FTS leg only.
 
 ### 2.8 Forum Topics
 

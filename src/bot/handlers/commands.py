@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from html import escape as html_escape
@@ -19,7 +20,8 @@ from dishka.integrations.aiogram import FromDishka
 from src.bot.keyboards.admin_kb import kb_undo_keyboard, kb_view_keyboard
 from src.bot.keyboards.help import help_keyboard
 from src.bot.progress import ProgressNotice
-from src.bot.utils import resolve_display_name, safe_edit_text
+from src.bot.utils import is_user_chat_admin, resolve_display_name, safe_edit_text
+from src.database.repositories.aliases import AliasRepository, AliasWriteOutcome
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.knowledge import KnowledgeRepository
@@ -39,6 +41,12 @@ from src.services.modules.summary import SummaryService
 from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import MAX_FACT_CHARS
 from src.utils import parse_admin_ids, parse_user_id_list
+from src.utils.aliases import (
+    MAX_ALIAS_CHARS,
+    AliasRejection,
+    build_alias_view,
+    parse_alias,
+)
 from src.utils.telegram import typing_indicator
 from src.utils.telegram_text import split_html
 
@@ -1348,3 +1356,416 @@ async def handle_kb_view_page(
         await safe_edit_text(callback.message, text, reply_markup=keyboard)
 
     await callback.answer()
+
+
+# --- /callme: what this chat calls you (TD-150) ------------------------------
+
+_CALLME_DM_NOTICE = {
+    "ru": (
+        "Имя задаётся для конкретного чата — в личке задавать нечего.\n"
+        "Напишите <code>/callme Костя</code> в самом чате."
+    ),
+    "en": (
+        "A name belongs to one chat, and there is no chat to belong to here.\n"
+        "Send <code>/callme Kostya</code> in the group itself."
+    ),
+}
+
+_CALLME_USAGE = {
+    "ru": (
+        "<b>Как боту вас звать</b>\n"
+        "<code>/callme Костя</code> — бот будет звать вас так\n"
+        "<code>/callme -</code> — убрать имя\n"
+        "Админы чата могут задать имя другому: ответом на его сообщение "
+        "или <code>/callme @ник Костя</code>."
+    ),
+    "en": (
+        "<b>What the bot should call you</b>\n"
+        "<code>/callme Kostya</code> — the bot will use this name\n"
+        "<code>/callme -</code> — remove it\n"
+        "Chat admins can name someone else: reply to their message, "
+        "or <code>/callme @handle Kostya</code>."
+    ),
+}
+
+_CALLME_CURRENT = {
+    "ru": "Сейчас бот зовёт вас <b>{name}</b>.",
+    "en": "Right now the bot calls you <b>{name}</b>.",
+}
+_CALLME_SET = {"ru": "Готово — теперь вы <b>{name}</b>.", "en": "Done — you are <b>{name}</b> now."}
+_CALLME_SET_OTHER = {
+    "ru": "Готово — бот будет звать {who} <b>{name}</b>.",
+    "en": "Done — the bot will call {who} <b>{name}</b>.",
+}
+_CALLME_UNCHANGED = {
+    "ru": "Бот и так зовёт вас <b>{name}</b>.",
+    "en": "The bot already calls you <b>{name}</b>.",
+}
+_CALLME_TAKEN = {
+    "ru": "Имя <b>{name}</b> в этом чате уже занято — выберите другое.",
+    "en": "The name <b>{name}</b> is already taken in this chat — pick another.",
+}
+_CALLME_EMPTY = {"ru": "Имя не может быть пустым.", "en": "A name cannot be empty."}
+_CALLME_TOO_LONG = {
+    "ru": "Слишком длинно — не больше {limit} символов.",
+    "en": "Too long — {limit} characters at most.",
+}
+_CALLME_FORBIDDEN = {
+    "ru": "В имени есть символы, которые бот не примет. Обычных букв достаточно.",
+    "en": "That name contains characters the bot will not accept. Plain letters are enough.",
+}
+_CALLME_NOT_ADMIN = {
+    "ru": "Задать имя другому человеку может только администратор чата.",
+    "en": "Only a chat administrator can set someone else's name.",
+}
+_CALLME_NOT_FOUND = {
+    "ru": "Не нашёл такого участника в этом чате. Проще ответить на его сообщение.",
+    "en": "No such member found in this chat. Replying to their message is easier.",
+}
+_CALLME_CLEARED = {
+    "ru": "Убрал. Бот снова зовёт вас по аккаунту.",
+    "en": "Removed. The bot is back to your account name.",
+}
+_CALLME_NOTHING_TO_CLEAR = {"ru": "У вас и не было имени.", "en": "You did not have a name set."}
+_CALLME_FAILED = {
+    "ru": "Не смог сохранить — попробуйте ещё раз.",
+    "en": "Could not save that — please try again.",
+}
+
+
+@dataclass(frozen=True)
+class _CallmeTarget:
+    """Who a `/callme` is about, decided before anyone asks who may do it.
+
+    Bundled because the four fields always travel together and were previously
+    four parallel locals reassigned inside the branch that also performed the
+    authority check -- which is how a failed check ended up renaming the wrong
+    person.
+    """
+
+    user_id: int
+    label: str | None
+    username: str | None
+    first_name: str | None
+
+    @property
+    def display(self) -> str:
+        """A label for a confirmation. Never empty, never an id if avoidable."""
+        return self.label or self.first_name or self.username or str(self.user_id)
+
+
+_CALLME_CHECK_FAILED = {
+    "ru": "Не смог проверить права в этом чате — попробуйте ещё раз.",
+    "en": "Could not check your rights in this chat — please try again.",
+}
+
+_CALLME_CURRENT_OTHER = {
+    "ru": "Сейчас бот зовёт {who} <b>{name}</b>.",
+    "en": "Right now the bot calls {who} <b>{name}</b>.",
+}
+_CALLME_CLEARED_OTHER = {
+    "ru": "Убрал имя для {who} — бот снова зовёт по аккаунту.",
+    "en": "Removed the name for {who} — the bot is back to their account name.",
+}
+_CALLME_NOTHING_TO_CLEAR_OTHER = {
+    "ru": "У {who} и не было имени.",
+    "en": "{who} did not have a name set.",
+}
+
+_CALLME_REJECTION_COPY = {
+    AliasRejection.EMPTY: _CALLME_EMPTY,
+    AliasRejection.TOO_LONG: _CALLME_TOO_LONG,
+    AliasRejection.FORBIDDEN_CHARS: _CALLME_FORBIDDEN,
+}
+
+
+@router.message(Command("callme"), F.chat.type == "private")
+async def handle_callme_dm(message: Message, chat_config: ChatConfig) -> None:
+    """`/callme` in a DM: say where a name lives instead of pretending to set one.
+
+    A chat-type filter and not a guard in the body, per the consumed-update
+    rule -- and this handler has to exist at all, because without it the
+    message falls through to the AI pipeline and the user gets a conversational
+    non-answer to what was a direct request.
+    """
+    lang = chat_config.language if chat_config.language in _CALLME_DM_NOTICE else "ru"
+    await message.answer(_CALLME_DM_NOTICE[lang])
+
+
+def _split_target_handle(args: str) -> tuple[str | None, str]:
+    """Peel a leading ``@handle`` off the arguments.
+
+    Returns ``(handle, rest)``. Only a leading handle counts: a name that
+    merely *contains* an @-mention is a name, and treating it as a target
+    would silently rename the wrong person.
+    """
+    stripped = args.strip()
+    if not stripped.startswith("@"):
+        return None, stripped
+    head, _, rest = stripped.partition(" ")
+    handle = _extract_callme_username(head)
+    return (handle, rest.strip()) if handle else (None, stripped)
+
+
+def _extract_callme_username(token: str) -> str | None:
+    candidate = token.strip().lstrip("@")
+    return candidate if re.fullmatch(r"[A-Za-z0-9_]{5,32}", candidate) else None
+
+
+@router.message(Command("callme"), F.chat.type.in_({"group", "supergroup"}))
+async def handle_callme(
+    message: Message,
+    chat_config: ChatConfig,
+    alias_repo: FromDishka[AliasRepository],
+    message_repo: FromDishka[MessageRepository],
+    bot: Bot,
+    command: CommandObject | None = None,
+) -> None:
+    """Set the name this chat's bot uses for a person.
+
+    Three shapes, and the authority differs between them:
+
+        /callme Костя              -- name yourself, open to everyone
+        /callme -                  -- drop your name
+        /callme @ник Костя         -- name somebody else, chat admins only
+        (as a reply) /callme Костя -- same, when an admin sends it
+
+    The admin check is a live `get_chat_member` round trip, so it runs **only**
+    on the branch that touches another person. Naming yourself needs no
+    authority and must not pay for one.
+
+    A reply retargets only when the sender is already a chat admin. For anyone
+    else a reply is ignored and they name themselves, which is the forgiving
+    reading: the alternative refuses a member who happened to be replying to
+    somebody while naming themselves, and a refusal there is a defect exactly
+    as real as an unauthorised rename. Every confirmation names who was
+    renamed, so a surprise is visible in the same breath.
+    """
+    lang = chat_config.language if chat_config.language in _CALLME_USAGE else "ru"
+    sender = message.from_user
+    if sender is None:  # channel post or anonymous admin -- nobody to name
+        return
+    chat_id = message.chat.id
+
+    args = command.args or "" if command is not None else ""
+    handle, rest = _split_target_handle(args)
+
+    # WHO first, MAY-THEY second, and never interleaved. The authority check
+    # used to live inside the boolean chain that picked the target, which meant
+    # a `get_chat_member` that merely failed to answer read as "not an admin",
+    # the branch did not fire, and the command silently renamed the SENDER --
+    # with a confirmation saying it had worked.
+    myself = _CallmeTarget(sender.id, None, sender.username, sender.first_name)
+    proposed: _CallmeTarget | None = None
+
+    if handle is not None:
+        found = await message_repo.find_by_username(chat_id, handle)
+        if found is None:
+            await message.reply(_CALLME_NOT_FOUND[lang])
+            return
+        proposed = _CallmeTarget(
+            user_id=int(found["user_id"]),
+            label=f"@{handle}",
+            username=handle,
+            first_name=found["first_name"],
+        )
+        args = rest
+    elif (
+        message.reply_to_message is not None
+        and message.reply_to_message.from_user is not None
+        and message.reply_to_message.from_user.id != sender.id
+        and not message.reply_to_message.from_user.is_bot
+    ):
+        replied = message.reply_to_message.from_user
+        proposed = _CallmeTarget(
+            user_id=replied.id,
+            label=f"@{replied.username}" if replied.username else replied.first_name,
+            username=replied.username,
+            first_name=replied.first_name,
+        )
+        args = rest
+
+    target = myself
+    if proposed is not None and proposed.user_id != sender.id:
+        allowed = await is_user_chat_admin(bot, chat_id, sender.id)
+        if allowed is None:
+            # Unresolved, not refused. Doing anything else here writes to a
+            # user id nobody chose.
+            await message.reply(_CALLME_CHECK_FAILED[lang])
+            return
+        if allowed:
+            target = proposed
+        elif handle is not None:
+            # An explicit @handle has no forgiving reading available: it can
+            # only have meant that person.
+            await message.reply(_CALLME_NOT_ADMIN[lang])
+            return
+        # A reply from an ordinary member falls through to naming themselves,
+        # which is the forgiving reading -- see the docstring.
+
+    about_sender = target.user_id == sender.id
+    body = args.strip()
+    if not body:
+        await _reply_callme_usage(
+            message, alias_repo, chat_id, target, lang, about_sender=about_sender
+        )
+        return
+
+    if body == "-":
+        await _clear_callme(message, alias_repo, chat_id, target, lang, about_sender=about_sender)
+        return
+
+    parsed = parse_alias(body)
+    if not parsed.ok:
+        copy = _CALLME_REJECTION_COPY[parsed.rejection]  # type: ignore[index]
+        await message.reply(copy[lang].format(limit=MAX_ALIAS_CHARS))
+        return
+
+    renaming_somebody_else = target.user_id != sender.id
+    try:
+        outcome, _owner = await alias_repo.set_primary(
+            chat_id=chat_id,
+            user_id=target.user_id,
+            alias=parsed.display,
+            source="admin" if renaming_somebody_else else "self",
+            source_message_id=message.message_id,
+            source_user_id=sender.id,
+        )
+    except Exception as exc:
+        logger.error(
+            "callme_set_primary_failed",
+            chat_id=chat_id,
+            user_id=target.user_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        await message.reply(_CALLME_FAILED[lang])
+        return
+
+    safe_name = html_escape(parsed.display)
+    if outcome is AliasWriteOutcome.TAKEN:
+        await message.reply(_CALLME_TAKEN[lang].format(name=safe_name))
+        return
+    if outcome is AliasWriteOutcome.UNCHANGED:
+        await message.reply(_CALLME_UNCHANGED[lang].format(name=safe_name))
+        return
+
+    # Seed the account's own names as *alternates*, best effort. This is what
+    # makes the roster useful on the very first turn: the archive is filed
+    # under account names, so without this bridge the bot learns to say
+    # "Костя" while every stored conversation still says "Капитан" and
+    # nothing connects the two. It writes alternates only -- the one thing
+    # automation is allowed to write (migration 033) -- and a failure here
+    # must never lose the rename that already succeeded, which is why each is
+    # swallowed individually.
+    for candidate in (target.username, target.first_name):
+        if not candidate:
+            continue
+        seeded = parse_alias(candidate)
+        if not seeded.ok or seeded.norm == parsed.norm:
+            continue
+        try:
+            await alias_repo.add_alternate(
+                chat_id=chat_id,
+                user_id=target.user_id,
+                alias=seeded.display,
+                source="admin" if renaming_somebody_else else "self",
+                source_message_id=message.message_id,
+                source_user_id=sender.id,
+            )
+        except Exception:
+            logger.warning(
+                "callme_seed_alternate_failed",
+                chat_id=chat_id,
+                user_id=target.user_id,
+                exc_info=True,
+            )
+
+    if renaming_somebody_else:
+        await message.reply(
+            _CALLME_SET_OTHER[lang].format(who=html_escape(target.display), name=safe_name)
+        )
+    else:
+        await message.reply(_CALLME_SET[lang].format(name=safe_name))
+
+
+async def _reply_callme_usage(
+    message: Message,
+    alias_repo: AliasRepository,
+    chat_id: int,
+    target: _CallmeTarget,
+    lang: str,
+    *,
+    about_sender: bool,
+) -> None:
+    """Usage, plus the name currently in force if there is one.
+
+    ``about_sender`` picks second or third person. Both helpers used to be
+    handed only a user id and answer in the second person unconditionally, so
+    an admin asking about somebody else was told *their own* name was that
+    person's -- a fact about a third party, phrased as a fact about the reader.
+    """
+    current: str | None = None
+    try:
+        view = build_alias_view(await alias_repo.load_active(chat_id))
+        current = view.primary_by_user.get(target.user_id)
+    except Exception:
+        logger.warning(
+            "callme_read_current_failed",
+            chat_id=chat_id,
+            user_id=target.user_id,
+            exc_info=True,
+        )
+    text = _CALLME_USAGE[lang]
+    if current:
+        safe = html_escape(current)
+        head = (
+            _CALLME_CURRENT[lang].format(name=safe)
+            if about_sender
+            else _CALLME_CURRENT_OTHER[lang].format(who=html_escape(target.display), name=safe)
+        )
+        text = f"{head}\n\n{text}"
+    await message.reply(text)
+
+
+async def _clear_callme(
+    message: Message,
+    alias_repo: AliasRepository,
+    chat_id: int,
+    target: _CallmeTarget,
+    lang: str,
+    *,
+    about_sender: bool,
+) -> None:
+    """Retire whatever primary this person currently holds.
+
+    Only the primary. Their alternates stay, and that is deliberate: an
+    alternate is a name the bot should still *recognise*, and since a primary
+    request now outranks any alternate (see ``AliasRepository.set_primary``),
+    a leftover alternate can no longer block anybody from claiming that name.
+    """
+    who = html_escape(target.display)
+    try:
+        view = build_alias_view(await alias_repo.load_active(chat_id))
+        current = view.primary_by_user.get(target.user_id)
+        if not current:
+            await message.reply(
+                _CALLME_NOTHING_TO_CLEAR[lang]
+                if about_sender
+                else _CALLME_NOTHING_TO_CLEAR_OTHER[lang].format(who=who)
+            )
+            return
+        await alias_repo.retire(chat_id, current)
+    except Exception as exc:
+        logger.error(
+            "callme_clear_failed",
+            chat_id=chat_id,
+            user_id=target.user_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        await message.reply(_CALLME_FAILED[lang])
+        return
+    await message.reply(
+        _CALLME_CLEARED[lang] if about_sender else _CALLME_CLEARED_OTHER[lang].format(who=who)
+    )

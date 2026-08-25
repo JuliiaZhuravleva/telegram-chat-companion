@@ -229,12 +229,14 @@ async def handle_chat_migration(
         # longer exists.
         chat_config_service.invalidate(old_chat_id)
         logger.info(
-            "Chat migrated to supergroup: settings, knowledge base and rules re-keyed",
+            "Chat migrated to supergroup: settings, knowledge base, rules "
+            "and participant names re-keyed",
             old_chat_id=old_chat_id,
             new_chat_id=new_chat_id,
             settings_moved=outcome.settings_moved,
             facts_moved=outcome.facts_moved,
             rules_moved=outcome.rules_moved,
+            aliases_moved=outcome.aliases_moved,
             not_moved=NOT_MOVED,
         )
     elif outcome.status == "target_occupied":

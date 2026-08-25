@@ -77,6 +77,49 @@ async def is_bot_chat_admin(bot: Bot, chat_id: int, bot_id: int) -> bool:
     return member.status in _ADMIN_STATUSES
 
 
+async def is_user_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool | None:
+    """Live-check whether *a person* administrates the chat they are writing in.
+
+    Not to be confused with any of the four admin checks that already exist
+    here and nearby -- ``IsAdmin``, ``check_admin_direct`` and the
+    middleware-injected ``is_admin`` all answer "is this one of the two or
+    three people who operate the bot", read out of ``bot_config.admin_ids``,
+    and ``is_bot_chat_admin`` above asks about the **bot**. Nothing answered
+    "does this user run this chat" before, which is the question that has to be
+    asked before letting somebody rename another member.
+
+    Uncached, for the same reason `is_bot_chat_admin` is uncached: Telegram
+    sends no notification when a person is demoted, so a stored answer goes
+    stale silently and the check would keep granting authority that no longer
+    exists. It costs one API round trip, which is why callers must reach for it
+    only on the branch that acts on *someone else* -- renaming yourself needs
+    no authority and must stay free.
+
+    **Three answers, not two**, and the third is the point. ``True``/``False``
+    are real verdicts; ``None`` means the API did not answer and the question
+    is unresolved. Collapsing ``None`` into ``False`` -- which this function
+    did at first, "failing closed" -- is only safe when the caller's
+    no-authority branch is a refusal. It is not always: ``/callme``'s
+    no-authority branch deliberately falls back to *naming the sender
+    instead*, so one timed-out ``get_chat_member`` turned an admin's attempt to
+    rename somebody else into a silent rename of themselves, confirmed as a
+    success. A caller that genuinely wants fail-closed writes
+    ``if await is_user_chat_admin(...) is not True``; a caller whose fallback
+    performs a different action has to tell the two apart.
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except Exception as exc:
+        logger.warning(
+            "user_chat_admin_check_failed",
+            chat_id=chat_id,
+            user_id=user_id,
+            error=str(exc),
+        )
+        return None
+    return member.status in _ADMIN_STATUSES
+
+
 async def resolve_display_name(
     bot: Bot | None,
     chat_id: int,
