@@ -430,6 +430,19 @@ class TextProcessingPipeline:
             # floor first, budget second. `trim_chunks_to_budget` returns the
             # kept rows with their text already capped, so what is rendered is
             # exactly what was budgeted.
+            #
+            # S6, BEFORE YOU RAISE THE FLOOR ABOVE 0.0: `rows_above_floor` is
+            # shared with RAG and KB, where a missing `similarity` means a
+            # malformed row and is correctly treated as below any floor. Here it
+            # does not mean that. `ChunkRepository.search` returns
+            # `similarity = NULL` for a row whose own embedding is still NULL,
+            # and for *every* row on a turn whose query vector is missing — the
+            # degraded, lexical-only turn this store exists to survive. A
+            # non-zero floor therefore deletes exactly the results the FTS leg
+            # was added to provide, and `chunks_searched` does not notice,
+            # because it is computed before this line. Chunks need their own
+            # predicate (apply the floor only to rows that carry a cosine)
+            # in the same commit that first sets a floor. TD-147.
             chunks=trim_chunks_to_budget(rows_above_floor(chunk_rows, chunks_floor)),
             # "The index was consulted and answered", not "something was
             # found" — an errored search is not evidence the chat never

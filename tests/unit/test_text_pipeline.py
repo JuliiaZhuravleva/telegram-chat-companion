@@ -2055,15 +2055,46 @@ class TestChunkRetrievalDegraded:
 
         assert _chunk_log_call(mocks).kwargs["params"]["vector_leg_skipped"] is True
 
-    async def test_a_degraded_empty_turn_does_not_claim_the_archive_is_empty(
+    async def test_an_embedding_outage_with_no_rows_does_not_claim_an_empty_archive(
         self, make_chat_config
     ):
-        """Conservative on purpose: with no rows there is nothing carrying
-        `vector_leg_skipped`, so a turn that started without an embedding is
-        treated as unproven rather than asserted as thorough."""
+        """Names the reason it passes, which is NOT the degraded flag.
+
+        With no rows there is nothing carrying `vector_leg_skipped`; what
+        suppresses the notice here is `chunks_error`, which `_timed_chunk_search`
+        sets from the shared-embedding failure when the search came back empty.
+        The first version of this test claimed to pin the degraded clause and
+        stayed green with that clause deleted (review 2026-08-25) — the test
+        below is the one that pins it.
+        """
         mocks = await _run_chunks(
             make_chat_config, embedding_error=RuntimeError("provider down"), chunks=[]
         )
 
         system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "nothing matched" not in system_prompt
+
+    async def test_a_degraded_turn_whose_rows_all_fail_the_floor_stays_silent(
+        self, make_chat_config
+    ):
+        """The state where `not chunks_degraded` is the only thing doing work.
+
+        Rows came back, so `chunks_error` is None; they were found without a
+        vector leg, so they carry no cosine and a floor above zero drops every
+        one of them. Nothing reaches the prompt — but half a search is not
+        evidence that the chat never discussed this, so the notice must not
+        fire. Unreachable while the shipped floor is 0.0, which is precisely
+        why it needs a test rather than an argument: S6 sets that floor.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks_min_similarity=0.6,
+            chunks=[
+                _chunk(1, "Аня (12:01): проектор", similarity=None, vector_leg_skipped=True),
+                _chunk(2, "Боря (13:02): дождь", similarity=None, vector_leg_skipped=True),
+            ],
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "проектор" not in system_prompt, "sub-floor rows must not reach the prompt"
         assert "nothing matched" not in system_prompt

@@ -1296,6 +1296,21 @@ class TestTrimChunksToBudget:
         body = rendered.split("\n", 1)[1]
         assert len(body) > 1000, f"body all but disappeared: {rendered[:80]!r}"
 
+    def test_a_short_line_before_a_long_one_does_not_swallow_the_long_one(self):
+        """The same defect one line deeper (review 2026-08-25).
+
+        Every chunk after the first opens with up to two carried-over overlap
+        messages, so "header, a short line, then the long message" is a normal
+        shape — and cutting at the boundary *past* the header still landed
+        before the long message and dropped it whole. Measured over the real
+        corpus, that left a minimum of 44 surviving body characters.
+        """
+        source = _real_chunk("ок", "ы" * 1400)
+        rendered = trim_chunks_to_budget([source])[0]["content"]
+
+        body = rendered.split("\n", 1)[1]
+        assert len(body) > 1000, f"the long message was dropped: {rendered[:90]!r}"
+
     def test_a_chunk_that_is_only_a_header_and_one_long_line_is_cut_hard(self):
         """Trade-off stated as a test: a truncated first message beats none.
 
@@ -1372,6 +1387,20 @@ class TestChunksSection:
         result = build_system_prompt(PromptContext(chunks=[], chunks_searched=True))
         assert "nothing matched" in result
         assert _CHUNKS_HEADER_PREFIX not in result
+
+    def test_the_empty_notice_does_not_disown_the_recent_history(self):
+        """The notice is about the archive, not about memory in general.
+
+        `build_user_prompt` puts the last 20-30 messages of this same chat into
+        `<chat_history>` in the same request. A notice saying "if the answer
+        depends on something said earlier, say you do not remember" covers
+        those too — so the system prompt would be telling the model to deny
+        what it can see, on every turn, for any chat whose index is still empty
+        (review 2026-08-25).
+        """
+        result = build_system_prompt(PromptContext(chunks=[], chunks_searched=True))
+        assert "recent messages quoted above are unaffected" in result
+        assert "depends on something said earlier" not in result
 
     def test_an_unsearched_index_renders_no_notice(self):
         """Not searching is not the same as searching and finding nothing."""

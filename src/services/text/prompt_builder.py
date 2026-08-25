@@ -539,10 +539,21 @@ _CHUNKS_HEADER = (
 )
 
 _CHUNKS_EMPTY_NOTICE = (
-    "The chat's past conversations were searched for this question and nothing "
-    "matched. If the answer depends on something said earlier, say you do not "
-    "remember it rather than inventing it."
+    "The archive of this chat's older conversations was searched for this "
+    "question and nothing matched. The recent messages quoted above are "
+    "unaffected — use them freely. Only if the answer is not there either, say "
+    "you do not remember rather than inventing it."
 )
+"""Scoped to the archive on purpose.
+
+The first version said "if the answer depends on something said earlier, say
+you do not remember", which is unscoped: `build_user_prompt` puts the last
+20-30 messages of the same chat into `<chat_history>` in the very same
+request, and "said earlier" covers those. The system prompt was therefore
+telling the model to deny knowledge it could see — worst on the turn right
+after a chat enables the module, when its index is still empty and this notice
+fires on every message (review 2026-08-25).
+"""
 
 
 def _cap_chunk_content(content: str, max_chars: int = MAX_CHUNK_CHARS) -> str:
@@ -553,28 +564,33 @@ def _cap_chunk_content(content: str, max_chars: int = MAX_CHUNK_CHARS) -> str:
     they said, and half of a sentence can invert the whole of it. Cutting at
     the last complete line loses more text and lies about none of it.
 
-    **The boundary has to leave a body line behind.** Every chunk is
+    **The boundary has to leave most of the fragment behind.** Every chunk is
     `header + "\n" + body` (`chunker._make_chunk`), so there is *always* a
-    newline near position 30 — the dateline's. A plain "cut at the last
-    newline" therefore has a failure mode that looks like success: when the
-    first message is longer than the cap on its own, the only boundary in
-    range is the header's, and the fragment renders as a date and nothing
-    else. Measured against the real 2841-chunk corpus, 25 rows (0.9%) are that
-    shape, every one of them a single long message — a voice-note transcript,
-    typically, since the chunker closes a chunk at `TARGET_CHARS` and hands
-    the next long message a chunk of its own.
+    newline near position 30 — the dateline's — and short lines are common
+    right after it, because each chunk after the first opens with up to two
+    carried-over overlap messages. A plain "cut at the last newline" therefore
+    has a failure mode that looks like success: when one long message follows
+    the header and a short line or two, the only boundary in range sits before
+    it, and the fragment renders as a date, a "ок", and an ellipsis while the
+    message that actually earned the retrieval hit is dropped whole.
 
-    So the line-boundary cut is used only when it lands past the header, and a
-    truncated first message is preferred to a fragment with no conversation in
-    it. That is a real trade — the surviving half-sentence is the thing the
-    rule above exists to avoid — but an empty fragment costs the top-ranked
-    hit entirely, and the trailing `…` says the text was cut either way.
+    Both conditions were measured against the real corpus (1989 chunks
+    sampled; 39.4% exceed this cap, so capping is the common case, not an
+    edge one). Cutting at any boundary past the header left a *minimum* of 44
+    surviving body characters and 16 fragments under 200. Requiring the
+    boundary to retain at least half the cap changes 34 of 783 capped rows,
+    raises that minimum to 604, and leaves none under 200.
+
+    So a truncated message is preferred to a deleted one. That is a real trade
+    — the surviving half-sentence is exactly what the rule above exists to
+    avoid — but an empty fragment costs the top-ranked hit entirely, and the
+    trailing `…` says the text was cut either way.
     """
     if len(content) <= max_chars:
         return content
     head = content[:max_chars]
     cut = head.rfind("\n")
-    if cut > content.find("\n"):
+    if cut > content.find("\n") and cut >= max_chars // 2:
         return head[:cut] + "\n…"
     return head + "…"
 

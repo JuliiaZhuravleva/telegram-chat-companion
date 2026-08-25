@@ -209,24 +209,34 @@ the *prompt's* forum branch fire on ordinary replies — tracked as TD-102, not 
   corpus is most of what people ask about. Strict `websearch_to_tsquery` relaxes AND→OR
   when it matches nothing (never for negated queries).
 - **One embedding per turn** — the query vector computed for RAG and KB is reused, so
-  adding this source costs no extra API call. If it failed, the search still runs on the
-  lexical leg alone (`query_embedding=None` is the documented "FTS only" contract), which
-  is strictly better than the Q&A path's behaviour of retrieving nothing.
+  adding this source costs no extra API call on a healthy turn. If that shared embedding
+  failed, the service retries it once itself (a second call, free tier); only if that also
+  fails does the search run on the lexical leg alone (`query_embedding=None` is the
+  documented "FTS only" contract). Either way it still answers, which is strictly better
+  than the Q&A path's behaviour of retrieving nothing.
 - **No similarity floor** (`chunk_retrieval.min_similarity: 0.0`), on purpose. The 0.7
   RAG and KB use was calibrated on `chat_memory`, whose documents begin with the same bot
   address the query does, so the two stores' cosine scales are offset — measured, see
   `docs/rag-eval-baseline.md`. What bounds injection until S6 calibrates one is the prompt
   budget below plus framing that tells the model to ignore off-topic fragments.
 - **Injection** — up to `CHUNKS_BUDGET_TOKENS` (900 ≈ two full fragments) at ~3 chars per
-  token, each fragment capped at 1300 characters and cut on a line boundary so no
-  half-sentence is left attributed to a named person. Rendered as `[fragment N]` blocks
+  token; measured over the real corpus, 2 fragments reach the prompt on 84% of turns and 3
+  on 16%. Each fragment is capped at 1300 characters (39% of real chunks exceed that) and
+  cut on a line boundary, so no half-sentence is left attributed to a named person —
+  *unless* the boundary would throw away more than half the fragment, in which case the
+  text is cut mid-line instead. Deleting the message that earned the retrieval hit is the
+  worse of the two, and the trailing `…` marks the cut either way. Rendered as
+  `[fragment N]` blocks
   under a header that says they were ranked by a search and may be off-topic; **no
   similarity percentage**, because ranking is RRF over two legs and the cosine column
   would misdescribe a fragment the lexical leg found.
 - **Explicit-empty contract** — when the index was searched and matched nothing, the
   prompt says so, which licenses an in-character "не помню" instead of a confabulation.
-  A search that errored or ran without its vector leg does *not* trigger it: a failure is
-  not a finding.
+  The notice is scoped to the *archive* and explicitly leaves the recent-history block
+  alone, so it cannot be read as "deny everything": a chat whose index is still empty
+  (just enabled, or `save_messages = false`) gets it on every turn, and must not start
+  refusing to answer about the message before last. A search that errored or ran without
+  its vector leg does *not* trigger it at all: a failure is not a finding.
 - **Everything is logged** — one `retrieval_log` row per turn with `source='chunks'`,
   carrying the unfiltered candidate set (`sim`, `rrf`, `vec_rank`, `fts_rank`,
   `above_floor`, `injected`) and every knob that shaped the ranking. S6 derives the floor
