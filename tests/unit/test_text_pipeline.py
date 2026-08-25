@@ -58,6 +58,9 @@ def _make_pipeline(
     embedding_error=None,
     kb_min_similarity=0.0,
     rag_min_similarity=0.0,
+    chunks=None,
+    chunks_min_similarity=0.0,
+    chunk_search_error=None,
 ):
     """Build a pipeline with mocked dependencies.
 
@@ -74,6 +77,13 @@ def _make_pipeline(
     compares against it, and a mock there fails with ``'<=' not supported
     between instances of 'AsyncMock' and 'float'`` — a fixture defect that
     reads like a production bug.
+
+    ``chunks`` is the chunk-retrieval side (S5b). The mocked service gets a
+    real ``min_similarity`` float and a real ``params`` dict for the same
+    reason: the pipeline compares against the first and splats the second into
+    the ``retrieval_log`` payload, and an ``AsyncMock`` in either position
+    raises inside a ``fire_and_forget`` task, where the failure is swallowed
+    and the row simply never appears.
     """
     abuse_checker = AsyncMock()
     abuse_checker.check.return_value = abuse_result or _make_abuse_result()
@@ -119,6 +129,23 @@ def _make_pipeline(
         knowledge_repo = AsyncMock()
         knowledge_repo.search_by_similarity.return_value = kb_facts or []
 
+    chunk_service = AsyncMock()
+    if chunk_search_error:
+        chunk_service.search.side_effect = chunk_search_error
+    else:
+        chunk_service.search.return_value = chunks or []
+    chunk_service.min_similarity = chunks_min_similarity
+    chunk_service.max_results = 5
+    chunk_service.params = {
+        "backend": "chunks",
+        "max_results": 5,
+        "min_similarity": chunks_min_similarity,
+        "rrf_k": 60,
+        "vector_weight": 1.0,
+        "fts_weight": 1.0,
+        "depth_multiplier": 2,
+    }
+
     observability_repo = AsyncMock()
     observability_repo.log_decision = AsyncMock()
     observability_repo.log_retrieval = AsyncMock()
@@ -129,6 +156,7 @@ def _make_pipeline(
         message_repo=message_repo,
         response_log_repo=response_log_repo,
         rag_service=rag_service,
+        chunk_service=chunk_service,
         link_service=link_service,
         knowledge_repo=knowledge_repo,
         observability_repo=observability_repo,
@@ -140,6 +168,7 @@ def _make_pipeline(
         "message_repo": message_repo,
         "response_log_repo": response_log_repo,
         "rag_service": rag_service,
+        "chunk_service": chunk_service,
         "link_service": link_service,
         "knowledge_repo": knowledge_repo,
         "observability_repo": observability_repo,
@@ -1599,3 +1628,442 @@ class TestTopicContextPassthrough:
 
         call = mocks["message_repo"].get_recent_with_topic_context.call_args
         assert call.args == (-100123, None)
+
+
+# ── S5b: the chunk index becomes readable ────────────────────────────────────
+
+
+def _chunk(chunk_id, content, similarity=0.5, **overrides):
+    """One `chat_chunks` row as `ChunkRetrievalService.search` returns it."""
+    row = {
+        "id": chunk_id,
+        "content": content,
+        "similarity": similarity,
+        "rrf_score": 0.03,
+        "vec_rank": 1,
+        "fts_rank": 2,
+        "fts_relaxed": False,
+        "msg_from": 100,
+        "msg_to": 140,
+        "msg_count": 12,
+        "senders": [1, 2],
+        "started_at": None,
+        "ended_at": None,
+        "vector_leg_skipped": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def _chunk_log_call(mocks):
+    """The single `chunks` row written to retrieval_log, or None."""
+    calls = [
+        c
+        for c in mocks["observability_repo"].log_retrieval.call_args_list
+        if c.kwargs["source"] == "chunks"
+    ]
+    assert len(calls) <= 1, "one retrieval_log row per source per turn"
+    return calls[0] if calls else None
+
+
+async def _run_chunks(make_chat_config, *, text="а что там было с проектором?", **kwargs):
+    """Drive one turn with the chunk index on, returning the mocks."""
+    config_overrides = kwargs.pop("config", {})
+    config = make_chat_config(enabled=True, chunks_enabled=True, **config_overrides)
+    pipeline, mocks = _make_pipeline(**kwargs)
+    await pipeline.process(
+        chat_id=-100123,
+        user_id=42,
+        user_name="Alice",
+        message_text=text,
+        trigger_type=TriggerType.TRIGGER,
+        config=config,
+        message_id=777,
+    )
+    await asyncio.sleep(0)  # flush the fire-and-forget log writers
+    return mocks
+
+
+class TestChunkRetrievalGate:
+    """`chunks_enabled` is the whole gate — and it is off by default."""
+
+    async def test_disabled_by_default_nothing_is_searched(self, make_chat_config):
+        """The slice that adds the read path must not switch it on.
+
+        Merging to main is a production release, so a default of `True` here
+        would flip every chat at once, on the release rather than on a
+        decision. `make_chat_config` does not pass `chunks_enabled`, so this
+        also pins the `ChatConfig` field default itself.
+        """
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline(chunks=[_chunk(1, "Аня (12:01): проектор сгорел")])
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="а что там было с проектором?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+            message_id=777,
+        )
+        await asyncio.sleep(0)
+
+        mocks["chunk_service"].search.assert_not_awaited()
+        assert _chunk_log_call(mocks) is None
+
+    async def test_enabled_without_rag_still_searches_chunks(self, make_chat_config):
+        """The "chunks only" combination — what the store swap looks like.
+
+        `chunks_enabled` deliberately does not hang off `rag_enabled`: with the
+        two coupled, turning the Q&A store off would silently take the chunk
+        index down with it, and the migration path away from `chat_memory`
+        would have no expressible intermediate state.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            config={"rag_enabled": False},
+            chunks=[_chunk(1, "Аня (12:01): проектор сгорел")],
+        )
+
+        mocks["chunk_service"].search.assert_awaited_once()
+        mocks["rag_service"].search_unfiltered.assert_not_awaited()
+        mocks["rag_service"].search.assert_not_awaited()
+        # The shared embedding still has to be computed for the one consumer
+        # that remains; gating it on RAG alone would leave chunks with nothing.
+        mocks["ai_router"].generate_embedding.assert_awaited_once()
+
+
+class TestChunkRetrievalQuery:
+    async def test_one_shared_embedding_serves_rag_kb_and_chunks(self, make_chat_config):
+        """S2-4's single query embedding survives a third consumer.
+
+        Three sources searching one query must still be one embedding call:
+        the alternative is a paid round-trip and a duplicated cost-log row per
+        turn, which is the exact regression S2-4 removed.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            config={"kb_enabled": True},
+            chunks=[_chunk(1, "Аня (12:01): проектор сгорел")],
+            kb_facts=[{"id": 5, "fact_text": "проектор в кладовке", "similarity": 0.9}],
+        )
+
+        mocks["ai_router"].generate_embedding.assert_awaited_once()
+        shared = mocks["ai_router"].generate_embedding.return_value.embedding
+        assert mocks["chunk_service"].search.call_args.kwargs["query_embedding"] == shared
+
+    async def test_search_is_asked_for_everything_so_the_log_sees_near_misses(
+        self, make_chat_config
+    ):
+        """`min_similarity=0.0` is passed explicitly, overriding the service.
+
+        R1 moved the Q&A floor out of SQL because a sub-floor row that is never
+        returned is never logged, and a turn that retrieved nothing then cannot
+        say whether it missed by 0.001 or by 0.3. The argument is stronger
+        here: S6 has to derive this store's floor *from this table*, so a read
+        path that pre-filtered would destroy its own calibration data. The
+        floor is 0.0 today, which is exactly why an implementation that dropped
+        this argument would look correct until the day it mattered.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks_min_similarity=0.65,
+            chunks=[_chunk(1, "Аня (12:01): проектор сгорел")],
+        )
+
+        assert mocks["chunk_service"].search.call_args.kwargs["min_similarity"] == 0.0
+
+    async def test_chunk_search_gets_the_stripped_query(self, make_chat_config):
+        """R0's query hygiene applies to the new store too.
+
+        The trigger word is semantically loud and pulls the query toward
+        content *about the bot* — measured three-fold worse signal/noise. A new
+        retrieval path that read `message_text` instead would re-introduce it
+        for the store that covers the whole chat.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            text="бот, а что там было с проектором?",
+            chunks=[_chunk(1, "Аня (12:01): проектор сгорел")],
+        )
+
+        assert mocks["chunk_service"].search.call_args.args[1] == "а что там было с проектором?"
+
+
+class TestChunkInjection:
+    HEADER = "Fragments of this chat's own past conversations"
+
+    async def test_fragments_reach_the_system_prompt(self, make_chat_config):
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks=[_chunk(1, "Чат «Тест», 2026-08-01\nАня (12:01): проектор сгорел")],
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert self.HEADER in system_prompt
+        assert "Аня (12:01): проектор сгорел" in system_prompt
+
+    async def test_sub_floor_fragments_do_not_reach_the_prompt(self, make_chat_config):
+        """The floor is applied by the caller, after the log has seen the row."""
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks_min_similarity=0.6,
+            chunks=[
+                _chunk(1, "Аня (12:01): проектор сгорел", similarity=0.71),
+                _chunk(2, "Боря (13:02): вчера был дождь", similarity=0.12),
+            ],
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "проектор сгорел" in system_prompt
+        assert "вчера был дождь" not in system_prompt
+
+    async def test_over_budget_fragments_do_not_reach_the_prompt(self, make_chat_config):
+        """Two full chunks fill the budget; a third full one is dropped.
+
+        Asserted through the pipeline rather than only against
+        `trim_chunks_to_budget`, because a caller that rendered `chunk_rows`
+        instead of the trimmed list would pass every test of the trim itself.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks=[
+                _chunk(1, "Аня (12:01): " + "раз " * 400),
+                _chunk(2, "Боря (13:02): " + "два " * 400),
+                _chunk(3, "Витя (14:03): проектор " + "три " * 400),
+            ],
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "Аня (12:01)" in system_prompt
+        assert "Боря (13:02)" in system_prompt
+        assert "Витя (14:03)" not in system_prompt
+
+    async def test_the_budget_stops_rather_than_skipping_ahead(self, make_chat_config):
+        """A cheap low-ranked fragment must not leapfrog an expensive better one.
+
+        `trim_chunks_to_budget` breaks at the first fragment that does not fit
+        instead of skipping it and trying the next — the same choice
+        `trim_facts_to_budget` makes. Continuing would spend the tail of the
+        budget on the *worse* match purely because it was shorter, which
+        quietly re-orders a ranking the hybrid SQL exists to compute.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks=[
+                _chunk(1, "Аня (12:01): " + "раз " * 400),
+                _chunk(2, "Боря (13:02): " + "два " * 400),
+                _chunk(3, "Витя (14:03): проектор " + "три " * 400),
+                _chunk(4, "Галя (15:04): короткая реплика"),
+            ],
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "Витя (14:03)" not in system_prompt
+        assert "короткая реплика" not in system_prompt
+
+    async def test_empty_result_says_so_instead_of_staying_silent(self, make_chat_config):
+        """The explicit-empty contract (plan §4.2 / north star 3.2).
+
+        Silence reads to the model as "no context was offered", which it
+        answers by confabulating. Saying the archive was searched and came back
+        empty is what licenses an in-character "не помню".
+        """
+        mocks = await _run_chunks(make_chat_config, chunks=[])
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "nothing matched" in system_prompt
+        assert self.HEADER not in system_prompt
+
+    async def test_a_disabled_index_says_nothing_at_all(self, make_chat_config):
+        """Not searching is not the same as searching and finding nothing.
+
+        A chat with the module off must produce the prompt it produced before
+        this slice existed — otherwise every such chat is told, every turn,
+        that its history holds nothing.
+        """
+        config = make_chat_config(enabled=True)
+        pipeline, mocks = _make_pipeline(chunks=[])
+
+        await pipeline.process(
+            chat_id=-100123,
+            user_id=42,
+            user_name="Alice",
+            message_text="а что там было?",
+            trigger_type=TriggerType.TRIGGER,
+            config=config,
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "nothing matched" not in system_prompt
+
+    async def test_a_failed_search_is_not_evidence_of_an_empty_archive(self, make_chat_config):
+        """A retrieval outage must not be reported to the model as a finding.
+
+        `chunks_searched` is False on error precisely so the bot does not tell
+        the chat "this was never discussed" on the strength of a database
+        error.
+        """
+        mocks = await _run_chunks(
+            make_chat_config, chunk_search_error=RuntimeError("pool exhausted")
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "nothing matched" not in system_prompt
+
+    async def test_a_failed_search_still_answers(self, make_chat_config):
+        """Retrieval degrades; the reply does not disappear."""
+        mocks = await _run_chunks(
+            make_chat_config, chunk_search_error=RuntimeError("pool exhausted")
+        )
+
+        mocks["ai_router"].generate_text.assert_awaited_once()
+        call = _chunk_log_call(mocks)
+        assert call is not None
+        assert "pool exhausted" in call.kwargs["error"]
+
+
+class TestChunkRetrievalLog:
+    async def test_rejected_fragments_are_still_recorded(self, make_chat_config):
+        """The row S6 needs most is the one that did not make it.
+
+        `above_floor` and `injected` are two separate facts about a fragment:
+        "was it relevant enough" and "did it then fit". Collapsing them would
+        make "the floor cut it" and "the budget cut it" indistinguishable in
+        the only table that could tell them apart — and the budget here binds
+        far more often than the KB one does.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks_min_similarity=0.6,
+            chunks=[
+                _chunk(1, "Аня (12:01): проектор сгорел", similarity=0.71),
+                _chunk(2, "Боря (13:02): вчера был дождь", similarity=0.12),
+            ],
+        )
+
+        call = _chunk_log_call(mocks)
+        assert call is not None
+        by_id = {item["id"]: item for item in call.kwargs["results"]}
+        assert by_id.keys() == {1, 2}
+        assert by_id[1]["above_floor"] is True
+        assert by_id[1]["injected"] is True
+        assert by_id[2]["above_floor"] is False
+        assert by_id[2]["injected"] is False
+        assert call.kwargs["n_results"] == 2
+        assert call.kwargs["n_injected"] == 1
+
+    async def test_a_budget_drop_is_above_floor_but_not_injected(self, make_chat_config):
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks=[
+                _chunk(1, "Аня (12:01): " + "раз " * 400),
+                _chunk(2, "Боря (13:02): " + "два " * 400),
+                _chunk(3, "Витя (14:03): " + "три " * 400),
+            ],
+        )
+
+        call = _chunk_log_call(mocks)
+        by_id = {item["id"]: item for item in call.kwargs["results"]}
+        assert by_id[3]["above_floor"] is True
+        assert by_id[3]["injected"] is False
+        assert call.kwargs["n_injected"] == 2
+
+    async def test_params_record_every_knob_that_shaped_the_ranking(self, make_chat_config):
+        """A row saying only "chunks" could not tell a weight change from a
+        floor change months later, and S6 will have made both."""
+        mocks = await _run_chunks(
+            make_chat_config,
+            text="бот, а что там было с проектором?",
+            chunks=[_chunk(1, "Аня (12:01): проектор сгорел")],
+        )
+
+        params = _chunk_log_call(mocks).kwargs["params"]
+        assert params["backend"] == "chunks"
+        assert params["rrf_k"] == 60
+        assert params["vector_weight"] == 1.0
+        assert params["fts_weight"] == 1.0
+        assert params["depth_multiplier"] == 2
+        assert params["min_similarity"] == 0.0
+        assert params["query_stripped"] is True
+        assert params["vector_leg_skipped"] is False
+
+    async def test_the_fusion_score_is_recorded_beside_the_cosine(self, make_chat_config):
+        """Both, not one: a fragment only the lexical leg found carries a NULL
+        cosine while being the best answer on the page, so a log keeping only
+        `sim` would misdescribe why it was there — and a log keeping only the
+        fused score could not answer what a floor on `sim` would have cut."""
+        mocks = await _run_chunks(
+            make_chat_config,
+            chunks=[_chunk(1, "Аня (12:01): проектор", similarity=None, rrf_score=0.0164)],
+        )
+
+        item = _chunk_log_call(mocks).kwargs["results"][0]
+        assert item["sim"] is None
+        assert item["rrf"] == 0.0164
+        assert item["vec_rank"] == 1
+        assert item["fts_rank"] == 2
+
+    async def test_the_stored_head_is_the_head_not_just_120_characters(self, make_chat_config):
+        """Which end it is taken from is the whole point.
+
+        `results[].head` is the only human-readable trace of what a turn
+        retrieved, and S6 reads it when judging relevance. A length-only
+        assertion passes for `[-120:]` just as happily as for `[:120]` — and
+        the tail of a 2600-character chunk is a mid-conversation scrap with the
+        dateline stripped off, i.e. exactly the context a human grader needs.
+        (Review 2026-08-25: the `[-120:]` mutation survived the whole suite.)
+        """
+        content = "Чат «Тест», 1 мая 2026\nАня (12:01): " + "проектор " * 100
+        mocks = await _run_chunks(make_chat_config, chunks=[_chunk(1, content)])
+
+        item = _chunk_log_call(mocks).kwargs["results"][0]
+        assert item["head"] == content[:120]
+
+
+class TestChunkRetrievalDegraded:
+    """An embeddings outage costs the vector leg, not the turn."""
+
+    async def test_the_lexical_leg_still_runs_without_an_embedding(self, make_chat_config):
+        """The Q&A store retrieves nothing in this state; this one still answers.
+
+        Passing `query_embedding=None` is the service's documented "FTS only"
+        contract. Skipping the search instead would throw away the one leg that
+        survives an embeddings outage — on the turn where RAG and KB have
+        already returned nothing.
+        """
+        mocks = await _run_chunks(
+            make_chat_config,
+            embedding_error=RuntimeError("provider down"),
+            chunks=[_chunk(1, "Аня (12:01): проектор сгорел", vector_leg_skipped=True)],
+        )
+
+        mocks["chunk_service"].search.assert_awaited_once()
+        assert mocks["chunk_service"].search.call_args.kwargs["query_embedding"] is None
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "проектор сгорел" in system_prompt
+
+    async def test_a_degraded_turn_is_marked_in_the_log(self, make_chat_config):
+        """S6 has to be able to drop these rows: half a search is not a sample
+        of what a full search would have scored."""
+        mocks = await _run_chunks(
+            make_chat_config,
+            embedding_error=RuntimeError("provider down"),
+            chunks=[_chunk(1, "Аня (12:01): проектор", vector_leg_skipped=True)],
+        )
+
+        assert _chunk_log_call(mocks).kwargs["params"]["vector_leg_skipped"] is True
+
+    async def test_a_degraded_empty_turn_does_not_claim_the_archive_is_empty(
+        self, make_chat_config
+    ):
+        """Conservative on purpose: with no rows there is nothing carrying
+        `vector_leg_skipped`, so a turn that started without an embedding is
+        treated as unproven rather than asserted as thorough."""
+        mocks = await _run_chunks(
+            make_chat_config, embedding_error=RuntimeError("provider down"), chunks=[]
+        )
+
+        system_prompt = mocks["ai_router"].generate_text.call_args.kwargs["system_prompt"]
+        assert "nothing matched" not in system_prompt

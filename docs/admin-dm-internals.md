@@ -18,7 +18,7 @@ grammar, state machines, storage, and the traps that have already bitten.
 | [src/bot/handlers/admin_sticker.py](../src/bot/handlers/admin_sticker.py) | Sticker browser, re-analysis, DM sticker check, description-merge reply (`adm_stk*`) |
 | [src/bot/handlers/rules.py](../src/bot/handlers/rules.py) | Rules engine UI (`adm_rules:`, `ar_*`) |
 | [src/bot/keyboards/admin*.py](../src/bot/keyboards/) | All inline keyboards; one module per handler module |
-| [src/bot/settings_fields.py](../src/bot/settings_fields.py) | The 25-field registry shared by the chat panel and the defaults screen |
+| [src/bot/settings_fields.py](../src/bot/settings_fields.py) | The 26-field registry shared by the chat panel and the defaults screen |
 | [src/bot/command_registry.py](../src/bot/command_registry.py) | Which slash commands exist, where Telegram advertises them, and the pure code↔registry audit |
 | [src/bot/commands.py](../src/bot/commands.py) | Pushes that registry to Telegram, deletes stale per-admin scopes, reads back and diffs |
 | [src/bot/filters/admin.py](../src/bot/filters/admin.py) | `IsAdmin` message filter |
@@ -178,7 +178,7 @@ state living on Telegram's side, declared by `COMMANDS` in
 | `admin_settings` | JSON `{"lang": "ru", "notifications": {...}}` | Panel language + notification switches, both global |
 | `command_scopes_pushed` | JSON list of ints | Chat ids currently holding a per-admin command menu (§4a) |
 | `command_sync_last_alert` | sha256 string or null | Digest of the last command-drift alert sent (§4a) |
-| `default_<field>` | scalar | Merge layer 2 for the 12 non-legacy per-chat fields |
+| `default_<field>` | scalar | Merge layer 2 for the 13 non-legacy per-chat fields |
 | `health_check_*` | scalars | Health scheduler config |
 
 Notification defaults live in two places that must agree:
@@ -215,17 +215,22 @@ vestigial).
 codes, value types and the legacy split. Both the chat panel and the defaults screen render
 from it.
 
-- **25 fields** = 26 mergeable `ChatConfig` fields − `enabled` − `kb_organizer_ids`.
+- **26 fields** = 27 mergeable `ChatConfig` fields (`_CHAT_CONFIG_FIELDS`) − `enabled`.
+  `kb_organizer_ids` is excluded from the registry too, but it was never in the merge to
+  begin with — it is written straight through `ChatSettingsRepository`.
 - **13 legacy** (migration 001 columns that still carry a SQL `DEFAULT`): `ensure_exists()`
   materialises a value on first contact, permanently shadowing `bot_config.default_*`.
   Therefore they never show the inherited marker and never appear on the global screen.
-- **12 non-legacy** (nullable, no `DEFAULT`) — NULL honestly means "inherited".
+- **13 non-legacy** (nullable, no `DEFAULT`) — NULL honestly means "inherited".
 - Only `FieldType.BOOL` fields get a toggle; the rest render read-only, except
   `tolerance_level`, which has a dedicated FSM editor (ADR-0008 Decision 10). A generic
   non-BOOL editor is the deferred F-1 work item.
 
-Several docstrings still say "11 new fields" — they predate `tolerance_level`. The count is
-computed from `new_fields()`, so the code is right and the prose is stale.
+Every count on this page is prose about a number the code computes (`len(CHAT_SETTINGS_FIELDS)`,
+`len(new_fields())`), so treat the code as authoritative and fix the prose when it drifts. It has
+drifted twice: the docstrings that said "11 new fields" predated `tolerance_level`, and the 25/12
+figures predated `chunks_enabled` (S5b). `tests/unit/test_settings_fields.py` pins the numbers —
+if a count here disagrees with that file, that file is right.
 
 Three fields are **link-only** on the chat panel: `kb_enabled`, `reactions_enabled`,
 `reactions_history_enabled`. `handle_chat_panel_toggle` explicitly refuses them

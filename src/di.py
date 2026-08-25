@@ -22,6 +22,7 @@ from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.chunks import ChunkRepository
 from src.database.repositories.knowledge import KnowledgeRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
@@ -41,6 +42,7 @@ from src.services.modules.links import LinkExtractorService
 from src.services.modules.sticker import StickerLearningService, StickerResponderService
 from src.services.modules.summary import SummaryService
 from src.services.modules.voice import VoiceTranscriptionService
+from src.services.rag.chunk_retrieval import ChunkRetrievalService
 from src.services.rag.memory import RAGMemoryService
 from src.services.relevancy.gate import RelevancyGate
 from src.services.rules import RuleActionExecutor, RuleEngine
@@ -105,6 +107,10 @@ class RepositoryProvider(Provider):
     @provide
     def memory_repo(self, pool: asyncpg.Pool) -> MemoryRepository:
         return MemoryRepository(pool)
+
+    @provide
+    def chunk_repo(self, pool: asyncpg.Pool) -> ChunkRepository:
+        return ChunkRepository(pool)
 
     @provide
     def abuse_repo(self, pool: asyncpg.Pool) -> AbuseRepository:
@@ -180,6 +186,33 @@ class ServiceProvider(Provider):
         )
 
     @provide
+    def chunk_retrieval_service(
+        self,
+        settings: Settings,
+        chunk_repo: ChunkRepository,
+        ai_router: AIRouter,
+    ) -> ChunkRetrievalService:
+        """The read half of the chunk index (S5b, TD-123).
+
+        Registered here the moment it acquired a caller, and not before: until
+        this slice its only users were two eval scripts that construct it
+        themselves, so a DI entry would have been a second way to build a thing
+        nothing asked for. `ChatChunkIndexer` (the write half) stays outside
+        Dishka for the opposite reason — it is a process-lifetime worker with no
+        handler calling it, so it is constructed in `main.py`.
+        """
+        return ChunkRetrievalService(
+            chunk_repo=chunk_repo,
+            ai_router=ai_router,
+            max_results=settings.chunk_retrieval.max_results,
+            min_similarity=settings.chunk_retrieval.min_similarity,
+            rrf_k=settings.chunk_retrieval.rrf_k,
+            vector_weight=settings.chunk_retrieval.vector_weight,
+            fts_weight=settings.chunk_retrieval.fts_weight,
+            depth_multiplier=settings.chunk_retrieval.depth_multiplier,
+        )
+
+    @provide
     def anti_abuse_checker(self, abuse_repo: AbuseRepository) -> AntiAbuseChecker:
         return AntiAbuseChecker(abuse_repo)
 
@@ -234,6 +267,7 @@ class ServiceProvider(Provider):
         message_repo: MessageRepository,
         response_log_repo: ResponseLogRepository,
         rag_service: RAGMemoryService,
+        chunk_service: ChunkRetrievalService,
         link_service: LinkExtractorService,
         sticker_service: StickerResponderService,
         knowledge_repo: KnowledgeRepository,
@@ -245,6 +279,7 @@ class ServiceProvider(Provider):
             message_repo=message_repo,
             response_log_repo=response_log_repo,
             rag_service=rag_service,
+            chunk_service=chunk_service,
             link_service=link_service,
             sticker_service=sticker_service,
             knowledge_repo=knowledge_repo,

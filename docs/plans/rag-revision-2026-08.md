@@ -160,8 +160,8 @@ kept-lists so `retrieval_log.injected` stays truthful.
 | S1 | Observability | ✅ PR #20 | `decision_log` + `retrieval_log` (migration 022), writers, dated RAG memories, bounded container logs, retention |
 | S2 | Correctness & hygiene | next | 1536-dim latent fallback bug; threshold consolidation; KB order-by fix; single query embedding + TD-009; dead code (delete_expired, ChatFact, unread module toggles); `chat_memory` into retention (stopgap); missing tests (MemoryRepository chat-scoping, RAGMemoryService); riders: `/kb` gating, relevancy_check provider routing |
 | S3 | Eval harness + baseline | | `scripts/eval_rag.py` + committed synthetic example template; golden set (gitignored) grown from `retrieval_log` real queries; **recorded baseline of the current Q&A store** — the justification artifact; knowledge-update + answer-absent strata |
-| S4 | Chunk store + indexer + backfill | | migration: `chat_chunks`; chunker (golden-file tests); background indexer; `task_type`-asymmetric embeddings (fresh index only); optional A/B: LLM per-chunk context vs header-only, gated on eval delta |
-| S5 | Retrieval cutover | | hybrid RRF SQL + OR-relaxation; `rag_backend` env flag; S5a shadow (chunks retrieval logs `injected=false` on live traffic, zero prompt impact) → S5b flip: injection + explicit-empty contract + ADR-0006 trims; Q&A writes stop |
+| S4 | Chunk store + indexer + backfill | ✅ PR #51 | migration: `chat_chunks`; chunker (golden-file tests); background indexer; `task_type`-asymmetric embeddings (fresh index only); optional A/B: LLM per-chunk context vs header-only, gated on eval delta |
+| S5 | Retrieval cutover | ✅ PR #62 (read side) + S5b 2026-08-25 | hybrid RRF SQL + OR-relaxation; `rag_backend` env flag; S5a shadow (chunks retrieval logs `injected=false` on live traffic, zero prompt impact) → S5b flip: injection + explicit-empty contract + ADR-0006 trims; Q&A writes stop |
 | S6 | Calibration | | floors re-tuned from prod `retrieval_log`; KB floor; recency as third RRF leg / decay multiplier (eval-gated); intent gate: heuristic first, instrumented fire-rate, classifier only if the heuristic measurably loses; `chat_memory` drop migration scheduled |
 
 Every slice merges to main independently (merge = production release); S1–S5
@@ -511,6 +511,57 @@ Telegram ставит `message_thread_id` не только на топики, �
 **Чего в S4 нет и не должно быть:** ни одна строка не читает `chat_chunks`. Гибридный
 запрос приезжает в S5 вместе с shadow-периодом — тогда же и появится смысл у GIN по
 `tsv`, который в этой миграции уже создан.
+
+## 5.3 Что приехало в S5b (2026-08-25) — чтение включено
+
+**Shadow-периода не было, и это осознанный отказ, а не пропуск.** Роадмап ставил его
+перед флипом, потому что на момент написания плана про чанки не было известно ничего.
+К 2026-08-25 замер (TD-121) уже прогнан на полном корпусе и на двух наборах кейсов, и
+shadow добавил бы не знание, а цикл релиза. Роль канарейки играет сам гейт: он
+per-chat, поэтому один чат включается первым и наблюдается на живом трафике ровно так
+же, как наблюдался бы в shadow — с той разницей, что видно и качество ответа, а не
+только распределение схожестей.
+
+**Что решил замер и на чём стоит флип.** Там, где у обоих хранилищ что-то есть, разницы
+нет — авто-набор дал ничью (чанки 2, `chat_memory` 2, ничья 3), и она артефакт: кейсы
+харвестятся из `bot_response_log`, то есть ровно из ходов, которые и лежат в
+`chat_memory`. На честном наборе — вопросы про отрезки без участия бота — `chat_memory`
+даёт recall@5 **0.000** (структурно: за время этих отрезков в ней создано 0 строк), а
+`chat_chunks` **0.545** при MRR 0.500. Вывод, который и нужно держать в голове: флип
+**расширяет досягаемость** (7.7% → 99.3% переписки), а не улучшает ранжирование.
+
+**Гейт — свой, а не `rag_enabled`.** План говорил «гейт выдачи — `rag_enabled`»; отдельный
+`chunks_enabled` (миграция 032, nullable без DEFAULT) выбран потому, что связка сделала бы
+невозможным промежуточное состояние «только чанки», через которое и проходит уход от
+`chat_memory`. Четыре комбинации двух флагов покрывают весь путь миграции, и каждая
+выражается одной записью в БД без рестарта.
+
+**Порог не унаследован — его нет.** `chunk_retrieval.min_similarity = 0.0`. Шкалы двух
+хранилищ смещены (документы `chat_memory` сами начинаются с обращения к боту), так что
+0.7 здесь мерил бы не то. Инъекцию ограничивают бюджет промпта и рамка «возможно
+релевантные, игнорируй не в тему». Калибровка — S6, и она возможна только потому, что
+read-path логирует **нефильтрованный** набор: `search()` вызывается с явным
+`min_similarity=0.0`, порог применяет пайплайн уже после записи в `retrieval_log`. Это
+тот же приём, что R1 сделал для Q&A-стороны, и здесь он строже обязателен — S6 выводит
+порог именно из этой таблицы.
+
+**Бюджет по §4.4.** `CHUNKS_BUDGET_TOKENS = 900` при оценке ÷3 (не ÷4 — кириллица),
+per-chunk cap 1300 символов с обрезкой по границе строки. KB осталась на ÷4 намеренно:
+менять её оценку — значит молча пересчитать уже откалиброванный бюджет, это идёт вместе
+с её собственной калибровкой, а не здесь. `trim_history_to_budget` (TD-007) по-прежнему
+не приехал.
+
+**Explicit-empty есть, и он различает три состояния, а не два:** индекс не спрашивали
+(ничего не говорим), спросили и не нашли (говорим — это и лицензирует «не помню»),
+спросили и не смогли (молчим: отказ ретривала — не свидетельство о содержимом чата).
+Деградация до одной лексической ноги при упавшем эмбеддинге считается «не смогли», хотя
+ответ при этом всё равно строится — половина поиска не является выборкой того, что дал
+бы полный.
+
+**Чего в S5b нет:** запись Q&A-пар не остановлена. Решение владельца 2026-08-18 всё
+равно оставляет их для чатов с `save_messages = false`, а до тех пор, пока чтение не
+обкатано, второй источник памяти — страховка, а не дубль. Чат с обоими флагами ищет в
+обоих хранилищах; это ровно то «искать всегда в обоих», которое требует §5.1.
 
 ## 6. Non-goals (v1)
 

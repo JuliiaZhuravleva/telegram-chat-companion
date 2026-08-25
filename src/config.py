@@ -210,6 +210,36 @@ class ChunkIndexerSettings(BaseSettings):
     embed_per_pass: int = 100
 
 
+class ChunkRetrievalSettings(BaseSettings):
+    """Hybrid retrieval over `chat_chunks` -- the read side (S5b).
+
+    Every field is a constructor argument of `ChunkRetrievalService`, hoisted
+    into config because S6 sweeps them against the eval set and a sweep whose
+    knobs are constants means editing code to run it. They are also recorded
+    verbatim in `retrieval_log.params` on every turn, so a distribution read
+    back months later says which numbers produced it.
+
+    `min_similarity = 0.0` means **no floor**, and that is deliberate rather
+    than a placeholder. The 0.7 that RAG and KB use was derived on
+    `chat_memory`, whose documents are built from the raw exchange and
+    therefore begin with the same bot address the query does -- measured
+    2026-08-19, that shared boilerplate inflates cosine on both hits and
+    misses. Chunks are ordinary conversation on a differently-offset scale, so
+    importing 0.7 would be carrying a number across exactly the discontinuity
+    `docs/rag-eval-baseline.md` warns about. What bounds the injection until S6
+    calibrates a real floor is the prompt budget (`CHUNKS_BUDGET_TOKENS`) plus
+    the framing that tells the model to ignore off-topic fragments -- not a
+    threshold nobody has measured.
+    """
+
+    max_results: int = 5
+    min_similarity: float = 0.0
+    rrf_k: int = 60
+    vector_weight: float = 1.0
+    fts_weight: float = 1.0
+    depth_multiplier: int = 2
+
+
 class Settings(BaseSettings):
     """Main application settings."""
 
@@ -248,6 +278,7 @@ class Settings(BaseSettings):
     maintenance: MaintenanceSettings = Field(default_factory=MaintenanceSettings)
     embedding_backfill: EmbeddingBackfillSettings = Field(default_factory=EmbeddingBackfillSettings)
     chunk_indexer: ChunkIndexerSettings = Field(default_factory=ChunkIndexerSettings)
+    chunk_retrieval: ChunkRetrievalSettings = Field(default_factory=ChunkRetrievalSettings)
     modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:

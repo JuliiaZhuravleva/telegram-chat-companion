@@ -136,6 +136,50 @@ Four things about it that are behaviour, not tuning:
 `python -m scripts.backfill_chunks <dsn>` runs the same worker in a loop when waiting
 for the schedule is not worth it — after a restore, or before a measurement.
 
+### Chunk Retrieval Settings (S5b)
+
+Whether a chat is searched at all is **not** here — it is `chunks_enabled` in the
+three-layer merge (`chat_settings.chunks_enabled` → `bot_config.default_chunks_enabled`
+→ `false`), toggleable per chat from the settings panel. These are the ranking knobs.
+
+```yaml
+chunk_retrieval:
+  max_results: 5
+  min_similarity: 0.0    # 0.0 = no floor, on purpose — see below
+  rrf_k: 60
+  vector_weight: 1.0
+  fts_weight: 1.0
+  depth_multiplier: 2    # how deep each leg goes before fusion; must be >= 2
+```
+
+Every one of these is recorded verbatim in `retrieval_log.params` on every turn, so a
+distribution read back months later says which numbers produced it. That is the point:
+S6 sweeps them, and a log saying only `"chunks"` could not tell a weight change from a
+floor change after both had happened.
+
+- **`min_similarity: 0.0` means no floor, and it is a decision rather than a placeholder.**
+  The 0.7 that RAG and KB use was calibrated on `chat_memory`, whose documents are built
+  from the raw exchange and therefore begin with the same bot address the query does;
+  measured 2026-08-19, that shared boilerplate inflates cosine on hits *and* misses.
+  Chunks are ordinary conversation on a differently-offset scale, so importing 0.7 would
+  carry a number across exactly the discontinuity
+  [rag-eval-baseline.md](rag-eval-baseline.md) warns about. What bounds injection
+  meanwhile is the prompt budget plus framing that tells the model to ignore off-topic
+  fragments — not a threshold nobody has measured.
+- **`depth_multiplier` below 2 quietly disables RRF.** Fusing two top-`k` lists can only
+  return rows some leg already had in its top `k`, which throws away the one thing the
+  fusion is for: a row ranked 7th by both legs beating a row ranked 1st by one and 400th
+  by the other.
+- **The prompt budget is not configurable** — `CHUNKS_BUDGET_TOKENS` (900) and
+  `MAX_CHUNK_CHARS` (1300) live in `prompt_builder.py`, because the two are an arithmetic
+  pair: the cap is what makes "about two fragments" true, and moving one without the
+  other silently makes it one.
+
+Rolling out is two DB writes and no restart: `chat_settings.chunks_enabled = true` for
+one chat first, then `bot_config.default_chunks_enabled` for the rest. Rolling back is
+the same writes inverted — the indexer keeps writing either way, so reading and writing
+never have to be reverted together.
+
 ### Knowledge Base Settings
 
 Retrieval tuning only — whether the module runs at all is `modules.knowledge_base.enabled`

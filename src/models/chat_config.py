@@ -60,6 +60,15 @@ class ChatConfig:
     # Relevancy gate (filters random responses for natural participation)
     relevancy_gate_enabled: bool = True
 
+    # Chunk retrieval (S5b): whether the conversation-chunk index is SEARCHED
+    # for this chat. Independent of the two gates around it, so all four
+    # combinations are expressible: `save_messages` decides whether there is
+    # anything to chunk, `rag_enabled` decides whether the Q&A store is
+    # searched, and this decides whether the chunk store is. Off by default —
+    # the slice that added the read path must not also switch it on, since
+    # merging to main is a production release.
+    chunks_enabled: bool = False
+
     # Knowledge Base (opt-in per chat, ADR-0003)
     kb_enabled: bool = False
 

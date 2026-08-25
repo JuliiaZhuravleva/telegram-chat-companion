@@ -155,7 +155,7 @@ Live QA evidence from chat history: a sticker `🍩 Аниме-девочка с
 
 Forum-topic awareness is **present in message history** (`message_thread_id` composite index from migration 007) but **not enforced in RAG retrieval** — the cosine query does not scope by topic. This is by design: long-term memory is chat-wide, while recent-history quotes are topic-scoped (20 current topic + 10 other topics via UNION ALL).
 
-### 2.7a Chunk Index (S4 — written, not yet read)
+### 2.7a Chunk Index (S4 write, S5b read)
 
 [src/services/rag/chunker.py](src/services/rag/chunker.py), [src/services/rag/indexer.py](src/services/rag/indexer.py), [src/database/repositories/chunks.py](src/database/repositories/chunks.py), migration 029.
 
@@ -194,9 +194,47 @@ would separate a reply from the message it answers. The column stays in `chat_ch
 for when a forum can be recognised (`chat.is_forum` is not stored). The same fact makes
 the *prompt's* forum branch fire on ordinary replies — tracked as TD-102, not fixed here.
 
-**Nothing reads this table yet.** Retrieval moves onto it in S5 (hybrid FTS + vector
-with RRF), behind a shadow period; until then the index is written, embedded and unused,
-which is exactly what makes the migration safe to ship on its own.
+**Retrieval (S5b)** — [src/services/rag/chunk_retrieval.py](src/services/rag/chunk_retrieval.py),
+`ChunkRepository.search`, migration 032.
+
+- **Gate** — `chunks_enabled` per chat, **off by default**, in the three-layer merge
+  (`chat_settings.chunks_enabled` → `bot_config.default_chunks_enabled` → `false`) and
+  as a toggle on the chat settings panel. It is deliberately independent of
+  `rag_enabled`: the two stores answer different questions, so all four combinations
+  are expressible, "chunks only" among them.
+- **Hybrid, one SQL statement** — a vector leg and a full-text leg, each `MATERIALIZED`,
+  each ranked to `2 × max_results` deep, fused by RRF (`weight / (k + rank)`, k=60). The
+  vector leg finds a paraphrase nobody typed; the FTS leg finds the rare literal token an
+  embedding smooths away — names, in-jokes, model numbers, misspellings — which on this
+  corpus is most of what people ask about. Strict `websearch_to_tsquery` relaxes AND→OR
+  when it matches nothing (never for negated queries).
+- **One embedding per turn** — the query vector computed for RAG and KB is reused, so
+  adding this source costs no extra API call. If it failed, the search still runs on the
+  lexical leg alone (`query_embedding=None` is the documented "FTS only" contract), which
+  is strictly better than the Q&A path's behaviour of retrieving nothing.
+- **No similarity floor** (`chunk_retrieval.min_similarity: 0.0`), on purpose. The 0.7
+  RAG and KB use was calibrated on `chat_memory`, whose documents begin with the same bot
+  address the query does, so the two stores' cosine scales are offset — measured, see
+  `docs/rag-eval-baseline.md`. What bounds injection until S6 calibrates one is the prompt
+  budget below plus framing that tells the model to ignore off-topic fragments.
+- **Injection** — up to `CHUNKS_BUDGET_TOKENS` (900 ≈ two full fragments) at ~3 chars per
+  token, each fragment capped at 1300 characters and cut on a line boundary so no
+  half-sentence is left attributed to a named person. Rendered as `[fragment N]` blocks
+  under a header that says they were ranked by a search and may be off-topic; **no
+  similarity percentage**, because ranking is RRF over two legs and the cosine column
+  would misdescribe a fragment the lexical leg found.
+- **Explicit-empty contract** — when the index was searched and matched nothing, the
+  prompt says so, which licenses an in-character "не помню" instead of a confabulation.
+  A search that errored or ran without its vector leg does *not* trigger it: a failure is
+  not a finding.
+- **Everything is logged** — one `retrieval_log` row per turn with `source='chunks'`,
+  carrying the unfiltered candidate set (`sim`, `rrf`, `vec_rank`, `fts_rank`,
+  `above_floor`, `injected`) and every knob that shaped the ranking. S6 derives the floor
+  from exactly this table, which is why the read path must not pre-filter it.
+
+**What has not moved.** The Q&A store still writes on every answered turn, so a chat with
+both flags on searches both. Retiring `chat_memory` writes is a separate decision (owner,
+2026-08-18: chats with `save_messages = false` keep them as their only memory).
 
 ### 2.8 Forum Topics
 
@@ -377,7 +415,8 @@ From [src/models/chat_config.py](src/models/chat_config.py) and `config/default.
 | `random_response_min_interval` | int (s) | `300` | Per-chat cooldown between RANDOM responses |
 | `system_prompt` | str | `""` | Chat personality preamble |
 | `language` | str | `"ru"` | `ru` or `en` — affects prompt instructions and admin-panel strings |
-| `rag_enabled` | bool | `true` | Vector-memory retrieval + storage |
+| `rag_enabled` | bool | `true` | Q&A-pair (`chat_memory`) retrieval + storage |
+| `chunks_enabled` | bool | `false` | Search the chat's own conversation archive (`chat_chunks`, §2.7a). Independent of `rag_enabled` |
 | `transcribe_voice` | bool | `true` | Whisper on voice messages |
 | `transcribe_video_notes` | bool | `true` | Whisper on video notes |
 | `abuse_filter_enabled` | bool | `false` | Jailbreak/cooldown/blacklist layer |
@@ -480,7 +519,8 @@ For text messages, in order:
   natural key `(chat_id, thread_id, msg_from, msg_to, part)` with `NULLS NOT DISTINCT`,
   `senders BIGINT[]`, a generated `tsvector` (russian, ё→е), `embedding` + `emb_model` +
   `emb_task_type`. No ANN index by design — exact scan at a couple of thousand rows per
-  chat is both faster and complete. Written since S4, read from S5.
+  chat is both faster and complete. Written since S4; read from S5b, per chat behind
+  `chunks_enabled` (migration 032).
 - `chat_stickers` — `file_unique_id` PK, `visual_description`, `emotion`, `character`, `contexts` array, `description_embedding`, `usage_count`, `bot_usage_count`.
 - `chat_rules` — per-chat JSON rule store with `type`, `weight`, `mandatory`, `enabled`.
 - `bot_config` — global KV (admin_ids, default_*, notifications).
