@@ -229,6 +229,12 @@ async def handle_close_callback(
 
     msg = callback.message
     if isinstance(msg, Message):
+        # A multi-part summary lives in several messages, and only this one
+        # carries the Close button. Deleting the anchor alone leaves the tail
+        # in the chat with nothing that can ever remove it -- and strands the
+        # tracking entry too, pointing at a message that no longer exists, so
+        # even a later refresh could not clean it up.
+        await _drop_continuations(msg)
         try:
             await msg.delete()
         except Exception:

@@ -266,3 +266,46 @@ class TestItIsActuallyWired:
             "on the SESSION, not the dispatcher: a dispatcher middleware sees incoming "
             "updates and would never see an outgoing flood limit at all"
         )
+
+
+class TestTimeBoundMethodsAreNotRetried:
+    """A retry that lands after the value expires is worse than no retry.
+
+    `sendChatAction` is the one that bites. Telegram expires a chat action
+    client-side after ~5s (which is why `typing_indicator` re-sends every 4s),
+    so a "typing" delivered 30s late is not late, it is wrong — and aiogram's
+    `ChatActionSender._stop()` waits on its worker with no timeout, so a worker
+    parked in our sleep holds `async with typing_indicator(...)` open. Measured
+    before the fix: ~61s of dead wait on the voice path, beginning the instant
+    transcription returned, with the transcript already in hand.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("method_name", ["SendChatAction", "AnswerCallbackQuery"])
+    async def test_it_fails_fast_instead_of_sleeping(self, method_name: str) -> None:
+        from src.bot.middleware.flood_control import _NEVER_RETRY
+
+        assert method_name in _NEVER_RETRY
+
+        recorder = _Recorder()
+        method = MagicMock()
+        type(method).__name__ = method_name
+        method.chat_id = -100123
+        make_request = AsyncMock(side_effect=_flood(30))
+
+        with pytest.raises(TelegramRetryAfter):
+            await _middleware(recorder)(make_request, MagicMock(), method)
+
+        assert recorder.slept == [], f"{method_name} must not be waited on"
+        assert make_request.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_send_is_still_retried(self) -> None:
+        """Control: the exclusion list must not have disabled retrying wholesale."""
+        recorder = _Recorder()
+        make_request = AsyncMock(side_effect=[_flood(3), "ok"])
+
+        result = await _middleware(recorder)(make_request, MagicMock(), _method())
+
+        assert result == "ok"
+        assert recorder.slept == [3.5]

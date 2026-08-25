@@ -369,14 +369,15 @@ class OpenAIProvider(AIProvider):
         tokens_input = usage.get("input_tokens")
         tokens_output = usage.get("output_tokens")
 
-        # A token-priced model answering without usage numbers would cost-log
-        # as $0 — indistinguishable from a genuinely free model, forever, with
-        # nothing else in the chain noticing (calculate_cost skips falsy
-        # tokens, _log_usage happily writes the zero). Say it here, at the
-        # only place that knows the numbers were absent rather than zero.
+        # A token-priced model answering without usage numbers cannot be
+        # priced. `calculate_cost` now says so by returning None, which reaches
+        # `response_log.cost_usd` as SQL NULL rather than as a fabricated zero,
+        # and it logs its own line to that effect. This warning is still worth
+        # keeping: it is the only place that knows WHICH provider call came
+        # back short, which `calculate_cost` cannot see from the model name.
         if not model.startswith("whisper") and tokens_input is None:
             logger.warning(
-                "Transcription response carried no usage tokens; cost will be logged as zero",
+                "Transcription response carried no usage tokens; cost logs as NULL",
                 model=model,
                 response_keys=list(result.keys()),
             )

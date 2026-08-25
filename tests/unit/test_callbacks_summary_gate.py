@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiogram.types import Message
 
-from src.bot.handlers.callbacks import handle_summary_callback
+from src.bot.handlers.callbacks import handle_close_callback, handle_summary_callback
 
 OWNER_ID = 111
 
@@ -168,7 +168,7 @@ async def test_the_keyboard_stays_on_the_anchor_of_a_multi_part_summary() -> Non
 
     The keyboard used to ride on the LAST part, and the anchor's own keyboard
     was cleared to make room for it — so a single failed `answer` (flood
-    control, a network blip; this project installs no retry middleware) left
+    control, a network blip; FloodControlMiddleware absorbs only <=30s waits, and only three of them) left
     the chat with a summary carrying no refresh, no count switch and no close.
     """
     from src.bot.handlers.callbacks import _CONTINUATIONS
@@ -235,3 +235,37 @@ async def test_a_summary_that_shrinks_to_one_message_leaves_no_tail() -> None:
     assert deleted, "the old continuations must go when the new summary fits in one message"
     short_call.message.answer.assert_not_awaited()
     assert not _CONTINUATIONS, "nothing left to track once the summary is one message"
+
+
+@pytest.mark.asyncio
+async def test_closing_a_multi_part_summary_removes_its_tail_too() -> None:
+    """Only the anchor carries the Close button.
+
+    Deleting it alone left the continuation messages in the chat with nothing
+    that could ever remove them — and stranded the tracking entry, pointing at
+    a message that no longer exists, so even a later refresh could not clean it
+    up. In a group that is permanent litter nobody can clear.
+    """
+    from src.bot.handlers.callbacks import _CONTINUATIONS
+
+    _CONTINUATIONS.clear()
+    sent_ids = iter(range(601, 620))
+    cfg = _make_chat_config(save_messages=True)
+
+    posted = _refreshable_callback(sent_ids, [])
+    await handle_summary_callback(posted, cfg, _summary_service(_LONG_SUMMARY))
+    appended = len(posted.message.answer.await_args_list)
+    assert appended > 0, "this fixture must produce a multi-part summary"
+
+    deleted: list[int] = []
+    closing = _refreshable_callback(iter(range(700, 710)), deleted)
+    closing.data = f"help_close:{OWNER_ID}"
+    closing.message.delete = AsyncMock()
+
+    await handle_close_callback(closing, cfg)
+
+    assert deleted == [601 + i for i in range(appended)], (
+        "the continuations must be deleted along with the anchor"
+    )
+    closing.message.delete.assert_awaited_once()
+    assert not _CONTINUATIONS

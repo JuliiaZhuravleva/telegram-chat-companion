@@ -13,10 +13,13 @@ result* rather than deleted, so the answer lands where the reader was already
 looking.
 
 Nothing in here may raise into the caller. A cosmetic ticker that can kill the
-operation it is reporting on would be strictly worse than no ticker: the
-project has no flood-control middleware, and `editMessageText` answers a burst
-with `TelegramRetryAfter`, a sibling of `TelegramBadRequest` that nothing in
-`src/` currently catches.
+operation it is reporting on would be strictly worse than no ticker, and
+`FloodControlMiddleware` does not make that safe: it absorbs a
+`TelegramRetryAfter` only for up to three attempts and only when Telegram asks
+for 30 seconds or less, re-raising otherwise. `TelegramRetryAfter` is also a
+*sibling* of `TelegramBadRequest` rather than a subclass, so an `except
+TelegramBadRequest` would not catch what does get through. The broad guards
+below are therefore still load-bearing.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from types import TracebackType
 import structlog
 from aiogram.types import Message
 
+from src.bot.reply_flow import send_html_parts
 from src.bot.utils import safe_edit_text
 
 logger = structlog.get_logger(__name__)
@@ -171,8 +175,6 @@ class ProgressNotice:
         plain send when there is no placeholder to edit (it was never posted,
         or someone deleted it), so the result is delivered either way.
         """
-        from src.bot.reply_flow import send_html_parts
-
         await self._stop_ticking()
         if not parts:
             # `split_html` returns no parts when the body has no visible text.
@@ -195,6 +197,11 @@ class ProgressNotice:
                 rest = await send_html_parts(
                     message=self._message,
                     parts=parts[1:],
+                    # Part one is already on screen -- it IS the placeholder,
+                    # just edited. Without this, a failure on `parts[1]` looks
+                    # like a first-element failure to send_html_parts and it
+                    # would unwind the handler with part one visible.
+                    already_delivered=True,
                     reply_to_message_id=None,
                     language=language,
                 )
@@ -223,11 +230,28 @@ class ProgressNotice:
             return
         placeholder = self._placeholder
         self._placeholder = None
-        try:
-            if placeholder is not None:
+
+        if placeholder is not None:
+            try:
                 await safe_edit_text(placeholder, text, parse_mode=None)
+            except Exception as exc:
+                # Editing the placeholder is the preferred route, not the only
+                # one. `finish` has had this fallback from the start; `fail`
+                # had none, so a throttled or vanished placeholder swallowed
+                # the failure report AND left "🎙 Расшифровываю…" standing over
+                # work that was already dead -- the durable silence this whole
+                # class exists to remove, reached through its own error path.
+                logger.info(
+                    "Could not edit the placeholder into the failure; sending fresh",
+                    chat_id=self._message.chat.id,
+                    error_type=type(exc).__name__,
+                )
+                await _discard_message(placeholder, self._message.chat.id)
             else:
-                await self._message.answer(text)
+                return
+
+        try:
+            await self._message.answer(text)
         except Exception as exc:
             logger.warning(
                 "Could not report the failure to the chat",
@@ -240,8 +264,14 @@ class ProgressNotice:
         placeholder, self._placeholder = self._placeholder, None
         if placeholder is None:
             return
-        try:
-            await placeholder.delete()
-        except Exception:
-            # A placeholder we cannot delete is a cosmetic problem only.
-            logger.debug("Could not delete the progress placeholder")
+        await _discard_message(placeholder, self._message.chat.id)
+
+
+async def _discard_message(message: Message, chat_id: int) -> None:
+    """Delete a placeholder we are about to replace. Never raises."""
+    try:
+        await message.delete()
+    except Exception:
+        # A placeholder we cannot delete is a cosmetic problem only -- the
+        # caller is on its way to sending the real content regardless.
+        logger.debug("Could not delete the progress placeholder", chat_id=chat_id)

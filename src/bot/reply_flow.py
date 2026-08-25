@@ -162,6 +162,7 @@ async def send_html_parts(
     parts: list[str],
     reply_to_message_id: int | None,
     language: str,
+    already_delivered: bool = False,
 ) -> list[Message]:
     """Send pre-split pieces as consecutive messages; return the ones that landed.
 
@@ -172,6 +173,22 @@ async def send_html_parts(
     Stops at the first piece that cannot be delivered rather than sending the
     tail on its own: a reply whose opening is missing is harder to read than a
     reply that is visibly cut short, and the caller is told how far it got.
+
+    **Once anything has reached the chat, a later failure degrades instead of
+    raising.** Raising there was a real defect: `TelegramRetryAfter` is a
+    *sibling* of `TelegramBadRequest`, not a subclass, so a throttled part two
+    unwound the whole handler with part one already visible -- and the caller's
+    post-send bookkeeping never ran. For a transcription that means a bot
+    message the chat can read with no migration-028 routing row behind it, so
+    a reply to those words is answered as if the bot had spoken them. Nothing
+    reaches the user either way (the global error handler answers only
+    CallbackQuery), so raising bought nothing and cost the bookkeeping.
+
+    `already_delivered` lets a caller say that something is on screen *before*
+    this call: `ProgressNotice.finish` edits the placeholder into part one and
+    then passes `parts[1:]` here, so a failure on this call's own first element
+    is still a partial delivery. Keying the behaviour on `index == 0` instead
+    would miss exactly that case.
     """
     sent: list[Message] = []
     for index, part in enumerate(parts):
@@ -183,9 +200,25 @@ async def send_html_parts(
                 reply_to_message_id=quote,
                 language=language,
             )
-        except TelegramBadRequest as exc:
-            if not any(marker in str(exc).lower() for marker in _TOO_LONG_MARKERS):
-                raise
+        except Exception as exc:
+            too_long = isinstance(exc, TelegramBadRequest) and any(
+                marker in str(exc).lower() for marker in _TOO_LONG_MARKERS
+            )
+            if not too_long:
+                if not (sent or already_delivered):
+                    # Nothing is on screen yet, so unwinding leaves no
+                    # half-finished state and the caller's own error handling
+                    # (or the global one) is still the right place for this.
+                    raise
+                logger.warning(
+                    "A continuation could not be delivered; keeping what landed",
+                    chat_id=message.chat.id,
+                    part_index=index + 1,
+                    part_count=len(parts),
+                    error=str(exc),
+                    error_type=type(exc).__name__,
+                )
+                break
             logger.warning(
                 "Telegram rejected a split piece as too long; truncating",
                 chat_id=message.chat.id,

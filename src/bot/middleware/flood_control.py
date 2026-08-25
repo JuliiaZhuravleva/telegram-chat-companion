@@ -64,12 +64,38 @@ logger = structlog.get_logger(__name__)
 # delays the caller's own degradation.
 DEFAULT_MAX_ATTEMPTS = 3
 
-# The longest wait worth taking. Telegram occasionally answers a heavily
-# rate-limited chat with a `retry_after` in the hundreds of seconds; a reply
-# that arrives four minutes into a conversation is not a reply any more, and
-# meanwhile the handler holds a database connection from the pool. Past this,
-# fail immediately rather than sleeping and then failing.
+# The longest single wait worth taking. Telegram occasionally answers a heavily
+# rate-limited chat with a `retry_after` in the hundreds of seconds, and a reply
+# that arrives four minutes into a conversation is not a reply any more. Past
+# this, fail immediately rather than sleeping and then failing.
+#
+# Note what it does and does not bound: it caps ONE wait, not the total. Three
+# attempts at the maximum give ~61s of wall clock in the worst case. It is
+# deliberately not a total budget -- each individual wait is the thing Telegram
+# asked for, and refusing the second one after honouring the first would just
+# discard the time already spent.
 DEFAULT_MAX_WAIT_SECONDS = 30.0
+
+# Methods whose value expires before any wait we would take, so retrying them
+# is worse than dropping them.
+#
+# `sendChatAction` is the one that bites. The project's own note in
+# `src/utils/telegram.py` records that Telegram expires a chat action
+# client-side after ~5 seconds, which is why `typing_indicator` re-sends every
+# 4s -- so a "typing" delivered 30 seconds late is not late, it is wrong. Worse
+# than useless, in fact: aiogram's `ChatActionSender._stop()` waits on its
+# worker with no timeout, so a worker parked in our sleep holds
+# `async with typing_indicator(...)` open. Measured: a flood-limited
+# sendChatAction at the maximum accepted retry_after delays the block's exit by
+# ~61s -- and on the voice path that clock starts the instant transcription
+# returns, with Whisper already paid for, the transcript in hand and the
+# progress placeholder still standing. The user waits a minute for a message
+# that was ready before the wait began.
+#
+# `answerCallbackQuery` has the same shape: Telegram invalidates the query
+# after ~60s, so a retry that succeeds is answering a spinner that has already
+# timed out.
+_NEVER_RETRY = frozenset({"SendChatAction", "AnswerCallbackQuery"})
 
 # Telegram's value is the floor, not the target: waking at exactly that instant
 # is what produced the flood. A little extra, jittered, keeps several parts of
@@ -109,6 +135,17 @@ class FloodControlMiddleware(BaseRequestMiddleware):
             try:
                 return await make_request(bot, method)
             except TelegramRetryAfter as exc:
+                if method_name in _NEVER_RETRY:
+                    # Fail fast rather than sleep: the value is already stale,
+                    # and for sendChatAction the sleep also blocks the caller's
+                    # `typing_indicator` block from exiting.
+                    logger.info(
+                        "Flood limited on a time-bound method; not retrying",
+                        method=method_name,
+                        chat_id=_chat_id_of(method),
+                        retry_after=float(exc.retry_after),
+                    )
+                    raise
                 # Telegram's own number, not a guess of ours.
                 requested = float(exc.retry_after)
                 if requested > self._max_wait_seconds:
