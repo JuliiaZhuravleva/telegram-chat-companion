@@ -20,7 +20,9 @@ class TestCalculateCost:
         ) * Decimal("500") / Decimal("1000000")
         assert cost == expected
 
-    def test_free_model_returns_zero(self) -> None:
+    def test_free_model_returns_a_real_zero(self) -> None:
+        """`is_free` is a fact about the model, so zero here is an assertion we
+        are entitled to make — unlike the unknown cases below."""
         cost = calculate_cost(
             "gemini-embedding-001",
             tokens_input=10000,
@@ -33,19 +35,33 @@ class TestCalculateCost:
         expected = Decimal("0.006") * Decimal("2.5")
         assert cost == expected
 
-    def test_unknown_model_returns_zero(self) -> None:
+    def test_unknown_model_is_unpriceable_not_free(self) -> None:
+        """It used to return Decimal("0"), and that was a claim, not a fact.
+
+        A model absent from the table may be free or may be the most expensive
+        thing the provider sells. The zero was written to response_log.cost_usd,
+        which SpendLimitService sums — so the daily cap under-counted and
+        nothing could tell those rows from genuinely free ones afterwards.
+        """
         cost = calculate_cost(
             "nonexistent-model",
             tokens_input=1000,
             tokens_output=500,
         )
-        assert cost == Decimal("0")
+        assert cost is None
 
-    def test_none_tokens_returns_zero(self) -> None:
+    def test_a_priced_model_without_usage_numbers_is_unpriceable(self) -> None:
+        """The case streaming makes routine: a response with no usage object."""
         cost = calculate_cost("gpt-5-nano")
-        assert cost == Decimal("0")
+        assert cost is None
 
-    def test_zero_tokens_returns_zero(self) -> None:
+    def test_measured_zero_tokens_really_is_zero(self) -> None:
+        """The control for the test above: 0 and None must not be conflated.
+
+        A response that measurably consumed nothing costs nothing, and must stay
+        a hard zero. Written with `is None` checks rather than falsiness for
+        exactly this reason.
+        """
         cost = calculate_cost("gpt-5-nano", tokens_input=0, tokens_output=0)
         assert cost == Decimal("0")
 
@@ -55,10 +71,15 @@ class TestCalculateCost:
         expected = Decimal("0.02") * Decimal("5000") / Decimal("1000000")
         assert cost == expected
 
-    def test_whisper_without_duration_returns_zero(self) -> None:
-        # whisper-1 with no duration — can't compute cost
+    def test_a_per_minute_model_without_a_duration_is_unpriceable(self) -> None:
+        """whisper-1 is billed per minute; token counts cannot stand in.
+
+        Falling through to the token branches would bill it at its unset
+        $0/1M rates and call the result zero — a per-minute model priced as if
+        it were free.
+        """
         cost = calculate_cost("whisper-1", tokens_input=100)
-        assert cost == Decimal("0")
+        assert cost is None
 
     def test_transcribe_model_is_token_priced(self) -> None:
         # gpt-4o-mini-transcribe: $1.25/1M input (audio), $5/1M output
