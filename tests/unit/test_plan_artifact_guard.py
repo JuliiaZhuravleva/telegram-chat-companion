@@ -153,16 +153,16 @@ def test_telegram_chat_and_user_ids(tmp_path: Path) -> None:
     supergroup = write(
         tmp_path,
         "a.execution.md",
-        "QA ran against the test chat -1003908877878 with the admin account.\n",
-        marker="-1003908877878",
+        "QA ran against the test chat -1009999000042 with the admin account.\n",
+        marker="-1009999000042",
     )
     assert "telegram-id" in rules_hit(supergroup, tmp_path)
 
     bare = write(
         tmp_path,
         "b.execution.md.verdicts/A-1-1.json",
-        '{"verdict":"PASS","notes":"reproduced as user 5870677432 in the DM"}',
-        marker="5870677432",
+        '{"verdict":"PASS","notes":"reproduced as user 900000111 in the DM"}',
+        marker="900000111",
     )
     assert "telegram-id" in rules_hit(bare, tmp_path)
 
@@ -415,7 +415,7 @@ def test_waiver_is_per_rule_and_per_line(tmp_path: Path) -> None:
         tmp_path,
         "p.execution.md",
         f"budget 1000000000 and {secret} <!-- check-plan-artifacts: allow telegram-id -->\n"
-        "and the chat was -1003908877878\n",
+        "and the chat was -1009999000042\n",
         marker=secret,
     )
     hits = rules_hit(path, tmp_path)

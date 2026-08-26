@@ -103,8 +103,8 @@ class TestBuildChatUrl:
         assert url == "https://t.me/c/1234567890"
 
     def test_channel_uses_c_link(self):
-        url = build_chat_url(-1004200000000, chat_type="channel")
-        assert url == "https://t.me/c/4200000000"
+        url = build_chat_url(-1009999000042, chat_type="channel")
+        assert url == "https://t.me/c/9999000042"
 
     def test_supergroup_id_threshold_not_crossed(self):
         # Above the -1_000_000_000_000 threshold → not a real supergroup ID
@@ -139,10 +139,10 @@ class TestParseChatReference:
         assert build_chat_url(ref.chat_id, chat_type="supergroup") == "https://t.me/c/1234567890"
 
     def test_tme_c_link_channel_round_trips(self):
-        ref = parse_chat_reference("t.me/c/4200000000")
+        ref = parse_chat_reference("t.me/c/9999000042")
         assert ref is not None
-        assert ref.chat_id == -1004200000000
-        assert build_chat_url(ref.chat_id, chat_type="channel") == "https://t.me/c/4200000000"
+        assert ref.chat_id == -1009999000042
+        assert build_chat_url(ref.chat_id, chat_type="channel") == "https://t.me/c/9999000042"
 
     def test_tme_c_link_with_message_id_suffix(self):
         ref = parse_chat_reference("https://t.me/c/1234567890/42")
