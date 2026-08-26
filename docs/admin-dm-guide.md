@@ -43,6 +43,7 @@ Three rules apply to the whole admin surface:
 |---|---|
 | `/admin` or `/settings` | Opens the main panel (§4) |
 | `/costs` | Shortcut to the 24-hour AI spend screen (§6) |
+| `/cancel` | Ends whatever multi-step prompt you are parked in — a rule's JSON config, a tolerance value, an organizer add — and says which. Answers «Нечего отменять» when nothing is open. Works from **every** state: its router is included first, ahead of the ones that own those prompts. A *forwarded* message reading "/cancel" is content, not the command, so forwarding someone into the organizer prompt still works |
 | `/start`, `/help` | Ordinary user commands, nothing admin-specific |
 | `/summary` | Answers "group chats only" — summaries are never generated for a DM |
 | `/kb` | Works on the *DM's own* knowledge base, which is almost always empty. It appears in the command menu |
