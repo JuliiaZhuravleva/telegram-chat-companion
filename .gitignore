@@ -128,10 +128,21 @@ tests/manual/
 # Test screenshots
 tests/manual/screenshots/
 
-# Plan-orchestration raw payloads (raw `claude -p` output may contain auth tokens — TD-021)
-# Keep the *.execution.md envelopes and *.log.jsonl audit trails tracked; ignore only raw dumps.
+# Plan-orchestration artifacts. Everything the orchestrator or a specialist
+# WRITES stays local; only the human-written plan documents and checklists are
+# tracked. This repository is public, and agent-authored text is free prose
+# nobody reviewed line by line, produced by a process that quotes whatever it
+# was looking at — 222 such files, 83% of docs/plans/, were tracked until
+# 2026-08-26. An audit trail is worth having; it is not worth publishing.
+# (Raw `claude -p` dumps were already ignored — they may carry auth tokens, TD-021.)
 *.execution.md.raw/
 docs/plans/.draft/
+*.execution.md
+*.execution.md.progress
+*.execution.md.lock
+*.log.jsonl
+docs/plans/**/*.verdicts/
+*.verdicts/
 
 # Literal real identifiers for the commit guard (scripts/check_denylist.py).
 # The patterns half (.secrets-denylist.toml) IS committed; this half never is.
