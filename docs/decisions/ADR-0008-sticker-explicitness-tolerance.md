@@ -45,7 +45,7 @@ against these decisions; D-4 tests against them.
   completely normie/safe, `1.0` = maximally explicit. Nullable, **no SQL `DEFAULT`** (Decision 8).
 - `chat_settings.tolerance_level FLOAT` — **per-chat**, admin-settable (Decision 10), merged through
   `ChatConfigService`'s existing three-layer merge (`src/services/chat_config.py:95-126`). `0.0` = admits
-  nothing with any explicitness at all, `1.0` = anarchy, admits everything (Julia's "срачейка" example).
+  nothing with any explicitness at all, `1.0` = anarchy, admits everything (the "we are all friends here, send anything" chat).
   Nullable, no SQL `DEFAULT` (Decision 8); `ChatConfig.tolerance_level: float = 0.5` is the layer-1
   fallback (Decision 8 explains why this is sufficient with no migration seed row).
 

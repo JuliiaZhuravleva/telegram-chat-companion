@@ -1213,7 +1213,7 @@ def _real_chunk(*texts: str) -> dict:
         )
         for index, text in enumerate(texts)
     ]
-    chunks = build_chunks(messages, chat_id=-100, thread_id=None, chat_title="СРАЧЕЙКА")
+    chunks = build_chunks(messages, chat_id=-100, thread_id=None, chat_title="Тестовая беседа")
     assert chunks, "the chunker produced nothing — fixture is not exercising anything"
     return _chunk(1, chunks[0].content)
 
@@ -1306,7 +1306,7 @@ class TestTrimChunksToBudget:
 
         assert rendered.endswith("…")
         # The dateline survives, and so does the conversation under it.
-        assert rendered.startswith("Чат «СРАЧЕЙКА»")
+        assert rendered.startswith("Чат «Тестовая беседа»")
         body = rendered.split("\n", 1)[1]
         assert len(body) > 1000, f"body all but disappeared: {rendered[:80]!r}"
 
