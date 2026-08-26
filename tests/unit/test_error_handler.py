@@ -205,7 +205,7 @@ def test_json_logging_does_not_leak_local_variables() -> None:
     logged exception into a credential disclosure. Pins the safer choice so a
     later 'let's make tracebacks structured' change has to confront it.
     """
-    token_shaped_local = "8456420238:AAFAKEfaketokenvaluenotrealatall"
+    token_shaped_local = "1234567890:AAFAKEfaketokenvaluenotrealatall"
 
     def _frame_holding_a_secret() -> None:
         secret = token_shaped_local  # noqa: F841 — the point is that it is a local

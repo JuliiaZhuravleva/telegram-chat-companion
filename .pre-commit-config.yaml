@@ -41,6 +41,26 @@ repos:
         files: ^(docs/plans/|docs/rag-eval-baseline\.md$|docs/kb-eval-baseline\.md$)
         pass_filenames: true
 
+  # Project-specific identifiers. gitleaks above matches credential SHAPES and
+  # is good at it -- measured, it catches the real token in .env and correctly
+  # ignores the synthetic ones in tests/. What it structurally cannot see is a
+  # bare Telegram chat/user/bot id: an integer looks like every other integer.
+  # That class has leaked into this public repository twice. The patterns live
+  # in .secrets-denylist.toml (committed); the literal real values live in
+  # .secrets-denylist.local.toml (gitignored, deliberately not hashed -- ten
+  # digits is not a space sha256 protects).
+  #
+  # Intentionally NO files: filter. This is a whole-tree guard, and a filter
+  # narrower than the script silently disables it for everything else --
+  # the same lesson the ruff pin above records.
+  - repo: local
+    hooks:
+      - id: check-denylist
+        name: project identifiers (real chat/user/bot ids, developer paths)
+        entry: python3 scripts/check_denylist.py
+        language: system
+        pass_filenames: true
+
   # Shell linting. The backup and restore scripts run unattended against a
   # production database, where the usual shell traps (unquoted expansions, a
   # typo'd variable silently becoming an empty string) are expensive rather than

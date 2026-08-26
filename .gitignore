@@ -132,3 +132,7 @@ tests/manual/screenshots/
 # Keep the *.execution.md envelopes and *.log.jsonl audit trails tracked; ignore only raw dumps.
 *.execution.md.raw/
 docs/plans/.draft/
+
+# Literal real identifiers for the commit guard (scripts/check_denylist.py).
+# The patterns half (.secrets-denylist.toml) IS committed; this half never is.
+.secrets-denylist.local.toml
