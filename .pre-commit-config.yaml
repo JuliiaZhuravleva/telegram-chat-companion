@@ -57,7 +57,10 @@ repos:
     hooks:
       - id: check-denylist
         name: project identifiers (real chat/user/bot ids, developer paths)
-        entry: python3 scripts/check_denylist.py
+        # --require-literals: on a developer machine the local file MUST exist,
+        # otherwise the half that covers shapeless values is silently inert.
+        # CI does not pass it -- the file is gitignored and cannot exist there.
+        entry: python3 scripts/check_denylist.py --require-literals
         language: system
         pass_filenames: true
 

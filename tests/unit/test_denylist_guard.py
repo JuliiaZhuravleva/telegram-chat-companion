@@ -12,6 +12,8 @@ so each rule also gets an input it must stay silent about.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import re
 import subprocess
 import sys
@@ -46,8 +48,11 @@ NEGATIVE: dict[str, str] = {
     # Placeholder ids the repository actually writes, in every shape the
     # synthetic filter is meant to absorb.
     "telegram-chat-id": (
-        "ADR example -1001234567890, fixture -1009999000042, "
-        "round number -1004200000000, repeated -1009999999999"
+        # A round number is NOT on this list any more: the trailing-zeros
+        # branch that absorbed it also absorbed ids in the live range, so
+        # roundness stopped being a synthetic signal. Placeholders use the
+        # repository's -1009999xxxxxx convention instead.
+        "ADR example -1001234567890, fixture -1009999000042, repeated -1009999999999"
     ),
     "home-path": "CI wrote /home/runner/work/x.log and the docs say /Users/someone/projects/",
 }
@@ -194,3 +199,166 @@ def test_tracked_tree_is_clean() -> None:
         text=True,
     )
     assert result.returncode == 0, f"denylist violations in the tracked tree:\n{result.stderr}"
+
+
+# --------------------------------------------------------------------------
+# main() -- the call site, not the helper.
+#
+# Everything above drives scan_text(). That is exactly how the first version of
+# this suite passed while the program violated its own invariant: main() used
+# to skip SELF_EXEMPT files WHOLESALE, one level above the function under test,
+# so "a literal is never file-exempt" held in the helper and was false in the
+# guard. These tests run the real main() against a temporary tree.
+# --------------------------------------------------------------------------
+
+
+def run_main(tmp_path, files: dict[str, str], *, literals: str | None, argv: list[str]):
+    """Drive the real main() over a throwaway repo. Returns (code, out, err)."""
+    (tmp_path / "scripts").mkdir(parents=True, exist_ok=True)
+    for rel, body in files.items():
+        target = tmp_path / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+
+    # NOT named .secrets-denylist.toml: that name is a fixture in its own right
+    # (it is in SELF_EXEMPT), and writing the rule file over it clobbered the
+    # very content under test -- the first version of this helper did exactly
+    # that and the assertion failed for a reason that had nothing to do with
+    # the guard.
+    patterns = tmp_path / ".patterns-under-test.toml"
+    patterns.write_text((REPO_ROOT / ".secrets-denylist.toml").read_text("utf-8"), encoding="utf-8")
+    lit = tmp_path / ".secrets-denylist.local.toml"
+    if literals is not None:
+        lit.write_text(literals, encoding="utf-8")
+
+    saved = (guard.REPO_ROOT, guard.PATTERNS_FILE, guard.LITERALS_FILE, sys.argv)
+    guard.REPO_ROOT, guard.PATTERNS_FILE, guard.LITERALS_FILE = tmp_path, patterns, lit
+    sys.argv = ["check_denylist.py", *argv]
+    buf_out, buf_err = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+            code = guard.main()
+    finally:
+        guard.REPO_ROOT, guard.PATTERNS_FILE, guard.LITERALS_FILE, sys.argv = saved
+    return code, buf_out.getvalue(), buf_err.getvalue()
+
+
+FAKE_LITERALS = '[[literal]]\nvalue = "8123456789"\nlabel = "a bot"\n'
+
+
+def test_main_still_checks_literals_inside_a_self_exempt_file(tmp_path) -> None:
+    """The invariant, asserted where it was actually broken.
+
+    .secrets-denylist.toml is committed and public, and it is precisely where
+    someone pastes a measured example into a comment. Muting shape rules there
+    is right; muting the literal check is not. Deleting the SELF_EXEMPT guard
+    from the pattern loop and restoring the wholesale skip in main() must make
+    this test fail.
+    """
+    code, _out, err = run_main(
+        tmp_path,
+        {".secrets-denylist.toml": "# calibrated on 8123456789\n"},
+        literals=FAKE_LITERALS,
+        argv=[".secrets-denylist.toml"],
+    )
+    assert code == 1, "a known real value must be caught even in a self-exempt file"
+    assert "literal" in err
+
+
+def test_main_mutes_shape_rules_inside_a_self_exempt_file(tmp_path) -> None:
+    """The other half of the asymmetry -- otherwise the rule file cannot hold rules."""
+    code, out, _err = run_main(
+        tmp_path,
+        {".secrets-denylist.toml": "# example -1003418762095\n"},
+        literals=FAKE_LITERALS,
+        argv=[".secrets-denylist.toml"],
+    )
+    assert code == 0, out
+
+
+def test_main_exits_2_when_a_file_cannot_be_scanned(tmp_path) -> None:
+    """'Could not check' must never render as 'clean'. Exit 1 would be wrong too."""
+    code, out, err = run_main(tmp_path, {}, literals=FAKE_LITERALS, argv=["nope.md"])
+    assert code == 2, f"expected the could-not-scan code, got {code}: {out}{err}"
+    assert "could NOT scan" in err
+    assert "clean" not in out
+
+
+def test_main_refuses_when_literals_are_required_but_missing(tmp_path) -> None:
+    """Fail closed on a machine that never seeded the local file."""
+    code, _out, err = run_main(
+        tmp_path, {"a.md": "hello\n"}, literals=None, argv=["--require-literals", "a.md"]
+    )
+    assert code == 2
+    assert "--add-literal" in err, "the refusal must say how to fix it"
+
+
+def test_main_warns_loudly_when_literals_are_absent(tmp_path) -> None:
+    """Without the flag it still runs -- but 'clean' must not imply full coverage."""
+    code, out, err = run_main(tmp_path, {"a.md": "hello\n"}, literals=None, argv=["a.md"])
+    assert code == 0
+    assert "WARNING" in err and "NOT checked" in err
+    assert "SHAPES ONLY" in out, "the success line must not read as full coverage"
+
+
+def test_main_checks_the_file_name_not_only_the_contents(tmp_path) -> None:
+    """A chat id in a path is more visible than one in body text, not less."""
+    code, _out, err = run_main(
+        tmp_path,
+        {"docs/chat--1003418762095-notes.md": "nothing here\n"},
+        literals=FAKE_LITERALS,
+        argv=["docs/chat--1003418762095-notes.md"],
+    )
+    assert code == 1
+    assert "in the file name" in err
+
+
+def test_a_literal_is_not_waivable(tmp_path) -> None:
+    """A shape rule is a heuristic and may be waived; a known real value may not.
+
+    The sibling guard learned this first: the marker is written by whoever is
+    being inspected, so a waivable literal lets the leak switch off its own
+    detection with one line of text.
+    """
+    code, _out, err = run_main(
+        tmp_path,
+        {"a.md": "id 8123456789  # denylist-ok: literal\n"},
+        literals=FAKE_LITERALS,
+        argv=["a.md"],
+    )
+    assert code == 1, "a one-line comment must not mute a known real identifier"
+    assert "literal" in err
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "chat -1009999000042 here",  # canonical
+        "chat -1_009_999_000_042 here",  # digit separators, as this repo writes ints
+        "open t.me/c/9999000042/7 here",  # what build_chat_url() actually emits
+    ],
+)
+def test_a_literal_is_found_in_every_spelling_this_codebase_emits(tmp_path, spelling) -> None:
+    code, _out, err = run_main(
+        tmp_path,
+        {"a.md": spelling + "\n"},
+        literals='[[literal]]\nvalue = "-1009999000042"\nlabel = "a chat"\n',
+        argv=["a.md"],
+    )
+    assert code == 1, f"missed the {spelling!r} spelling"
+    assert "literal" in err
+
+
+@pytest.mark.parametrize("real", ["1003456789012", "1003210987654", "1003400000000"])
+def test_synthetic_filter_does_not_swallow_ids_in_the_live_range(real: str) -> None:
+    """False positives here are LEAKS, so the heuristic must stay narrow.
+
+    Two earlier versions failed exactly these: a non-monotonic run of six, and
+    a trailing-zeros branch.
+    """
+    assert not guard.is_synthetic_id(real)
+
+
+@pytest.mark.parametrize("fake", ["1234567890", "9876543210", "9999999999", "1500000000"])
+def test_synthetic_filter_still_absorbs_obvious_placeholders(fake: str) -> None:
+    assert guard.is_synthetic_id(fake)
