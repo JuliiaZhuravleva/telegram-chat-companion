@@ -6,6 +6,7 @@ from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 
 from src.utils.telegram import (
     TelegramFileError,
@@ -17,26 +18,54 @@ from src.utils.telegram import (
 )
 
 
-@pytest.mark.asyncio
-async def test_download_success():
+def _download_bot(payload: bytes = b"fake-image-data", file_path: str = "photos/file_123.jpg"):
+    """A bot whose download writes `payload` into whatever buffer it is handed."""
     bot = MagicMock()
     file_obj = MagicMock()
-    file_obj.file_path = "photos/file_123.jpg"
-
+    file_obj.file_path = file_path
     bot.get_file = AsyncMock(return_value=file_obj)
-
-    buf = BytesIO(b"fake-image-data")
+    # The parameter really is called `timeout`: production passes it by
+    # keyword, so renaming it to silence ARG005 makes every call raise
+    # TypeError -- which the retry loop then swallows as a transient failure.
     bot.download_file = AsyncMock(
-        side_effect=lambda _fp, destination: destination.write(buf.getvalue())
+        side_effect=lambda _fp, destination, timeout=None: destination.write(  # noqa: ARG005
+            payload
+        )
     )
+    return bot
+
+
+class _Recorder:
+    """Records the delays a retry asks for without spending them.
+
+    Same shape as tests/unit/test_flood_control.py's recorder: a test that
+    actually slept through this module's backoff would add ~3 seconds to the
+    suite and make the assertions depend on a wall clock.
+    """
+
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def __call__(self, delay: float) -> None:
+        self.delays.append(delay)
+
+
+@pytest.mark.asyncio
+async def test_download_success():
+    bot = _download_bot()
 
     result = await download_telegram_file(bot, "test-file-id")
+
     assert result == b"fake-image-data"
-    bot.get_file.assert_awaited_once_with("test-file-id")
+    bot.get_file.assert_awaited_once_with("test-file-id", request_timeout=30)
     bot.download_file.assert_awaited_once()
     call_args = bot.download_file.call_args
     assert call_args.args[0] == "photos/file_123.jpg"
     assert isinstance(call_args.kwargs["destination"], BytesIO)
+    assert call_args.kwargs["timeout"] == 30, (
+        "the timeout must be passed, not inherited: aiogram is unpinned in "
+        "pyproject.toml, so its own default can move without a repo change"
+    )
 
 
 @pytest.mark.asyncio
@@ -54,9 +83,99 @@ async def test_download_no_file_path():
 async def test_download_api_error():
     bot = MagicMock()
     bot.get_file = AsyncMock(side_effect=RuntimeError("API error"))
+    sleep = _Recorder()
 
     with pytest.raises(TelegramFileError, match="Failed to download"):
-        await download_telegram_file(bot, "test-file-id")
+        await download_telegram_file(bot, "test-file-id", sleep=sleep, jitter=lambda: 0.0)
+
+
+class TestDownloadRetries:
+    """The nine voice notes lost in production were transient CDN stalls: eight
+    of nine failed at 30-34 seconds and the same files downloaded in under a
+    second days later. Retrying is the fix; these pin what it may and may not
+    retry."""
+
+    @pytest.mark.asyncio
+    async def test_a_transient_failure_is_retried_and_can_succeed(self):
+        bot = _download_bot()
+        bot.get_file = AsyncMock(side_effect=[TimeoutError(), MagicMock(file_path="voice/f.oga")])
+        sleep = _Recorder()
+
+        result = await download_telegram_file(bot, "test-file-id", sleep=sleep, jitter=lambda: 0.0)
+
+        assert result == b"fake-image-data"
+        assert bot.get_file.await_count == 2
+        assert sleep.delays == [1.0]
+
+    @pytest.mark.asyncio
+    async def test_it_gives_up_after_the_configured_attempts(self):
+        bot = _download_bot()
+        bot.get_file = AsyncMock(side_effect=TimeoutError())
+        sleep = _Recorder()
+
+        with pytest.raises(TelegramFileError, match="after 3 attempts"):
+            await download_telegram_file(bot, "x", sleep=sleep, jitter=lambda: 0.0)
+
+        assert bot.get_file.await_count == 3
+        assert sleep.delays == [1.0, 2.0], "linear backoff, and no sleep after the last try"
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_telegram_error_is_not_retried(self):
+        """ "The file is gone" does not become truer on the third ask. Retrying
+        it would triple the wall clock in front of the caller's own
+        degradation."""
+        bot = _download_bot()
+        bot.get_file = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="file is too big")
+        )
+        sleep = _Recorder()
+
+        with pytest.raises(TelegramFileError, match="TelegramBadRequest"):
+            await download_telegram_file(bot, "x", sleep=sleep, jitter=lambda: 0.0)
+
+        assert bot.get_file.await_count == 1
+        assert sleep.delays == []
+
+    @pytest.mark.asyncio
+    async def test_an_empty_file_is_not_retried(self):
+        bot = _download_bot(payload=b"")
+        sleep = _Recorder()
+
+        with pytest.raises(TelegramFileError, match="Empty file"):
+            await download_telegram_file(bot, "x", sleep=sleep, jitter=lambda: 0.0)
+
+        assert bot.download_file.await_count == 1
+        assert sleep.delays == []
+
+    @pytest.mark.asyncio
+    async def test_a_retry_does_not_append_to_the_partial_first_attempt(self):
+        """The corrupt-retry trap, and the reason the buffer is built inside
+        the attempt rather than hoisted out of the loop.
+
+        `download_file` writes chunks straight into `destination` and only
+        rewinds once the stream finishes, so a mid-stream timeout leaves
+        partial bytes behind. A shared buffer would concatenate the two
+        attempts, pass the emptiness check, and hand Whisper a corrupt file --
+        billed, transcribed into nonsense, and invisible to every test that
+        mocks the download as writing once.
+        """
+        calls = {"n": 0}
+
+        async def flaky(_fp, destination, timeout=None):  # noqa: ARG001
+            calls["n"] += 1
+            if calls["n"] == 1:
+                destination.write(b"PARTIAL")
+                raise TimeoutError()
+            destination.write(b"WHOLE-FILE")
+
+        bot = _download_bot()
+        bot.download_file = AsyncMock(side_effect=flaky)
+        sleep = _Recorder()
+
+        result = await download_telegram_file(bot, "x", sleep=sleep, jitter=lambda: 0.0)
+
+        assert result == b"WHOLE-FILE", "the retry inherited the partial download"
+        assert b"PARTIAL" not in result
 
 
 class TestDetectMimeType:

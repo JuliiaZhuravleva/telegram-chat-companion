@@ -218,15 +218,25 @@ class ProgressNotice:
             language=language,
         )
 
-    async def fail(self, text: str) -> None:
+    async def fail(self, text: str, *, report_when_disabled: bool = False) -> None:
         """Turn the placeholder into a failure line, or send one.
 
-        Silent when the notice was disabled: a caller that only announces long
-        operations must not start reporting on short ones, which would be a
-        new class of message rather than a fix to an existing one.
+        Silent by default when the notice was disabled: a caller that only
+        announces long operations must not start reporting on short ones, which
+        would be a new class of message rather than a fix to an existing one.
+
+        ``report_when_disabled`` opts out of that, and exists for one specific
+        shape: a failure that means the user's message was *dropped entirely*,
+        as opposed to one where the bot merely has nothing to say. The
+        distinction is not academic. `enabled` is `duration >= 20s`, and the
+        six voice notes whose download timed out in production on 2026-08-29..31
+        measured 21, 27, 27, 35, 41 and 49 seconds — one of them cleared the
+        threshold by a single second. Gating "your voice note never arrived" on
+        a duration cut-off it happens to sit on top of is a coin flip, and the
+        losing side of it is silence.
         """
         await self._stop_ticking()
-        if not self._enabled:
+        if not self._enabled and not report_when_disabled:
             return
         placeholder = self._placeholder
         self._placeholder = None

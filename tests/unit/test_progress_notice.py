@@ -117,6 +117,35 @@ class TestFailPath:
         assert notice.placeholder is None
 
     @pytest.mark.asyncio
+    async def test_a_disabled_notice_speaks_when_told_to(self) -> None:
+        """The opt-out, for a failure that means the user's message was dropped
+        rather than that the bot has nothing to say.
+
+        Without it the duration gate decides whether a download failure is
+        reported, and the six measured production failures ran 21-49 seconds
+        against a 20-second gate — one of them clearing it by a single second.
+        """
+        message = FakeMessage()
+        async with ProgressNotice(message, text="…", enabled=False) as notice:
+            pass
+
+        await notice.fail("⚠️ Не удалось загрузить", report_when_disabled=True)
+
+        assert any("Не удалось загрузить" in text for text in message.sent)
+
+    @pytest.mark.asyncio
+    async def test_the_opt_out_is_off_by_default(self) -> None:
+        """Control, restating the original decision rather than deleting it: a
+        caller that does not ask for it keeps the old silence."""
+        message = FakeMessage()
+        async with ProgressNotice(message, text="…", enabled=False) as notice:
+            pass
+
+        await notice.fail("⚠️ Не удалось расшифровать", report_when_disabled=False)
+
+        assert message.sent == []
+
+    @pytest.mark.asyncio
     async def test_both_routes_failing_is_swallowed_not_raised(self) -> None:
         message = FakeMessage()
         async with ProgressNotice(message, text="…") as notice:
