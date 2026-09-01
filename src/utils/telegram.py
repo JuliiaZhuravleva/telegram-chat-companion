@@ -22,6 +22,7 @@ from aiogram.exceptions import (
     TelegramEntityTooLarge,
     TelegramForbiddenError,
     TelegramNotFound,
+    TelegramRetryAfter,
     TelegramUnauthorizedError,
 )
 from aiogram.utils.chat_action import ChatActionSender
@@ -32,10 +33,15 @@ logger = structlog.get_logger(__name__)
 # so the indicator never visibly flickers off between re-sends.
 _TYPING_INDICATOR_INTERVAL = 4.0
 
-# Seconds for one download attempt, passed explicitly rather than inherited —
-# see `download_telegram_file`'s docstring for why the library's own default
-# cannot be relied on. Same value aiogram uses today, so this pins current
-# behaviour rather than changing it.
+# TWO clocks, not one, and collapsing them was a real bug in the first draft of
+# this change. `get_file` is an ordinary Bot API method: its `request_timeout`
+# REPLACES `AiohttpSession.DEFAULT_TIMEOUT`, which is 60s. `download_file` is a
+# raw CDN GET through `session.stream_content`, whose own default is 30s.
+# Passing one number to both silently halved the metadata call's budget while a
+# comment claimed it changed nothing — on the very call that was never the
+# problem (all nine measured production failures were in the download half).
+# Both are stated explicitly so neither is inherited from an unpinned library.
+GET_FILE_TIMEOUT_SECONDS = 60
 DOWNLOAD_TIMEOUT_SECONDS = 30
 
 # How many times one download may be attempted in total. Three matches
@@ -63,6 +69,14 @@ _PERMANENT_DOWNLOAD_ERRORS = (
     TelegramEntityTooLarge,
     TelegramForbiddenError,
     TelegramUnauthorizedError,
+    # Not "permanent" in the same sense, but permanent as far as THIS loop is
+    # concerned: `FloodControlMiddleware` wraps `make_request`, so a flood-limited
+    # `get_file` has already been retried three times and slept for up to 30s a
+    # time before the exception reaches us. Retrying it here would nest one
+    # budget inside the other -- up to nine get_file attempts and a worst case
+    # nobody can state, which is precisely what DOWNLOAD_ATTEMPTS' own comment
+    # says it exists to avoid. If flood control gave up, so do we.
+    TelegramRetryAfter,
 )
 
 
@@ -178,8 +192,13 @@ class TelegramFileError(Exception):
 
 
 async def _attempt_download(bot: Bot, file_id: str, *, timeout: int) -> bytes:
-    """One get_file + CDN fetch. Raises the underlying error unwrapped."""
-    file = await bot.get_file(file_id, request_timeout=timeout)
+    """One get_file + CDN fetch. Raises the underlying error unwrapped.
+
+    `timeout` is the DOWNLOAD budget only; the metadata call keeps its own,
+    larger one. See the constants above for why the two must not be the same
+    number.
+    """
+    file = await bot.get_file(file_id, request_timeout=GET_FILE_TIMEOUT_SECONDS)
     if not file.file_path:
         raise TelegramFileError(f"No file_path returned for file_id={file_id}")
 
@@ -240,17 +259,23 @@ async def download_telegram_file(
     ``session.stream_content()``, bypassing the request middleware chain
     entirely. A stalled CDN fetch has never had any retry anywhere.
 
-    ## Why the timeout is passed explicitly
+    ## Why the timeouts are passed explicitly, and why there are two
 
-    aiogram's ``download_file`` carries its own ``timeout: int = 30`` default,
-    and ``pyproject.toml`` pins nothing tighter than ``aiogram>=3.4.0`` while
-    the Dockerfile and both CI jobs install from it — so prod, CI and a
-    developer's venv can each resolve a different aiogram and a different
-    number. Passing it makes the value a fact of this project rather than of
-    whatever version resolved. It is deliberately the same 30s the library
-    already used: the failures this fixes were stalls that never completed, not
-    transfers that were merely slow (a 9.6 MB video note normally lands in
-    0.8s), so more attempts help and a longer clock would not.
+    ``pyproject.toml`` pins nothing tighter than ``aiogram>=3.4.0`` while the
+    Dockerfile and both CI jobs install from it, so prod, CI and a developer's
+    venv can each resolve a different aiogram and a different default. Passing
+    the numbers makes them facts of this project.
+
+    They are two different clocks and must not be collapsed into one. The
+    ``timeout`` argument here is the CDN download's budget (aiogram's own
+    default for it is 30s); ``get_file`` is a Bot API method whose
+    ``request_timeout`` *replaces* ``AiohttpSession.DEFAULT_TIMEOUT`` of 60s.
+    Handing this one number to both would quietly halve the metadata call's
+    budget — on the half that was never failing. Both values match what the
+    library uses today, so this pins current behaviour rather than changing it:
+    the failures being fixed were stalls that never completed, not transfers
+    that were merely slow (a 9.6 MB video note normally lands in 0.8s), so more
+    attempts help and a longer clock would not.
 
     Raises:
         TelegramFileError: every failure, after the attempts are spent. The

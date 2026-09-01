@@ -362,6 +362,33 @@ class TestEditedMediaMessageDoesNotEraseBotWrittenContent:
         assert after["edited_at"] == before["edited_at"]
         assert after["original_content"] == before["original_content"]
 
+    async def test_resaving_identical_content_records_no_edit_either(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """The `IS DISTINCT FROM` half of the guard, asserted behaviourally.
+
+        Removing it from all three columns and keeping only `IS NOT NULL` left
+        every integration test in this file green — the defect's own data never
+        exercises "same content saved twice", so only a string-match on the SQL
+        caught it. This is that same fact stated as behaviour: a re-save that
+        changes nothing is not an edit.
+
+        It is a real path, not a hypothetical: aiogram redelivers an unconfirmed
+        update after a restart, and the voice handler then re-transcribes the
+        same audio to the same text.
+        """
+        await repo.save(CHAT_ID, 820, "voice", user_id=555, content="одно и то же")
+        before = await _row(db_pool, 820)
+
+        await repo.save(CHAT_ID, 820, "voice", user_id=555, content="одно и то же")
+
+        after = await _row(db_pool, 820)
+        assert after["edit_count"] == before["edit_count"]
+        assert after["edited_at"] == before["edited_at"]
+        assert after["original_content"] is None, (
+            "an unchanged re-save must not pin original_content to the live text"
+        )
+
     async def test_the_invariant_the_defect_broke_holds_after_an_edit(
         self, repo: MessageRepository, db_pool: asyncpg.Pool
     ):

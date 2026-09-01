@@ -241,6 +241,55 @@ class TestArchiveProspects:
             "would wrongly promise this row reaches the archive"
         )
 
+    async def test_the_watermark_is_this_chat_s_own(self, db_pool: asyncpg.Pool):
+        """Deleting `WHERE c.chat_id = m.chat_id` from the subquery survived the
+        whole suite: every fixture here had chunks in one chat only, so a global
+        `max(msg_to)` and a per-chat one were the same number. A busy neighbour
+        chat would then declare this chat's rows already archived and tell the
+        operator not to bother hurrying.
+        """
+        other_chat = CHAT_ID - 1
+        await db_pool.execute(
+            """
+            INSERT INTO chat_chunks
+                (chat_id, thread_id, msg_from, msg_to, part, content, msg_count,
+                 senders, started_at, ended_at)
+            VALUES ($1, NULL, 900000, 999999, 0, 'neighbour', 1,
+                    ARRAY[555]::bigint[], NOW(), NOW())
+            """,
+            other_chat,
+        )
+        try:
+            await _wiped_row(db_pool, 200, "этот чат ещё не индексировался")
+
+            rows = await find_wiped(db_pool)
+
+            assert [r["above_watermark"] for r in rows if r["chat_id"] == CHAT_ID] == [True]
+        finally:
+            await db_pool.execute("DELETE FROM chat_chunks WHERE chat_id = $1", other_chat)
+
+    async def test_a_row_exactly_on_the_watermark_is_already_archived(self, db_pool: asyncpg.Pool):
+        """The boundary, which `>` vs `>=` decides and nothing else asserted.
+        `msg_to` is INCLUSIVE — the chunker fetches `message_id > watermark` —
+        so the row whose id equals the watermark is inside the last chunk
+        already and will never be re-read."""
+        await self._chunk(db_pool, 1, 100)
+        await _wiped_row(db_pool, 100, "ровно на границе")
+
+        rows = await find_wiped(db_pool)
+
+        assert [r["above_watermark"] for r in rows] == [False]
+
+    async def test_recovered_chars_measures_the_text_being_restored(self, db_pool: asyncpg.Pool):
+        """The operator reads this number to decide whether a dry run found what
+        it expected. Reading it off any other column still produces a plausible
+        integer, and nothing else here would notice."""
+        await _wiped_row(db_pool, 1, "12345678901234567890")
+
+        rows = await find_wiped(db_pool)
+
+        assert [r["recovered_chars"] for r in rows] == [20]
+
     async def test_a_chat_with_no_chunks_at_all_counts_as_ahead(self, db_pool: asyncpg.Pool):
         """COALESCE(..., 0) — an unindexed chat has everything still to come,
         not nothing."""

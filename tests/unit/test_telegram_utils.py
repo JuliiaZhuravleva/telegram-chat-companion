@@ -6,7 +6,7 @@ from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from src.utils.telegram import (
     TelegramFileError,
@@ -57,15 +57,37 @@ async def test_download_success():
     result = await download_telegram_file(bot, "test-file-id")
 
     assert result == b"fake-image-data"
-    bot.get_file.assert_awaited_once_with("test-file-id", request_timeout=30)
     bot.download_file.assert_awaited_once()
     call_args = bot.download_file.call_args
     assert call_args.args[0] == "photos/file_123.jpg"
     assert isinstance(call_args.kwargs["destination"], BytesIO)
-    assert call_args.kwargs["timeout"] == 30, (
-        "the timeout must be passed, not inherited: aiogram is unpinned in "
-        "pyproject.toml, so its own default can move without a repo change"
-    )
+
+
+@pytest.mark.asyncio
+async def test_the_two_calls_get_their_own_timeouts():
+    """They are different clocks, and handing one number to both is a real bug
+    that shipped in this change's first draft.
+
+    `get_file` is a Bot API method whose `request_timeout` REPLACES
+    AiohttpSession.DEFAULT_TIMEOUT (60s). `download_file` is a raw CDN GET whose
+    own default is 30s. Passing 30 to both silently halved the metadata call's
+    budget — on the half that was never failing, since all nine measured
+    production losses were stalls in the download.
+
+    Asserted as concrete numbers rather than by importing the constants: a test
+    that reads the same constant as the code cannot notice them being collapsed
+    back into one.
+    """
+    bot = _download_bot()
+
+    await download_telegram_file(bot, "test-file-id")
+
+    assert bot.get_file.call_args.kwargs["request_timeout"] == 60
+    assert bot.download_file.call_args.kwargs["timeout"] == 30
+    assert (
+        bot.get_file.call_args.kwargs["request_timeout"]
+        != bot.download_file.call_args.kwargs["timeout"]
+    ), "one number for both clocks is the bug this test exists for"
 
 
 @pytest.mark.asyncio
@@ -145,6 +167,26 @@ class TestDownloadRetries:
             await download_telegram_file(bot, "x", sleep=sleep, jitter=lambda: 0.0)
 
         assert bot.download_file.await_count == 1
+        assert sleep.delays == []
+
+    @pytest.mark.asyncio
+    async def test_a_flood_limit_is_left_to_the_middleware_that_owns_it(self):
+        """`FloodControlMiddleware` wraps `make_request`, so a flood-limited
+        `get_file` has ALREADY been retried three times and slept up to 30s a
+        time before the exception reaches here. Retrying it again nests one
+        budget inside the other — nine attempts and a worst case nobody can
+        state, which is exactly what this module's own DOWNLOAD_ATTEMPTS comment
+        says it exists to avoid."""
+        bot = _download_bot()
+        bot.get_file = AsyncMock(
+            side_effect=TelegramRetryAfter(method=MagicMock(), message="flood", retry_after=25)
+        )
+        sleep = _Recorder()
+
+        with pytest.raises(TelegramFileError):
+            await download_telegram_file(bot, "x", sleep=sleep, jitter=lambda: 0.0)
+
+        assert bot.get_file.await_count == 1
         assert sleep.delays == []
 
     @pytest.mark.asyncio

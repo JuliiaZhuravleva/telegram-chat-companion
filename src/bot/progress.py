@@ -261,7 +261,13 @@ class ProgressNotice:
                 return
 
         try:
-            await self._message.answer(text)
+            # Quoted, like the placeholder this is standing in for. Without it a
+            # failure line in a busy group names no message at all -- and with
+            # `report_when_disabled` this fresh-send path is now the COMMON one
+            # (a short voice note posts no placeholder to edit), so an unquoted
+            # "could not fetch this voice message" would arrive with nothing to
+            # attach it to.
+            await self._message.answer(text, reply_to_message_id=self._reply_to)
         except Exception as exc:
             logger.warning(
                 "Could not report the failure to the chat",
