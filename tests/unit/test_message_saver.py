@@ -110,3 +110,48 @@ class TestMessageSaverQuotePersistence:
 
         kwargs = msg_repo.save.call_args.kwargs
         assert kwargs["quote_text"] == long_text
+
+
+class TestMediaEditsProduceNoContent:
+    """The producing half of the transcript-wipe defect.
+
+    `_save_message` maps content from `text or caption`, so for a voice note,
+    a video note or an uncaptioned photo it hands `save()` a None -- on the
+    `dp.message` delivery, where the row does not exist yet and None is
+    correct, and identically on the `dp.edited_message` delivery, where the
+    row now holds a transcript the bot wrote. The middleware cannot tell those
+    apart and is not asked to: the repository's ON CONFLICT branch is what
+    refuses to write the None over existing text (see
+    `MessageRepository.save`, and the round-trip in
+    tests/integration/test_migration_028_transcription_link.py).
+
+    Pinned here so the two halves of the fix cannot drift: if this ever stops
+    being None, the integration test above stops testing the real defect and
+    would keep passing.
+    """
+
+    @pytest.mark.parametrize("kind", ["voice", "video_note", "photo"])
+    async def test_a_media_message_binds_content_none(self, kind: str):
+        event = _make_event(quote=None)
+        event.text = None
+        event.caption = None
+        setattr(event, kind, [MagicMock()] if kind == "photo" else MagicMock())
+        data, msg_repo = _make_data()
+
+        await MessageSaverMiddleware._save_message(event, data)
+
+        kwargs = msg_repo.save.call_args.kwargs
+        assert kwargs["content"] is None
+        assert kwargs["message_type"] == kind
+
+    async def test_a_captioned_photo_still_binds_the_caption(self):
+        """Control: the None is a property of "no caption", not of "is media"."""
+        event = _make_event(quote=None)
+        event.text = None
+        event.caption = "подпись"
+        event.photo = [MagicMock()]
+        data, msg_repo = _make_data()
+
+        await MessageSaverMiddleware._save_message(event, data)
+
+        assert msg_repo.save.call_args.kwargs["content"] == "подпись"

@@ -305,3 +305,39 @@ class TestGetTopActiveUsers:
 
         assert total == 0
         assert candidates == []
+
+
+class TestSaveNeverErasesContentOnConflict:
+    """Shape-level guard on the ON CONFLICT branch.
+
+    Weak on its own — it asserts SQL text, not what PostgreSQL does with it,
+    and the behavioural coverage lives in
+    tests/integration/test_migration_028_transcription_link.py. It earns its
+    place as a tripwire: the defect it guards was a single unconditional
+    assignment that looked entirely reasonable in review for six months, and
+    this is the assertion that makes reintroducing it loud.
+    """
+
+    def _set_clause(self, pool) -> str:
+        sql = pool.execute.call_args[0][0]
+        return sql[sql.index("DO UPDATE") :]
+
+    async def test_content_is_coalesced_not_overwritten(self, repo):
+        repository, pool = repo
+        await repository.save(CHAT_ID, 1, "voice")
+
+        clause = self._set_clause(pool)
+        assert "content = COALESCE(EXCLUDED.content, chat_messages.content)" in clause
+        assert "content = EXCLUDED.content" not in clause
+
+    async def test_edit_bookkeeping_is_conditional_on_a_real_content_change(self, repo):
+        repository, pool = repo
+        await repository.save(CHAT_ID, 1, "voice")
+
+        clause = self._set_clause(pool)
+        # An unconditional NOW() / +1 would record a phantom edit for every
+        # content-less re-save, pinning original_content to a value nothing
+        # ever edited away from.
+        assert "edited_at = NOW()," not in clause
+        assert "edit_count = chat_messages.edit_count + 1," not in clause
+        assert clause.count("EXCLUDED.content IS DISTINCT FROM chat_messages.content") == 3

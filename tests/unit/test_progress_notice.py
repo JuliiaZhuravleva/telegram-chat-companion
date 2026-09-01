@@ -33,12 +33,22 @@ class FakeMessage:
         self.chat = type("Chat", (), {"id": chat_id})()
         self.sent: list[str] = []
         self.answer_error: Exception | None = None
+        # Telegram rejects a send whose quote target has been deleted while
+        # accepting the identical send without the quote. Modelled separately
+        # from `answer_error` because a fake that fails both ways cannot tell a
+        # missing fallback from a dead chat.
+        self.quoted_answer_error: Exception | None = None
+        self.quoted: list[bool] = []
         self._next_id = 900
 
     async def answer(self, text: str, **kwargs) -> FakeSent:
+        is_quoted = kwargs.get("reply_to_message_id") is not None
+        if is_quoted and self.quoted_answer_error is not None:
+            raise self.quoted_answer_error
         if self.answer_error is not None:
             raise self.answer_error
         self.sent.append(text)
+        self.quoted.append(is_quoted)
         self._next_id += 1
         return FakeSent(self, self._next_id, text)
 
@@ -115,6 +125,35 @@ class TestFailPath:
 
         assert message.sent == []
         assert notice.placeholder is None
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_notice_speaks_when_told_to(self) -> None:
+        """The opt-out, for a failure that means the user's message was dropped
+        rather than that the bot has nothing to say.
+
+        Without it the duration gate decides whether a download failure is
+        reported, and the six measured production failures ran 21-49 seconds
+        against a 20-second gate — one of them clearing it by a single second.
+        """
+        message = FakeMessage()
+        async with ProgressNotice(message, text="…", enabled=False) as notice:
+            pass
+
+        await notice.fail("⚠️ Не удалось загрузить", report_when_disabled=True)
+
+        assert any("Не удалось загрузить" in text for text in message.sent)
+
+    @pytest.mark.asyncio
+    async def test_the_opt_out_is_off_by_default(self) -> None:
+        """Control, restating the original decision rather than deleting it: a
+        caller that does not ask for it keeps the old silence."""
+        message = FakeMessage()
+        async with ProgressNotice(message, text="…", enabled=False) as notice:
+            pass
+
+        await notice.fail("⚠️ Не удалось расшифровать", report_when_disabled=False)
+
+        assert message.sent == []
 
     @pytest.mark.asyncio
     async def test_both_routes_failing_is_swallowed_not_raised(self) -> None:
@@ -228,3 +267,43 @@ class TestTicker:
 def test_the_announce_threshold_is_above_a_typical_short_note() -> None:
     """A placeholder that appears and vanishes inside a second reads as a glitch."""
     assert MIN_SECONDS_TO_ANNOUNCE >= 10
+
+
+class TestTheFailureSurvivesTheSourceBeingDeleted:
+    """Quoting the source was added so a failure line in a busy group names the
+    message it is about. Adding it WITHOUT a fallback reintroduced the silence
+    this whole class exists to remove — the author can delete the voice note
+    during the thirty seconds its download is stalling, and Telegram then
+    rejects the quoted send outright.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_falls_back_to_an_unquoted_send(self) -> None:
+        message = FakeMessage()
+        message.quoted_answer_error = TelegramNetworkError(
+            method=None, message="message to be replied not found"
+        )
+        async with ProgressNotice(
+            message, text="…", enabled=False, reply_to_message_id=42
+        ) as notice:
+            pass
+
+        await notice.fail("⚠️ Не удалось загрузить", report_when_disabled=True)
+
+        assert message.sent == ["⚠️ Не удалось загрузить"]
+        assert message.quoted == [False], "the fallback must drop the quote, not keep it"
+
+    @pytest.mark.asyncio
+    async def test_it_quotes_when_it_can(self) -> None:
+        """Control: the fallback must not fire when quoting works, or the
+        feature it is protecting never happens."""
+        message = FakeMessage()
+        async with ProgressNotice(
+            message, text="…", enabled=False, reply_to_message_id=42
+        ) as notice:
+            pass
+
+        await notice.fail("⚠️ Не удалось загрузить", report_when_disabled=True)
+
+        assert message.quoted == [True]
+        assert len(message.sent) == 1, "one message, not one per attempt"

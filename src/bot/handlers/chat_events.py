@@ -60,6 +60,15 @@ async def handle_edited_message(message: Message) -> None:
     ``content`` while stamping ``edited_at``, bumping ``edit_count`` and
     preserving the first wording in ``original_content``.
 
+    That description assumed a *text* edit, and for six months it was the whole
+    story only because nobody asked what an edit means for a message that has no
+    text. Telegram delivers ``edited_message`` for voice notes, video notes and
+    photos too, and the middleware then saves ``text or caption`` — ``None`` —
+    over a row whose content the bot itself had written. See
+    ``MessageRepository.save``'s docstring for the 52 transcripts and image
+    descriptions that cost, and for the COALESCE that now makes a content-less
+    re-save a no-op rather than an erasure.
+
     This handler exists so that chain actually runs — ``dp.edited_message``
     middlewares are *inner* middlewares in aiogram, so they only fire once a
     handler matches the update.

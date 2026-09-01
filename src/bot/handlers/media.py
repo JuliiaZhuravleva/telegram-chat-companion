@@ -45,6 +45,16 @@ _TRANSCRIBE_FAILED = {
     "ru": "⚠️ Не удалось расшифровать это голосовое. Попробуйте ещё раз.",
     "en": "⚠️ Could not transcribe this voice message. Please try again.",
 }
+# Deliberately not the same string as above. "Could not transcribe" describes a
+# model that answered with nothing; this describes a file that never arrived, so
+# the audio was never sent anywhere and nothing was billed. Same visible outcome
+# for the reader, entirely different thing to report to an admin reading the log
+# beside it -- and the earlier wording would have sent a user re-recording a
+# voice note when re-sending the same one is what actually works.
+_DOWNLOAD_FAILED = {
+    "ru": "⚠️ Не удалось загрузить это голосовое из Telegram. Попробуйте переслать его ещё раз.",
+    "en": "⚠️ Could not fetch this voice message from Telegram. Please try sending it again.",
+}
 
 
 def _format_duration(seconds: int) -> str:
@@ -97,17 +107,6 @@ async def handle_voice_message(
     if not is_voice and not chat_config.transcribe_video_notes:
         return
 
-    # Download audio
-    try:
-        audio_data = await download_telegram_file(bot, media.file_id)
-    except TelegramFileError:
-        logger.warning(
-            "Failed to download voice file",
-            chat_id=message.chat.id,
-            file_id=media.file_id,
-        )
-        return
-
     # Keep "typing" alive for the whole transcription (route to correct topic)
     user = message.from_user
     user_name = (user.first_name if user else None) or "Unknown"
@@ -132,16 +131,72 @@ async def handle_voice_message(
         ) as notice,
         typing_indicator(bot, message.chat.id, message_thread_id),
     ):
-        result = await voice_service.transcribe(
-            audio_data=audio_data,
-            chat_id=message.chat.id,
-            message_id=message.message_id,
-            user_first_name=user_name,
-            message_type=message_type,
-            language=chat_config.language,
-            user_id=user.id if user else None,
-            username=user.username if user else None,
+        # The download lives INSIDE the notice, and that placement is the fix.
+        # It used to run before the block, so its failure path returned with no
+        # placeholder in existence and nothing for `notice.fail()` to speak
+        # through -- the chat got absolute silence while the user's voice note
+        # vanished from history. Measured: 9 such losses in three days, none of
+        # them visible to anyone (2026-08-29..31).
+        #
+        # Caught rather than allowed to propagate: `__aexit__` discards the
+        # placeholder when the block raises, which would delete the very thing
+        # `fail()` is about to turn into the failure line. Returning normally
+        # and reporting after the block is the shape the `result is None` path
+        # below already uses.
+        audio_data: bytes | None
+        try:
+            audio_data = await download_telegram_file(bot, media.file_id)
+        except TelegramFileError as exc:
+            logger.warning(
+                "Failed to download voice file",
+                chat_id=message.chat.id,
+                file_id=media.file_id,
+                message_type=message_type,
+                duration=duration,
+                # `download_telegram_file` builds its message around the
+                # concrete exception type precisely so a caller can log it.
+                # Dropping it here is what made the original nine failures
+                # indistinguishable from each other in the log.
+                error=str(exc),
+                error_type=type(exc).__name__,
+                # The retry loop catches broadly, on purpose -- a GET is safe to
+                # repeat and an unanticipated transient type should not become a
+                # permanent one. The cost of that breadth is that a genuine code
+                # bug inside the download arrives here wearing the same clothes
+                # as a CDN stall. The stack is what tells them apart, and this
+                # is the one place it can still be captured: the chain is
+                # preserved through `raise ... from exc`.
+                exc_info=True,
+            )
+            audio_data = None
+
+        result = (
+            await voice_service.transcribe(
+                audio_data=audio_data,
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                user_first_name=user_name,
+                message_type=message_type,
+                language=chat_config.language,
+                user_id=user.id if user else None,
+                username=user.username if user else None,
+            )
+            if audio_data is not None
+            else None
         )
+
+    if audio_data is None:
+        # Reported even when the notice was disabled: this is not "the bot has
+        # nothing to say about your voice note", it is "your voice note is
+        # gone", and it needs its own wording for the same reason. The measured
+        # failures ran 21-49 seconds against a 20-second announce threshold, so
+        # letting the duration gate decide whether the user hears about it is a
+        # coin flip.
+        await notice.fail(
+            _DOWNLOAD_FAILED.get(chat_config.language, _DOWNLOAD_FAILED["en"]),
+            report_when_disabled=True,
+        )
+        return
 
     if result is None:
         # Only speaks when the notice was enabled, i.e. when we already told
@@ -376,11 +431,19 @@ async def handle_photo_message(
     # Download image
     try:
         image_data = await download_telegram_file(bot, photo.file_id)
-    except TelegramFileError:
+    except TelegramFileError as exc:
+        # Same silent shape as the voice path had, and deliberately left silent
+        # here for now: a photo carries no bot-written content the chat is
+        # waiting on, and adding a new user-facing message to the image path is
+        # a product change, not a fix. The exception text is logged so the next
+        # incident on this path does not start from zero the way the voice one
+        # did.
         logger.warning(
             "Failed to download photo",
             chat_id=message.chat.id,
             file_id=photo.file_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
         )
         return
 
@@ -551,11 +614,18 @@ async def _update_message_content(
             message_type="photo",
             content=f"[Image: {description}]",
         )
-    except Exception:
+    except Exception as exc:
+        # `content` on a photo row is exactly the column this release taught the
+        # UPSERT to stop erasing, and this is the write that fills it. A bare
+        # "failed" line here would leave the next investigation with the same
+        # nothing the voice path just cost us.
         logger.warning(
             "Failed to update message with image description",
             chat_id=chat_id,
             message_id=message_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
         )
 
 
@@ -585,11 +655,13 @@ async def handle_sticker_message(
     # Download sticker file (all types: static, animated, video)
     try:
         image_data = await download_telegram_file(bot, sticker.file_id)
-    except TelegramFileError:
+    except TelegramFileError as exc:
         logger.warning(
             "Failed to download sticker",
             chat_id=message.chat.id,
             file_id=sticker.file_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
         )
         return
 

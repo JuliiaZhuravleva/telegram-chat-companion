@@ -6,15 +6,25 @@ Shared by voice, image, sticker, and admin panel handlers.
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
+import random
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from io import BytesIO
 
 import structlog
 from aiogram import Bot
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramEntityTooLarge,
+    TelegramForbiddenError,
+    TelegramNotFound,
+    TelegramRetryAfter,
+    TelegramUnauthorizedError,
+)
 from aiogram.utils.chat_action import ChatActionSender
 
 logger = structlog.get_logger(__name__)
@@ -22,6 +32,52 @@ logger = structlog.get_logger(__name__)
 # Re-send the chat action slightly under Telegram's ~5s client-side expiry
 # so the indicator never visibly flickers off between re-sends.
 _TYPING_INDICATOR_INTERVAL = 4.0
+
+# TWO clocks, not one, and collapsing them was a real bug in the first draft of
+# this change. `get_file` is an ordinary Bot API method: its `request_timeout`
+# REPLACES `AiohttpSession.DEFAULT_TIMEOUT`, which is 60s. `download_file` is a
+# raw CDN GET through `session.stream_content`, whose own default is 30s.
+# Passing one number to both silently halved the metadata call's budget while a
+# comment claimed it changed nothing — on the very call that was never the
+# problem (all nine measured production failures were in the download half).
+# Both are stated explicitly so neither is inherited from an unpinned library.
+GET_FILE_TIMEOUT_SECONDS = 60
+DOWNLOAD_TIMEOUT_SECONDS = 30
+
+# How many times one download may be attempted in total. Three matches
+# `FloodControlMiddleware.DEFAULT_MAX_ATTEMPTS`, deliberately: a bot with two
+# different retry budgets is a bot whose worst-case latency nobody can state.
+# Measured cause for this existing: 9 voice notes and video notes lost over
+# three days in production, 8 of them at 30-34s wall clock — the CDN fetch
+# stalling out — while the very same files downloaded in under a second when
+# retried days later.
+DOWNLOAD_ATTEMPTS = 3
+
+# Linear backoff: ~1s, then ~2s. The observed failure is a stalled connection,
+# not a busy server, so the point of waiting at all is to get a fresh socket
+# rather than to let a queue drain.
+_RETRY_BASE_DELAY_SECONDS = 1.0
+_RETRY_MAX_JITTER_SECONDS = 0.5
+
+# Answers that will not change no matter how many times we ask: the file is
+# gone, too big for the Bot API's 20 MB download ceiling, or not ours to fetch.
+# Retrying these turns one permanent failure into three and delays the caller's
+# own degradation by the whole backoff budget.
+_PERMANENT_DOWNLOAD_ERRORS = (
+    TelegramBadRequest,
+    TelegramNotFound,
+    TelegramEntityTooLarge,
+    TelegramForbiddenError,
+    TelegramUnauthorizedError,
+    # Not "permanent" in the same sense, but permanent as far as THIS loop is
+    # concerned: `FloodControlMiddleware` wraps `make_request`, so a flood-limited
+    # `get_file` has already been retried three times and slept for up to 30s a
+    # time before the exception reaches us. Retrying it here would nest one
+    # budget inside the other -- up to nine get_file attempts and a worst case
+    # nobody can state, which is precisely what DOWNLOAD_ATTEMPTS' own comment
+    # says it exists to avoid. If flood control gave up, so do we.
+    TelegramRetryAfter,
+)
 
 
 def build_chat_url(
@@ -135,50 +191,134 @@ class TelegramFileError(Exception):
     """Failed to download a file from Telegram servers."""
 
 
-async def download_telegram_file(bot: Bot, file_id: str) -> bytes:
+async def _attempt_download(bot: Bot, file_id: str, *, timeout: int) -> bytes:
+    """One get_file + CDN fetch. Raises the underlying error unwrapped.
+
+    `timeout` is the DOWNLOAD budget only; the metadata call keeps its own,
+    larger one. See the constants above for why the two must not be the same
+    number.
+    """
+    file = await bot.get_file(file_id, request_timeout=GET_FILE_TIMEOUT_SECONDS)
+    if not file.file_path:
+        raise TelegramFileError(f"No file_path returned for file_id={file_id}")
+
+    # A FRESH buffer per attempt, and the single most important line in this
+    # module. `download_file` writes chunks straight into `destination` and
+    # only rewinds it once the stream completes, so a timeout mid-download
+    # leaves a partial file sitting at the write head. Hoisting this out of the
+    # retry loop -- the obvious refactor -- would append attempt two onto
+    # attempt one's truncated bytes, sail past the emptiness check below, and
+    # hand a corrupt audio file to Whisper, billed and transcribed into
+    # nonsense. Every existing test mocks `download_file` to write once and
+    # would stay green.
+    buf = BytesIO()
+    await bot.download_file(file.file_path, destination=buf, timeout=timeout)
+    data = buf.getvalue()
+
+    if not data:
+        raise TelegramFileError(f"Empty file downloaded for file_id={file_id}")
+
+    logger.debug(
+        "Downloaded telegram file",
+        file_id=file_id,
+        size=len(data),
+        file_path=file.file_path,
+    )
+    return data
+
+
+async def download_telegram_file(
+    bot: Bot,
+    file_id: str,
+    *,
+    timeout: int = DOWNLOAD_TIMEOUT_SECONDS,
+    attempts: int = DOWNLOAD_ATTEMPTS,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+    jitter: Callable[[], float] | None = None,
+) -> bytes:
     """Download a file from Telegram servers by file_id.
 
-    Steps:
-    1. Call bot.get_file(file_id) to get File object with file_path.
-    2. Download from Telegram CDN via bot.download_file(file_path).
+    Steps, up to ``attempts`` times:
 
-    Returns:
-        Raw bytes of the downloaded file.
+    1. ``bot.get_file(file_id)`` for the ``file_path``.
+    2. ``bot.download_file(file_path)`` — a plain GET against Telegram's file
+       CDN.
+
+    ## Why this retries, when FloodControlMiddleware refuses to
+
+    That middleware's docstring argues a retry is only safe when the first
+    attempt provably did nothing, and narrows itself to ``TelegramRetryAfter``
+    for exactly that reason: re-sending an ambiguous *send* can post a message
+    to a group twice. None of that applies here. This is a GET; it has no
+    chat-visible side effect, changes nothing on Telegram's side, and the caller
+    already throws away whatever it returns on failure. Retrying a download is
+    the same argument reaching the opposite conclusion, not an exception to it.
+
+    Note also that the middleware could not cover step 2 even if it wanted to:
+    it wraps ``make_request``, and ``download_file`` streams through
+    ``session.stream_content()``, bypassing the request middleware chain
+    entirely. A stalled CDN fetch has never had any retry anywhere.
+
+    ## Why the timeouts are passed explicitly, and why there are two
+
+    ``pyproject.toml`` pins nothing tighter than ``aiogram>=3.4.0`` while the
+    Dockerfile and both CI jobs install from it, so prod, CI and a developer's
+    venv can each resolve a different aiogram and a different default. Passing
+    the numbers makes them facts of this project.
+
+    They are two different clocks and must not be collapsed into one. The
+    ``timeout`` argument here is the CDN download's budget (aiogram's own
+    default for it is 30s); ``get_file`` is a Bot API method whose
+    ``request_timeout`` *replaces* ``AiohttpSession.DEFAULT_TIMEOUT`` of 60s.
+    Handing this one number to both would quietly halve the metadata call's
+    budget — on the half that was never failing. Both values match what the
+    library uses today, so this pins current behaviour rather than changing it:
+    the failures being fixed were stalls that never completed, not transfers
+    that were merely slow (a 9.6 MB video note normally lands in 0.8s), so more
+    attempts help and a longer clock would not.
 
     Raises:
-        TelegramFileError: If download fails at any step.
+        TelegramFileError: every failure, after the attempts are spent. The
+            concrete exception type is named in the message — four callers see
+            only this type, and "the CDN stalled" versus "the file is gone" are
+            different situations that read identically once the type is lost.
     """
-    try:
-        file = await bot.get_file(file_id)
-        if not file.file_path:
-            raise TelegramFileError(f"No file_path returned for file_id={file_id}")
+    _sleep = sleep or asyncio.sleep
+    _jitter = jitter or (lambda: random.uniform(0.0, _RETRY_MAX_JITTER_SECONDS))
 
-        buf = BytesIO()
-        await bot.download_file(file.file_path, destination=buf)
-        data = buf.getvalue()
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _attempt_download(bot, file_id, timeout=timeout)
+        except TelegramFileError:
+            # Ours, from the two checks above: no file_path, or zero bytes.
+            # Neither is a transient network condition and neither improves by
+            # being asked again -- and retrying them would turn one permanent
+            # failure into three, which is how a fix becomes a slower bug.
+            raise
+        except _PERMANENT_DOWNLOAD_ERRORS as exc:
+            # The file is gone, too big, or we are not allowed to have it.
+            raise TelegramFileError(
+                f"Failed to download file {file_id}: {type(exc).__name__}: {exc}"
+            ) from exc
+        except Exception as exc:
+            if attempt == attempts:
+                raise TelegramFileError(
+                    f"Failed to download file {file_id} after {attempts} attempts: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            delay = _RETRY_BASE_DELAY_SECONDS * attempt + _jitter()
+            logger.info(
+                "Telegram file download failed, retrying",
+                file_id=file_id,
+                attempt=attempt,
+                attempts=attempts,
+                retry_in=round(delay, 2),
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            await _sleep(delay)
 
-        if not data:
-            raise TelegramFileError(f"Empty file downloaded for file_id={file_id}")
-
-        logger.debug(
-            "Downloaded telegram file",
-            file_id=file_id,
-            size=len(data),
-            file_path=file.file_path,
-        )
-        return data
-
-    except TelegramFileError:
-        raise
-    except Exception as exc:
-        # Name the concrete type in the message: four callers see only
-        # TelegramFileError, and "rate-limited, retry in 30s" versus "file is
-        # gone" are different situations that read identically once the type
-        # is gone. The chain via ``from exc`` is preserved for anyone who
-        # wants to inspect ``__cause__``.
-        raise TelegramFileError(
-            f"Failed to download file {file_id}: {type(exc).__name__}: {exc}"
-        ) from exc
+    raise AssertionError("unreachable: the loop either returns or raises")
 
 
 def detect_mime_type(file_path: str) -> str:

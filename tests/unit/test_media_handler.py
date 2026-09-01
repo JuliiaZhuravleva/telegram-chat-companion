@@ -12,6 +12,7 @@ from src.services.ai.base import TranscriptionResult
 from src.services.modules.voice.transcription import _HEADER_LABEL
 from src.services.relevancy.gate import GateDecision
 from src.services.text.pipeline import PipelineResult
+from src.utils.telegram import TelegramFileError
 from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
 
@@ -211,16 +212,17 @@ def _make_voice_deps(
     }
 
 
-async def _run_voice_handler(deps, *, message_thread_id=None, patch_indicator=False):
+async def _run_voice_handler(
+    deps, *, message_thread_id=None, patch_indicator=False, download_error=None
+):
     from src.bot.handlers.media import handle_voice_message
 
-    stack = [
-        patch(
-            "src.bot.handlers.media.download_telegram_file",
-            new_callable=AsyncMock,
-            return_value=b"fake-audio",
-        )
-    ]
+    download = (
+        AsyncMock(side_effect=download_error)
+        if download_error is not None
+        else AsyncMock(return_value=b"fake-audio")
+    )
+    stack = [patch("src.bot.handlers.media.download_telegram_file", download)]
     indicator = None
     if patch_indicator:
         indicator = patch("src.bot.handlers.media.typing_indicator")
@@ -1613,3 +1615,100 @@ async def test_a_failed_transcription_of_a_short_note_stays_quiet():
     await _run_voice_handler(deps)
 
     deps["message"].answer.assert_not_awaited()
+
+
+def _everything_the_chat_saw(deps) -> str:
+    """Every string that reached the chat, through either surface.
+
+    A failure can land two ways and the tests must not care which: with a
+    placeholder standing it is EDITED into the failure line, and with none
+    (a short note, where the notice is disabled) it is a fresh `answer`.
+    Asserting only on `answer` reads as green for the long-note case while
+    checking nothing about it.
+    """
+    parts = [str(c.args[0]) for c in deps["message"].answer.await_args_list if c.args]
+    for sent in deps["message"].sent_messages:
+        parts += [str(c.args[0]) for c in sent.edit_text.await_args_list if c.args]
+    return " ".join(parts)
+
+
+class TestAFailedDownloadIsVisibleToTheChat:
+    """The download used to run before the progress placeholder existed, so its
+    failure path returned having sent nothing at all: no transcription, no
+    error, no hint. Nine voice notes and video notes were lost that way over
+    three days in production (2026-08-29..31), and the only trace was a warning
+    that had thrown the exception text away.
+
+    These assert the artefact — that something reached the chat — rather than
+    that a line was logged. A log assertion would pass while the chat stayed
+    silent, which is the entire failure being fixed.
+    """
+
+    async def test_the_chat_is_told_when_the_file_cannot_be_downloaded(self):
+        deps = _make_voice_deps(duration=372)
+
+        await _run_voice_handler(
+            deps, download_error=TelegramFileError("boom"), patch_indicator=True
+        )
+
+        assert "загрузить" in _everything_the_chat_saw(deps)
+
+    async def test_a_short_voice_note_is_reported_too(self):
+        """`enabled` is `duration >= 20s` and the measured production failures
+        ran 21-49 seconds — one of them clearing the gate by a single second.
+        A fix that only speaks for long notes would have been green on every
+        one of those nine and still silent on the next."""
+        deps = _make_voice_deps(duration=3)
+
+        await _run_voice_handler(
+            deps, download_error=TelegramFileError("boom"), patch_indicator=True
+        )
+
+        assert "загрузить" in _everything_the_chat_saw(deps)
+
+    async def test_the_wording_is_not_the_transcription_failure_wording(self):
+        """Different cause, different advice: nothing was billed and re-sending
+        the same audio is what works, where "could not transcribe" invites the
+        user to re-record."""
+        deps = _make_voice_deps(duration=372)
+
+        await _run_voice_handler(
+            deps, download_error=TelegramFileError("boom"), patch_indicator=True
+        )
+
+        assert "расшифровать" not in _everything_the_chat_saw(deps)
+
+    async def test_nothing_is_transcribed_or_billed_when_the_file_never_arrived(self):
+        deps = _make_voice_deps(duration=372)
+
+        await _run_voice_handler(
+            deps, download_error=TelegramFileError("boom"), patch_indicator=True
+        )
+
+        deps["voice_service"].transcribe.assert_not_awaited()
+        deps["pipeline"].process.assert_not_awaited()
+
+    async def test_no_progress_placeholder_is_left_standing(self):
+        """The orphan hazard. `ProgressNotice.__aexit__` only discards on an
+        exception, so catching the download failure inside the block and
+        returning would leave "🎙 Расшифровываю…" in the chat for ever — the
+        durable form of the silence being removed. `fail()` must consume the
+        placeholder by editing it."""
+        deps = _make_voice_deps(duration=372)
+
+        await _run_voice_handler(
+            deps, download_error=TelegramFileError("boom"), patch_indicator=True
+        )
+
+        placeholder = deps["message"].sent_messages[0]
+        assert placeholder.edit_text.await_count + placeholder.delete.await_count >= 1, (
+            "the placeholder was neither edited into the failure nor removed"
+        )
+
+    async def test_a_successful_download_still_transcribes(self):
+        """Control: the try/except must not swallow the happy path."""
+        deps = _make_voice_deps(duration=372)
+
+        await _run_voice_handler(deps, patch_indicator=True)
+
+        deps["voice_service"].transcribe.assert_awaited_once()

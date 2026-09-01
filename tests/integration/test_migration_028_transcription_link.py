@@ -13,9 +13,13 @@ would make the bot quietly mute itself in any chat with voice traffic).
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import asyncpg
 import pytest
+from aiogram.types import Message
 
+from src.bot.middleware.message_saver import MessageSaverMiddleware
 from src.database.repositories.messages import MessageRepository
 
 CHAT_ID = -100999000111
@@ -219,3 +223,239 @@ class TestEveryReaderExcludesTheBookkeepingRow:
             assert row["content"] is not None, row["message_id"]
         for row in await repo.get_recent_with_topic_context(CHAT_ID, None):
             assert row["content"] is not None, row["message_id"]
+
+
+# ── The transcript survives an `edited_message` ────────────────────────
+#
+# Telegram delivers `edited_message` for a voice note, and `MessageSaverMiddleware`
+# is registered on that observer too (src/main.py). It saves
+# `message.text or message.caption`, which is None for audio -- so the re-save
+# used to take the ON CONFLICT branch and overwrite the transcript with NULL.
+#
+# These drive the REAL middleware into the REAL repository against real
+# PostgreSQL, because that pair is the defect: the middleware is what produces
+# the NULL and the SQL is what accepts it. A test at either end alone stays
+# green while the chain loses data.
+
+
+def _edited_media_message(
+    chat_id: int, message_id: int, *, kind: str, caption: str | None = None
+) -> MagicMock:
+    """A Telegram `edited_message` for a voice / video_note / photo.
+
+    Every field `_save_message` reads is pinned explicitly: `spec=Message`
+    hands back a truthy MagicMock for anything unset, which would make the
+    middleware classify the type off the wrong attribute.
+    """
+    event = MagicMock(spec=Message)
+    event.chat = MagicMock()
+    event.chat.id = chat_id
+    event.message_id = message_id
+    event.from_user = MagicMock()
+    event.from_user.id = 555
+    event.from_user.username = "ivan"
+    event.from_user.first_name = "Иван"
+    event.from_user.is_bot = False
+    # The whole point: an audio or uncaptioned-photo edit carries neither.
+    event.text = None
+    event.caption = caption
+    event.reply_to_message = None
+    event.quote = None
+    event.sticker = None
+    event.voice = MagicMock() if kind == "voice" else None
+    event.video_note = MagicMock() if kind == "video_note" else None
+    event.photo = [MagicMock()] if kind == "photo" else None
+    return event
+
+
+def _edited_text_message(chat_id: int, message_id: int, text: str) -> MagicMock:
+    event = _edited_media_message(chat_id, message_id, kind="text")
+    event.text = text
+    return event
+
+
+async def _save_via_middleware(event: MagicMock, repo: MessageRepository) -> None:
+    """Route a mock Message through the real middleware code path.
+
+    `_save_message` pulls the repository out of `data["dishka_container"]`; an
+    AsyncMock whose `.get` returns the real DB-backed repo reproduces that
+    without standing up a full Dishka container.
+    """
+    container = AsyncMock()
+    container.get.return_value = repo
+    await MessageSaverMiddleware._save_message(
+        event, {"dishka_container": container, "chat_config": None}
+    )
+
+
+async def _row(db_pool: asyncpg.Pool, message_id: int) -> asyncpg.Record:
+    row = await db_pool.fetchrow(
+        "SELECT content, original_content, edit_count, edited_at "
+        "FROM chat_messages WHERE chat_id = $1 AND message_id = $2",
+        CHAT_ID,
+        message_id,
+    )
+    assert row is not None, f"no row for message_id={message_id}"
+    return row
+
+
+class TestEditedMediaMessageDoesNotEraseBotWrittenContent:
+    """Regression for the 52 rows emptied in production between 2026-08-03 and
+    2026-09-01 (29 voice, 11 video_note, 12 photo)."""
+
+    async def test_an_edited_voice_note_keeps_its_transcript(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """The defect, end to end, in the order production performed it."""
+        await repo.save(
+            CHAT_ID, VOICE_ID, "voice", user_id=555, first_name="Иван"
+        )  # MessageSaverMiddleware on dp.message: no text on a voice note
+        await repo.save(
+            CHAT_ID,
+            VOICE_ID,
+            "voice",
+            user_id=555,
+            first_name="Иван",
+            content="давайте в субботу",
+        )  # VoiceTranscriptionService.transcribe
+
+        await _save_via_middleware(_edited_media_message(CHAT_ID, VOICE_ID, kind="voice"), repo)
+
+        assert (await _row(db_pool, VOICE_ID))["content"] == "давайте в субботу"
+
+    async def test_an_edited_video_note_keeps_its_transcript(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        await repo.save(CHAT_ID, 801, "video_note", user_id=555, content="проверяем кружочки")
+
+        await _save_via_middleware(_edited_media_message(CHAT_ID, 801, kind="video_note"), repo)
+
+        assert (await _row(db_pool, 801))["content"] == "проверяем кружочки"
+
+    async def test_an_edited_photo_keeps_its_vision_description(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """`_update_message_content` owns a photo row's content, not the caption."""
+        await repo.save(CHAT_ID, 802, "photo", user_id=555, content="[Image: кот на подоконнике]")
+
+        await _save_via_middleware(_edited_media_message(CHAT_ID, 802, kind="photo"), repo)
+
+        assert (await _row(db_pool, 802))["content"] == "[Image: кот на подоконнике]"
+
+    async def test_a_content_less_resave_records_no_edit_at_all(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """Preserving the text is not enough on its own.
+
+        If the bookkeeping columns still moved, `original_content` would be
+        pinned to a value nothing ever edited away from, and every future
+        "was this edited / show me the original" reader inherits a false
+        positive on every voice note in the chat.
+        """
+        await repo.save(CHAT_ID, 803, "voice", user_id=555, content="привет")
+        before = await _row(db_pool, 803)
+
+        await _save_via_middleware(_edited_media_message(CHAT_ID, 803, kind="voice"), repo)
+
+        after = await _row(db_pool, 803)
+        assert after["edit_count"] == before["edit_count"]
+        assert after["edited_at"] == before["edited_at"]
+        assert after["original_content"] == before["original_content"]
+
+    async def test_resaving_identical_content_records_no_edit_either(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """The `IS DISTINCT FROM` half of the guard, asserted behaviourally.
+
+        Removing it from all three columns and keeping only `IS NOT NULL` left
+        every integration test in this file green — the defect's own data never
+        exercises "same content saved twice", so only a string-match on the SQL
+        caught it. This is that same fact stated as behaviour: a re-save that
+        changes nothing is not an edit.
+
+        It is a real path, not a hypothetical: aiogram redelivers an unconfirmed
+        update after a restart, and the voice handler then re-transcribes the
+        same audio to the same text.
+        """
+        await repo.save(CHAT_ID, 820, "voice", user_id=555, content="одно и то же")
+        before = await _row(db_pool, 820)
+
+        await repo.save(CHAT_ID, 820, "voice", user_id=555, content="одно и то же")
+
+        after = await _row(db_pool, 820)
+        assert after["edit_count"] == before["edit_count"]
+        assert after["edited_at"] == before["edited_at"]
+        assert after["original_content"] is None, (
+            "an unchanged re-save must not pin original_content to the live text"
+        )
+
+    async def test_the_invariant_the_defect_broke_holds_after_an_edit(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """`test_no_row_reaching_a_prompt_has_null_content`, re-asserted on the
+        far side of the edit that used to violate it. A NULL here does not read
+        as absent: `_format_message` renders it as the literal word "None"
+        attributed to a named participant."""
+        await _seed_voice_and_transcription(repo)
+
+        await _save_via_middleware(_edited_media_message(CHAT_ID, VOICE_ID, kind="voice"), repo)
+
+        for row in await repo.get_recent(CHAT_ID, limit=10):
+            assert row["content"] is not None, row["message_id"]
+        for row in await repo.get_recent_with_topic_context(CHAT_ID, None):
+            assert row["content"] is not None, row["message_id"]
+
+
+class TestTheGuardDoesNotWronglyRefuse:
+    """The cases whose expected answer is "yes, overwrite". A fix that froze
+    `content` outright would pass every test above and break editing."""
+
+    async def test_a_real_text_edit_still_replaces_the_text(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        await repo.save(CHAT_ID, 810, "text", user_id=555, content="первая редакция")
+
+        await _save_via_middleware(_edited_text_message(CHAT_ID, 810, "вторая редакция"), repo)
+
+        row = await _row(db_pool, 810)
+        assert row["content"] == "вторая редакция"
+        assert row["original_content"] == "первая редакция"
+        assert row["edit_count"] == 1
+        assert row["edited_at"] is not None
+
+    async def test_an_edited_caption_still_replaces_the_content(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        await repo.save(CHAT_ID, 811, "photo", user_id=555, content="старая подпись")
+
+        await _save_via_middleware(
+            _edited_media_message(CHAT_ID, 811, kind="photo", caption="новая подпись"), repo
+        )
+
+        assert (await _row(db_pool, 811))["content"] == "новая подпись"
+
+    async def test_the_transcription_write_itself_still_lands(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """NULL -> transcript is the write the whole feature depends on, and it
+        goes through the same ON CONFLICT branch as the wipe did."""
+        await repo.save(CHAT_ID, 812, "voice", user_id=555)
+
+        await repo.save(CHAT_ID, 812, "voice", user_id=555, content="расшифровка")
+
+        assert (await _row(db_pool, 812))["content"] == "расшифровка"
+
+    async def test_removing_a_caption_no_longer_clears_the_content(
+        self, repo: MessageRepository, db_pool: asyncpg.Pool
+    ):
+        """The documented trade, asserted so it is a decision and not a
+        discovery: `caption=None` is indistinguishable from "this update
+        carries no content", so an emptied caption now survives in history.
+        Losing a transcript outright is the worse of the two."""
+        await repo.save(CHAT_ID, 813, "photo", user_id=555, content="подпись, которую удалят")
+
+        await _save_via_middleware(
+            _edited_media_message(CHAT_ID, 813, kind="photo", caption=None), repo
+        )
+
+        assert (await _row(db_pool, 813))["content"] == "подпись, которую удалят"

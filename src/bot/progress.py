@@ -218,15 +218,25 @@ class ProgressNotice:
             language=language,
         )
 
-    async def fail(self, text: str) -> None:
+    async def fail(self, text: str, *, report_when_disabled: bool = False) -> None:
         """Turn the placeholder into a failure line, or send one.
 
-        Silent when the notice was disabled: a caller that only announces long
-        operations must not start reporting on short ones, which would be a
-        new class of message rather than a fix to an existing one.
+        Silent by default when the notice was disabled: a caller that only
+        announces long operations must not start reporting on short ones, which
+        would be a new class of message rather than a fix to an existing one.
+
+        ``report_when_disabled`` opts out of that, and exists for one specific
+        shape: a failure that means the user's message was *dropped entirely*,
+        as opposed to one where the bot merely has nothing to say. The
+        distinction is not academic. `enabled` is `duration >= 20s`, and the
+        six voice notes whose download timed out in production on 2026-08-29..31
+        measured 21, 27, 27, 35, 41 and 49 seconds — one of them cleared the
+        threshold by a single second. Gating "your voice note never arrived" on
+        a duration cut-off it happens to sit on top of is a coin flip, and the
+        losing side of it is silence.
         """
         await self._stop_ticking()
-        if not self._enabled:
+        if not self._enabled and not report_when_disabled:
             return
         placeholder = self._placeholder
         self._placeholder = None
@@ -247,6 +257,39 @@ class ProgressNotice:
                     error_type=type(exc).__name__,
                 )
                 await _discard_message(placeholder, self._message.chat.id)
+            else:
+                return
+
+        # Quoted, like the placeholder this is standing in for. Without it a
+        # failure line in a busy group names no message at all -- and with
+        # `report_when_disabled` this fresh-send path is now the COMMON one
+        # (a short voice note posts no placeholder to edit), so an unquoted
+        # "could not fetch this voice message" would arrive with nothing to
+        # attach it to.
+        #
+        # But quoting can itself fail, and adding it without this fallback
+        # reintroduced the very silence the rest of this class removes: the
+        # author can delete their voice note during the thirty seconds the
+        # download is stalling, and Telegram then rejects the send outright
+        # because the quote target is gone. `reply_flow._send_one` survives the
+        # same race for ordinary answers; a failure notice deserves it at least
+        # as much, because it is the only thing the chat will ever hear about a
+        # message that vanished from history.
+        #
+        # Any exception, not just the "message to be replied not found" markers
+        # that `_send_one` matches on: those exist there to stop a genuine
+        # FORMATTING error hiding behind a deletion, and `text` here is a static
+        # maintainer-authored string with nothing to format wrongly. Delivering
+        # it beats classifying why the first attempt failed.
+        if self._reply_to is not None:
+            try:
+                await self._message.answer(text, reply_to_message_id=self._reply_to)
+            except Exception as exc:
+                logger.info(
+                    "Could not quote the source when reporting the failure; sending unquoted",
+                    chat_id=self._message.chat.id,
+                    error_type=type(exc).__name__,
+                )
             else:
                 return
 
