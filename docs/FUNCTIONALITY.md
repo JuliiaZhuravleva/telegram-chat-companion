@@ -127,6 +127,19 @@ code path and cannot be reached from a chat. Two consequences worth knowing:
   bot's message at all), so replies to them keep the old behaviour. The gap closes as new
   voice messages arrive; `scripts/backfill_transcription_links.py` recovers what is
   recoverable and reports what is not.
+- **The transcript lives on the voice row, and an `edited_message` used to erase it.**
+  `MessageSaverMiddleware` is registered on `dp.edited_message` too and saves
+  `text or caption` — `None` for audio — so the UPSERT's old unconditional
+  `content = EXCLUDED.content` overwrote the transcript with NULL hours after the fact.
+  52 rows (29 voice, 11 video_note, 12 photo — the last are `[Image: …]` vision
+  descriptions, wiped the same way) were emptied in production between 2026-08-03 and
+  2026-09-01 before `save()` learned to COALESCE. The words survived only in
+  `original_content`, a column with one writer and no readers;
+  `python -m scripts.repair_wiped_media_content` (dry run by default, `--apply` to write)
+  puts them back. Run it **after** the fix is live, or the old code re-empties what you
+  just restored. It repairs `chat_messages` only: `chat_chunks` has already passed those
+  message ids and its watermark is a maximum, so a restored row below it never re-enters
+  the archive — the script reports that split per row.
 
 **If the audio is deleted mid-flight**, the answer is still sent — unquoted, with a
 one-line note at the top (`⚠️ Исходное сообщение удалено.`) so the chat can see why it
