@@ -78,6 +78,19 @@ class MessageRepository:
         Hence `COALESCE(EXCLUDED.content, chat_messages.content)`: a save that
         carries no content may create a row but may never empty one.
 
+        **What this does NOT close, stated so nobody reads the class as solved.**
+        The guard is about content-less saves only. An `edited_message` that
+        carries a NON-empty caption still takes the full write path, because the
+        repository cannot tell a middleware save from a transcription save — so
+        adding a caption to a voice note would still replace its transcript, and
+        editing a photo's caption still replaces the `[Image: ...]` description
+        (which vision never recomputes, since `handle_photo_message` is
+        registered on `dp.message` only). Closing that needs the caller to
+        declare whether its content is authoritative, which changes `save()`'s
+        signature. Measured on production 2026-09-01: **zero** voice or
+        video_note rows are in that state, so the mechanism is live but has
+        never fired. Tracked as TD-159 rather than fixed blind.
+
         **The trade this makes, deliberately:** "the caption was removed" becomes
         unrepresentable. Edit a photo's caption away and Telegram delivers
         `caption=None`, so the old caption now survives in history. That is a

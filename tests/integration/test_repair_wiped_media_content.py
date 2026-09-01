@@ -339,3 +339,49 @@ class TestTheTargetIsNamedAndTheCredentialIsNot:
         """Never raise: a log line that crashes the script it was added to
         protect would be a worse bug than the one it guards."""
         assert describe_target("host/db") == "host/db"
+
+
+class TestTheDryRunShowsWhatItWouldRestore:
+    """`--apply` is gated on a human reading the dry run, so the dry run has to
+    carry enough to read.
+
+    The predicate alone cannot tell a wiped transcript from a caption its author
+    deleted on purpose — Telegram delivers `caption=None` for both, and the old
+    SQL treated them identically. `shape` and `recovered_head` are what make that
+    distinction available to the operator instead of assumed by the script.
+    """
+
+    async def test_a_video_note_is_unambiguous(self, db_pool: asyncpg.Pool):
+        """It cannot carry a caption at all, so its text can only be a transcript."""
+        await _wiped_row(db_pool, 1, "расшифровка кружочка", message_type="video_note")
+
+        rows = await find_wiped(db_pool)
+
+        assert [r["shape"] for r in rows] == ["transcript"]
+
+    async def test_an_image_description_is_unambiguous(self, db_pool: asyncpg.Pool):
+        """The bot wrote anything starting with `[Image:` — a user's caption
+        does not look like that."""
+        await _wiped_row(db_pool, 2, "[Image: кот на подоконнике]", message_type="photo")
+
+        rows = await find_wiped(db_pool)
+
+        assert [r["shape"] for r in rows] == ["image_description"]
+
+    async def test_a_voice_note_is_flagged_for_inspection(self, db_pool: asyncpg.Pool):
+        """A voice note CAN carry a caption, so its text is a transcript or a
+        removed caption and the script must not pretend to know which."""
+        await _wiped_row(db_pool, 3, "длинная расшифровка", message_type="voice")
+
+        rows = await find_wiped(db_pool)
+
+        assert [r["shape"] for r in rows] == ["inspect"]
+
+    async def test_the_preview_carries_the_text_itself(self, db_pool: asyncpg.Pool):
+        """A shape label the operator cannot check against the actual words is
+        an assertion, not evidence."""
+        await _wiped_row(db_pool, 4, "первые слова, которые вернутся в историю")
+
+        rows = await find_wiped(db_pool)
+
+        assert rows[0]["recovered_head"].startswith("первые слова")

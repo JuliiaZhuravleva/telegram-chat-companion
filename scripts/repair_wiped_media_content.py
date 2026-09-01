@@ -35,11 +35,28 @@ Hence the recovery predicate, which is precisely the wipe's signature:
 
     content IS NULL AND original_content IS NOT NULL
 
-No other code path can produce that state. ``content`` only ever goes from
-something back to nothing through the defect: the four other writers
-(``VoiceTranscriptionService``, ``_update_message_content``, the pipeline's own
-bot-message save, and the transcription bookkeeping row) either always pass a
-value or only ever insert.
+``content`` only ever goes from something back to nothing through two paths:
+this defect, and a user clearing a caption they had written (Telegram delivers
+``caption=None``, which the old SQL could not tell apart from "this update
+carries no content"). The four other writers — ``VoiceTranscriptionService``,
+``_update_message_content``, the pipeline's own bot-message save, and the
+transcription bookkeeping row — either always pass a value or only ever insert.
+
+The predicate therefore cannot, by itself, distinguish a wiped transcript from a
+caption its author deleted on purpose, and restoring the second would put text
+back that someone chose to remove. That is what ``shape`` and ``recovered_head``
+in the dry-run output are for, and why they are not decoration:
+
+* ``transcript`` — a video note, which cannot carry a caption at all. Unambiguous.
+* ``image_description`` — starts with ``[Image:``, so the bot wrote it. Unambiguous.
+* ``inspect`` — a voice note or photo whose text could be either. **Read the
+  ``recovered_head`` lines before passing ``--apply``.**
+
+Measured on production 2026-09-01 before the first run: all 12 photo rows began
+with ``[Image:`` and no voice or video_note row's text was shorter than 31
+characters, i.e. none had the shape of a caption. That was checked with a
+separate query; printing it here is what makes the same check possible next
+time, by someone who is not holding this context.
 
 What this script deliberately does NOT do
 -----------------------------------------
@@ -121,6 +138,12 @@ async def find_wiped(pool: asyncpg.Pool) -> list[asyncpg.Record]:
                m.created_at,
                m.edit_count,
                length(m.original_content) AS recovered_chars,
+               left(m.original_content, 60) AS recovered_head,
+               CASE
+                   WHEN m.message_type = 'video_note' THEN 'transcript'
+                   WHEN m.original_content LIKE '[Image:%' THEN 'image_description'
+                   ELSE 'inspect'
+               END AS shape,
                m.message_id > COALESCE(
                    (SELECT max(c.msg_to) FROM chat_chunks c WHERE c.chat_id = m.chat_id), 0
                ) AS above_watermark
@@ -197,6 +220,8 @@ async def main() -> int:
                 created_at=str(row["created_at"]),
                 edit_count=row["edit_count"],
                 recovered_chars=row["recovered_chars"],
+                shape=row["shape"],
+                recovered_head=row["recovered_head"],
                 reaches_chunk_archive=row["above_watermark"],
             )
 
