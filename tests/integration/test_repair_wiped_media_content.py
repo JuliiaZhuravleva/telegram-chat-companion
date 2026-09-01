@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncpg
 import pytest
 
-from scripts.repair_wiped_media_content import find_wiped, repair
+from scripts.repair_wiped_media_content import describe_target, find_wiped, repair
 from src.database.repositories.messages import MessageRepository
 
 CHAT_ID = -100999000222
@@ -298,3 +298,44 @@ class TestArchiveProspects:
         rows = await find_wiped(db_pool)
 
         assert [row["above_watermark"] for row in rows] == [True]
+
+
+class TestTheTargetIsNamedAndTheCredentialIsNot:
+    """The script hits whichever database the ambient `.env` points at, and the
+    console output is identical either way — both were exercised while building
+    it. Naming the target is the only thing that distinguishes "aimed at prod"
+    from "aimed at prod, hit dev, saw zero rows, closed the incident".
+
+    The credential half matters because this line is written for an operator to
+    paste into a chat.
+    """
+
+    def test_it_names_host_and_database(self):
+        assert (
+            describe_target("postgresql://bot_user:pw@companion-postgres:5432/telegram_bot")
+            == "companion-postgres:5432/telegram_bot"
+        )
+
+    def test_two_environments_are_distinguishable(self):
+        """The whole point: dev and prod must not render the same."""
+        dev = describe_target("postgresql://bot_user:pw@localhost:55432/telegram_bot")
+        prod = describe_target("postgresql://bot_user:pw@companion-postgres:5432/telegram_bot")
+        assert dev != prod
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "postgresql://bot_user:s3cr3t@host:5432/db",
+            "postgresql://bot_user:p%40ss%3Aword@host:5432/db",
+            "postgres://user:pw@host:5432/db?sslmode=require",
+        ],
+    )
+    def test_no_password_survives(self, url: str):
+        out = describe_target(url)
+        for leak in ("s3cr3t", "p%40ss", "word", "pw"):
+            assert leak not in out, f"{leak!r} leaked into {out!r}"
+
+    def test_a_urlless_form_still_returns_something_printable(self):
+        """Never raise: a log line that crashes the script it was added to
+        protect would be a worse bug than the one it guards."""
+        assert describe_target("host/db") == "host/db"

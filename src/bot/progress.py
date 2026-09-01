@@ -260,14 +260,41 @@ class ProgressNotice:
             else:
                 return
 
+        # Quoted, like the placeholder this is standing in for. Without it a
+        # failure line in a busy group names no message at all -- and with
+        # `report_when_disabled` this fresh-send path is now the COMMON one
+        # (a short voice note posts no placeholder to edit), so an unquoted
+        # "could not fetch this voice message" would arrive with nothing to
+        # attach it to.
+        #
+        # But quoting can itself fail, and adding it without this fallback
+        # reintroduced the very silence the rest of this class removes: the
+        # author can delete their voice note during the thirty seconds the
+        # download is stalling, and Telegram then rejects the send outright
+        # because the quote target is gone. `reply_flow._send_one` survives the
+        # same race for ordinary answers; a failure notice deserves it at least
+        # as much, because it is the only thing the chat will ever hear about a
+        # message that vanished from history.
+        #
+        # Any exception, not just the "message to be replied not found" markers
+        # that `_send_one` matches on: those exist there to stop a genuine
+        # FORMATTING error hiding behind a deletion, and `text` here is a static
+        # maintainer-authored string with nothing to format wrongly. Delivering
+        # it beats classifying why the first attempt failed.
+        if self._reply_to is not None:
+            try:
+                await self._message.answer(text, reply_to_message_id=self._reply_to)
+            except Exception as exc:
+                logger.info(
+                    "Could not quote the source when reporting the failure; sending unquoted",
+                    chat_id=self._message.chat.id,
+                    error_type=type(exc).__name__,
+                )
+            else:
+                return
+
         try:
-            # Quoted, like the placeholder this is standing in for. Without it a
-            # failure line in a busy group names no message at all -- and with
-            # `report_when_disabled` this fresh-send path is now the COMMON one
-            # (a short voice note posts no placeholder to edit), so an unquoted
-            # "could not fetch this voice message" would arrive with nothing to
-            # attach it to.
-            await self._message.answer(text, reply_to_message_id=self._reply_to)
+            await self._message.answer(text)
         except Exception as exc:
             logger.warning(
                 "Could not report the failure to the chat",

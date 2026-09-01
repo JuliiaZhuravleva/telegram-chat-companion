@@ -159,6 +159,14 @@ async def handle_voice_message(
                 # indistinguishable from each other in the log.
                 error=str(exc),
                 error_type=type(exc).__name__,
+                # The retry loop catches broadly, on purpose -- a GET is safe to
+                # repeat and an unanticipated transient type should not become a
+                # permanent one. The cost of that breadth is that a genuine code
+                # bug inside the download arrives here wearing the same clothes
+                # as a CDN stall. The stack is what tells them apart, and this
+                # is the one place it can still be captured: the chain is
+                # preserved through `raise ... from exc`.
+                exc_info=True,
             )
             audio_data = None
 
@@ -606,11 +614,18 @@ async def _update_message_content(
             message_type="photo",
             content=f"[Image: {description}]",
         )
-    except Exception:
+    except Exception as exc:
+        # `content` on a photo row is exactly the column this release taught the
+        # UPSERT to stop erasing, and this is the write that fills it. A bare
+        # "failed" line here would leave the next investigation with the same
+        # nothing the voice path just cost us.
         logger.warning(
             "Failed to update message with image description",
             chat_id=chat_id,
             message_id=message_id,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            exc_info=True,
         )
 
 

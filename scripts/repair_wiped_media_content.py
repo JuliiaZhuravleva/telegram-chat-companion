@@ -85,6 +85,26 @@ logger = structlog.get_logger(__name__)
 _WIPED = "content IS NULL AND original_content IS NOT NULL"
 
 
+def describe_target(database_url: str) -> str:
+    """``host:port/dbname`` for the log line, with credentials stripped.
+
+    Named rather than assumed, because the same command line hits a different
+    database depending on which `.env` is in scope: from a laptop venv it is the
+    local dev container, from inside the production container it is production.
+    Both were exercised while building this script and the console output was
+    identical. Worse, the two failure directions are asymmetric but look the
+    same: aiming at prod and hitting dev prints `rows_matching=0`, which reads
+    as "already repaired" and would close the incident with the damage intact.
+
+    Deliberately parsed rather than echoed: `database_url` carries a password,
+    and this line goes to a log an operator will paste into a chat.
+    """
+    without_scheme = database_url.split("://", 1)[-1]
+    # Everything before the last '@' is credentials.
+    host_and_db = without_scheme.rsplit("@", 1)[-1]
+    return host_and_db.split("?", 1)[0]
+
+
 async def find_wiped(pool: asyncpg.Pool) -> list[asyncpg.Record]:
     """Every row matching the wipe signature, with its archive prospects.
 
@@ -141,10 +161,27 @@ async def main() -> int:
         action="store_true",
         help="write changes; without it the script only reports what it would do",
     )
+    parser.add_argument(
+        "--database-url",
+        default=None,
+        help=(
+            "target database; defaults to DATABASE_URL from the environment. "
+            "Pass it when you want the target to be a choice rather than whatever "
+            "the ambient .env happens to say."
+        ),
+    )
     args = parser.parse_args()
 
-    settings = Settings()  # type: ignore[call-arg]
-    pool = await create_pool(settings.database_url)
+    database_url = args.database_url or Settings().database_url  # type: ignore[call-arg]
+    # BEFORE the pool, before the query, before any chance of writing: say which
+    # database this is about to touch. See describe_target's docstring.
+    logger.info(
+        "connecting",
+        target=describe_target(database_url),
+        source="--database-url" if args.database_url else "environment",
+        mode="APPLY" if args.apply else "dry run",
+    )
+    pool = await create_pool(database_url)
 
     try:
         rows = await find_wiped(pool)
@@ -169,6 +206,7 @@ async def main() -> int:
 
     logger.info(
         "repair_complete",
+        target=describe_target(database_url),
         mode="APPLIED" if args.apply else "DRY RUN — nothing written",
         rows_matching=len(rows),
         rows_updated=updated,
