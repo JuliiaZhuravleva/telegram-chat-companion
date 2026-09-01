@@ -50,6 +50,49 @@ class MessageRepository:
         update, so the transcription row is written exactly once and never
         re-saved. If a future path (message editing, business connections) can
         re-save it, this is the line that decides whether the link survives.
+
+        ## Why the ON CONFLICT branch never writes a NULL over existing content
+
+        `content` on a media row is written by the *bot*, not by the sender:
+        `VoiceTranscriptionService.transcribe` puts the transcript on the voice
+        row (it is the only copy of it in the database — the bot's own
+        transcription message deliberately stores none), and
+        `_update_message_content` puts `[Image: ...]` on a photo row. But
+        `MessageSaverMiddleware` is registered on `dp.edited_message` as well as
+        `dp.message`, and it saves `message.text or message.caption`, which is
+        `None` for voice, video_note and an uncaptioned photo.
+
+        So an `edited_message` for a voice note — which Telegram does deliver,
+        hours after the fact — used to re-save the row with `content=None` and
+        the old unconditional `content = EXCLUDED.content` wiped the transcript.
+        Measured in production 2026-09-01: **52 rows** (29 voice, 11 video_note,
+        12 photo) had been silently emptied this way since 2026-08-03, at two to
+        three a day. Nothing surfaced it: the transcription had already been
+        posted to the chat, so the loss was invisible there, and the words simply
+        stopped existing for `get_transcription_source` (which then reports the
+        speaker as unknown and hands the model the bot's own rendered message as
+        if it were speech), for `/summary` and for the chunk archive. The prompt
+        history was worse than empty — `_format_message` renders a NULL content
+        as the literal string "None" attributed to a named participant.
+
+        Hence `COALESCE(EXCLUDED.content, chat_messages.content)`: a save that
+        carries no content may create a row but may never empty one.
+
+        **The trade this makes, deliberately:** "the caption was removed" becomes
+        unrepresentable. Edit a photo's caption away and Telegram delivers
+        `caption=None`, so the old caption now survives in history. That is a
+        small, rare divergence between history and the chat; losing a transcript
+        outright is neither.
+
+        The same guard is why the three edit-bookkeeping columns are conditional.
+        A re-save that carries no content changes nothing, so recording it as an
+        edit is a lie — and an expensive one, because `original_content` would
+        then be pinned to a value that was never edited away from. Note the guard
+        deliberately still counts a *first* content write (NULL -> transcript) as
+        an edit, which is pre-existing behaviour: every transcribed voice note
+        carries `edit_count = 1` with no human edit involved. Left alone here so
+        this change stays about the data loss; see TD-013 before trusting
+        `edit_count` to mean "a person edited this".
         """
         await self._pool.execute(
             """
@@ -64,12 +107,25 @@ class MessageRepository:
             SET transcribed_message_id = COALESCE(
                     EXCLUDED.transcribed_message_id, chat_messages.transcribed_message_id
                 ),
-                content = EXCLUDED.content,
-                edited_at = NOW(),
-                edit_count = chat_messages.edit_count + 1,
-                original_content = COALESCE(
-                    chat_messages.original_content, chat_messages.content
-                )
+                content = COALESCE(EXCLUDED.content, chat_messages.content),
+                edited_at = CASE
+                    WHEN EXCLUDED.content IS NOT NULL
+                     AND EXCLUDED.content IS DISTINCT FROM chat_messages.content
+                    THEN NOW()
+                    ELSE chat_messages.edited_at
+                END,
+                edit_count = chat_messages.edit_count + CASE
+                    WHEN EXCLUDED.content IS NOT NULL
+                     AND EXCLUDED.content IS DISTINCT FROM chat_messages.content
+                    THEN 1
+                    ELSE 0
+                END,
+                original_content = CASE
+                    WHEN EXCLUDED.content IS NOT NULL
+                     AND EXCLUDED.content IS DISTINCT FROM chat_messages.content
+                    THEN COALESCE(chat_messages.original_content, chat_messages.content)
+                    ELSE chat_messages.original_content
+                END
             """,
             chat_id,
             message_id,
