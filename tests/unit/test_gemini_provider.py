@@ -241,13 +241,62 @@ class TestAnalyzeImage:
 
 class TestRateLimiting:
     async def test_http_429(self, provider):
+        """No retry hint in the body means None, not an invented delay.
+
+        This assertion used to read `== 65.0`, which is the hardcoded default
+        the provider returned whenever it could not find a delay -- i.e. the
+        test certified the fabrication. It cost a day of production diagnosis:
+        a depleted-credits 429 carries no delay at all (waiting does not help),
+        so every log line and every `ai_failure_log` row described a permanent
+        billing outage as a 65-second blip.
+        """
         mock_resp = _mock_response(status_code=429, text="Too many requests")
 
         with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
             with pytest.raises(RateLimitError) as exc_info:
                 await provider.generate_text("Test")
 
-        assert exc_info.value.retry_after == 65.0  # default + buffer
+        assert exc_info.value.retry_after is None
+        assert "no retry hint" in str(exc_info.value)
+
+    async def test_429_carries_the_providers_own_words(self, provider):
+        """The body is the only place that says WHICH exhaustion this is."""
+        body = (
+            '{"error": {"code": 429, "message": "Your prepayment credits are '
+            "depleted. Please go to AI Studio at https://ai.studio/projects to "
+            'manage your project and billing.", "status": "RESOURCE_EXHAUSTED"}}'
+        )
+        mock_resp = _mock_response(status_code=429, text=body)
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            with pytest.raises(RateLimitError) as exc_info:
+                await provider.generate_text("Test")
+
+        message = str(exc_info.value)
+        assert "prepayment credits are depleted" in message
+        # The URL is what makes the admin alert actionable.
+        assert "https://ai.studio/projects" in message
+
+    async def test_429_detail_is_bounded(self, provider):
+        """An unbounded body must not become an unbounded Telegram message."""
+        body = '{"error": {"message": "' + ("x" * 5000) + '"}}'
+        mock_resp = _mock_response(status_code=429, text=body)
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            with pytest.raises(RateLimitError) as exc_info:
+                await provider.generate_text("Test")
+
+        assert len(str(exc_info.value)) < 500
+
+    async def test_429_unparseable_body_still_travels(self, provider):
+        """A body that is not our JSON shape is still evidence."""
+        mock_resp = _mock_response(status_code=429, text="upstream connect error 503 UF")
+
+        with patch.object(provider._client, "post", new_callable=AsyncMock, return_value=mock_resp):
+            with pytest.raises(RateLimitError) as exc_info:
+                await provider.generate_text("Test")
+
+        assert "upstream connect error" in str(exc_info.value)
 
     async def test_rate_limit_pattern_in_body(self, provider):
         mock_resp = _mock_response(

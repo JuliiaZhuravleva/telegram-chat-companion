@@ -968,6 +968,14 @@ def _format_health_status(row: dict[str, Any], lang: str) -> str:
             sev = str(issue.get("severity", "warning"))
             icon = "\U0001f525" if sev == "critical" else "\u26a0\ufe0f"
             lines.append(f"  {icon} {escape(str(issue.get('message', '')))}")
+            # The same provider error and advice the alert carries. Two
+            # surfaces describing one incident differently is how an admin
+            # ends up trusting neither -- and this is the surface someone
+            # opens precisely because they are not sure the alert is current.
+            if issue.get("detail"):
+                lines.append(f"     {escape(str(issue['detail']))}")
+            if issue.get("hint"):
+                lines.append(f"     \U0001f4a1 {escape(str(issue['hint']))}")
 
     return "\n".join(lines)
 

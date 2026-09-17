@@ -7,6 +7,7 @@ Supports text generation, embeddings (free tier), and vision.
 from __future__ import annotations
 
 import base64
+import json
 import re
 from typing import Any
 
@@ -49,6 +50,13 @@ _RATE_LIMIT_PATTERNS = [
 
 # Pattern to extract retry delay from Gemini error messages
 _RETRY_DELAY_PATTERN = re.compile(r"retry in (\d+\.?\d*)s", re.IGNORECASE)
+
+# How much of the provider's own error text travels with the exception. It
+# reaches `ai_failure_log.error_message` (via `str(error)`) and from there the
+# admin health alert, so it has to be long enough to carry a URL -- Google's
+# billing error spends ~90 characters before naming ai.studio -- and short
+# enough that an unbounded body cannot dominate a Telegram message.
+_MAX_ERROR_DETAIL = 300
 
 
 class GeminiProvider(AIProvider):
@@ -235,9 +243,29 @@ class GeminiProvider(AIProvider):
 
         # Check rate limit on HTTP 429 or body patterns
         if resp.status_code == 429 or self._is_rate_limited(body_text):
+            # The body is the only place that says WHICH exhaustion this is,
+            # and the three kinds want opposite responses: a per-minute quota
+            # passes in a minute, a per-day quota passes at the reset hour,
+            # and depleted prepaid credits never pass until someone pays. This
+            # branch used to discard the body and synthesise "retry in 65.0s"
+            # from a hardcoded default, so a 24-hour billing outage read in
+            # every log line and every `ai_failure_log` row as a momentary
+            # blip. Note the `!= 200` branch below always logged its body --
+            # the one status that needed it most was the one without it.
             retry_after = self._parse_retry_after(body_text)
+            detail = self._extract_error_detail(body_text)
+            logger.error(
+                "Gemini rate limited",
+                status=resp.status_code,
+                retry_after=retry_after,
+                body=body_text[:500],
+            )
+            hint = f"retry in {retry_after}s" if retry_after is not None else "no retry hint"
+            message = f"Gemini rate limit exceeded ({hint})"
+            if detail:
+                message = f"{message}: {detail}"
             raise RateLimitError(
-                f"Gemini rate limit exceeded (retry in {retry_after}s)",
+                message,
                 provider=self.name,
                 retry_after=retry_after,
             )
@@ -303,12 +331,46 @@ class GeminiProvider(AIProvider):
         return any(pattern.search(body_text) for pattern in _RATE_LIMIT_PATTERNS)
 
     @staticmethod
-    def _parse_retry_after(body_text: str) -> float:
-        """Extract retry delay from response text, default to 65s."""
+    def _parse_retry_after(body_text: str) -> float | None:
+        """Extract the retry delay the provider asked for, or None if it gave none.
+
+        Returns None rather than the old hardcoded 65.0: a fabricated delay is
+        indistinguishable from one Google actually sent, and it is what made a
+        depleted-credits outage (whose body carries no delay at all, because
+        waiting will not help) look like an ordinary per-minute blip for a day.
+        Callers that need a number must choose their own and own that choice --
+        see `ProviderBackoff`, which escalates instead of guessing.
+        """
         match = _RETRY_DELAY_PATTERN.search(body_text)
         if match:
             return float(match.group(1)) + 5.0  # Add 5s buffer
-        return 65.0
+        return None
+
+    @staticmethod
+    def _extract_error_detail(body_text: str) -> str | None:
+        """Pull the provider's own human-readable message out of an error body.
+
+        Falls back to the raw body when it is not the JSON shape we expect: an
+        unparseable body is still evidence, and dropping it is the behaviour
+        this function exists to end.
+        """
+        if not body_text:
+            return None
+        try:
+            parsed = json.loads(body_text)
+            message = parsed.get("error", {}).get("message")
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            message = None
+        # `str()` because the field is only a string by convention: a dict or
+        # list here would raise `AttributeError` on `.split()`, and that
+        # exception belongs to no router clause -- so it would cost the
+        # `ai_failure_log` row and the backoff, to save a truncation.
+        text = " ".join(str(message or body_text).split())
+        if not text:
+            return None
+        if len(text) > _MAX_ERROR_DETAIL:
+            text = text[: _MAX_ERROR_DETAIL - 1].rstrip() + "…"
+        return text
 
     @staticmethod
     def _get_token_count(response: dict[str, Any], key: str) -> int | None:

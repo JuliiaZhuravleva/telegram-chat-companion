@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -34,6 +34,32 @@ def bot():
 def checker(pool, bot):
     """HealthChecker instance with mocked deps."""
     return HealthChecker(pool=pool, bot=bot)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _failure_row(task: str, count: int, *, error: str | None = None, provider="gemini"):
+    """A row as `get_ai_failure_details` returns it."""
+    return {
+        "task_type": task,
+        "n": count,
+        "provider": provider,
+        "error_type": "RateLimitError",
+        "error_message": error,
+        "since": datetime.now(UTC) - timedelta(hours=2),
+    }
+
+
+def _last_alert(*, age: float, issues=None):
+    """A row as `get_last_alert` returns it."""
+    return {
+        "ts": time.time() - age,
+        "status": "warning",
+        "issues": issues if issues is not None else [],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +176,7 @@ class TestPersistResult:
         """Alert should be sent if cooldown has expired."""
         # Mock health repo methods
         pool.fetchrow.side_effect = [
-            {"ts": time.time() - 3600},  # last alert 1h ago (get_last_alert_time)
+            _last_alert(age=3600),  # last alert 1h ago, about something else
             {"id": 1},  # insert_log
         ]
         pool.fetchval.side_effect = [
@@ -174,7 +200,10 @@ class TestPersistResult:
     async def test_alert_not_sent_during_cooldown(self, checker, pool, bot):
         """Alert should NOT be sent if within cooldown period."""
         pool.fetchrow.side_effect = [
-            {"ts": time.time() - 60},  # last alert 1 min ago
+            # About the SAME issue, one minute ago. The floor deliberately
+            # applies only to repetition, so a prior alert about something
+            # else (or an all-clear) would not suppress this one.
+            _last_alert(age=60, issues=[{"severity": "warning", "message": "test issue"}]),
             {"id": 2},  # insert_log
         ]
         pool.fetchval.side_effect = [
@@ -197,7 +226,7 @@ class TestPersistResult:
     @pytest.mark.asyncio
     async def test_no_alert_when_healthy(self, checker, pool, bot):
         """No alert for healthy status (no issues)."""
-        pool.fetchrow.return_value = {"id": 3}
+        pool.fetchrow.side_effect = [None, {"id": 3}]  # no prior alert, insert_log
         pool.fetchval.return_value = 0
 
         config = {"admin_ids": "12345"}
@@ -312,19 +341,27 @@ class TestAIFailureCheck:
     async def test_warning_names_the_task_that_failed(self, checker, pool):
         pool.fetchval.side_effect = [1, 5, 0]  # db ok, messages, no fallbacks
         pool.fetch.return_value = [
-            {"task_type": "transcription", "n": 5},
-            {"task_type": "vision", "n": 1},
+            _failure_row("transcription", 5),
+            _failure_row("vision", 1),
         ]
 
         result = await checker._run_check()
 
         assert result.status == HealthStatus.WARNING
         failure_issues = [i for i in result.issues if "failed outright" in i.message]
-        assert len(failure_issues) == 1
+        # One issue per task, not one merged line: each task carries its own
+        # provider error, its own advice and its own de-duplication key.
+        assert len(failure_issues) == 2
         # Naming the task is the point: "transcription is down" and "the
         # provider is down" are different incidents with different responses.
-        assert "transcription x5" in failure_issues[0].message
-        assert "vision x1" in failure_issues[0].message
+        messages = " | ".join(i.message for i in failure_issues)
+        assert "transcription x5" in messages
+        assert "vision x1" in messages
+        # The key carries task AND cause (see `_run_check`), so assert the
+        # task prefix rather than pinning the whole composite.
+        keys = sorted(i.key for i in failure_issues)
+        assert keys[0].startswith("ai_failure:transcription")
+        assert keys[1].startswith("ai_failure:vision")
 
     @pytest.mark.asyncio
     async def test_no_failures_raises_no_issue(self, checker, pool):
