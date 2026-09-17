@@ -200,7 +200,10 @@ class TestPersistResult:
     async def test_alert_not_sent_during_cooldown(self, checker, pool, bot):
         """Alert should NOT be sent if within cooldown period."""
         pool.fetchrow.side_effect = [
-            _last_alert(age=60),  # last alert 1 min ago
+            # About the SAME issue, one minute ago. The floor deliberately
+            # applies only to repetition, so a prior alert about something
+            # else (or an all-clear) would not suppress this one.
+            _last_alert(age=60, issues=[{"severity": "warning", "message": "test issue"}]),
             {"id": 2},  # insert_log
         ]
         pool.fetchval.side_effect = [
@@ -354,10 +357,11 @@ class TestAIFailureCheck:
         messages = " | ".join(i.message for i in failure_issues)
         assert "transcription x5" in messages
         assert "vision x1" in messages
-        assert {i.key for i in failure_issues} == {
-            "ai_failure:transcription",
-            "ai_failure:vision",
-        }
+        # The key carries task AND cause (see `_run_check`), so assert the
+        # task prefix rather than pinning the whole composite.
+        keys = sorted(i.key for i in failure_issues)
+        assert keys[0].startswith("ai_failure:transcription")
+        assert keys[1].startswith("ai_failure:vision")
 
     @pytest.mark.asyncio
     async def test_no_failures_raises_no_issue(self, checker, pool):

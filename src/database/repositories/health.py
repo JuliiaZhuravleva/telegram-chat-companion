@@ -135,15 +135,31 @@ class HealthRepository:
         `DISTINCT ON` takes the most recent error per task -- the oldest one is
         a stale diagnosis of a situation that may have changed underneath it.
 
-        `since` is the start of the CURRENT streak, not the oldest failure in
-        the counting window (which would only ever be "15 minutes ago") and not
-        the oldest failure on record (which would fuse last week's unrelated
-        incident onto this one). A gap of more than an hour without a single
-        failure starts a new streak.
+        **`since` means "no successful call of this task since then".** The
+        first version defined the streak by a gap between FAILURES (more than
+        an hour apart started a new one), which is wrong for any task whose
+        requests are sparse: a review measured `transcription` broken for 2
+        days 22 hours reporting `holding since 0m`, because voice notes arrive
+        further apart than the gap. Asking the success side instead is exact
+        for both dense and sparse tasks.
+
+        The two tables disagree on task names -- `response_log` stores
+        `embedding`, `ai_failure_log` stores `embeddings`; success is `text`,
+        failure is `text_generation` -- so the join goes through an explicit
+        mapping. That discrepancy already produced one false conclusion during
+        this incident ("zero successes in 30 hours", from querying the plural
+        name against the success table), which is why it is spelled out here
+        rather than guessed at the call site.
         """
         rows = await self._pool.fetch(
             """
-            WITH recent AS (
+            WITH names(failure_task, success_task) AS (
+                VALUES ('embeddings', 'embedding'),
+                       ('text_generation', 'text'),
+                       ('vision', 'vision'),
+                       ('transcription', 'transcription')
+            ),
+            recent AS (
                 SELECT task_type, provider, error_type, error_message, created_at
                 FROM ai_failure_log
                 WHERE created_at > NOW() - $1::interval
@@ -157,19 +173,22 @@ class HealthRepository:
                 FROM recent
                 ORDER BY task_type, created_at DESC
             ),
-            gaps AS (
-                SELECT task_type, created_at,
-                       LAG(created_at) OVER (
-                           PARTITION BY task_type ORDER BY created_at
-                       ) AS prev
-                FROM ai_failure_log
-                WHERE created_at > NOW() - interval '7 days'
+            last_ok AS (
+                SELECT c.task_type,
+                       (SELECT MAX(r.created_at)
+                          FROM response_log r
+                          JOIN names n ON n.success_task = r.task_type
+                         WHERE n.failure_task = c.task_type) AS ok_at
+                FROM counts c
             ),
             streak AS (
-                SELECT task_type, MAX(created_at) AS since
-                FROM gaps
-                WHERE prev IS NULL OR created_at - prev > interval '1 hour'
-                GROUP BY task_type
+                SELECT c.task_type,
+                       (SELECT MIN(f.created_at)
+                          FROM ai_failure_log f
+                         WHERE f.task_type = c.task_type
+                           AND (o.ok_at IS NULL OR f.created_at > o.ok_at)) AS since
+                FROM counts c
+                JOIN last_ok o USING (task_type)
             )
             SELECT c.task_type, c.n, l.provider, l.error_type, l.error_message,
                    s.since

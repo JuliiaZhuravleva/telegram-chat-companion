@@ -55,3 +55,10 @@ class HealthCheckResult:
     ai_provider: str | None = None
     issues: list[HealthIssue] = field(default_factory=list)
     alert_sent: bool = False
+    # True when a sub-check could not run at all. Every sub-check swallows its
+    # own exception and appends no issue, which renders "the query is broken"
+    # identically to "nothing is wrong" -- harmless while silence was the only
+    # consequence, actively false once an all-clear message exists. Whoever
+    # adds a check must set this in its `except`, or a broken check will vote
+    # for health.
+    checks_degraded: bool = False

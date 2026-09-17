@@ -93,11 +93,6 @@ class AIRouter:
         self._backoff = ProviderBackoff()
         self._initialize_providers()
 
-    @property
-    def backoff(self) -> ProviderBackoff:
-        """Provider backoff state, so the health check can report an open one."""
-        return self._backoff
-
     def _initialize_providers(self) -> None:
         """Initialize available providers based on configured API keys."""
         if self._settings.openai_api_key:
@@ -381,7 +376,7 @@ class AIRouter:
             if not provider_supports(provider_name, "embeddings"):
                 continue
 
-            blocked = self._backoff.blocked_reason("embeddings", provider_name)
+            blocked, generation = self._backoff.gate("embeddings", provider_name)
             if blocked is not None:
                 # Skipped, not silently succeeded: `last_error` carries the
                 # remembered reason on to `_log_failure` below, so the row in
@@ -411,7 +406,7 @@ class AIRouter:
                     model=model,
                     **kwargs,
                 )
-                self._backoff.record_success("embeddings", provider_name)
+                self._backoff.record_success("embeddings", provider_name, generation)
                 fire_and_forget(
                     self._log_usage(
                         task_type="embedding",
@@ -443,6 +438,30 @@ class AIRouter:
                     error=str(e),
                 )
                 last_error = e
+                continue
+
+            except Exception as e:  # noqa: BLE001 -- see below
+                # Anything that is not an `AIProviderError` used to leave this
+                # method without reaching `_log_failure` at all: no row in
+                # `ai_failure_log`, no backoff armed, and therefore a failure
+                # that exists for the caller and does not exist for the health
+                # check -- the exact blindness that table was added to end.
+                # The provider is not short of ways to produce one: an
+                # unguarded `resp.json()` on a non-JSON 200 (a proxy
+                # interstitial), or a 200 whose `embedding` is not a dict.
+                # Re-raised as non-retriable, which is honest: nothing here
+                # suggests waiting would help, and the workers' parking logic
+                # needs that distinction to keep a poisoned row from blocking
+                # the queue for ever.
+                logger.exception(
+                    "Embedding generation raised a non-provider error",
+                    provider=provider_name,
+                    error_type=type(e).__name__,
+                )
+                last_error = AIProviderError(
+                    f"{type(e).__name__} from {provider_name}: {e}",
+                    provider=provider_name,
+                )
                 continue
 
         fire_and_forget(self._log_failure(task_type="embeddings", error=last_error))

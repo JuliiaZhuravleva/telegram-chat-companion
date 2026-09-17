@@ -21,9 +21,11 @@ Two deliberate choices:
   the delay escalates** (60s, 120s, ... capped at 30 min). Guessing a fixed
   delay is what the provider layer used to do with its hardcoded 65s, and it
   is precisely why a permanent outage read as a momentary one.
-- **Half-open, not closed:** when the deadline passes, exactly one call is let
-  through. A success clears the state. This is what makes the bot recover on
-  its own once someone tops up the account, with no restart and no operator.
+- **Half-open, not closed:** when the deadline passes, one call is let through
+  and the window is immediately re-armed, so the caller after it waits again
+  until the probe's outcome is known. A success clears the state -- which is
+  what makes the bot recover on its own once someone tops up the account, with
+  no restart and no operator.
 """
 
 from __future__ import annotations
@@ -37,6 +39,9 @@ logger = structlog.get_logger(__name__)
 
 _INITIAL_DELAY = 60.0
 _MAX_DELAY = 1800.0
+# How many consecutive rate limits a provider's own retry hint is taken at face
+# value for, before the escalation ladder becomes a floor under it.
+_TRUST_HINT_UNTIL = 3
 
 
 @dataclass
@@ -47,10 +52,11 @@ class _State:
     delay: float
     reason: str
     consecutive: int
-    # True once the window has been let through once. The record survives so
-    # the NEXT rate limit escalates from this delay instead of restarting at
-    # the initial one; `record_success` is what removes it.
-    expired: bool = False
+    # Identifies THIS window. A success carrying an older generation is a
+    # success that started before the window existed, and must not clear it.
+    generation: int = 0
+    # How many half-open probes this window has let through, for the log only.
+    probes: int = 0
 
 
 class ProviderBackoff:
@@ -74,34 +80,54 @@ class ProviderBackoff:
         # a default-argument `time.monotonic`: this outlives one call.
         self._now = time_source if callable(time_source) else time.monotonic
         self._states: dict[tuple[str, str], _State] = {}
+        # Starts at 1, so a real token is never falsy. `record_success` treats
+        # 0 as "no token, clear unconditionally", and a counter starting at 0
+        # handed that very value to the first caller -- defeating the check in
+        # the one interleaving it exists for.
+        self._generation = 1
 
-    def blocked_reason(self, task: str, provider: str) -> str | None:
-        """Why this provider is being skipped, or None if it may be called.
+    def gate(self, task: str, provider: str) -> tuple[str | None, int]:
+        """May this provider be called? Returns (reason-to-skip, generation).
 
-        Passing the deadline consumes the block: the next call is the half-open
-        probe. A caller that asks and then does not call therefore spends the
-        probe -- acceptable, because every caller here calls immediately.
+        `None` means go ahead, and the generation must be handed back to
+        `record_success` so a late success cannot clear a window that a
+        concurrent failure opened in the meantime (see `record_success`).
+
+        **Passing the deadline re-arms the window rather than removing it.**
+        That is what makes this half-open: the probe caller goes through, the
+        next caller is blocked again until the new deadline, and only the
+        probe's OUTCOME decides what happens next. The first version merely
+        flipped a flag that nothing read, so after the deadline every call went
+        through for ever -- and since a probe that fails with something other
+        than a rate limit re-arms nothing, that restored the original defect of
+        hammering a dead quota. Verified by execution before the fix: three
+        consecutive asks after the deadline all returned None.
         """
         state = self._states.get((task, provider))
         if state is None:
-            return None
+            # The CURRENT counter, not 0. With 0 the token compared equal to
+            # nothing and `record_success` fell back to clearing
+            # unconditionally -- in exactly the common case: no window yet, two
+            # calls in flight, the first comes back 429 and opens one, the
+            # second comes back 200 and pops it. Handing out the counter means
+            # any window opened after this call started carries a higher
+            # generation and survives that success. Caught by its own test,
+            # which is why it is not in the commit.
+            return None, self._generation
         if self._now() >= state.open_until:
-            if not state.expired:
-                # Kept, not deleted. Deleting it lost `consecutive` and
-                # `delay`, so the next rate limit started again at 60s and the
-                # escalation this class exists for never happened -- found by
-                # its own test, which is the only reason it is not in the
-                # commit. Only a SUCCESS clears the record.
-                state.expired = True
-                logger.info(
-                    "Provider backoff expired, letting one call through",
-                    task=task,
-                    provider=provider,
-                    consecutive_rate_limits=state.consecutive,
-                    reason=state.reason,
-                )
-            return None
-        return state.reason
+            state.open_until = self._now() + state.delay
+            state.probes += 1
+            logger.info(
+                "Provider backoff expired, letting one call through",
+                task=task,
+                provider=provider,
+                consecutive_rate_limits=state.consecutive,
+                probe=state.probes,
+                next_deadline_in=round(state.delay, 1),
+                reason=state.reason,
+            )
+            return None, state.generation
+        return state.reason, state.generation
 
     def record_rate_limit(
         self,
@@ -115,19 +141,28 @@ class ProviderBackoff:
         key = (task, provider)
         previous = self._states.get(key)
         consecutive = (previous.consecutive if previous else 0) + 1
+        escalated = (
+            self._initial_delay if previous is None else min(previous.delay * 2, self._max_delay)
+        )
 
-        if retry_after is not None and retry_after > 0:
+        if retry_after is not None and retry_after > 0 and consecutive <= _TRUST_HINT_UNTIL:
+            # The provider's hint is worth honouring while the condition still
+            # looks temporary. After a few repetitions it plainly is not: a
+            # daily quota answers "retry in 60s" all day, which would pin the
+            # window at a minute and still spend ~1300 doomed calls a day.
             delay = min(retry_after, self._max_delay)
-        elif previous is None:
-            delay = self._initial_delay
+        elif retry_after is not None and retry_after > 0:
+            delay = min(max(retry_after, escalated), self._max_delay)
         else:
-            delay = min(previous.delay * 2, self._max_delay)
+            delay = escalated
 
+        self._generation += 1
         self._states[key] = _State(
             open_until=self._now() + delay,
             delay=delay,
             reason=reason,
             consecutive=consecutive,
+            generation=self._generation,
         )
         logger.warning(
             "Provider rate limited, backing off",
@@ -140,20 +175,29 @@ class ProviderBackoff:
         )
         return delay
 
-    def record_success(self, task: str, provider: str) -> None:
-        """Clear any backoff — the provider is serving again."""
-        if self._states.pop((task, provider), None) is not None:
-            logger.info("Provider recovered, backoff cleared", task=task, provider=provider)
+    def record_success(self, task: str, provider: str, generation: int = 0) -> None:
+        """Clear the backoff this caller was cleared against — nothing newer.
 
-    def active(self) -> dict[str, str]:
-        """Currently blocked "task/provider" -> reason, for the health check.
-
-        Read-only: unlike `blocked_reason` this never consumes a deadline, so
-        asking about the state cannot change it.
+        `generation` is what `gate` returned. Without it, this sequence loses
+        the window: two calls are in flight, the first comes back 429 and opens
+        the window, the second comes back 200 and pops it. That is not an edge
+        case under a per-minute quota -- "the limit trips partway through a
+        batch, earlier rows succeed and later ones fail" is the measured
+        production behaviour that parked 58 healthy chunks. The breaker would
+        then hold only in passes where not a single call got through.
         """
-        now = self._now()
-        return {
-            f"{task}/{provider}": state.reason
-            for (task, provider), state in self._states.items()
-            if now < state.open_until
-        }
+        key = (task, provider)
+        state = self._states.get(key)
+        if state is None:
+            return
+        if generation and state.generation != generation:
+            logger.info(
+                "Ignoring a success against a superseded backoff window",
+                task=task,
+                provider=provider,
+                success_generation=generation,
+                current_generation=state.generation,
+            )
+            return
+        del self._states[key]
+        logger.info("Provider recovered, backoff cleared", task=task, provider=provider)

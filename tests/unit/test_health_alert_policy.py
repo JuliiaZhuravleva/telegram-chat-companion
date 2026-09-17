@@ -16,8 +16,10 @@ import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
+import asyncpg
 import pytest
 
+from src.services.health import checker as checker_module
 from src.services.health.checker import HealthChecker
 from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
 
@@ -37,6 +39,31 @@ def bot():
 @pytest.fixture
 def checker(pool, bot):
     return HealthChecker(pool=pool, bot=bot)
+
+
+class _Clock:
+    """Fake wall clock, anchored near a real epoch so ages stay sane."""
+
+    def __init__(self) -> None:
+        self.now = 1_800_000_000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """Patch the clock the checker reads.
+
+    Recovery is gated on ELAPSED TIME, not on a number of calls, so a test
+    that loops instantly must move the clock or it is testing nothing.
+    """
+    c = _Clock()
+    monkeypatch.setattr(checker_module.time, "time", c)
+    return c
 
 
 CONFIG = {
@@ -73,9 +100,9 @@ def _result(*issues: HealthIssue) -> HealthCheckResult:
     return HealthCheckResult(status=status, issues=list(issues))
 
 
-def _prior(issue: HealthIssue | None, *, age: float) -> dict[str, object]:
+def _prior(issue: HealthIssue | None, *, age: float, now: float | None = None) -> dict[str, object]:
     return {
-        "ts": time.time() - age,
+        "ts": (now if now is not None else time.time()) - age,
         "status": "warning" if issue else "healthy",
         "issues": [_stored(issue)] if issue else [],
     }
@@ -187,20 +214,28 @@ class TestChangedCondition:
 
 
 class TestRecovery:
-    def test_all_clear_after_the_confirmation_window(self, checker):
-        prior = _prior(_embedding_issue(), age=3600)
+    def test_all_clear_after_the_window_has_actually_ELAPSED(self, checker, clock):
+        """Three checks AND the quiet must have lasted confirm * interval.
+
+        Counting calls alone is satisfiable in three seconds -- see the admin
+        refresh test below, which is how it would happen in practice.
+        """
+        prior = _prior(_embedding_issue(), age=3600, now=clock.now)
         healthy = _result()
 
-        decisions = [checker._decide_alert(healthy, CONFIG, prior)[0] for _ in range(3)]
+        instant = [checker._decide_alert(healthy, CONFIG, prior)[0] for _ in range(3)]
+        clock.advance(3 * 300)
+        after = checker._decide_alert(healthy, CONFIG, prior)[0]
 
-        # Not on the first two clean checks -- an intermittent trickle of
-        # failures would otherwise alternate all-clear and alert every cycle.
-        assert decisions == [None, None, "recovered"]
+        assert instant == [None, None, None]
+        assert after == "recovered"
 
-    def test_all_clear_names_what_cleared(self, checker):
-        prior = _prior(_embedding_issue(47), age=3600)
+    def test_all_clear_names_what_cleared(self, checker, clock):
+        prior = _prior(_embedding_issue(47), age=3600, now=clock.now)
         healthy = _result()
 
+        checker._decide_alert(healthy, CONFIG, prior)
+        clock.advance(3 * 300)
         for _ in range(2):
             checker._decide_alert(healthy, CONFIG, prior)
         decision, cleared = checker._decide_alert(healthy, CONFIG, prior)
@@ -208,29 +243,186 @@ class TestRecovery:
         assert decision == "recovered"
         assert cleared == ["AI calls failed outright in last 15 min: embeddings x47"]
 
-    def test_no_all_clear_when_nothing_was_alerted(self, checker):
+    def test_a_broken_check_is_not_a_clean_check(self, checker, clock):
+        """The worst regression this change could introduce: a false all-clear.
+
+        Every sub-check swallows its own exception and appends no issue, so a
+        broken query renders exactly like perfect health. While the only
+        consequence was silence that was survivable; with an all-clear message
+        it becomes an active false claim in the middle of a live outage.
+        """
+        prior = _prior(_embedding_issue(), age=3600, now=clock.now)
+        degraded = _result()
+        degraded.checks_degraded = True
+
+        decisions = []
+        for _ in range(4):
+            decisions.append(checker._decide_alert(degraded, CONFIG, prior)[0])
+            clock.advance(300)
+
+        assert decisions == [None, None, None, None]
+
+    def test_the_admin_refresh_button_cannot_manufacture_an_all_clear(self, checker, clock):
+        """`run_check_now` shares this method -- and its counter -- with the loop.
+
+        Three taps a few seconds apart used to satisfy a window that is meant
+        to mean fifteen minutes of evidence.
+        """
+        prior = _prior(_embedding_issue(), age=3600, now=clock.now)
+        healthy = _result()
+
+        taps = [checker._decide_alert(healthy, CONFIG, prior, manual=True)[0] for _ in range(5)]
+
+        assert taps == [None] * 5
+        # Control: the button must not poison the loop's evidence either --
+        # the loop still needs its own full window afterwards.
+        clock.advance(3 * 300)
+        assert checker._decide_alert(healthy, CONFIG, prior)[0] is None
+
+    def test_no_all_clear_when_nothing_was_alerted(self, checker, clock):
         """Control: a bot that has been healthy all along says nothing.
 
         Without this, "recovered" could fire on a fresh install, which is the
         kind of message that teaches the reader to ignore the channel.
         """
-        prior = _prior(None, age=3600)
+        prior = _prior(None, age=3600, now=clock.now)
 
-        decisions = [checker._decide_alert(_result(), CONFIG, prior)[0] for _ in range(5)]
+        decisions = []
+        for _ in range(5):
+            decisions.append(checker._decide_alert(_result(), CONFIG, prior)[0])
+            clock.advance(300)
 
         assert decisions == [None] * 5
 
-    def test_clean_streak_resets_when_the_problem_returns(self, checker):
-        prior = _prior(_embedding_issue(), age=3600)
+    def test_clean_streak_resets_when_the_problem_returns(self, checker, clock):
+        prior = _prior(_embedding_issue(), age=3600, now=clock.now)
 
         checker._decide_alert(_result(), CONFIG, prior)
+        clock.advance(600)
         checker._decide_alert(_result(), CONFIG, prior)
         checker._decide_alert(_result(_embedding_issue()), CONFIG, prior)  # back
+        clock.advance(600)
         decision, _ = checker._decide_alert(_result(), CONFIG, prior)
 
-        # The two clean checks before the relapse must not count towards the
-        # window, or the all-clear arrives one check after a live outage.
+        # The quiet before the relapse must not count towards the window, or
+        # the all-clear arrives one check after a live outage.
         assert decision is None
+
+    def test_a_relapse_after_an_all_clear_is_not_gagged_by_the_floor(self, checker, clock):
+        """The floor is for repetition, not for the first word about a relapse.
+
+        A false all-clear followed by 30 minutes of enforced silence would be
+        the worst of both worlds: wrong, then quiet about being wrong.
+        """
+        recovery_row = _prior(None, age=60, now=clock.now)  # an all-clear, one minute ago
+
+        decision, _ = checker._decide_alert(_result(_embedding_issue()), CONFIG, recovery_row)
+
+        assert decision == "new"
+
+
+class TestTheCauseIsPartOfTheIdentity:
+    """Same task, different root cause, different fix -- that is a change.
+
+    Measured by a review: credits depleted at 12:00, topped up by 18:00, and
+    the key revoked in the meantime. With a task-only key `changed` was False,
+    so no new alert went out and the admin's newest message still advised
+    topping up an account that was already fine.
+    """
+
+    def test_a_different_error_type_under_the_same_task_alerts(self, checker, clock):
+        credits = HealthIssue(
+            severity=HealthStatus.WARNING,
+            message="AI calls failed outright in last 15 min: embeddings x47",
+            key="ai_failure:embeddings:RateLimitError:top up",
+        )
+        revoked = HealthIssue(
+            severity=HealthStatus.WARNING,
+            message="AI calls failed outright in last 15 min: embeddings x12",
+            key="ai_failure:embeddings:AIProviderError:reissue the key",
+        )
+        prior = _prior(credits, age=1801, now=clock.now)
+
+        decision, _ = checker._decide_alert(_result(revoked), CONFIG, prior)
+
+        assert decision == "new"
+
+    @pytest.mark.asyncio
+    async def test_the_key_is_BUILT_from_the_cause(self, checker, pool):
+        """Asserted where the key is constructed, not on a hand-written one.
+
+        The first version of the test above supplied its own keys, so dropping
+        the cause from `_run_check`'s key expression left it green -- the
+        fixture was a mirror of the behaviour instead of a check on it. Found
+        by mutating that expression.
+        """
+
+        async def _key_for(error_type: str, message: str, count: int) -> str:
+            pool.fetchval.side_effect = [1, 5, 0]
+            pool.fetch.return_value = [
+                {
+                    "task_type": "embeddings",
+                    "n": count,
+                    "provider": "gemini",
+                    "error_type": error_type,
+                    "error_message": message,
+                    "since": None,
+                }
+            ]
+            result = await checker._run_check()
+            return next(i.key for i in result.issues if i.key.startswith("ai_failure:embeddings"))
+
+        depleted = await _key_for("RateLimitError", "Your prepayment credits are depleted.", 47)
+        revoked = await _key_for("AIProviderError", "API key not valid.", 12)
+        louder = await _key_for("RateLimitError", "Your prepayment credits are depleted.", 4123)
+
+        assert depleted != revoked  # different cause, different fix, new alert
+        assert depleted == louder  # same cause, louder count, still the same problem
+
+    def test_the_same_cause_still_does_not_re_alert(self, checker, clock):
+        """Control: the cause must not be a proxy for the count.
+
+        If anything per-cycle leaked into the key, this would return "new"
+        every five minutes -- the original defect, amplified.
+        """
+        issue = HealthIssue(
+            severity=HealthStatus.WARNING,
+            message="AI calls failed outright in last 15 min: embeddings x47",
+            key="ai_failure:embeddings:RateLimitError:top up",
+        )
+        louder = HealthIssue(
+            severity=HealthStatus.WARNING,
+            message="AI calls failed outright in last 15 min: embeddings x4123",
+            key="ai_failure:embeddings:RateLimitError:top up",
+        )
+        prior = _prior(issue, age=1801, now=clock.now)
+
+        decision, _ = checker._decide_alert(_result(louder), CONFIG, prior)
+
+        assert decision is None
+
+
+class TestConfigIsNotTrusted:
+    def test_a_garbage_interval_does_not_kill_the_decision(self, checker, clock):
+        """These values come from a table a human edits by hand.
+
+        An unparseable one used to raise inside the decision; the exception
+        landed in the loop's catch-all, which also skips the healthcheck file
+        write, so Docker restarted the container into the same broken config.
+        """
+        bad = dict(CONFIG, health_alert_cooldown_seconds="30m", health_alert_reminder_seconds=None)
+
+        decision, _ = checker._decide_alert(_result(_embedding_issue()), bad, None)
+
+        assert decision == "new"
+
+    def test_zero_confirm_checks_cannot_disable_the_hysteresis(self, checker, clock):
+        prior = _prior(_embedding_issue(), age=3600, now=clock.now)
+        cfg = dict(CONFIG, health_recovery_confirm_checks=0)
+
+        first = checker._decide_alert(_result(), cfg, prior)[0]
+
+        assert first is None
 
 
 class TestAlertContents:
@@ -319,11 +511,41 @@ class TestSinceFormatting:
 
         result = await checker._run_check()
 
-        issue = next(i for i in result.issues if i.key == "ai_failure:embeddings")
+        issue = next(i for i in result.issues if i.key.startswith("ai_failure:embeddings"))
         assert "holding since" in issue.message
         assert "22h 5m" in issue.message
         assert issue.detail is not None and "ai.studio" in issue.detail
         assert issue.hint is not None and "пополнить" in issue.hint
+
+
+class TestDetailBounds:
+    @pytest.mark.asyncio
+    async def test_detail_is_bounded_even_from_a_chatty_provider(self, checker, pool):
+        """The Gemini provider caps its own errors; nothing capped the rest.
+
+        A 60 KB `error_message` (another provider, a proxy's HTML page) became
+        sixteen sequential sends — meeting flood control halfway through an
+        alert, which is how an alert becomes a partial alert.
+        """
+        pool.fetchval.side_effect = [1, 5, 0]
+        pool.fetch.return_value = [
+            {
+                "task_type": "embeddings",
+                "n": 3,
+                "provider": "someprovider",
+                "error_type": "RateLimitError",
+                "error_message": "x" * 60000,
+                "since": None,
+            }
+        ]
+
+        result = await checker._run_check()
+
+        issue = next(i for i in result.issues if i.key.startswith("ai_failure:embeddings"))
+        assert issue.detail is not None
+        assert len(issue.detail) < 500
+        # Control: the text must still be there, not emptied by the cap.
+        assert issue.detail.startswith("someprovider: xxx")
 
 
 class TestAdminPanelAgrees:
@@ -378,3 +600,137 @@ class TestAdminPanelAgrees:
         text = _format_health_status(row, "ru")
 
         assert "old style issue" in text
+
+
+class TestTheDecisionActuallyReachesTelegram:
+    """`_decide_alert` and `_send_alert` were each tested alone.
+
+    Nothing connected them, so deleting both `await self._send_alert(...)`
+    calls from `_persist_result` left every test in this file green while the
+    bot went permanently silent. That is the call-site class of defect: the
+    helper is perfect and nobody calls it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_new_problem_is_sent_as_an_alert(self, checker, pool, bot, clock):
+        pool.fetchrow.side_effect = [None, {"id": 1}]
+        pool.fetchval.return_value = 0
+
+        await checker._persist_result(_result(_embedding_issue()), CONFIG)
+
+        bot.send_message.assert_awaited_once()
+        assert "Bot Health Alert" in bot.send_message.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_an_all_clear_is_sent_with_the_recovery_wording(self, checker, pool, bot, clock):
+        """And with the RECOVERY formatter — swapping the two must fail."""
+        prior = _prior(_embedding_issue(), age=3600, now=clock.now)
+        pool.fetchrow.side_effect = [prior, {"id": 1}] * 3
+        pool.fetchval.return_value = 0
+
+        # Three checks AND the clock: the all-clear needs both.
+        for _ in range(2):
+            await checker._persist_result(_result(), CONFIG)
+            clock.advance(300)
+        clock.advance(600)
+        await checker._persist_result(_result(), CONFIG)
+
+        bot.send_message.assert_awaited_once()
+        sent = bot.send_message.await_args.args[1]
+        assert "Recovered" in sent
+        assert "Bot Health Alert" not in sent
+
+    @pytest.mark.asyncio
+    async def test_what_is_stored_is_what_the_fingerprint_reads(self, checker, pool, bot, clock):
+        """The WRITE side of de-duplication had no test at all.
+
+        Rename or drop `key` in `_issue_row` and production silently falls back
+        to message-based fingerprints — which carry the per-cycle count, so
+        `changed` is true every cycle and the alert fires every five minutes.
+        That is the original defect amplified sixfold, with every other test
+        still green.
+        """
+        pool.fetchrow.side_effect = [None, {"id": 1}]
+        pool.fetchval.return_value = 0
+
+        await checker._persist_result(_result(_embedding_issue()), CONFIG)
+
+        stored = pool.fetchrow.await_args_list[1].args[6]
+        assert '"key": "ai_failure:embeddings"' in stored
+        # And the identity must survive the round trip through storage.
+        import json
+
+        assert checker_module._fingerprint_of_rows(json.loads(stored)) == {
+            "warning:ai_failure:embeddings"
+        }
+
+    @pytest.mark.asyncio
+    async def test_alert_sent_records_delivery_not_intention(self, checker, pool, bot, clock):
+        """A swallowed send failure must not be recorded as "the admin knows".
+
+        Recorded as sent, the de-duplicator waits for the 6-hour reminder while
+        a live CRITICAL goes unmentioned — the channel reported its own failure
+        to the logs only.
+        """
+        pool.fetchrow.side_effect = [None, {"id": 1}]
+        pool.fetchval.return_value = 0
+        bot.send_message.side_effect = RuntimeError("flood control")
+
+        result = _result(_embedding_issue())
+        await checker._persist_result(result, CONFIG)
+
+        assert result.alert_sent is False
+        assert pool.fetchrow.await_args_list[1].args[7] is False
+
+    @pytest.mark.asyncio
+    async def test_a_database_outage_still_gets_its_alert_out(self, checker, pool, bot, clock):
+        """The one CRITICAL this checker detects is a dead database.
+
+        Reading the previous alert hits that same database, so the issue was
+        built and then discarded by the very failure it describes.
+        """
+        pool.fetchval.side_effect = asyncpg.PostgresError("down")
+        pool.fetchrow.side_effect = asyncpg.PostgresError("down")
+
+        result = await checker._run_check()
+        await checker._persist_result(result, CONFIG)
+
+        assert result.status == HealthStatus.CRITICAL
+        bot.send_message.assert_awaited_once()
+        assert "Database connectivity failed" in bot.send_message.await_args.args[1]
+
+
+class TestStoredRowsFromOlderVersions:
+    """`health_log` keeps 30 days, so rows written by the previous code
+    outlive the deploy and are read back by the de-duplicator."""
+
+    def test_a_row_without_a_key_still_compares(self, checker, clock):
+        legacy = {
+            "ts": clock.now - 21601,
+            "status": "warning",
+            "issues": [{"severity": "warning", "message": "AI calls failed outright: x1"}],
+        }
+
+        decision, _ = checker._decide_alert(_result(_embedding_issue()), CONFIG, legacy)
+
+        # Different message -> treated as a change. One extra alert after the
+        # deploy is the intended cost; a crash or silence would not be.
+        assert decision == "new"
+
+    def test_a_non_dict_row_does_not_crash_the_all_clear(self, checker, clock):
+        """A mixed array (hand-inserted row, partial migration) used to raise
+        `AttributeError` in the recovery branch — on every cycle, for ever,
+        because the row that poisons it is also the row that stays "last"."""
+        poisoned = {
+            "ts": clock.now - 3600,
+            "status": "warning",
+            "issues": ["just a string", {"severity": "warning", "message": "real one"}],
+        }
+
+        for _ in range(2):
+            checker._decide_alert(_result(), CONFIG, poisoned)
+        clock.advance(3 * 300)
+        decision, cleared = checker._decide_alert(_result(), CONFIG, poisoned)
+
+        assert decision == "recovered"
+        assert cleared == ["real one"]

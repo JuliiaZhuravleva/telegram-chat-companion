@@ -23,6 +23,38 @@ from src.utils.telegram_text import split_html
 
 logger = structlog.get_logger(__name__)
 
+# Longest provider error text the alert will carry, per issue.
+_MAX_DETAIL_CHARS = 400
+
+
+def _clip(text: str | None, limit: int = _MAX_DETAIL_CHARS) -> str | None:
+    """Bound external text before it becomes a Telegram message."""
+    if not text:
+        return None
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "\u2026"
+
+
+def _positive_int(config: dict[str, Any], key: str, default: int, *, minimum: int = 0) -> int:
+    """Read an int out of `bot_config`, tolerating whatever is actually stored.
+
+    These values come from a key-value table a human edits. An unparseable one
+    used to raise inside the alert decision, and the exception landed in
+    `_run_loop`'s catch-all -- which skips the healthcheck file write, so after
+    ten minutes Docker restarts the container into the same broken config.
+    A typo in a tuning knob should not be able to do that, and it certainly
+    should not be able to switch alerting off silently.
+    """
+    raw = config.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring unusable health config value", key=key, fallback=default)
+        return default
+    return max(value, minimum)
+
 
 def _issue_row(issue: HealthIssue) -> dict[str, str]:
     """One issue as it is stored in `health_log.issues`.
@@ -99,10 +131,17 @@ class HealthChecker:
         self._bot = bot
         self._task: asyncio.Task[None] | None = None
         self._manual_lock = asyncio.Lock()
-        # Consecutive checks with no issues. In-process on purpose: a restart
-        # resetting it only postpones an all-clear by a few minutes, whereas
-        # persisting it would need a column and buys nothing.
+        # Consecutive checks with no issues, and when that run started.
+        # In-process on purpose: a restart resetting them only postpones an
+        # all-clear, whereas persisting them would need a column and buys
+        # nothing. The timestamp is what makes the window mean elapsed time
+        # rather than a number of calls.
         self._clean_checks = 0
+        self._clean_since: float | None = None
+        # Last alert this process delivered, used only when the database read
+        # fails -- which is precisely the case where the database itself is
+        # the thing being reported.
+        self._last_alert_fallback: dict[str, Any] | None = None
 
     async def start(self) -> None:
         """Start the health check background loop."""
@@ -122,7 +161,7 @@ class HealthChecker:
         async with self._manual_lock:
             config = await self._load_config()
             result = await self._run_check()
-            await self._persist_result(result, config)
+            await self._persist_result(result, config, manual=True)
             self._write_healthcheck_file()
 
     # ------------------------------------------------------------------
@@ -144,8 +183,12 @@ class HealthChecker:
                     await asyncio.sleep(interval)
                     continue
 
-                result = await self._run_check()
-                await self._persist_result(result, config)
+                # Same lock as the refresh button: without it a press landing
+                # mid-cycle decides against the same previous alert and both
+                # send. The button already serialises against itself.
+                async with self._manual_lock:
+                    result = await self._run_check()
+                    await self._persist_result(result, config)
                 self._write_healthcheck_file()
 
             except asyncio.CancelledError:
@@ -224,6 +267,7 @@ class HealthChecker:
         try:
             result.messages_30m = await health_repo.get_message_count_30m()
         except Exception as exc:
+            result.checks_degraded = True
             logger.warning("Failed to get message count", error_type=type(exc).__name__)
 
         # 3. AI fallback frequency
@@ -242,6 +286,7 @@ class HealthChecker:
                     )
                 )
         except Exception as exc:
+            result.checks_degraded = True
             logger.warning("Failed to get fallback count", error_type=type(exc).__name__)
 
         # 4. AI calls that failed outright (migration 031)
@@ -264,6 +309,8 @@ class HealthChecker:
                 # task its own de-duplication key, so transcription breaking
                 # while embeddings are already broken is a NEW alert rather
                 # than a silent change inside an existing one.
+                hint = hint_for(detail)
+                body = f"{provider}: {detail}" if provider and detail else detail
                 result.issues.append(
                     HealthIssue(
                         severity=HealthStatus.WARNING,
@@ -273,12 +320,30 @@ class HealthChecker:
                             + (f" ({provider})" if provider else "")
                             + (f", holding since {_format_since(since)}" if since else "")
                         ),
-                        key=f"ai_failure:{task}",
-                        detail=f"{provider}: {detail}" if provider and detail else detail,
-                        hint=hint_for(detail),
+                        # The CAUSE is part of the identity, not just the task.
+                        # With the task alone, credits running out and then the
+                        # key being revoked six hours later are "the same
+                        # problem": no new alert, and the notification still
+                        # advises topping up an account that is now fine. The
+                        # two components chosen are stable per cycle -- unlike
+                        # the count, which is why the message cannot be used.
+                        key=":".join(
+                            part
+                            for part in ("ai_failure", task, failure.get("error_type"), hint)
+                            if part
+                        ),
+                        # Capped here as well as in the Gemini provider: this
+                        # is where the value becomes a Telegram message, and
+                        # the provider's own cap protects only its own errors.
+                        # A 60 KB `error_message` from anywhere else would
+                        # become sixteen sequential sends and meet flood
+                        # control halfway through an alert.
+                        detail=_clip(body),
+                        hint=hint,
                     )
                 )
         except Exception as exc:
+            result.checks_degraded = True
             logger.warning("Failed to get AI failure counts", error_type=type(exc).__name__)
 
         # Determine overall status
@@ -299,33 +364,76 @@ class HealthChecker:
         self,
         result: HealthCheckResult,
         config: dict[str, Any],
+        *,
+        manual: bool = False,
     ) -> None:
-        """Save result to DB and send an alert, a reminder or an all-clear."""
+        """Save result to DB and send an alert, a reminder or an all-clear.
+
+        `manual` marks the admin refresh button, which shares this method with
+        the timed loop but must not contribute evidence to it -- see
+        `_decide_alert`.
+        """
         health_repo = HealthRepository(self._pool)
 
-        last_alert = await health_repo.get_last_alert()
-        decision, cleared = self._decide_alert(result, config, last_alert)
-        should_alert = decision is not None
+        # Reading the previous alert must not be able to stop the current one.
+        # The one CRITICAL this checker knows how to detect is "the database is
+        # unreachable", and this read is against that same database -- so the
+        # issue would be built and then thrown away by the failure it describes.
+        # Falling back to the in-process copy keeps de-duplication working; a
+        # cold process falls back to None, which errs towards sending.
+        try:
+            last_alert = await health_repo.get_last_alert()
+        except Exception as exc:
+            logger.warning(
+                "Could not read the previous alert; using in-process state",
+                error_type=type(exc).__name__,
+            )
+            last_alert = self._last_alert_fallback
 
-        result.alert_sent = should_alert
+        decision, cleared = self._decide_alert(result, config, last_alert, manual=manual)
 
-        log_id = await health_repo.insert_log(
-            status=result.status.value,
-            db_ok=result.db_ok,
-            messages_30m=result.messages_30m,
-            fallbacks_15m=result.fallbacks_15m,
-            ai_provider=result.ai_provider,
-            issues=[_issue_row(i) for i in result.issues],
-            alert_sent=should_alert,
-        )
-
+        # Sent BEFORE the bookkeeping, and `alert_sent` reflects what actually
+        # went out. The other order records intent: a swallowed send failure
+        # (flood control, network) would tell the de-duplicator the admin had
+        # been informed, and a live CRITICAL would then wait for the 6-hour
+        # reminder. An unrecorded send is the safe direction -- it can repeat;
+        # an unsent record cannot be recovered from.
+        delivered = False
         if decision == "recovered":
-            await self._send_alert(result, config, text=self._format_recovery(cleared))
+            delivered = await self._send_alert(result, config, text=self._format_recovery(cleared))
         elif decision is not None:
-            await self._send_alert(
+            delivered = await self._send_alert(
                 result,
                 config,
                 text=self._format_alert(result, reminder=decision == "reminder"),
+            )
+
+        result.alert_sent = delivered
+        if delivered:
+            self._last_alert_fallback = {
+                "ts": time.time(),
+                "status": result.status.value,
+                "issues": [_issue_row(i) for i in result.issues],
+            }
+
+        log_id = None
+        try:
+            log_id = await health_repo.insert_log(
+                status=result.status.value,
+                db_ok=result.db_ok,
+                messages_30m=result.messages_30m,
+                fallbacks_15m=result.fallbacks_15m,
+                ai_provider=result.ai_provider,
+                issues=[_issue_row(i) for i in result.issues],
+                alert_sent=delivered,
+            )
+        except Exception as exc:
+            # The row is bookkeeping; the message was the point and is already
+            # out. Swallowed so a write failure cannot also skip the healthcheck
+            # file write in `_run_loop`, which would restart the container.
+            logger.warning(
+                "Failed to record the health check",
+                error_type=type(exc).__name__,
             )
 
         logger.info(
@@ -333,7 +441,7 @@ class HealthChecker:
             log_id=log_id,
             status=result.status.value,
             issues=len(result.issues),
-            alert_sent=should_alert,
+            alert_sent=delivered,
             alert_reason=decision,
             clean_checks=self._clean_checks,
             messages_30m=result.messages_30m,
@@ -353,6 +461,8 @@ class HealthChecker:
         result: HealthCheckResult,
         config: dict[str, Any],
         last_alert: dict[str, Any] | None,
+        *,
+        manual: bool = False,
     ) -> tuple[str | None, list[str]]:
         """Decide whether to say anything. Returns (reason, cleared-messages).
 
@@ -365,25 +475,54 @@ class HealthChecker:
         messages in 18 hours, measured. What matters for an alert is a CHANGE,
         so the comparison is against the conditions the last alert carried.
         """
-        cooldown = int(config.get("health_alert_cooldown_seconds", _DEFAULT_COOLDOWN))
-        reminder = int(config.get("health_alert_reminder_seconds", _DEFAULT_REMINDER))
-        confirm = int(config.get("health_recovery_confirm_checks", _DEFAULT_RECOVERY_CHECKS))
+        cooldown = _positive_int(config, "health_alert_cooldown_seconds", _DEFAULT_COOLDOWN)
+        reminder = _positive_int(config, "health_alert_reminder_seconds", _DEFAULT_REMINDER)
+        confirm = _positive_int(
+            config, "health_recovery_confirm_checks", _DEFAULT_RECOVERY_CHECKS, minimum=1
+        )
+        interval = _positive_int(config, "health_check_interval_seconds", _DEFAULT_INTERVAL)
 
         previous_rows: list[dict[str, Any]] = last_alert["issues"] if last_alert else []
         previous = _fingerprint_of_rows(previous_rows)
         current = {i.fingerprint() for i in result.issues}
-        age = None if last_alert is None else time.time() - last_alert["ts"]
+        now = time.time()
+        age = None if last_alert is None else now - last_alert["ts"]
 
         if not result.issues:
+            if result.checks_degraded:
+                # A check that COULD NOT RUN is not a check that found nothing.
+                # Every sub-check swallows its own exception and appends no
+                # issue, so a broken query renders as perfect health -- and
+                # with an all-clear message in the picture that silence became
+                # an active false claim: three failed queries in a row would
+                # announce "Recovered" in the middle of a live outage.
+                logger.warning("Health check degraded; not counting it as clean")
+                return None, []
+            if manual:
+                # The admin refresh button shares this method with the timed
+                # loop. Counting its presses as evidence let three taps a few
+                # seconds apart satisfy a window that is supposed to mean
+                # fifteen minutes of quiet.
+                return None, []
+            if self._clean_since is None:
+                self._clean_since = now
             self._clean_checks += 1
-            # Announce recovery only if the last thing the admin heard was a
-            # problem, and only after `confirm` consecutive clean checks.
-            if previous and self._clean_checks >= confirm:
-                cleared = [str(row.get("message", "")) for row in previous_rows]
+            # Recovery needs the quiet to have LASTED, measured on the clock
+            # and not in calls: the condition being watched is "any failure in
+            # the last 15 minutes", so a few quick calls can all see the same
+            # empty window.
+            held_for = now - self._clean_since
+            if previous and self._clean_checks >= confirm and held_for >= confirm * interval:
+                cleared = [
+                    str(row.get("message", ""))
+                    for row in previous_rows
+                    if isinstance(row, dict)  # a legacy or hand-written row may not be
+                ]
                 return "recovered", [c for c in cleared if c]
             return None, []
 
         self._clean_checks = 0
+        self._clean_since = None
 
         changed = current != previous
         is_critical = any(i.severity == HealthStatus.CRITICAL for i in result.issues)
@@ -396,7 +535,13 @@ class HealthChecker:
             # is the wrong side of that trade.
             return "new", []
 
-        if age is not None and age < cooldown:
+        # The floor applies to REPETITION, so it does not gag the first word
+        # about a fresh incident. Without this carve-out an all-clear followed
+        # by a relapse stayed silent for half an hour, and a false all-clear
+        # (see `checks_degraded` above) would suppress the real re-alert on top
+        # of having lied. Flapping is still bounded, because getting back to an
+        # all-clear now costs `confirm * interval` of measured quiet.
+        if previous and age is not None and age < cooldown:
             return None, []
 
         if changed:
@@ -411,11 +556,21 @@ class HealthChecker:
         config: dict[str, Any],
         *,
         text: str | None = None,
-    ) -> None:
-        """Send alert to first admin via Telegram."""
+    ) -> bool:
+        """Send alert to first admin via Telegram. True when it went out.
+
+        The return value is what `alert_sent` is recorded from: this channel
+        can fail (flood control, a network blip) exactly when it is most
+        needed, and a de-duplicator told "delivered" by a failed send goes
+        quiet for hours about a live problem.
+        """
         admin_ids = parse_admin_ids(config.get("admin_ids", ""))
         if not admin_ids:
-            return
+            # At error level, not silence: no admin configured means every
+            # alert this process ever raises goes nowhere, and the only
+            # symptom is the absence of messages.
+            logger.error("Health alert not sent: no admin_ids configured")
+            return False
 
         first_admin = admin_ids[0]
         body = text if text is not None else self._format_alert(result)
@@ -440,6 +595,8 @@ class HealthChecker:
                 admin_id=first_admin,
                 error_type=type(exc).__name__,
             )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Formatting

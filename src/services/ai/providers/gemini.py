@@ -361,7 +361,11 @@ class GeminiProvider(AIProvider):
             message = parsed.get("error", {}).get("message")
         except (json.JSONDecodeError, AttributeError, TypeError):
             message = None
-        text = " ".join((message or body_text).split())
+        # `str()` because the field is only a string by convention: a dict or
+        # list here would raise `AttributeError` on `.split()`, and that
+        # exception belongs to no router clause -- so it would cost the
+        # `ai_failure_log` row and the backoff, to save a truncation.
+        text = " ".join(str(message or body_text).split())
         if not text:
             return None
         if len(text) > _MAX_ERROR_DETAIL:

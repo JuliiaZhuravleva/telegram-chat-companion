@@ -39,11 +39,11 @@ class TestProviderBackoff:
 
         backoff.record_rate_limit("embeddings", "gemini", retry_after=None, reason="429")
 
-        assert backoff.blocked_reason("embeddings", "gemini") == "429"
+        assert backoff.gate("embeddings", "gemini")[0] == "429"
         clock.advance(59)
-        assert backoff.blocked_reason("embeddings", "gemini") == "429"
+        assert backoff.gate("embeddings", "gemini")[0] == "429"
         clock.advance(2)
-        assert backoff.blocked_reason("embeddings", "gemini") is None
+        assert backoff.gate("embeddings", "gemini")[0] is None
 
     def test_honours_the_providers_own_retry_hint(self):
         clock = _Clock()
@@ -52,7 +52,7 @@ class TestProviderBackoff:
         backoff.record_rate_limit("embeddings", "gemini", retry_after=5.0, reason="429")
 
         clock.advance(6)
-        assert backoff.blocked_reason("embeddings", "gemini") is None
+        assert backoff.gate("embeddings", "gemini")[0] is None
 
     def test_delay_escalates_when_no_hint_is_given(self):
         """A permanent condition must not be re-probed every minute for ever.
@@ -66,7 +66,7 @@ class TestProviderBackoff:
 
         first = backoff.record_rate_limit("embeddings", "g", retry_after=None, reason="r")
         clock.advance(first + 1)
-        backoff.blocked_reason("embeddings", "g")  # expire it
+        backoff.gate("embeddings", "g")  # the probe goes out
         second = backoff.record_rate_limit("embeddings", "g", retry_after=None, reason="r")
 
         assert second == first * 2
@@ -80,7 +80,7 @@ class TestProviderBackoff:
             delay = backoff.record_rate_limit("embeddings", "g", retry_after=None, reason="r")
             delays.append(delay)
             clock.advance(delay + 1)
-            backoff.blocked_reason("embeddings", "g")
+            backoff.gate("embeddings", "g")
 
         assert max(delays) == 1800.0
 
@@ -91,7 +91,7 @@ class TestProviderBackoff:
 
         backoff.record_success("embeddings", "gemini")
 
-        assert backoff.blocked_reason("embeddings", "gemini") is None
+        assert backoff.gate("embeddings", "gemini")[0] is None
 
     def test_tasks_are_independent(self):
         """A dead embedding quota says nothing about text generation.
@@ -103,19 +103,84 @@ class TestProviderBackoff:
 
         backoff.record_rate_limit("embeddings", "gemini", retry_after=None, reason="429")
 
-        assert backoff.blocked_reason("embeddings", "gemini") is not None
-        assert backoff.blocked_reason("text_generation", "gemini") is None
+        assert backoff.gate("embeddings", "gemini")[0] is not None
+        assert backoff.gate("text_generation", "gemini")[0] is None
 
-    def test_active_does_not_consume_the_window(self):
-        """The health check must be able to look without changing the state."""
+    def test_only_one_call_passes_after_the_deadline(self):
+        """Half-open means ONE probe, then blocked again until it reports.
+
+        The first version only flipped an `expired` flag that nothing read, so
+        every call after the deadline went through -- and a probe failing with
+        anything other than a rate limit re-arms nothing, which restored the
+        original defect of hammering a dead quota for ever. Verified by
+        execution at the time: three consecutive asks all returned None.
+        """
         clock = _Clock()
         backoff = ProviderBackoff(time_source=clock)
         backoff.record_rate_limit("embeddings", "gemini", retry_after=None, reason="429")
+        clock.advance(61)
 
-        assert backoff.active() == {"embeddings/gemini": "429"}
-        assert backoff.active() == {"embeddings/gemini": "429"}
-        # Still blocked afterwards: asking is not probing.
-        assert backoff.blocked_reason("embeddings", "gemini") == "429"
+        assert backoff.gate("embeddings", "gemini")[0] is None  # the probe
+        assert backoff.gate("embeddings", "gemini")[0] == "429"  # everyone else waits
+        assert backoff.gate("embeddings", "gemini")[0] == "429"
+
+    def test_a_late_success_does_not_clear_a_newer_window(self):
+        """Two calls in flight: one 429 opens a window, one 200 must not pop it.
+
+        Under a per-minute quota this is the NORMAL shape -- earlier rows in a
+        batch succeed and later ones fail (the measured behaviour that parked
+        58 healthy chunks). Without the generation check the breaker would hold
+        only in passes where not a single call got through.
+        """
+        clock = _Clock()
+        backoff = ProviderBackoff(time_source=clock)
+
+        # B passes the gate first and is still in flight.
+        _, b_generation = backoff.gate("embeddings", "gemini")
+        # A comes back rate-limited and opens a window.
+        backoff.record_rate_limit("embeddings", "gemini", retry_after=None, reason="429")
+        # Now B's 200 arrives, carrying a generation from before that window.
+        backoff.record_success("embeddings", "gemini", b_generation)
+
+        assert backoff.gate("embeddings", "gemini")[0] == "429"
+
+    def test_a_success_from_the_current_window_does_clear_it(self):
+        """Control for the test above: the probe's own success must still work.
+
+        Otherwise the window could never close and the bot would not recover
+        without a restart -- worse than the bug being guarded against.
+        """
+        clock = _Clock()
+        backoff = ProviderBackoff(time_source=clock)
+        backoff.record_rate_limit("embeddings", "gemini", retry_after=None, reason="429")
+        clock.advance(61)
+
+        _, generation = backoff.gate("embeddings", "gemini")  # the probe
+        backoff.record_success("embeddings", "gemini", generation)
+
+        assert backoff.gate("embeddings", "gemini")[0] is None
+
+    def test_a_repeated_retry_hint_stops_pinning_the_window(self):
+        """A daily quota answers "retry in 60s" all day.
+
+        Honoured for ever, that is ~1300 doomed calls a day instead of 3500 --
+        better than the incident and still a loop. After a few repetitions the
+        escalation ladder becomes a floor under the provider's hint.
+        """
+        clock = _Clock()
+        backoff = ProviderBackoff(time_source=clock)
+
+        delays = []
+        for _ in range(6):
+            delay = backoff.record_rate_limit(
+                "embeddings", "g", retry_after=60.0, reason="retry in 60s"
+            )
+            delays.append(delay)
+            clock.advance(delay + 1)
+            backoff.gate("embeddings", "g")
+
+        assert delays[0] == 60.0
+        assert delays[-1] > 60.0
 
 
 # ---------------------------------------------------------------------------
@@ -237,3 +302,115 @@ class TestRouterStopsCalling:
         # And the window is closed, so the next call goes straight through.
         await router.generate_embedding("текст")
         assert provider.generate_embedding.await_count == 2
+
+
+class TestTheFailureReallyReachesTheTable:
+    @pytest.mark.asyncio
+    async def test_log_failure_writes_the_row_with_the_providers_words(self, monkeypatch):
+        """Asserted on the REPOSITORY, not on the router's own method.
+
+        Monkeypatching `_log_failure` proves the router calls something; it
+        cannot notice that the body writes nothing. `ai_failure_log` is the
+        only signal the health check has for a terminal AI failure, so an
+        empty write is a silent outage — the exact hole this table was added
+        to close.
+        """
+        from unittest.mock import MagicMock
+
+        from src.services.ai.router import AIRouter
+
+        settings = MagicMock()
+        settings.openai_api_key = None
+        settings.gemini_api_key = "test-gemini-key"
+        settings.grok_api_key = None
+        settings.deepseek_api_key = None
+        settings.ai.default_provider = "gemini"
+        task = MagicMock()
+        task.provider, task.fallback, task.model = "gemini", [], "gemini-embedding-001"
+        settings.ai.tasks = {"embeddings": task}
+
+        repo = AsyncMock()
+        router = AIRouter(settings, response_log_repo=repo)
+        monkeypatch.setattr(
+            router, "_get_provider", AsyncMock(return_value=_rate_limited_provider())
+        )
+
+        with pytest.raises(AIProviderError):
+            await router.generate_embedding("текст")
+        await asyncio.sleep(0)
+
+        repo.log_failure.assert_awaited_once()
+        kwargs = repo.log_failure.await_args.kwargs
+        assert kwargs["task_type"] == "embeddings"
+        assert "prepayment credits are depleted" in kwargs["error_message"]
+
+    @pytest.mark.asyncio
+    async def test_a_non_provider_exception_is_still_logged(self, router, monkeypatch):
+        """A malformed 200 (bad JSON, `embedding` not a dict) used to escape.
+
+        It left the method without reaching `_log_failure`: no row, no backoff
+        armed, a failure that exists for the caller and not for the health
+        check.
+        """
+        provider = AsyncMock()
+        provider.generate_embedding = AsyncMock(side_effect=ValueError("not json"))
+        monkeypatch.setattr(router, "_get_provider", AsyncMock(return_value=provider))
+        logged: list[object] = []
+
+        async def _capture(*, task_type, error):
+            logged.append((task_type, str(error)))
+
+        monkeypatch.setattr(router, "_log_failure", _capture)
+
+        with pytest.raises(AIProviderError) as exc:
+            await router.generate_embedding("текст")
+        await asyncio.sleep(0)
+
+        assert logged and logged[0][0] == "embeddings"
+        assert "ValueError" in str(exc.value)
+
+
+class TestConcurrentCallers:
+    @pytest.mark.asyncio
+    async def test_a_partially_served_quota_does_not_pop_the_window(self, router, monkeypatch):
+        """The measured production shape: some rows succeed, later ones 429.
+
+        Two calls in flight; the 429 opens the window and the 200 arrives
+        afterwards carrying a token from before it existed. Without the
+        generation check the breaker would survive only in passes where not a
+        single call got through — i.e. almost never under a per-minute quota.
+        """
+        provider = AsyncMock()
+
+        async def _slow_success(**_kwargs):
+            await asyncio.sleep(0.02)
+            return EmbeddingResult(
+                embedding=[0.1] * 768,
+                model="gemini-embedding-001",
+                provider="gemini",
+                dimensions=768,
+                tokens_input=3,
+            )
+
+        async def _fast_rate_limit(**_kwargs):
+            await asyncio.sleep(0.01)
+            raise RateLimitError("Gemini rate limit exceeded (no retry hint)", provider="gemini")
+
+        calls = [_fast_rate_limit, _slow_success]
+
+        async def _dispatch(**kw):
+            return await calls.pop(0)(**kw)
+
+        provider.generate_embedding = AsyncMock(side_effect=_dispatch)
+        monkeypatch.setattr(router, "_get_provider", AsyncMock(return_value=provider))
+
+        results = await asyncio.gather(
+            router.generate_embedding("a"),
+            router.generate_embedding("b"),
+            return_exceptions=True,
+        )
+
+        assert any(isinstance(r, AIProviderError) for r in results)
+        assert any(not isinstance(r, Exception) for r in results)
+        # The window opened by the 429 must still be standing.
+        assert router._backoff.gate("embeddings", "gemini")[0] is not None
