@@ -16,6 +16,7 @@ import structlog
 
 from src.config import Settings
 from src.database.repositories.response_log import ResponseLogRepository
+from src.services.ai.backoff import ProviderBackoff
 from src.services.ai.base import (
     AIProvider,
     AIProviderError,
@@ -81,7 +82,21 @@ class AIRouter:
         self._settings = settings
         self._providers: dict[str, AIProvider] = {}
         self._response_log = response_log_repo
+        # Wired into `generate_embedding` only, on purpose. That is the chain
+        # with no fallback provider (`config/default.yml` -- OpenAI has no
+        # comparable 768-dim model), so a rate limit there is a total outage
+        # with no second leg to absorb it, and it is the chain that was
+        # measured hammering a dead quota 131-155 times an hour for a day.
+        # The other tasks fall back to a different provider, which already
+        # limits the damage; extending the breaker to them is TD-164 and wants
+        # its own measurement rather than a copied assumption.
+        self._backoff = ProviderBackoff()
         self._initialize_providers()
+
+    @property
+    def backoff(self) -> ProviderBackoff:
+        """Provider backoff state, so the health check can report an open one."""
+        return self._backoff
 
     def _initialize_providers(self) -> None:
         """Initialize available providers based on configured API keys."""
@@ -366,6 +381,19 @@ class AIRouter:
             if not provider_supports(provider_name, "embeddings"):
                 continue
 
+            blocked = self._backoff.blocked_reason("embeddings", provider_name)
+            if blocked is not None:
+                # Skipped, not silently succeeded: `last_error` carries the
+                # remembered reason on to `_log_failure` below, so the row in
+                # `ai_failure_log` still appears and the health check cannot
+                # mistake a muted provider for a working one. That row is the
+                # only thing standing between this and an outage nobody sees.
+                last_error = RateLimitError(
+                    f"Skipped {provider_name}: backing off after a rate limit ({blocked})",
+                    provider=provider_name,
+                )
+                continue
+
             try:
                 provider = await self._get_provider(provider_name)
                 # S2-1: unlike generate_text(), this is not index-aware -- it
@@ -383,6 +411,7 @@ class AIRouter:
                     model=model,
                     **kwargs,
                 )
+                self._backoff.record_success("embeddings", provider_name)
                 fire_and_forget(
                     self._log_usage(
                         task_type="embedding",
@@ -393,6 +422,19 @@ class AIRouter:
                     )
                 )
                 return result
+
+            except RateLimitError as e:
+                # Before `AIProviderError` below: `RateLimitError` is a
+                # subclass, and the first matching clause wins -- a single
+                # combined clause would never see the rate limit at all.
+                self._backoff.record_rate_limit(
+                    "embeddings",
+                    provider_name,
+                    retry_after=e.retry_after,
+                    reason=str(e),
+                )
+                last_error = e
+                continue
 
             except AIProviderError as e:
                 logger.error(

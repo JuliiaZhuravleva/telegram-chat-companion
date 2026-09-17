@@ -77,22 +77,62 @@ class TestGetLatest:
         assert result is None
 
 
-class TestGetLastAlertTime:
+class TestGetLastAlert:
+    """Replaces `get_last_alert_time`: the timestamp alone cannot answer
+    "is this the same problem as last time", which is what de-duplication
+    needs and what the timestamp-only rule could never ask."""
+
     @pytest.mark.asyncio
-    async def test_returns_float_when_alert_exists(self, repo):
+    async def test_returns_timestamp_and_issues(self, repo):
         repo_, pool = repo
-        pool.fetchrow.return_value = {"ts": 1707580000.0}
+        pool.fetchrow.return_value = {
+            "ts": 1707580000.0,
+            "status": "warning",
+            "issues": [{"severity": "warning", "message": "m", "key": "ai_failure:embeddings"}],
+        }
 
-        result = await repo_.get_last_alert_time()
+        result = await repo_.get_last_alert()
 
-        assert result == 1707580000.0
+        assert result is not None
+        assert result["ts"] == 1707580000.0
+        assert result["issues"][0]["key"] == "ai_failure:embeddings"
+
+    @pytest.mark.asyncio
+    async def test_parses_jsonb_delivered_as_text(self, repo):
+        """asyncpg hands jsonb back as a string unless a codec is registered.
+
+        Not hypothetical: this repository registers none, so the string form is
+        the one production actually returns. Taken as a list it would yield a
+        fingerprint of characters and re-alert every cycle.
+        """
+        repo_, pool = repo
+        pool.fetchrow.return_value = {
+            "ts": 1707580000.0,
+            "status": "warning",
+            "issues": '[{"severity": "warning", "message": "m", "key": "db"}]',
+        }
+
+        result = await repo_.get_last_alert()
+
+        assert result is not None
+        assert result["issues"] == [{"severity": "warning", "message": "m", "key": "db"}]
+
+    @pytest.mark.asyncio
+    async def test_unparseable_issues_degrade_to_empty(self, repo):
+        repo_, pool = repo
+        pool.fetchrow.return_value = {"ts": 1.0, "status": "warning", "issues": "{not json"}
+
+        result = await repo_.get_last_alert()
+
+        assert result is not None
+        assert result["issues"] == []
 
     @pytest.mark.asyncio
     async def test_returns_none_when_no_alerts(self, repo):
         repo_, pool = repo
         pool.fetchrow.return_value = None
 
-        result = await repo_.get_last_alert_time()
+        result = await repo_.get_last_alert()
 
         assert result is None
 
