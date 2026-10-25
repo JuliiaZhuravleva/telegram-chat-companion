@@ -381,6 +381,11 @@ class MessageRepository:
         Returns aggregated signals from the last `limit` messages in one query:
         total_count, bot_count, bot_ratio, seconds_since_last_bot,
         velocity_per_minute, consecutive_bot_at_end.
+
+        "Bot" here excludes placeholder senders (`sender_kind`, migration 035):
+        an anonymous admin and a member posting as a channel arrive flagged
+        `is_bot`, and counting a channel author's comments as the bot's own
+        would read their discussion as the bot dominating it.
         """
         # Single query computes all engagement signals in one round-trip.
         # CTE 'recent' fetches last N messages; 'stats' aggregates counts;
@@ -388,7 +393,7 @@ class MessageRepository:
         row = await self._pool.fetchrow(
             """
             WITH recent AS (
-                SELECT is_bot_message, created_at,
+                SELECT (is_bot_message AND sender_kind IS NULL) AS from_bot, created_at,
                        ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
                 FROM chat_messages
                 WHERE chat_id = $1
@@ -399,8 +404,8 @@ class MessageRepository:
             stats AS (
                 SELECT
                     COUNT(*)::int AS total_count,
-                    COUNT(*) FILTER (WHERE is_bot_message)::int AS bot_count,
-                    MAX(created_at) FILTER (WHERE is_bot_message) AS last_bot_at,
+                    COUNT(*) FILTER (WHERE from_bot)::int AS bot_count,
+                    MAX(created_at) FILTER (WHERE from_bot) AS last_bot_at,
                     COUNT(*) FILTER (
                         WHERE created_at > NOW() - INTERVAL '5 minutes'
                     )::int AS recent_5min_count
@@ -409,12 +414,12 @@ class MessageRepository:
             first_non_bot AS (
                 SELECT MIN(rn) AS rn
                 FROM recent
-                WHERE NOT is_bot_message
+                WHERE NOT from_bot
             ),
             consecutive AS (
                 SELECT COUNT(*)::int AS consecutive_bot
                 FROM recent
-                WHERE is_bot_message = true
+                WHERE from_bot
                   AND rn < COALESCE((SELECT rn FROM first_non_bot), $2 + 1)
             )
             SELECT

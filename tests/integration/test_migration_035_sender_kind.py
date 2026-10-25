@@ -238,6 +238,43 @@ class TestPeopleOnly:
         assert total == 1
 
 
+class TestEngagementCountsOnlyTheBot:
+    """The relevancy gate's "is the bot dominating" signals.
+
+    An anonymous admin arrives flagged `is_bot`: counted as the bot, a channel
+    author answering comments reads as the bot talking to itself, and the gate
+    silences it in exactly the chat it was added to.
+    """
+
+    async def test_an_anonymous_admin_is_not_the_bot(self, messages: MessageRepository):
+        await messages.save(CHAT_ID, 1, "text", user_id=900001, first_name="Аня", content="вопрос")
+        for message_id in (2, 3):
+            await messages.save(
+                CHAT_ID,
+                message_id,
+                "text",
+                user_id=GROUP_ANONYMOUS_BOT_ID,
+                is_bot_message=True,
+                content="ответ автора",
+                sender_kind="anon_admin",
+                sender_chat_id=CHAT_ID,
+            )
+
+        stats = await messages.get_bot_message_stats(CHAT_ID)
+
+        assert (stats["bot_count"], stats["consecutive_bot_at_end"]) == (0, 0), (
+            "placeholder sender counted as the bot"
+        )
+
+    async def test_the_bot_itself_still_counts(self, messages: MessageRepository):
+        await messages.save(CHAT_ID, 1, "text", user_id=900001, first_name="Аня", content="вопрос")
+        await messages.save(CHAT_ID, 2, "text", is_bot_message=True, content="ответ бота")
+
+        stats = await messages.get_bot_message_stats(CHAT_ID)
+
+        assert (stats["bot_count"], stats["consecutive_bot_at_end"]) == (1, 1)
+
+
 class TestSetLinkedChannel:
     async def test_no_row_yet_writes_nothing(self, settings_repo: ChatSettingsRepository):
         assert await settings_repo.set_linked_channel(CHAT_ID, CHANNEL_ID, "Блог") is None
