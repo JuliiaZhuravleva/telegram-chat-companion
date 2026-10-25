@@ -18,6 +18,7 @@ from src.services.abuse.checker import AntiAbuseChecker
 from src.services.costs.spend_limit import SpendLimitService
 from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import TextProcessingPipeline
+from src.utils.senders import chat_speaker_label
 from src.utils.telegram import typing_indicator
 
 router = Router(name="messages")
@@ -46,7 +47,7 @@ async def handle_text_message(
     # Extract reply context (full message + manually-highlighted quote, if any)
     # BEFORE the trigger decision: it is what decides whether a reply addresses
     # the bot at all, and the pipeline needs the same object further down.
-    reply_ctx = await extract_reply_context(message, bot_id, message_repo)
+    reply_ctx = await extract_reply_context(message, bot_id, message_repo, chat_config=chat_config)
 
     should_reply, trigger_type = should_respond(message, chat_config, reply_ctx=reply_ctx)
 
@@ -68,7 +69,10 @@ async def handle_text_message(
 
     user = message.from_user
     user_id = user.id if user else 0
-    user_name = (user.first_name if user else None) or "Unknown"
+    # A placeholder sender's first_name is "Group"/"Channel"/"Telegram"; the
+    # label names who actually speaks (src/utils/senders.py).
+    speaker_label = chat_speaker_label(message, chat_config)
+    user_name = speaker_label or (user.first_name if user else None) or "Unknown"
 
     logger.info(
         "Processing message",
@@ -104,6 +108,7 @@ async def handle_text_message(
             reply_quote_is_manual=reply_ctx.quote_is_manual,
             message_thread_id=message_thread_id,
             message_id=message.message_id,
+            speaker_label=speaker_label,
         )
 
     if not result.should_respond or not result.html_text:

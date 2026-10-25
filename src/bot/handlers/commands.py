@@ -431,6 +431,7 @@ async def _deliver_summary(
     count: int,
     lang: str,
     message_thread_id: int | None,
+    linked_channel_id: int | None,
 ) -> None:
     """Render a summary of ``count`` messages, editing a placeholder in place.
 
@@ -452,6 +453,7 @@ async def _deliver_summary(
             count=count,
             language=lang,
             message_thread_id=message_thread_id,
+            linked_channel_id=linked_channel_id,
         )
 
     if html:
@@ -509,6 +511,7 @@ async def handle_summary(
         count=count,
         lang=lang,
         message_thread_id=message_thread_id,
+        linked_channel_id=chat_config.linked_channel_id,
     )
 
 
@@ -536,6 +539,7 @@ async def handle_summary500(
         count=_SUMMARY500_COUNT,
         lang=lang,
         message_thread_id=message_thread_id,
+        linked_channel_id=chat_config.linked_channel_id,
     )
 
 

@@ -139,6 +139,7 @@ async def handle_summary_callback(
         count=count,
         language=lang,
         message_thread_id=message_thread_id,
+        linked_channel_id=chat_config.linked_channel_id,
     )
 
     if not html:

@@ -25,6 +25,7 @@ from src.models.chat_config import ChatConfig
 from src.models.enums import TriggerType
 from src.services.text.prompt_builder import REPLY_QUOTE_MAX_CHARS, REPLY_TEXT_MAX_CHARS
 from src.utils import parse_admin_ids
+from src.utils.senders import OWN_BOT_LABEL, is_channel_post, live_sender_label, sender_label
 
 logger = structlog.get_logger(__name__)
 
@@ -253,8 +254,17 @@ async def extract_reply_context(
     message: Message,
     bot_id: int | None,
     message_repo: MessageRepository,
+    *,
+    chat_config: ChatConfig,
 ) -> ReplyContext:
     """Extract reply-to-message context, including a manually-selected quote.
+
+    `chat_config` names a replied-to speaker who is not a person (a channel
+    post, an anonymous admin, a channel, another bot -- src/utils/senders.py).
+    Their `from` is a placeholder, and two of those placeholders carry
+    `is_bot=true`: reading the flag raw told the model "the user is replying
+    to the bot's own message" when they were answering the channel's author.
+    `is_bot` is therefore True for the bot ITSELF only.
 
     Shared by `handle_text_message`, `handle_photo_message` and the voice
     path, which previously duplicated this extraction inline.
@@ -289,6 +299,16 @@ async def extract_reply_context(
     if rpl.from_user:
         author = rpl.from_user.first_name
         is_bot = rpl.from_user.is_bot
+    label = live_sender_label(
+        rpl,
+        linked_channel_id=chat_config.linked_channel_id,
+        bot_id=bot_id,
+        language=chat_config.language,
+    )
+    if label is not None:
+        is_bot = label == OWN_BOT_LABEL
+        if not is_bot:
+            author = label
     raw_text = rpl.text or rpl.caption or ""
 
     from_bot_itself = (
@@ -341,6 +361,20 @@ async def extract_reply_context(
         # misattribution this whole mechanism exists to prevent, reachable with
         # no attacker at all. None renders as "unknown", which is true.
         author = transcription["source_first_name"]
+        source_label = sender_label(
+            sender_kind=transcription["source_sender_kind"],
+            sender_chat_id=transcription["source_sender_chat_id"],
+            sender_chat_title=transcription["source_sender_chat_title"],
+            author_signature=transcription["source_author_signature"],
+            is_bot_message=bool(transcription["source_is_bot_message"]),
+            user_id=transcription["source_user_id"],
+            first_name=transcription["source_first_name"],
+            linked_channel_id=chat_config.linked_channel_id,
+            bot_id=bot_id,
+            language=chat_config.language,
+        )
+        if author is not None and source_label is not None:
+            author = source_label
         if transcription["transcript"] is not None:
             body = transcription["transcript"][:REPLY_TEXT_MAX_CHARS]
         is_bot = False
@@ -394,7 +428,16 @@ def should_respond(
 
     Returns:
         Tuple of (should_respond, trigger_type).
+
+    A channel post auto-forwarded into its discussion group never draws a
+    reply, trigger word or not: it is the author's broadcast, and the
+    conversation is in its comments. Everything the bot says on its own
+    initiative -- a reply, a link comment, a reaction to silence, an answer to
+    a transcript -- goes through here, so this one check covers them all.
     """
+    if is_channel_post(message):
+        return False, TriggerType.NONE
+
     scanned = (text if text is not None else (message.text or message.caption or "")).strip()
     text_lower = scanned.lower()
 

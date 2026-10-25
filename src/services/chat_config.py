@@ -122,6 +122,10 @@ class ChatConfigService:
             for key in _CHAT_CONFIG_FIELDS:
                 if key in chat_row and chat_row[key] is not None:
                     merged[key] = _coerce(key, chat_row[key])
+            # Metadata, not settings: per-chat row only, no global layer.
+            for key in _CHAT_METADATA_FIELDS:
+                if chat_row.get(key) is not None:
+                    merged[key] = chat_row[key]
 
         return ChatConfig(**merged)
 
@@ -138,6 +142,7 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "rag_enabled",
         "transcribe_voice",
         "transcribe_video_notes",
+        "transcribe_expandable",
         "abuse_filter_enabled",
         "sticker_learning_enabled",
         "sticker_response_chance",
@@ -158,6 +163,12 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "reactions_history_enabled",
     }
 )
+
+
+# Fields on ChatConfig that only Telegram decides: read from the per-chat row,
+# never merged from `bot_config` (a `default_linked_channel_id` would link every
+# group to one channel) and absent from the settings panel.
+_CHAT_METADATA_FIELDS: frozenset[str] = frozenset({"linked_channel_id", "linked_channel_title"})
 
 
 def _coerce(key: str, value: Any) -> Any:

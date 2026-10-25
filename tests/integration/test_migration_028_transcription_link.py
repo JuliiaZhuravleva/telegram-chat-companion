@@ -265,6 +265,10 @@ def _edited_media_message(
     event.voice = MagicMock() if kind == "voice" else None
     event.video_note = MagicMock() if kind == "video_note" else None
     event.photo = [MagicMock()] if kind == "photo" else None
+    # Who speaks (migration 035): an ordinary person, so no sender chat.
+    event.sender_chat = None
+    event.is_automatic_forward = None
+    event.author_signature = None
     return event
 
 

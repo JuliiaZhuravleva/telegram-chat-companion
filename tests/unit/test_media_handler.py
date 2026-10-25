@@ -44,6 +44,11 @@ def _make_message(
     msg.text = text
     msg.caption = caption
     msg.reply_to_message = None
+    # A person writing as themselves (src/utils/senders.py): a bare MagicMock
+    # attribute is truthy and would read as an automatic channel forward.
+    msg.sender_chat = None
+    msg.is_automatic_forward = None
+    msg.author_signature = None
     msg.reply = AsyncMock()
     msg.answer = AsyncMock()
 
@@ -68,6 +73,8 @@ def _make_chat_config(**overrides):
     config.image_comment_sticker_enabled = False
     config.image_comment_sticker_chance = 0.0
     config.language = "ru"
+    config.linked_channel_id = None
+    config.transcribe_expandable = False
     for key, val in overrides.items():
         setattr(config, key, val)
     return config
@@ -605,6 +612,8 @@ async def test_photo_handler_with_caption_forwards_reply_quote_to_pipeline():
     reply_user.first_name = "Bob"
     reply_user.is_bot = False
     reply_to.from_user = reply_user
+    reply_to.sender_chat = None
+    reply_to.is_automatic_forward = None
 
     quote = MagicMock()
     quote.text = "detail"
@@ -1712,3 +1721,134 @@ class TestAFailedDownloadIsVisibleToTheChat:
         await _run_voice_handler(deps, patch_indicator=True)
 
         deps["voice_service"].transcribe.assert_awaited_once()
+
+
+# ── Who is speaking (migration 035) ───────────────────────────────────
+#
+# The call site, not the helper: format_reply_parts and should_respond are
+# covered in test_senders.py, and either could be left unwired here.
+
+
+def _as_channel_post(message, *, channel_id: int = -1009990002, title: str = "Блог") -> None:
+    message.from_user.id = 777000
+    message.from_user.first_name = "Telegram"
+    message.sender_chat = MagicMock(id=channel_id, title=title)
+    message.is_automatic_forward = True
+
+
+def _as_anon_admin(message, *, signature: str | None = "Юля") -> None:
+    message.from_user.id = 1087968824
+    message.from_user.first_name = "Group"
+    message.from_user.is_bot = True
+    message.sender_chat = MagicMock(id=message.chat.id, title="Обсуждение")
+    message.author_signature = signature
+
+
+@pytest.mark.asyncio
+async def test_a_post_is_transcribed_without_a_name_and_never_answered():
+    deps = _make_voice_deps(transcript="бот, это пост", trigger_words=("бот",), random_chance=1.0)
+    _as_channel_post(deps["message"])
+
+    await _run_voice_handler(deps)
+
+    deps["message"].answer.assert_awaited_once()
+    assert deps["message"].answer.call_args.args[0].startswith("\U0001f399 <b>Расшифровка</b>:\n\n")
+    deps["pipeline"].process.assert_not_awaited()
+    saved = deps["voice_service"].transcribe.call_args.kwargs
+    assert saved["sender"].kind == "channel_post"
+
+
+@pytest.mark.asyncio
+async def test_an_anonymous_admin_is_labelled_and_still_answered():
+    deps = _make_voice_deps(transcript="бот, привет", trigger_words=("бот",))
+    _as_anon_admin(deps["message"])
+
+    await _run_voice_handler(deps)
+
+    first = deps["message"].answer.call_args_list[0].args[0]
+    assert first.startswith("\U0001f399 <b>Расшифровка</b> — Юля (админ):")
+    kwargs = deps["voice_service"].transcribe.call_args.kwargs
+    assert kwargs["sender"].kind == "anon_admin"
+    assert kwargs["is_bot_message"] is True
+    process = deps["pipeline"].process.call_args.kwargs
+    assert process["speaker_label"] == "Юля (админ)"
+
+
+@pytest.mark.asyncio
+async def test_expandable_is_read_from_the_chat_config():
+    deps = _make_voice_deps()
+    deps["chat_config"].transcribe_expandable = True
+
+    await _run_voice_handler(deps)
+
+    text = deps["message"].answer.call_args.args[0]
+    assert "<blockquote expandable>Hello world</blockquote>" in text
+
+
+def _sticker_match():
+    return MagicMock(file_id="reply-sticker", file_unique_id="reply-unique")
+
+
+@pytest.mark.parametrize("post", [False, True], ids=["comment", "post"])
+@pytest.mark.asyncio
+async def test_a_sticker_on_a_photo_is_never_put_under_a_post(post):
+    deps = _make_photo_deps(caption=None)
+    deps["chat_config"].image_comment_sticker_enabled = True
+    deps["chat_config"].image_comment_sticker_chance = 1.0
+    deps["sticker_responder"].get_sticker_candidates = AsyncMock(return_value=[_sticker_match()])
+    deps["sticker_responder"].record_bot_use = AsyncMock()
+    deps["message"].reply_sticker = AsyncMock()
+    if post:
+        _as_channel_post(deps["message"])
+
+    await _run_photo_handler(deps)
+
+    assert deps["message"].reply_sticker.await_count == (0 if post else 1)
+
+
+@pytest.mark.parametrize("post", [False, True], ids=["comment", "post"])
+@pytest.mark.asyncio
+async def test_a_sticker_reply_to_a_sticker_is_never_put_under_a_post(post):
+    from src.bot.handlers.media import handle_sticker_message
+    from src.services.modules.sticker.models import StickerLearningResult
+
+    message = _make_message()
+    message.sticker = MagicMock(
+        file_id="sticker-file-id", file_unique_id="unique-1", is_animated=False, is_video=False
+    )
+    message.reply_sticker = AsyncMock()
+    if post:
+        _as_channel_post(message)
+    chat_config = _make_chat_config(
+        sticker_reply_to_sticker_enabled=True, sticker_reply_to_sticker_chance=1.0
+    )
+    sticker_service = MagicMock()
+    sticker_service.learn = AsyncMock(
+        return_value=StickerLearningResult(is_new=False, file_unique_id="unique-1")
+    )
+    sticker_responder = MagicMock()
+    sticker_responder.find_sticker_for_sticker_reply = AsyncMock(return_value=_sticker_match())
+    sticker_responder.record_bot_use = AsyncMock()
+    bot_config_repo = MagicMock()
+    bot_config_repo.get_value = AsyncMock(return_value="")
+    admin_repo = MagicMock()
+    admin_repo.get_notification_settings = AsyncMock(return_value={"sticker": "off"})
+
+    with patch(
+        "src.bot.handlers.media.download_telegram_file",
+        new_callable=AsyncMock,
+        return_value=b"fake-webp",
+    ):
+        await handle_sticker_message(
+            message,
+            chat_config,
+            sticker_service,
+            sticker_responder,
+            _make_sticker_repo(),
+            MagicMock(get_recent=AsyncMock(return_value=[])),
+            bot_config_repo,
+            admin_repo,
+            _make_bot(),
+        )
+
+    assert message.reply_sticker.await_count == (0 if post else 1)

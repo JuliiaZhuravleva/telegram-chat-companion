@@ -10,8 +10,10 @@ from aiogram import BaseMiddleware
 from aiogram.types import Message, TelegramObject
 from dishka import AsyncContainer
 
+from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
+from src.utils.senders import classify_sender, is_channel_post
 
 logger = structlog.get_logger(__name__)
 
@@ -32,8 +34,17 @@ class MessageSaverMiddleware(BaseMiddleware):
         if not isinstance(event, Message) or event.chat is None:
             return await handler(event, data)
 
-        # Check if message saving is enabled for this chat
         chat_config: ChatConfig | None = data.get("chat_config")
+
+        # Before the save_messages gate: which channel a group belongs to is
+        # chat metadata, needed by rendering whether or not history is kept.
+        if is_channel_post(event):
+            try:
+                await self._bind_linked_channel(event, chat_config, data)
+            except Exception:
+                logger.warning("Failed to record linked channel", exc_info=True)
+
+        # Check if message saving is enabled for this chat
         if chat_config and not chat_config.save_messages:
             return await handler(event, data)
 
@@ -43,6 +54,41 @@ class MessageSaverMiddleware(BaseMiddleware):
             logger.warning("Failed to save message", exc_info=True)
 
         return await handler(event, data)
+
+    @staticmethod
+    async def _bind_linked_channel(
+        message: Message, chat_config: ChatConfig | None, data: dict[str, Any]
+    ) -> None:
+        """Learn the discussion group's channel from the first post it carries.
+
+        Telegram auto-forwards a channel's posts ONLY into its linked discussion
+        group, so `sender_chat` of such a post is that channel by definition --
+        no API call, no admin question. An already-recorded different channel
+        is reported, never overwritten (`set_linked_channel`).
+        """
+        channel = message.sender_chat
+        if channel is None:
+            return
+        linked = chat_config.linked_channel_id if chat_config else None
+        if linked == channel.id:
+            return
+        if linked is None:
+            container: AsyncContainer = data["dishka_container"]
+            repo = await container.get(ChatSettingsRepository)
+            linked = await repo.set_linked_channel(message.chat.id, channel.id, channel.title)
+            if linked is None:
+                return  # no chat_settings row yet; the next post retries
+            if linked == channel.id:
+                logger.info(
+                    "Linked channel recorded", chat_id=message.chat.id, channel_id=channel.id
+                )
+                return
+        logger.warning(
+            "Channel post from a channel other than the recorded linked one",
+            chat_id=message.chat.id,
+            channel_id=channel.id,
+            linked_channel_id=linked,
+        )
 
     @staticmethod
     async def _save_message(message: Message, data: dict[str, Any]) -> None:
@@ -79,6 +125,7 @@ class MessageSaverMiddleware(BaseMiddleware):
             quote_text = message.quote.text
             quote_is_manual = bool(message.quote.is_manual)
 
+        sender = classify_sender(message)
         await msg_repo.save(
             chat_id=message.chat.id,
             message_id=message.message_id,
@@ -98,4 +145,8 @@ class MessageSaverMiddleware(BaseMiddleware):
             message_thread_id=message_thread_id,
             quote_text=quote_text,
             quote_is_manual=quote_is_manual,
+            sender_kind=sender.kind,
+            sender_chat_id=sender.chat_id,
+            sender_chat_title=sender.chat_title,
+            author_signature=sender.signature,
         )

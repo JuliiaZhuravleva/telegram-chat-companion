@@ -22,6 +22,7 @@ from src.services.text.adaptive_length import compute_length_instruction
 from src.services.text.prompt_sanitizer import sanitize_history_field, sanitize_prompt_content
 from src.utils.aliases import MAX_ALIAS_CHARS, AliasView, primary_alias
 from src.utils.display_tz import DISPLAY_TZ
+from src.utils.senders import row_sender_label
 
 # --- KB (Knowledge Base) budget constants (ADR-0003 Part 2, addendum to ADR-0001) ---
 # Budgeted independently of history/RAG (additive, per Julia's decision #3) --
@@ -148,6 +149,15 @@ class PromptContext:
     # same turn.
     aliases: AliasView = field(default_factory=AliasView)
     user_id: int | None = None
+
+    # Who speaks when it is not a person (migration 035, src/utils/senders.py).
+    # `speaker_label` replaces the `<user_message>` name for a channel post,
+    # an anonymous admin or a channel comment -- their `from` is a placeholder
+    # shared by every such sender, so neither its first_name nor an alias
+    # keyed on its id names anyone. `linked_channel_id` lets history rows tell
+    # the channel's own author from any other channel commenting.
+    speaker_label: str | None = None
+    linked_channel_id: int | None = None
 
     # User message
     user_name: str = ""
@@ -291,7 +301,7 @@ def build_user_prompt(ctx: PromptContext) -> str:
                 parts.append("Messages in this topic:")
                 parts.append("<current_topic>")
                 for msg in current_msgs:
-                    parts.append(_format_message(msg, ctx.aliases))
+                    parts.append(_format_message(msg, ctx))
                 parts.append("</current_topic>")
                 parts.append("")
 
@@ -299,7 +309,7 @@ def build_user_prompt(ctx: PromptContext) -> str:
                 parts.append("Recent messages from other topics (for context):")
                 parts.append("<other_topics>")
                 for msg in other_msgs:
-                    parts.append(_format_message(msg, ctx.aliases))
+                    parts.append(_format_message(msg, ctx))
                 parts.append("</other_topics>")
                 parts.append("")
         else:
@@ -307,7 +317,7 @@ def build_user_prompt(ctx: PromptContext) -> str:
             parts.append("Chat history (last messages):")
             parts.append("<chat_history>")
             for msg in ctx.recent_messages:
-                parts.append(_format_message(msg, ctx.aliases))
+                parts.append(_format_message(msg, ctx))
             parts.append("</chat_history>")
             parts.append("")
 
@@ -321,7 +331,8 @@ def build_user_prompt(ctx: PromptContext) -> str:
     # naming the speaker one way in `<chat_history>` and another way here is
     # the failure this shared helper exists to prevent.
     safe_name = sanitize_prompt_content(
-        render_participant_name(ctx.aliases, user_id=ctx.user_id, first_name=ctx.user_name)
+        ctx.speaker_label
+        or render_participant_name(ctx.aliases, user_id=ctx.user_id, first_name=ctx.user_name)
     )
     safe_msg = sanitize_prompt_content(ctx.user_message)
     parts.append(f"<user_message>{safe_name}: {safe_msg}</user_message>")
@@ -370,7 +381,7 @@ def render_participant_name(
     return username or first_name or fallback
 
 
-def _format_message(msg: dict[str, Any], aliases: AliasView) -> str:
+def _format_message(msg: dict[str, Any], ctx: PromptContext) -> str:
     """Format a single message for the prompt."""
     # Every interpolated field here is user-controlled and lands in a
     # line-oriented block, so all of them go through sanitize_history_field()
@@ -385,7 +396,7 @@ def _format_message(msg: dict[str, Any], aliases: AliasView) -> str:
     # exactly the way a username would.
     name = sanitize_history_field(
         render_participant_name(
-            aliases,
+            ctx.aliases,
             user_id=user_id,
             username=msg.get("username"),
             first_name=msg.get("first_name"),
@@ -393,10 +404,16 @@ def _format_message(msg: dict[str, Any], aliases: AliasView) -> str:
         )
     )
     content = sanitize_history_field(msg.get("content", ""))
-    is_bot = msg.get("is_bot_message", False)
 
-    if is_bot:
-        return f"Bot: {content}"
+    # A speaker who is not a person -- the bot itself (`Bot`, as always),
+    # another bot, a channel post, an anonymous admin, a channel -- gets a label
+    # and no `[uid:N]`: a placeholder id is shared by every such sender, so it
+    # identifies nobody. The label's chat-controlled parts are sanitized
+    # inside sender_label. For an ordinary person this is None and the line is
+    # byte-for-byte what it was before migration 035.
+    label = row_sender_label(msg, linked_channel_id=ctx.linked_channel_id, language=ctx.language)
+    if label is not None:
+        return f"{label}: {content}"
 
     # Gate on quote_is_manual (not merely quote_text being present), same
     # rule as the live-reply path in _reply_section: only a fragment the

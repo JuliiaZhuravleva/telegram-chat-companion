@@ -268,6 +268,14 @@ def make_message():
 
         message.from_user = MagicMock()
         message.from_user.id = user_id
+        message.from_user.is_bot = False
+
+        # A person writing as themselves: no `sender_chat`, not an automatic
+        # forward. A bare MagicMock attribute is truthy, which
+        # src/utils/senders.py would read as a channel post.
+        message.sender_chat = None
+        message.is_automatic_forward = None
+        message.author_signature = None
 
         message.reply_to_message = reply_to_message
 

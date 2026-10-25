@@ -32,6 +32,7 @@ from src.services.modules.voice import VoiceTranscriptionService
 from src.services.relevancy.gate import RelevancyGate
 from src.services.text.pipeline import PipelineResult, TextProcessingPipeline
 from src.utils import parse_admin_ids
+from src.utils.senders import chat_speaker_label, classify_sender, is_channel_post
 from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
 router = Router(name="media")
@@ -109,7 +110,11 @@ async def handle_voice_message(
 
     # Keep "typing" alive for the whole transcription (route to correct topic)
     user = message.from_user
-    user_name = (user.first_name if user else None) or "Unknown"
+    first_name = (user.first_name if user else None) or "Unknown"
+    # A placeholder sender's first_name is "Group"/"Channel"/"Telegram"; the
+    # label names who actually speaks (src/utils/senders.py).
+    speaker_label = chat_speaker_label(message, chat_config)
+    user_name = speaker_label or first_name
     message_type = "voice" if is_voice else "video_note"
 
     # A long voice note takes ten to twenty seconds to come back, and until it
@@ -175,11 +180,13 @@ async def handle_voice_message(
                 audio_data=audio_data,
                 chat_id=message.chat.id,
                 message_id=message.message_id,
-                user_first_name=user_name,
+                user_first_name=first_name,
                 message_type=message_type,
                 language=chat_config.language,
                 user_id=user.id if user else None,
                 username=user.username if user else None,
+                is_bot_message=bool(user and user.is_bot),
+                sender=classify_sender(message),
             )
             if audio_data is not None
             else None
@@ -221,7 +228,14 @@ async def handle_voice_message(
     # were already in the database. Any voice message over roughly four
     # minutes hits this; four such transcripts were lost in production before
     # this call learned to split.
-    reply_parts = VoiceTranscriptionService.format_reply_parts(user_name, result.text)
+    # A channel post's transcript carries no name: the post is right above it.
+    channel_post = is_channel_post(message)
+    reply_parts = VoiceTranscriptionService.format_reply_parts(
+        None if channel_post else first_name,
+        result.text,
+        speaker_label=None if channel_post else speaker_label,
+        expandable=chat_config.transcribe_expandable,
+    )
     # `finish` turns the placeholder into the first part, so the transcription
     # lands where the reader was already looking rather than further down the
     # chat. With no placeholder (a short voice note) it degrades to an ordinary
@@ -265,6 +279,7 @@ async def handle_voice_message(
         chat_config=chat_config,
         transcript=result.text,
         user_name=user_name,
+        speaker_label=speaker_label,
         pipeline=pipeline,
         message_repo=message_repo,
         relevancy_gate=relevancy_gate,
@@ -282,6 +297,7 @@ async def _maybe_answer_transcript(
     chat_config: ChatConfig,
     transcript: str,
     user_name: str,
+    speaker_label: str | None,
     pipeline: TextProcessingPipeline,
     message_repo: MessageRepository,
     relevancy_gate: RelevancyGate,
@@ -314,7 +330,7 @@ async def _maybe_answer_transcript(
     paths (CLAUDE.md), and this is the only pipeline pass a voice message ever
     makes.
     """
-    reply_ctx = await extract_reply_context(message, bot_id, message_repo)
+    reply_ctx = await extract_reply_context(message, bot_id, message_repo, chat_config=chat_config)
     respond, trigger_type = should_respond(
         message, chat_config, reply_ctx=reply_ctx, text=transcript
     )
@@ -353,6 +369,7 @@ async def _maybe_answer_transcript(
             chat_id=message.chat.id,
             user_id=user_id,
             user_name=user_name,
+            speaker_label=speaker_label,
             message_text=transcript,
             trigger_type=trigger_type,
             config=chat_config,
@@ -458,7 +475,9 @@ async def handle_photo_message(
         # Extracted before the decision, not after: it is what decides whether
         # a reply addresses the bot (a reply to one of the bot's transcriptions
         # does not), and pipeline.process() below needs the same object.
-        reply_ctx = await extract_reply_context(message, bot_id, message_repo)
+        reply_ctx = await extract_reply_context(
+            message, bot_id, message_repo, chat_config=chat_config
+        )
         respond, trigger_type = should_respond(message, chat_config, reply_ctx=reply_ctx)
 
         # Relevancy gate (TD-028). Its absence here was a live defect: an
@@ -514,12 +533,14 @@ async def handle_photo_message(
         if respond and caption:
             user = message.from_user
             user_id = user.id if user else 0
-            user_name = (user.first_name if user else None) or "Unknown"
+            speaker_label = chat_speaker_label(message, chat_config)
+            user_name = speaker_label or (user.first_name if user else None) or "Unknown"
 
             result = await pipeline.process(
                 chat_id=message.chat.id,
                 user_id=user_id,
                 user_name=user_name,
+                speaker_label=speaker_label,
                 message_text=caption,
                 trigger_type=trigger_type,
                 config=chat_config,
@@ -575,9 +596,11 @@ async def handle_photo_message(
             message_repo, message.chat.id, message.message_id, description
         )
 
-    # Image comment sticker (works for both photo_with_text and photo_only)
+    # Image comment sticker (works for both photo_with_text and photo_only).
+    # Not on a channel post: see should_respond().
     if (
         description
+        and not is_channel_post(message)
         and chat_config.image_comment_sticker_enabled
         and chat_config.sticker_learning_enabled
         and random.random() < chat_config.image_comment_sticker_chance
@@ -735,9 +758,10 @@ async def handle_sticker_message(
         except Exception:
             logger.exception("Failed to notify admins about new sticker")
 
-    # Sticker-to-sticker reply
+    # Sticker-to-sticker reply. Not on a channel post: see should_respond().
     if (
-        chat_config.sticker_reply_to_sticker_enabled
+        not is_channel_post(message)
+        and chat_config.sticker_reply_to_sticker_enabled
         and random.random() < chat_config.sticker_reply_to_sticker_chance
     ):
         try:

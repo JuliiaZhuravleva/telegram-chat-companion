@@ -36,6 +36,7 @@ def _all_values(**overrides: object) -> dict[str, object]:
         "rules_enabled": False,
         "rules_mode": "all",
         "chunks_enabled": False,
+        "transcribe_expandable": False,
         "kb_enabled": False,
         "reactions_enabled": False,
         "reactions_history_enabled": True,

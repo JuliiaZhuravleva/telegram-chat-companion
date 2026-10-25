@@ -171,7 +171,9 @@ class ChatChunkIndexer:
                     save_messages=config.save_messages,
                 )
             try:
-                written = await self._index_chat(chat_id, titles.get(chat_id))
+                written = await self._index_chat(
+                    chat_id, titles.get(chat_id), linked_channel_id=config.linked_channel_id
+                )
             except Exception:
                 # One unhealthy chat must not stall every other chat's index,
                 # and the next pass retries it from the same watermark.
@@ -195,7 +197,9 @@ class ChatChunkIndexer:
             )
         return {"chats": chats_indexed, "chunks": chunks_written, "embedded": embedded}
 
-    async def _index_chat(self, chat_id: int, chat_title: str | None) -> int:
+    async def _index_chat(
+        self, chat_id: int, chat_title: str | None, *, linked_channel_id: int | None = None
+    ) -> int:
         messages_repo = MessageRepository(self._pool)
         chunks_repo = ChunkRepository(self._pool)
 
@@ -207,7 +211,7 @@ class ChatChunkIndexer:
         if not rows:
             return 0
 
-        messages = source_messages(rows)
+        messages = source_messages(rows, linked_channel_id=linked_channel_id)
         if not messages:
             return 0
 

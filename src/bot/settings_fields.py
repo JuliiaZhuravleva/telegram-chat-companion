@@ -1,14 +1,14 @@
 """Registry of per-chat settings fields — shared by the chat settings panel
 (B-1) and the "settings by default" screen (C-1).
 
-Single source of truth for how each of the 26 per-chat settings fields (a
+Single source of truth for how each of the 27 per-chat settings fields (a
 subset of ``ChatConfig`` / ``ChatConfigService._CHAT_CONFIG_FIELDS``, see
 ``src/services/chat_config.py``) is grouped, labeled, typed, and addressed in
 inline-keyboard ``callback_data``. Both consumer screens must render the same
 grouping/labels/legacy split, so it lives here once rather than drifting
 between two handler modules.
 
-Excluded from this registry — 26 of the 27 mergeable ``ChatConfig`` fields
+Excluded from this registry — 27 of the 28 mergeable ``ChatConfig`` fields
 (``_CHAT_CONFIG_FIELDS``) appear here; the two names below do not, and only the
 first of them is in the merge at all:
 
@@ -20,12 +20,12 @@ first of them is in the merge at all:
   (``adm_kb_orgs:``) per the A-2 ADR; not part of ``ChatConfig`` either (it's
   written straight through ``ChatSettingsRepository``, never merged).
 
-Legacy vs. new (``FieldSpec.legacy``): 13 of these 26 columns still carry a
+Legacy vs. new (``FieldSpec.legacy``): 13 of these 27 columns still carry a
 SQL ``DEFAULT`` from migration 001 (``alembic/versions/001_initial_schema.py``),
 so ``ensure_exists()`` materializes a per-chat value on first contact and
 permanently shadows ``bot_config.default_*`` for that field on every chat the
 bot has already seen — the "inherited from default" story is false for them
-until the forward-only migration in C-2 (deferred to tech debt). The other 13
+until the forward-only migration in C-2 (deferred to tech debt). The other 14
 are nullable, no-DEFAULT columns (CLAUDE.md "Per-chat columns: nullable, no
 DEFAULT") where NULL honestly means "inherited". Consumers:
 
@@ -183,6 +183,14 @@ CHAT_SETTINGS_FIELDS: tuple[FieldSpec, ...] = (
         "tn",
         FieldType.BOOL,
         legacy=True,
+    ),
+    FieldSpec(
+        "transcribe_expandable",
+        FieldGroup.MODULES,
+        {"ru": "Сворачивать расшифровки", "en": "Collapse transcriptions"},
+        "tx",
+        FieldType.BOOL,
+        legacy=False,
     ),
     FieldSpec(
         "abuse_filter_enabled",

@@ -52,6 +52,7 @@ from typing import Any
 from src.services.rag.models import Chunk, SourceMessage
 from src.services.text.prompt_sanitizer import sanitize_history_field
 from src.utils.display_tz import DISPLAY_TZ
+from src.utils.senders import row_sender_label
 
 # --- Parameters (measured in the sibling archive projects; do not re-derive) ---
 
@@ -99,7 +100,9 @@ _MONTHS_GENITIVE = (
 )
 
 
-def source_messages(rows: Iterable[Any]) -> list[SourceMessage]:
+def source_messages(
+    rows: Iterable[Any], *, linked_channel_id: int | None = None
+) -> list[SourceMessage]:
     """Convert `chat_messages` rows into chunker input, dropping what cannot
     be chunked.
 
@@ -117,6 +120,12 @@ def source_messages(rows: Iterable[Any]) -> list[SourceMessage]:
     - **transcription bookkeeping rows** (migration 028) -- content-free by
       design; the transcript itself lives on the voice message's own row, so
       including these would render an empty `Bot (12:00):` line.
+
+    The speaker's KIND (a channel post, an anonymous admin, another bot --
+    src/utils/senders.py) is applied, its alias is not: the kind is a fact
+    about the message at the moment it was sent, an alias is today's name and
+    rewriting the archive with it would forge quotes. Chunks written before
+    migration 035 keep the `Bot` they were embedded with.
     """
     out: list[SourceMessage] = []
     for row in rows:
@@ -136,6 +145,7 @@ def source_messages(rows: Iterable[Any]) -> list[SourceMessage]:
                 user_id=row["user_id"],
                 name=row["first_name"] or row["username"],
                 is_bot=bool(row["is_bot_message"]),
+                label=row_sender_label(row, linked_channel_id=linked_channel_id),
             )
         )
     return out
@@ -365,9 +375,13 @@ def _render_line(message: SourceMessage) -> str:
 
 
 def _speaker(message: SourceMessage) -> str:
-    if message.is_bot:
+    if message.label is not None:
+        name = message.label
+    elif message.is_bot:
+        # A hand-built SourceMessage with no label: the pre-035 reading.
         return BOT_SPEAKER
-    name = (message.name or "").strip()
+    else:
+        name = (message.name or "").strip()
     if not name:
         return ANONYMOUS_SPEAKER
     safe = sanitize_history_field(name).replace(_NAME_COLON, _NAME_COLON_SAFE)

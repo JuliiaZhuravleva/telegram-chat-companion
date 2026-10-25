@@ -32,6 +32,9 @@ class ChatConfig:
     rag_enabled: bool = True
     transcribe_voice: bool = True
     transcribe_video_notes: bool = True
+    # Wrap each transcription part in `<blockquote expandable>` so a long one
+    # collapses to a few lines (migration 035). Off by default.
+    transcribe_expandable: bool = False
     abuse_filter_enabled: bool = False
     sticker_learning_enabled: bool = False
     sticker_response_chance: float = 0.15
@@ -81,3 +84,12 @@ class ChatConfig:
     # (see RuleActionExecutor._set_reaction).
     reactions_enabled: bool = False
     reactions_history_enabled: bool = True
+
+    # The channel this group is the discussion group of (migration 035).
+    # Chat METADATA, not a setting: copied from the per-chat row only, never
+    # from the global layer or the panel -- only Telegram decides which channel
+    # a group is linked to (same reasoning as `chat_settings.is_forum`, 030).
+    # Read by `src/utils/senders.py` to tell the channel's own author apart
+    # from any other channel commenting.
+    linked_channel_id: int | None = None
+    linked_channel_title: str | None = None
