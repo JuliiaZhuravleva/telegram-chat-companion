@@ -155,8 +155,15 @@ class TextProcessingPipeline:
         image_context: str | None = None,
         message_thread_id: int | None = None,
         message_id: int | None = None,
+        speaker_label: str | None = None,
     ) -> PipelineResult:
-        """Run the full pipeline and return the result."""
+        """Run the full pipeline and return the result.
+
+        `speaker_label` (src/utils/senders.py) names a speaker who is not a
+        person -- a channel post, an anonymous admin, a channel -- in the
+        `<user_message>` tail instead of the alias/first_name lookup, which
+        would resolve the placeholder account every such sender shares.
+        """
         # --- Stage 1: Anti-abuse check ---
         is_addressed = trigger_type in (TriggerType.TRIGGER, TriggerType.REPLY)
         abuse_result = await self._abuse.check(
@@ -487,6 +494,8 @@ class TextProcessingPipeline:
             user_name=user_name,
             user_message=message_text,
             is_forum_mode=is_forum_mode,
+            speaker_label=speaker_label,
+            linked_channel_id=config.linked_channel_id,
         )
 
         system_prompt = build_system_prompt(ctx)

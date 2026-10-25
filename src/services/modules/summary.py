@@ -16,6 +16,7 @@ from src.services.text.prompt_sanitizer import sanitize_prompt_content
 from src.utils.aliases import AliasView, build_alias_view, primary_alias
 from src.utils.background import fire_and_forget
 from src.utils.display_tz import DISPLAY_TZ
+from src.utils.senders import row_sender_label
 
 logger = structlog.get_logger(__name__)
 
@@ -172,8 +173,13 @@ class SummaryService:
         count: int = 100,
         language: str = "ru",
         message_thread_id: int | None = None,
+        linked_channel_id: int | None = None,
     ) -> str | None:
         """Generate a chat summary.
+
+        ``linked_channel_id`` (the chat's discussion-group channel) lets a
+        comment posted as that channel read as its author's, see
+        src/utils/senders.py.
 
         ``count`` is the number of recent messages to consider — the caller
         (the ``/summary`` command handler) is responsible for range
@@ -203,10 +209,15 @@ class SummaryService:
         lines: list[str] = []
         for row in reversed(rows):
             user_id = row["user_id"]
-            if row["is_bot_message"]:
-                prefix = "Bot"
+            # A speaker who is not a person -- this bot, another bot, a channel
+            # post, an anonymous admin, a channel -- gets a plain label and no
+            # @@uN@@ token: its `user_id` is a placeholder every such sender
+            # shares, so a mention of it would link a stranger.
+            label = row_sender_label(row, linked_channel_id=linked_channel_id, language=language)
+            if label is not None:
+                prefix = sanitize_prompt_content(label)
             elif user_id is None:
-                # Anonymous admin / channel-linked posts have no user to link to.
+                # A row whose writer had no user to record.
                 prefix = sanitize_prompt_content(row["first_name"] or row["username"] or "?")
             else:
                 idx = user_id_to_idx.get(user_id)

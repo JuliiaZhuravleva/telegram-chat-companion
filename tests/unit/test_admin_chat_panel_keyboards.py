@@ -294,13 +294,14 @@ class TestChatPanelGroupKeyboard:
         assert any(label.startswith("RAG memory") for label in labels)
 
     def test_row_count_matches_group_field_count_plus_back(self):
-        """MODULES (largest group) is 9 field rows + 1 back row (ADR-0010
-        Decision 4's row-count check). The 9th is `chunks_enabled` (S5b)."""
+        """MODULES (largest group) is 10 field rows + 1 back row (ADR-0010
+        Decision 4's row-count check). The 9th is `chunks_enabled` (S5b), the
+        10th `transcribe_expandable` (migration 035)."""
         config = self._config()
         kb = chat_panel_group_keyboard(
             "ru", chat_id=CHAT_ID, group=FieldGroup.MODULES, config=config, row=None
         )
-        assert len(kb.inline_keyboard) == 10
+        assert len(kb.inline_keyboard) == 11
 
 
 class TestRootGroupStatus:

@@ -22,6 +22,9 @@ class SourceMessage:
     user_id: int | None = None
     name: str | None = None
     is_bot: bool = False
+    # A speaker who is not a person (src/utils/senders.py), already rendered;
+    # None for a person, whose `name` is used.
+    label: str | None = None
 
 
 @dataclass(frozen=True)

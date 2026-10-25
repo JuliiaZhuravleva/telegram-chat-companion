@@ -21,6 +21,7 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "rag_enabled",
         "transcribe_voice",
         "transcribe_video_notes",
+        "transcribe_expandable",
         "abuse_filter_enabled",
         "sticker_learning_enabled",
         "sticker_response_chance",
@@ -172,6 +173,35 @@ class ChatSettingsRepository:
         row = await self.get(chat_id)
         assert row is not None  # just inserted
         return row
+
+    async def set_linked_channel(
+        self, chat_id: int, channel_id: int, channel_title: str | None
+    ) -> int | None:
+        """Record the group's linked channel; returns the id now stored.
+
+        Fills an empty slot or refreshes the title of the SAME channel, and
+        never replaces a different one: a mismatch is something to log and look
+        at (a group relinked to a new channel), not to overwrite silently on
+        whatever post happens to arrive. The caller compares the returned id
+        with the one it offered. None means the chat has no row yet.
+        """
+        stored: int | None = await self._pool.fetchval(
+            """
+            UPDATE chat_settings
+               SET linked_channel_id = COALESCE(linked_channel_id, $2),
+                   linked_channel_title = CASE
+                       WHEN linked_channel_id IS NULL OR linked_channel_id = $2
+                       THEN COALESCE($3, linked_channel_title)
+                       ELSE linked_channel_title
+                   END
+             WHERE chat_id = $1
+            RETURNING linked_channel_id
+            """,
+            chat_id,
+            channel_id,
+            channel_title,
+        )
+        return stored
 
     async def list_enabled(self) -> list[int]:
         """Get all enabled (whitelisted) chat IDs."""

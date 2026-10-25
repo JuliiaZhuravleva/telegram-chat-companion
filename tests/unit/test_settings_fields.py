@@ -78,8 +78,17 @@ class TestRegistryCoverage:
     def test_all_registry_keys_are_writable_columns(self):
         assert set(FIELDS_BY_KEY) <= _WRITABLE_COLUMNS
 
-    def test_field_count_is_26(self):
-        assert len(CHAT_SETTINGS_FIELDS) == 26
+    def test_linked_channel_is_not_a_setting(self):
+        """chat_settings.linked_channel_* (migration 035) is Telegram-observed
+        metadata like is_forum: ChatConfig carries it, but only from the
+        per-chat row -- a toggle or a global default must not be able to link
+        a group to a channel."""
+        for key in ("linked_channel_id", "linked_channel_title"):
+            assert key not in FIELDS_BY_KEY
+            assert key not in _CHAT_CONFIG_FIELDS
+
+    def test_field_count_is_27(self):
+        assert len(CHAT_SETTINGS_FIELDS) == 27
 
     def test_no_duplicate_keys(self):
         keys = [f.key for f in CHAT_SETTINGS_FIELDS]
@@ -96,8 +105,8 @@ class TestLegacySplit:
     def test_legacy_count_is_13(self):
         assert sum(1 for f in CHAT_SETTINGS_FIELDS if f.legacy) == 13
 
-    def test_new_fields_count_is_13(self):
-        assert len(new_fields()) == 13
+    def test_new_fields_count_is_14(self):
+        assert len(new_fields()) == 14
 
     def test_new_fields_are_exactly_the_non_legacy_fields(self):
         # FieldSpec.label is a dict (unhashable) so compare by key, not identity-in-a-set.
@@ -170,11 +179,11 @@ class TestFieldTypes:
         assert all(f.type is FieldType.BOOL for f in bool_fields())
 
     def test_bool_field_count(self):
-        # 26 total, 10 non-bool (trigger_words, random_response_chance,
+        # 27 total, 10 non-bool (trigger_words, random_response_chance,
         # random_response_min_interval, system_prompt, language,
         # sticker_response_chance, sticker_reply_to_sticker_chance,
-        # image_comment_sticker_chance, tolerance_level, rules_mode) => 16 bool.
-        assert len(bool_fields()) == 16
+        # image_comment_sticker_chance, tolerance_level, rules_mode) => 17 bool.
+        assert len(bool_fields()) == 17
 
     def test_every_field_has_a_valid_type(self):
         assert all(isinstance(f.type, FieldType) for f in CHAT_SETTINGS_FIELDS)

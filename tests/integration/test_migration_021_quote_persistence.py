@@ -102,6 +102,10 @@ def _make_event(*, quote: MagicMock | None, chat_id: int, message_id: int) -> Ma
     event.video_note = None
     event.photo = None
     event.quote = quote
+    # Who speaks (migration 035): an ordinary person, so no sender chat.
+    event.sender_chat = None
+    event.is_automatic_forward = None
+    event.author_signature = None
     return event
 
 

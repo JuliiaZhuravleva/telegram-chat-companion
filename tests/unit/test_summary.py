@@ -166,15 +166,19 @@ class TestSummaryMentions:
     async def test_bot_messages_never_get_a_mention_token(
         self, summary_service, ai_router, message_repo
     ):
+        # The bot writes its own rows with no user_id; another bot in the chat
+        # has one, and is labelled as itself rather than as this bot.
         message_repo.get_for_summary.return_value = [
-            _make_message_row(user_id=1, is_bot_message=True, first_name="Bot"),
+            _make_message_row(user_id=None, is_bot_message=True, first_name=None),
+            _make_message_row(user_id=1, is_bot_message=True, first_name="Keeper"),
         ]
 
         await summary_service.generate(chat_id=-1, language="ru")
 
         prompt = ai_router.generate_text.call_args.kwargs["prompt"]
-        assert "@@u0@@" not in prompt
+        assert "@@u" not in prompt
         assert "] Bot:" in prompt
+        assert "] Keeper (бот):" in prompt
 
     @pytest.mark.asyncio
     async def test_unknown_token_degrades_to_generic_label(

@@ -40,6 +40,9 @@ def _make_event(*, quote: MagicMock | None, chat_id: int = -1001234567890) -> Ma
     event.video_note = None
     event.photo = None
     event.quote = quote
+    event.sender_chat = None
+    event.is_automatic_forward = None
+    event.author_signature = None
     return event
 
 

@@ -18,6 +18,7 @@ from src.services.ai.pricing import calculate_cost
 from src.services.ai.router import AIRouter
 from src.services.modules.reactions.models import ALLOWED_REACTION_EMOJI
 from src.services.text.prompt_sanitizer import sanitize_prompt_content
+from src.utils.senders import row_sender_label
 
 logger = structlog.get_logger(__name__)
 
@@ -134,7 +135,7 @@ async def llm_judge(
     for msg in recent_messages[-5:]:
         name = sanitize_prompt_content(msg.get("first_name") or msg.get("username") or "?")
         content = sanitize_prompt_content((msg.get("content") or "")[:60])
-        prefix = "Bot" if msg.get("is_bot_message") else name
+        prefix = sanitize_prompt_content(row_sender_label(msg) or "") or name
         lines.append(f"  {prefix}: {content}")
 
     history = "\n".join(lines) if lines else "  (no recent messages)"

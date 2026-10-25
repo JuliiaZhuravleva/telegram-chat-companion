@@ -13,6 +13,7 @@ import structlog
 from src.database.repositories.messages import MessageRepository
 from src.services.ai.base import AIProviderError, TranscriptionResult
 from src.services.ai.router import AIRouter
+from src.utils.senders import SenderInfo
 from src.utils.telegram_text import DEFAULT_SPLIT_LIMIT, parsed_length, split_html
 
 logger = structlog.get_logger(__name__)
@@ -31,6 +32,10 @@ logger = structlog.get_logger(__name__)
 # content") and removes the whole question.
 _HEADER_EMOJI = "\U0001f399"
 _HEADER_LABEL = "Расшифровка от"
+# The header for a speaker who is not a person: a channel post has no name
+# worth printing (the post itself is right above), and a label such as
+# "админ" or "X (канал)" does not decline after "от".
+_HEADER_PLAIN = "Расшифровка"
 
 
 class VoiceTranscriptionService:
@@ -55,6 +60,8 @@ class VoiceTranscriptionService:
         language: str | None = None,
         user_id: int | None = None,
         username: str | None = None,
+        is_bot_message: bool = False,
+        sender: SenderInfo | None = None,
     ) -> TranscriptionResult | None:
         """Transcribe audio and save to message history.
 
@@ -65,6 +72,8 @@ class VoiceTranscriptionService:
             user_first_name: Sender's first name (for formatting).
             message_type: "voice" or "video_note".
             language: Expected language (ISO code, e.g. "ru").
+            is_bot_message, sender: who really speaks (src/utils/senders.py),
+                for the row this may create -- see the note at the insert.
 
         Returns:
             TranscriptionResult on success, None on failure.
@@ -121,6 +130,11 @@ class VoiceTranscriptionService:
                 user_id=user_id,
                 username=username,
                 first_name=user_first_name,
+                is_bot_message=is_bot_message,
+                sender_kind=sender.kind if sender else None,
+                sender_chat_id=sender.chat_id if sender else None,
+                sender_chat_title=sender.chat_title if sender else None,
+                author_signature=sender.signature if sender else None,
             )
         except Exception as exc:
             # Detail matters more than it looks: this row is where
@@ -203,7 +217,13 @@ class VoiceTranscriptionService:
         )
 
     @staticmethod
-    def format_reply_parts(user_first_name: str, transcription_text: str) -> list[str]:
+    def format_reply_parts(
+        user_first_name: str | None,
+        transcription_text: str,
+        *,
+        speaker_label: str | None = None,
+        expandable: bool = False,
+    ) -> list[str]:
         """The same reply, split into messages Telegram will accept.
 
         A six-minute voice note transcribes to well over 4096 characters, and
@@ -217,11 +237,22 @@ class VoiceTranscriptionService:
         counter appears only when there is more than one part, so the ordinary
         short voice message is byte-identical to what `format_reply` produced
         before.
+
+        ``speaker_label`` names a speaker who is not a person (an anonymous
+        admin, a channel; src/utils/senders.py) and wins over the name; with
+        neither, the header carries no name at all -- the channel-post case.
+        ``expandable`` wraps each part's body in ``<blockquote expandable>``.
+        The budget does not move for it: the limit counts the parsed text, in
+        which a tag weighs nothing, and each part opens and closes its own.
         """
         # A display name is user-controlled and can be 64 characters; the
         # header budget has to be derived from the real one, not assumed.
-        name = html.escape(user_first_name)
-        head = f"{_HEADER_EMOJI} <b>{_HEADER_LABEL}</b> {name}"
+        if speaker_label:
+            head = f"{_HEADER_EMOJI} <b>{_HEADER_PLAIN}</b> — {html.escape(speaker_label)}"
+        elif user_first_name:
+            head = f"{_HEADER_EMOJI} <b>{_HEADER_LABEL}</b> {html.escape(user_first_name)}"
+        else:
+            head = f"{_HEADER_EMOJI} <b>{_HEADER_PLAIN}</b>"
 
         # Reserve room for the longest counter this will realistically render
         # plus the blank line under the header. Reserving too much only costs
@@ -230,9 +261,15 @@ class VoiceTranscriptionService:
         budget = max(DEFAULT_SPLIT_LIMIT - reserve, 512)
 
         bodies = split_html(html.escape(transcription_text), limit=budget)
+        # A blockquote is already set off as a block, so one newline under the
+        # header instead of the blank line.
+        sep = "\n\n"
+        if expandable:
+            bodies = [f"<blockquote expandable>{body}</blockquote>" for body in bodies]
+            sep = "\n"
         if len(bodies) == 1:
-            return [f"{head}:\n\n{bodies[0]}"]
+            return [f"{head}:{sep}{bodies[0]}"]
         total = len(bodies)
         return [
-            f"{head} ({index}/{total}):\n\n{body}" for index, body in enumerate(bodies, start=1)
+            f"{head} ({index}/{total}):{sep}{body}" for index, body in enumerate(bodies, start=1)
         ]

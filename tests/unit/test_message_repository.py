@@ -53,6 +53,10 @@ _SAVE_PARAMS = (
     "quote_text",
     "quote_is_manual",
     "transcribed_message_id",
+    "sender_kind",
+    "sender_chat_id",
+    "sender_chat_title",
+    "author_signature",
 )
 
 

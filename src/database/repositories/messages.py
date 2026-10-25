@@ -35,8 +35,18 @@ class MessageRepository:
         quote_text: str | None = None,
         quote_is_manual: bool | None = None,
         transcribed_message_id: int | None = None,
+        sender_kind: str | None = None,
+        sender_chat_id: int | None = None,
+        sender_chat_title: str | None = None,
+        author_signature: str | None = None,
     ) -> None:
         """Save a chat message.
+
+        The four `sender_*` / `author_signature` columns (migration 035, see
+        `src/utils/senders.py`) record who really speaks when `from` is a
+        placeholder. They are COALESCEd on conflict for the same reason
+        `content` is: a re-save that does not carry them -- any save the bot
+        itself makes -- must not erase what the first save learned.
 
         `transcribed_message_id` (migration 028): set ONLY on a message the bot
         posted that carries a voice transcription, and holds the message_id of
@@ -114,11 +124,21 @@ class MessageRepository:
                 message_type, content, raw_data, reply_to_message_id,
                 is_bot_message, sticker_file_id, sticker_file_unique_id,
                 sticker_set_name, sticker_emoji, message_thread_id,
-                quote_text, quote_is_manual, transcribed_message_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                quote_text, quote_is_manual, transcribed_message_id,
+                sender_kind, sender_chat_id, sender_chat_title, author_signature
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, $10, $11, $12, $13, $14, $15, $16,
+                      $17, $18, $19, $20, $21, $22)
             ON CONFLICT (chat_id, message_id) DO UPDATE
             SET transcribed_message_id = COALESCE(
                     EXCLUDED.transcribed_message_id, chat_messages.transcribed_message_id
+                ),
+                sender_kind = COALESCE(EXCLUDED.sender_kind, chat_messages.sender_kind),
+                sender_chat_id = COALESCE(EXCLUDED.sender_chat_id, chat_messages.sender_chat_id),
+                sender_chat_title = COALESCE(
+                    EXCLUDED.sender_chat_title, chat_messages.sender_chat_title
+                ),
+                author_signature = COALESCE(
+                    EXCLUDED.author_signature, chat_messages.author_signature
                 ),
                 content = COALESCE(EXCLUDED.content, chat_messages.content),
                 edited_at = CASE
@@ -158,6 +178,10 @@ class MessageRepository:
             quote_text,
             quote_is_manual,
             transcribed_message_id,
+            sender_kind,
+            sender_chat_id,
+            sender_chat_title,
+            author_signature,
         )
 
     async def get_transcription_source(
@@ -178,6 +202,10 @@ class MessageRepository:
         nothing; this column is written by exactly one code path and cannot be
         forged from the chat.
 
+        The `source_sender_*` columns (migration 035) say who spoke when it was
+        not a person: a channel post's `first_name` is the placeholder
+        "Telegram", an anonymous admin's is "Group".
+
         `source_first_name` / `transcript` are LEFT JOINed and may be NULL if
         the source row was pruned by retention while the transcription row
         survived — callers must treat "recognised as a transcription" and
@@ -189,7 +217,12 @@ class MessageRepository:
                    src.user_id                    AS source_user_id,
                    src.first_name                 AS source_first_name,
                    src.username                   AS source_username,
-                   src.content                    AS transcript
+                   src.content                    AS transcript,
+                   src.is_bot_message             AS source_is_bot_message,
+                   src.sender_kind                AS source_sender_kind,
+                   src.sender_chat_id             AS source_sender_chat_id,
+                   src.sender_chat_title          AS source_sender_chat_title,
+                   src.author_signature           AS source_author_signature
             FROM chat_messages t
             LEFT JOIN chat_messages src
                    ON src.chat_id = t.chat_id
@@ -221,7 +254,8 @@ class MessageRepository:
         """
         query = """
             SELECT id, chat_id, message_id, user_id, username, first_name,
-                   message_type, content, is_bot_message, created_at
+                   message_type, content, is_bot_message, created_at,
+                   sender_kind, sender_chat_id, sender_chat_title, author_signature
             FROM chat_messages
             WHERE chat_id = $1
               AND message_type <> 'transcription'
@@ -263,6 +297,7 @@ class MessageRepository:
                 """
                 SELECT id, chat_id, message_id, user_id, username, first_name,
                        message_type, content, is_bot_message, created_at,
+                       sender_kind, sender_chat_id, sender_chat_title, author_signature,
                        quote_text, quote_is_manual,
                        NULL::text AS topic_scope
                 FROM chat_messages
@@ -281,6 +316,7 @@ class MessageRepository:
             """
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    sender_kind, sender_chat_id, sender_chat_title, author_signature,
                     quote_text, quote_is_manual,
                     'current' AS topic_scope
                FROM chat_messages
@@ -290,6 +326,7 @@ class MessageRepository:
             UNION ALL
             (SELECT id, chat_id, message_id, user_id, username, first_name,
                     message_type, content, is_bot_message, created_at,
+                    sender_kind, sender_chat_id, sender_chat_title, author_signature,
                     quote_text, quote_is_manual,
                     'other' AS topic_scope
                FROM chat_messages
@@ -310,13 +347,19 @@ class MessageRepository:
         limit: int = 15,
         min_length: int = 5,
     ) -> list[int]:
-        """Get lengths of recent non-bot messages for adaptive response length."""
+        """Get lengths of recent people's messages for adaptive response length.
+
+        `sender_kind IS NULL` (migration 035): a channel's posts in its
+        discussion group are long-form broadcasts, and counting them would
+        stretch every reply the bot writes under them.
+        """
         rows = await self._pool.fetch(
             """
             SELECT LENGTH(content) as msg_length
             FROM chat_messages
             WHERE chat_id = $1
               AND is_bot_message = false
+              AND sender_kind IS NULL
               AND content IS NOT NULL
               AND LENGTH(content) >= $3
             ORDER BY created_at DESC
@@ -338,6 +381,11 @@ class MessageRepository:
         Returns aggregated signals from the last `limit` messages in one query:
         total_count, bot_count, bot_ratio, seconds_since_last_bot,
         velocity_per_minute, consecutive_bot_at_end.
+
+        "Bot" here excludes placeholder senders (`sender_kind`, migration 035):
+        an anonymous admin and a member posting as a channel arrive flagged
+        `is_bot`, and counting a channel author's comments as the bot's own
+        would read their discussion as the bot dominating it.
         """
         # Single query computes all engagement signals in one round-trip.
         # CTE 'recent' fetches last N messages; 'stats' aggregates counts;
@@ -345,7 +393,7 @@ class MessageRepository:
         row = await self._pool.fetchrow(
             """
             WITH recent AS (
-                SELECT is_bot_message, created_at,
+                SELECT (is_bot_message AND sender_kind IS NULL) AS from_bot, created_at,
                        ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
                 FROM chat_messages
                 WHERE chat_id = $1
@@ -356,8 +404,8 @@ class MessageRepository:
             stats AS (
                 SELECT
                     COUNT(*)::int AS total_count,
-                    COUNT(*) FILTER (WHERE is_bot_message)::int AS bot_count,
-                    MAX(created_at) FILTER (WHERE is_bot_message) AS last_bot_at,
+                    COUNT(*) FILTER (WHERE from_bot)::int AS bot_count,
+                    MAX(created_at) FILTER (WHERE from_bot) AS last_bot_at,
                     COUNT(*) FILTER (
                         WHERE created_at > NOW() - INTERVAL '5 minutes'
                     )::int AS recent_5min_count
@@ -366,12 +414,12 @@ class MessageRepository:
             first_non_bot AS (
                 SELECT MIN(rn) AS rn
                 FROM recent
-                WHERE NOT is_bot_message
+                WHERE NOT from_bot
             ),
             consecutive AS (
                 SELECT COUNT(*)::int AS consecutive_bot
                 FROM recent
-                WHERE is_bot_message = true
+                WHERE from_bot
                   AND rn < COALESCE((SELECT rn FROM first_non_bot), $2 + 1)
             )
             SELECT
@@ -455,8 +503,10 @@ class MessageRepository:
 
         Powers the KB organizer picker (B-2): lets an admin pick a candidate
         from chat participants instead of guessing a forward/@username.
-        Excludes bot messages and rows with no `user_id` (e.g. service
-        messages). `username`/`first_name` reflect that user's most recent
+        Excludes bot messages, rows with no `user_id` (e.g. service
+        messages) and placeholder senders (`sender_kind`, migration 035 -- the
+        auto-forward's "Telegram" is `is_bot=false` and would be offered as a
+        participant otherwise). `username`/`first_name` reflect that user's most recent
         message in this chat -- same chat-scoped-history constraint as
         `find_by_username` (no live Bot API lookup here). The existing
         `idx_chat_messages_user(chat_id, user_id, created_at DESC)` serves the
@@ -475,6 +525,7 @@ class MessageRepository:
                 SELECT COUNT(DISTINCT user_id)
                 FROM chat_messages
                 WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+                  AND sender_kind IS NULL
                 """,
                 chat_id,
             )
@@ -488,6 +539,7 @@ class MessageRepository:
                    COUNT(*)::int AS message_count
             FROM chat_messages
             WHERE chat_id = $1 AND user_id IS NOT NULL AND is_bot_message = false
+              AND sender_kind IS NULL
             GROUP BY user_id
             ORDER BY message_count DESC, user_id ASC
             LIMIT $2 OFFSET $3
@@ -514,7 +566,8 @@ class MessageRepository:
             result: list[asyncpg.Record] = await self._pool.fetch(
                 """
                 SELECT user_id, username, first_name, content,
-                       is_bot_message, created_at
+                       is_bot_message, created_at,
+                       sender_kind, sender_chat_id, sender_chat_title, author_signature
                 FROM chat_messages
                 WHERE chat_id = $1
                   AND content IS NOT NULL
@@ -530,7 +583,8 @@ class MessageRepository:
             result = await self._pool.fetch(
                 """
                 SELECT user_id, username, first_name, content,
-                       is_bot_message, created_at
+                       is_bot_message, created_at,
+                       sender_kind, sender_chat_id, sender_chat_title, author_signature
                 FROM chat_messages
                 WHERE chat_id = $1 AND content IS NOT NULL
                 ORDER BY created_at DESC
@@ -652,7 +706,8 @@ class MessageRepository:
             # comment early and broke the whole query.
             r"""
             SELECT message_id, user_id, username, first_name,
-                   message_type, content, is_bot_message, created_at
+                   message_type, content, is_bot_message, created_at,
+                   sender_kind, sender_chat_id, sender_chat_title, author_signature
             FROM chat_messages
             WHERE chat_id = $1
               AND message_id > $2
