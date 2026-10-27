@@ -95,6 +95,18 @@ DEFAULT_MODELS: dict[str, dict[str, str]] = {
     },
 }
 
+# Which provider serves a model, by its name. A caller that names a model
+# (`generate_text(model="gpt-5-nano")`) means that model's provider; sending
+# the name to any other provider only buys a 404 and an error line in the log.
+MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
+    "openai": ("gpt-", "o1", "o3", "o4", "text-embedding-", "whisper-"),
+    "gemini": ("gemini-",),
+    "grok": ("grok-",),
+    "deepseek": ("deepseek-",),
+    "anthropic": ("claude-",),
+}
+
+
 # EXPENSIVE models — require explicit user approval before use.
 # Never set these as defaults in config or code.
 EXPENSIVE_MODELS = [
@@ -136,3 +148,11 @@ def provider_supports(provider: str, capability: str) -> bool:
     if provider not in PROVIDER_CAPABILITIES:
         return False
     return bool(PROVIDER_CAPABILITIES[provider].get(capability, False))
+
+
+def provider_for_model(model: str) -> str | None:
+    """The provider that serves `model`, or None when the name is not recognised."""
+    for provider, prefixes in MODEL_PREFIXES.items():
+        if model.startswith(prefixes):
+            return provider
+    return None

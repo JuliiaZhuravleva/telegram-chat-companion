@@ -26,7 +26,11 @@ from src.services.ai.base import (
     TranscriptionResult,
     VisionResult,
 )
-from src.services.ai.capabilities import get_providers_for_capability, provider_supports
+from src.services.ai.capabilities import (
+    get_providers_for_capability,
+    provider_for_model,
+    provider_supports,
+)
 from src.services.ai.pricing import calculate_cost
 from src.utils.background import fire_and_forget
 
@@ -280,6 +284,22 @@ class AIRouter:
         caller_temperature: float | None = (
             float(kwargs.pop("temperature")) if "temperature" in kwargs else None
         )
+
+        # A named model goes straight to its own provider. Walking the chain
+        # with it sent `gpt-5-nano` to Gemini first on every relevancy check:
+        # a 404, an extra round-trip and an error line that read as an outage
+        # (TD-058). An unrecognised name keeps the old walk.
+        owner = provider_for_model(caller_model) if caller_model is not None else None
+        if owner is not None:
+            if owner not in chain:
+                error = AIProviderError(
+                    f"Model {caller_model} is served by {owner}, "
+                    f"which is not in the text generation chain {chain}",
+                    provider="router",
+                )
+                fire_and_forget(self._log_failure(task_type="text_generation", error=error))
+                raise error
+            chain = [owner]
 
         last_error: Exception | None = None
 
