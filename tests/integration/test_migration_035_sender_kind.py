@@ -27,6 +27,8 @@ OTHER_CHANNEL_ID = -1009990037
 
 TELEGRAM_SERVICE_ID = 777000
 GROUP_ANONYMOUS_BOT_ID = 1087968824
+OWN_BOT_ID = 900777
+OTHER_BOT_ID = 900778
 CHANNEL_BOT_ID = 136817688
 
 _MIGRATION = Path(__file__).parents[2] / "alembic" / "versions" / "035_sender_kind.py"
@@ -271,6 +273,36 @@ class TestEngagementCountsOnlyTheBot:
         await messages.save(CHAT_ID, 2, "text", is_bot_message=True, content="ответ бота")
 
         stats = await messages.get_bot_message_stats(CHAT_ID)
+
+        assert (stats["bot_count"], stats["consecutive_bot_at_end"]) == (1, 1)
+
+    async def test_another_bot_is_not_the_bot(self, messages: MessageRepository):
+        """A reputation bot's "+1 to X" is somebody else talking (owner, 2026-10-27)."""
+        await messages.save(CHAT_ID, 1, "text", user_id=900001, first_name="Аня", content="вопрос")
+        for message_id in (2, 3):
+            await messages.save(
+                CHAT_ID,
+                message_id,
+                "text",
+                user_id=OTHER_BOT_ID,
+                first_name="Счётчик",
+                is_bot_message=True,
+                content="репутация +1",
+            )
+
+        stats = await messages.get_bot_message_stats(CHAT_ID, own_bot_id=OWN_BOT_ID)
+
+        assert (stats["bot_count"], stats["consecutive_bot_at_end"]) == (0, 0), (
+            "another bot counted as this one"
+        )
+
+    async def test_a_row_carrying_our_own_id_counts(self, messages: MessageRepository):
+        await messages.save(CHAT_ID, 1, "text", user_id=900001, first_name="Аня", content="вопрос")
+        await messages.save(
+            CHAT_ID, 2, "text", user_id=OWN_BOT_ID, is_bot_message=True, content="ответ бота"
+        )
+
+        stats = await messages.get_bot_message_stats(CHAT_ID, own_bot_id=OWN_BOT_ID)
 
         assert (stats["bot_count"], stats["consecutive_bot_at_end"]) == (1, 1)
 

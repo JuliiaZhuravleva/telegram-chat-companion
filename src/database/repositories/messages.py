@@ -375,6 +375,7 @@ class MessageRepository:
         self,
         chat_id: int,
         limit: int = 20,
+        own_bot_id: int | None = None,
     ) -> dict[str, Any]:
         """Get bot message statistics for the relevancy gate.
 
@@ -382,10 +383,14 @@ class MessageRepository:
         total_count, bot_count, bot_ratio, seconds_since_last_bot,
         velocity_per_minute, consecutive_bot_at_end.
 
-        "Bot" here excludes placeholder senders (`sender_kind`, migration 035):
-        an anonymous admin and a member posting as a channel arrive flagged
-        `is_bot`, and counting a channel author's comments as the bot's own
-        would read their discussion as the bot dominating it.
+        "Bot" here is THIS bot only -- the same rule `sender_label` uses: a row
+        it wrote itself (`user_id` NULL or 0) or one carrying `own_bot_id`.
+        Everything else flagged `is_bot` is somebody else in the conversation:
+        an anonymous admin or a member posting as a channel (placeholder
+        senders, migration 035) -- counting a channel author's comments as the
+        bot's own would read their discussion as the bot dominating it -- and
+        other bots, whose posts (a reputation bot's "+1 to X") are no reason
+        for this one to keep quiet.
         """
         # Single query computes all engagement signals in one round-trip.
         # CTE 'recent' fetches last N messages; 'stats' aggregates counts;
@@ -393,7 +398,9 @@ class MessageRepository:
         row = await self._pool.fetchrow(
             """
             WITH recent AS (
-                SELECT (is_bot_message AND sender_kind IS NULL) AS from_bot, created_at,
+                SELECT (is_bot_message AND sender_kind IS NULL
+                        AND (user_id IS NULL OR user_id = 0 OR user_id = $3)) AS from_bot,
+                       created_at,
                        ROW_NUMBER() OVER (ORDER BY created_at DESC) AS rn
                 FROM chat_messages
                 WHERE chat_id = $1
@@ -437,6 +444,7 @@ class MessageRepository:
             """,
             chat_id,
             limit,
+            own_bot_id,
         )
         if row is None:
             return {
