@@ -89,3 +89,14 @@ class TestEngagement:
         result = await compute_engagement(chat_id=-100, message_repo=repo)
         assert result.signals is not None
         assert result.signals.velocity_per_minute == 3.5
+
+
+@pytest.mark.asyncio
+async def test_passes_the_own_bot_id_to_the_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without it a row carrying our own id would count as somebody else's."""
+    monkeypatch.setattr("src.services.relevancy.engagement.own_bot_id", lambda: 900777)
+    repo = _make_repo({})
+
+    await compute_engagement(chat_id=-100, message_repo=repo)
+
+    repo.get_bot_message_stats.assert_awaited_once_with(-100, limit=20, own_bot_id=900777)

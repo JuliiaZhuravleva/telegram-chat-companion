@@ -213,3 +213,28 @@ class TestSetField:
         await repo.ensure_exists(-110002)
         with pytest.raises(ValueError, match="Unknown chat_settings column"):
             await repo.set_field(-110002, "bogus_field", "value")
+
+
+class TestListGroups:
+    """The community rollout's candidate list: groups only, whatever their state."""
+
+    @pytest.mark.asyncio
+    async def test_groups_and_supergroups_only(self, repo: ChatSettingsRepository) -> None:
+        await repo.ensure_exists(chat_id=-100901, chat_title="A", chat_type="group")
+        await repo.ensure_exists(chat_id=-100902, chat_title="B", chat_type="supergroup")
+        await repo.ensure_exists(chat_id=900903, chat_title=None, chat_type="private")
+        await repo.ensure_exists(chat_id=-100904, chat_title="C", chat_type="channel")
+
+        rows = await repo.list_groups()
+
+        assert [(r["chat_id"], r["chat_title"]) for r in rows] == [
+            (-100902, "B"),
+            (-100901, "A"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_disabled_group_is_still_listed(self, repo: ChatSettingsRepository) -> None:
+        """Whether the bot is there is Telegram's answer, not this row's."""
+        await repo.ensure_exists(chat_id=-100905, chat_type="supergroup")
+
+        assert [r["chat_id"] for r in await repo.list_groups()] == [-100905]

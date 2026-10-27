@@ -14,6 +14,7 @@ from src.bot.access_requests import AccessRequest, AccessRequestService
 from src.database.repositories.bot_config import BotConfigRepository
 from src.models.chat_config import ChatConfig
 from src.utils import parse_admin_ids
+from src.utils.senders import is_membership_notice
 
 logger = structlog.get_logger(__name__)
 
@@ -55,6 +56,11 @@ class AccessControlMiddleware(BaseMiddleware):
                 chat_id=chat_id,
                 user_id=user_id,
             )
+
+            # A "joined"/"left" line is nobody asking for the bot: it reaches
+            # this middleware only because the community handlers match it.
+            if isinstance(event, Message) and is_membership_notice(event):
+                return None
 
             # Notify admins about unauthorized access (with cooldown)
             await self._notify_unauthorized(

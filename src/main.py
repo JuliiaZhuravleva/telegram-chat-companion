@@ -26,6 +26,7 @@ from src.bot.middleware import (
     AccessControlMiddleware,
     ActivityTrackerMiddleware,
     ChatConfigMiddleware,
+    CommunityGreetingMiddleware,
     FloodControlMiddleware,
     MessageSaverMiddleware,
     RulesMiddleware,
@@ -181,6 +182,7 @@ async def main() -> None:
     activity_tracker_mw = ActivityTrackerMiddleware()
     message_saver_mw = MessageSaverMiddleware()
     rules_mw = RulesMiddleware()
+    community_mw = CommunityGreetingMiddleware()
 
     for mw in (
         chat_config_mw,
@@ -189,6 +191,7 @@ async def main() -> None:
         activity_tracker_mw,
         message_saver_mw,
         rules_mw,
+        community_mw,
     ):
         dp.message.middleware(mw)
 
@@ -220,6 +223,12 @@ async def main() -> None:
     # every chat including never-approved ones, and de-whitelisting a chat never
     # clears the per-chat column.)
     dp.message_reaction.middleware(chat_config_mw)
+
+    # Joins and leaves (community mode): chat_config only, and for the same
+    # reason as reactions -- the `enabled` gate is in the handler. The update
+    # type is requested from Telegram because a handler for it exists:
+    # start_polling() resolves allowed_updates from the registered handlers.
+    dp.chat_member.middleware(chat_config_mw)
 
     dp.include_router(main_router)
 

@@ -12,7 +12,7 @@ whose own column is NULL, existing chats included. The screen says so, because
 the earlier "defaults for new chats" wording promised the opposite and an admin
 could flip a module on fleet-wide believing they were configuring the future.
 
-Scoped to ``settings_fields.new_fields()`` (11 fields) -- see ADR-0006's C-1
+Scoped to ``settings_fields.new_fields()`` -- see ADR-0006's C-1
 consequence to Decision 2 and the module docstring in
 ``src/bot/settings_fields.py`` for why the 13 legacy migration-001 columns
 are excluded (C-2, deferred tech debt: the defaults screen would otherwise
@@ -54,7 +54,7 @@ _DEFAULTS_TITLE = {
 # The screen used to be titled "defaults for NEW chats", which is the one thing
 # `bot_config.default_*` does NOT mean: it is an override LAYER, applied on every
 # read to every chat whose own column is NULL (ChatConfigService._merge layer 2).
-# Nothing copies it into a chat_settings row at creation time, and the 11 fields
+# Nothing copies it into a chat_settings row at creation time, and the new_fields()
 # on this screen are precisely the nullable/no-DEFAULT columns that are NULL on
 # essentially every existing row -- so each control here retroactively changes
 # every chat that has not overridden that field in its own panel.

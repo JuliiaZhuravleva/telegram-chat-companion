@@ -126,6 +126,18 @@ def is_channel_post(message: Message) -> bool:
     return bool(message.is_automatic_forward)
 
 
+def is_membership_notice(message: Message) -> bool:
+    """A "joined" / "left" line Telegram posts by itself -- nobody said it.
+
+    No handler matched these before the community mode, so the inner
+    `dp.message` middlewares never saw them. Now one does, and every
+    middleware that treats a message as something a person said must step
+    aside: saving (a row with no content), activity (a join counted as
+    speech) and moderation rules.
+    """
+    return bool(message.new_chat_members) or message.left_chat_member is not None
+
+
 @lru_cache(maxsize=1)
 def own_bot_id() -> int | None:
     """The bot's own user id, read off the token the way aiogram's `Bot.id` is.

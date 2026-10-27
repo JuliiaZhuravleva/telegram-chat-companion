@@ -28,6 +28,8 @@ def _make_event(
     event.chat.id = chat_id
     event.from_user = MagicMock()
     event.from_user.id = user_id
+    event.new_chat_members = None
+    event.left_chat_member = None
     return event
 
 

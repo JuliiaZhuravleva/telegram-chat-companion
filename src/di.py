@@ -25,6 +25,7 @@ from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.chunks import ChunkRepository
 from src.database.repositories.knowledge import KnowledgeRepository
+from src.database.repositories.member_state import ChatMemberStateRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.observability import ObservabilityRepository
@@ -37,6 +38,7 @@ from src.services.abuse.filter import AbuseFilter
 from src.services.abuse.notifications import AbuseNotificationService
 from src.services.ai.router import AIRouter
 from src.services.chat_config import ChatConfigService
+from src.services.community import CommunityLimiter, CommunityService
 from src.services.costs.spend_limit import SpendLimitService
 from src.services.modules.image import ImageAnalysisService
 from src.services.modules.links import LinkExtractorService
@@ -70,6 +72,12 @@ class AppProvider(Provider):
         with the `my_chat_member` handler now filing access requests too, two
         callers each holding their own would notify twice for one chat."""
         return NotifyCooldown()
+
+    @provide
+    def community_limiter(self) -> CommunityLimiter:
+        """One per process for the same reason: the raid guard counts every
+        greeting a chat got, whichever update (and request) produced it."""
+        return CommunityLimiter()
 
     @provide
     async def get_ai_router(
@@ -148,6 +156,10 @@ class RepositoryProvider(Provider):
     @provide
     def chat_migration_repo(self, pool: asyncpg.Pool) -> ChatMigrationRepository:
         return ChatMigrationRepository(pool)
+
+    @provide
+    def member_state_repo(self, pool: asyncpg.Pool) -> ChatMemberStateRepository:
+        return ChatMemberStateRepository(pool)
 
     @provide
     def reaction_repo(self, pool: asyncpg.Pool) -> ReactionRepository:
@@ -249,6 +261,25 @@ class ServiceProvider(Provider):
             bot_config_repo=bot_config_repo,
             notifier=notifier,
             cooldown=cooldown,
+        )
+
+    @provide
+    def community_service(
+        self,
+        member_repo: ChatMemberStateRepository,
+        chat_settings_repo: ChatSettingsRepository,
+        bot_config_repo: BotConfigRepository,
+        alias_repo: AliasRepository,
+        ai_router: AIRouter,
+        limiter: CommunityLimiter,
+    ) -> CommunityService:
+        return CommunityService(
+            member_repo=member_repo,
+            chat_settings_repo=chat_settings_repo,
+            bot_config_repo=bot_config_repo,
+            alias_repo=alias_repo,
+            ai_router=ai_router,
+            limiter=limiter,
         )
 
     @provide

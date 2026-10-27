@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.database.repositories.messages import MessageRepository
+from src.utils.senders import own_bot_id
 
 # If the bot authored more than this fraction of recent messages, suppress.
 _BOT_RATIO_CAP = 0.25
@@ -53,7 +54,9 @@ async def compute_engagement(
     Returns ``should_pass=False`` when conversation dynamics indicate the
     bot would be intrusive.
     """
-    stats: dict[str, Any] = await message_repo.get_bot_message_stats(chat_id, limit=20)
+    stats: dict[str, Any] = await message_repo.get_bot_message_stats(
+        chat_id, limit=20, own_bot_id=own_bot_id()
+    )
 
     signals = EngagementSignals(
         bot_message_ratio=stats["bot_ratio"],

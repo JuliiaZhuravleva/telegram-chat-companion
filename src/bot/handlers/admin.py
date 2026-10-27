@@ -533,6 +533,7 @@ _TASK_TYPE_LABELS: dict[str, dict[str, str]] = {
     "embedding": {"ru": "Эмбеддинги", "en": "Embeddings"},
     "vision": {"ru": "Зрение", "en": "Vision"},
     "transcription": {"ru": "Транскрипция", "en": "Transcription"},
+    "community": {"ru": "Сообщество", "en": "Community"},
 }
 
 

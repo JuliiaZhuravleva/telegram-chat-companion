@@ -31,6 +31,8 @@ def _make_message(chat_id: int = -100123, user_id: int = 42, chat_type: str = "g
     msg.from_user.username = None
     msg.text = "hello"
     msg.caption = None
+    msg.new_chat_members = None
+    msg.left_chat_member = None
     return msg
 
 

@@ -11,6 +11,7 @@ from aiogram.types import Message, TelegramObject
 from dishka import AsyncContainer
 
 from src.database.repositories.activity import ActivityRepository
+from src.utils.senders import is_membership_notice
 
 logger = structlog.get_logger(__name__)
 
@@ -27,7 +28,7 @@ class ActivityTrackerMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if not isinstance(event, Message) or event.from_user is None:
+        if not isinstance(event, Message) or event.from_user is None or is_membership_notice(event):
             return await handler(event, data)
 
         try:

@@ -9,7 +9,7 @@ dedicated "defaults" sub-panel for KB/Reactions to link to at the global
 layer, so they toggle exactly like the other 8 ``new_fields()`` bool fields,
 through ``BotConfigRepository.set(f"default_{key}", ...)``.
 
-Scoped to ``settings_fields.new_fields()`` (11 fields) only -- the 13 legacy
+Scoped to ``settings_fields.new_fields()`` only -- the 13 legacy
 migration-001 columns still carry a SQL ``DEFAULT`` and showing/editing a
 "default" for them here would lie (see ``settings_fields.py`` module
 docstring; C-2, deferred). Non-BOOL fields (``rules_mode``, sticker/image

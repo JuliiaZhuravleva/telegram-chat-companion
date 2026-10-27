@@ -18,6 +18,7 @@ from dishka import AsyncContainer
 from src.models.chat_config import ChatConfig
 from src.services.rules.engine import RuleEngine
 from src.services.rules.executor import RuleActionExecutor
+from src.utils.senders import is_membership_notice
 
 logger = structlog.get_logger(__name__)
 
@@ -34,7 +35,7 @@ class RulesMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if not isinstance(event, Message) or event.chat is None:
+        if not isinstance(event, Message) or event.chat is None or is_membership_notice(event):
             return await handler(event, data)
 
         chat_config: ChatConfig | None = data.get("chat_config")
