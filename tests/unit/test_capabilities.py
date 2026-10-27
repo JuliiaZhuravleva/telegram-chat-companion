@@ -6,6 +6,7 @@ from src.services.ai.capabilities import (
     EXPENSIVE_MODELS,
     PROVIDER_CAPABILITIES,
     get_providers_for_capability,
+    provider_for_model,
     provider_supports,
 )
 
@@ -130,3 +131,20 @@ class TestExpensiveModels:
 
     def test_expensive_list_is_nonempty(self):
         assert len(EXPENSIVE_MODELS) > 0
+
+
+class TestProviderForModel:
+    """A named model is routed to the provider that owns the name."""
+
+    def test_every_default_model_belongs_to_its_own_provider(self):
+        for provider, models in DEFAULT_MODELS.items():
+            for model in models.values():
+                assert provider_for_model(model) == provider, f"{model} not mapped to {provider}"
+
+    def test_the_models_callers_name(self):
+        assert provider_for_model("gpt-5-nano") == "openai"
+        assert provider_for_model("o4-mini") == "openai"
+
+    def test_an_unknown_name_has_no_owner(self):
+        assert provider_for_model("mock-model") is None
+        assert provider_for_model("") is None

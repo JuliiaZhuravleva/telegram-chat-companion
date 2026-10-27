@@ -271,6 +271,73 @@ class TestGenerateText:
         assert provider.last_text_call["temperature"] == 0.0
 
 
+class TestNamedModelGoesToItsProvider:
+    """`generate_text(model=...)` skips providers that do not serve the model (TD-058)."""
+
+    @pytest.fixture
+    def text_chain(self, mock_router_settings):
+        task_config = MagicMock()
+        task_config.provider = "gemini"
+        task_config.fallback = ["openai"]
+        task_config.model = "gemini-3-flash"
+        task_config.max_tokens = 500
+        task_config.temperature = 0.9
+        mock_router_settings.ai.tasks = {"text_generation": task_config}
+        return mock_router_settings
+
+    @pytest.mark.asyncio
+    async def test_the_foreign_primary_is_never_asked(self, mock_provider, text_chain):
+        # Gemini would answer here, so only the skip keeps it out of the call.
+        gemini = mock_provider(name="gemini")
+        openai = mock_provider(
+            name="openai",
+            text_result=TextGenerationResult(text="ok", model="gpt-5-nano", provider="openai"),
+        )
+        router = AIRouter(text_chain)
+        router._providers["gemini"] = gemini
+        router._providers["openai"] = openai
+
+        result = await router.generate_text("test", model="gpt-5-nano")
+
+        assert "generate_text" not in gemini.call_log, "named model was sent to Gemini"
+        assert result.provider == "openai"
+        assert openai.last_text_call["model"] == "gpt-5-nano"
+
+    @pytest.mark.asyncio
+    async def test_an_owner_outside_the_chain_fails_without_a_call(self, mock_provider, text_chain):
+        text_chain.openai_api_key = None
+        gemini = mock_provider(name="gemini")
+        router = AIRouter(text_chain)
+        router._providers["gemini"] = gemini
+
+        with pytest.raises(AIProviderError, match="served by openai"):
+            await router.generate_text("test", model="gpt-5-nano")
+
+        assert "generate_text" not in gemini.call_log
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_name_still_walks_the_chain(self, mock_provider, text_chain):
+        gemini = mock_provider(name="gemini")
+        router = AIRouter(text_chain)
+        router._providers["gemini"] = gemini
+        router._providers["openai"] = mock_provider(name="openai")
+
+        await router.generate_text("test", model="mock-model")
+
+        assert gemini.last_text_call["model"] == "mock-model"
+
+    @pytest.mark.asyncio
+    async def test_no_name_uses_the_configured_chain(self, mock_provider, text_chain):
+        gemini = mock_provider(name="gemini")
+        router = AIRouter(text_chain)
+        router._providers["gemini"] = gemini
+        router._providers["openai"] = mock_provider(name="openai")
+
+        await router.generate_text("test")
+
+        assert gemini.last_text_call["model"] == "gemini-3-flash"
+
+
 class TestCentralizedLogging:
     """Test that embedding generation is logged in the router."""
 
