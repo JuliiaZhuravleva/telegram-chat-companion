@@ -14,7 +14,7 @@ editing) -- except ``tolerance_level``, which gets its own small dedicated
 edit flow (``adm_pnl_tol:``, ADR-0008 Decision 10) independent of F-1.
 
 Per B-2 (ADR-0006 "Implementation notes", item 2), every ``new_fields()`` row
-(the 11 nullable/no-DEFAULT columns) gets an "inherited from default" marker
+(the nullable/no-DEFAULT columns) gets an "inherited from default" marker
 suffix when its *raw* per-chat column is ``NULL`` -- the effective
 (``ChatConfig``) value alone can't distinguish "explicitly set, happens to
 match the default" from "inherited." The 13 legacy columns never get the
@@ -166,7 +166,7 @@ def _is_inherited(field: FieldSpec, row: dict[str, Any] | None) -> bool:
     back NULL for a chat the bot has already seen, so the marker would be a
     lie for them until C-2 (deferred tech debt) drops those defaults. The
     check is baked in here (not left to callers) precisely because it's easy
-    to forget by analogy with the other 11 fields.
+    to forget by analogy with the other new_fields().
     """
     if field.legacy:
         return False

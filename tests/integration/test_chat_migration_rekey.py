@@ -23,11 +23,13 @@ bare integer (CLAUDE.md).
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import asyncpg
 import pytest_asyncio
 
 from src.database.repositories.chat_migration import ChatMigrationRepository
+from src.database.repositories.member_state import ChatMemberStateRepository
 from src.database.repositories.rules import RulesRepository
 
 OLD_ID = -1009999991001
@@ -44,7 +46,7 @@ async def clean_ids(db_pool: asyncpg.Pool) -> AsyncIterator[None]:
     """
 
     async def _purge() -> None:
-        for table in ("custom_rules", "chat_facts", "chat_settings"):
+        for table in ("custom_rules", "chat_facts", "chat_settings", "chat_member_state"):
             await db_pool.execute(
                 f"DELETE FROM {table} WHERE chat_id = ANY($1::bigint[])",  # noqa: S608
                 [OLD_ID, NEW_ID],
@@ -138,3 +140,58 @@ class TestTheSchemaAllowsTheReKey:
             f"custom_rules grew a chat-scoped UNIQUE index: {[dict(r) for r in colliding]} — "
             "migrate()'s target probe only checks chat_settings and will now abort mid-transaction"
         )
+
+
+class TestMemberStateFollowsTheChat:
+    """`chat_member_state` is the only record of who left (migration 036)."""
+
+    async def test_a_leaver_is_still_a_returner_after_the_upgrade(
+        self, db_pool: asyncpg.Pool, clean_ids: None
+    ) -> None:
+        await db_pool.execute(
+            "INSERT INTO chat_settings (chat_id, chat_title, chat_type) "
+            "VALUES ($1, 'rekey probe', 'group')",
+            OLD_ID,
+        )
+        members = ChatMemberStateRepository(db_pool)
+        left_at = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+        assert await members.record_leave(OLD_ID, 101, left_at, status="left") is not None
+
+        outcome = await ChatMigrationRepository(db_pool).migrate(OLD_ID, NEW_ID)
+
+        assert outcome.status == "migrated"
+        assert outcome.members_moved == 1
+        back = await members.record_join(NEW_ID, 101, datetime(2026, 10, 2, tzinfo=UTC), greet=True)
+        assert back is not None and back.kind == "back", (
+            "left behind on the old id, the leaver would be greeted as a stranger"
+        )
+
+    async def test_a_row_already_under_the_new_id_does_not_abort_the_move(
+        self, db_pool: asyncpg.Pool, clean_ids: None
+    ) -> None:
+        """A join on the supergroup can be handled before the migration line.
+
+        A bare UPDATE would hit the primary key and roll back the whole
+        transaction -- settings, facts, rules and aliases with it.
+        """
+        await db_pool.execute(
+            "INSERT INTO chat_settings (chat_id, chat_title, chat_type) "
+            "VALUES ($1, 'rekey probe', 'group')",
+            OLD_ID,
+        )
+        members = ChatMemberStateRepository(db_pool)
+        t0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+        await members.record_leave(OLD_ID, 101, t0, status="left")
+        await members.record_leave(OLD_ID, 102, t0, status="left")
+        await members.record_join(NEW_ID, 102, datetime(2026, 10, 3, tzinfo=UTC), greet=False)
+
+        outcome = await ChatMigrationRepository(db_pool).migrate(OLD_ID, NEW_ID)
+
+        assert outcome.status == "migrated"
+        assert outcome.settings_moved == 1
+        assert outcome.members_moved == 1
+        status = await db_pool.fetchval(
+            "SELECT status FROM chat_member_state WHERE chat_id = $1 AND user_id = 102",
+            NEW_ID,
+        )
+        assert status == "member", "the newer state under the new id must win"

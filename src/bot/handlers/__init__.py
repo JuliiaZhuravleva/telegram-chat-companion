@@ -13,6 +13,7 @@ from src.bot.handlers.admin_sticker import router as admin_sticker_router
 from src.bot.handlers.callbacks import router as callbacks_router
 from src.bot.handlers.chat_events import router as chat_events_router
 from src.bot.handlers.commands import router as commands_router
+from src.bot.handlers.community import router as community_router
 from src.bot.handlers.fsm_cancel import router as fsm_cancel_router
 from src.bot.handlers.media import router as media_router
 from src.bot.handlers.message import router as message_router
@@ -57,7 +58,10 @@ from src.bot.handlers.rules import router as rules_router
 #
 # chat_events observes edited_message / my_chat_member, and reactions observes
 # message_reaction -- update types no other router handles, so their position
-# among the message routers is irrelevant.
+# among the message routers is irrelevant. community observes chat_member and the
+# "joined"/"left" service messages: a Message, but one no earlier router's
+# filters accept (`test_community.py` feeds one through them), and it must come
+# before media/message only in principle -- neither matches a service line.
 router = Router(name="main")
 router.include_router(fsm_cancel_router)
 router.include_router(admin_sticker_router)
@@ -70,6 +74,7 @@ router.include_router(rules_router)
 router.include_router(commands_router)
 router.include_router(callbacks_router)
 router.include_router(chat_events_router)
+router.include_router(community_router)
 router.include_router(reactions_router)
 router.include_router(media_router)
 router.include_router(message_router)

@@ -246,6 +246,7 @@ async def handle_chat_migration(
             facts_moved=outcome.facts_moved,
             rules_moved=outcome.rules_moved,
             aliases_moved=outcome.aliases_moved,
+            members_moved=outcome.members_moved,
             not_moved=NOT_MOVED,
         )
     elif outcome.status == "target_occupied":

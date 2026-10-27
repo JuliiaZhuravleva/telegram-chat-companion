@@ -42,6 +42,13 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "last_activity_at",
         "reactions_enabled",
         "reactions_history_enabled",
+        "community_enabled",
+        "greet_on_first_message",
+        "welcome_back_enabled",
+        "farewell_public",
+        "farewell_dm",
+        "returner_joke_enabled",
+        "community_templates",
     }
 )
 
@@ -207,6 +214,15 @@ class ChatSettingsRepository:
         """Get all enabled (whitelisted) chat IDs."""
         rows = await self._pool.fetch("SELECT chat_id FROM chat_settings WHERE enabled = true")
         return [row["chat_id"] for row in rows]
+
+    async def list_groups(self) -> list[asyncpg.Record]:
+        """Every group the bot has a settings row for -- whether or not it is
+        still there, which only Telegram can say (`scripts/community_rollout.py`)."""
+        rows: list[asyncpg.Record] = await self._pool.fetch(
+            "SELECT chat_id, chat_title FROM chat_settings "
+            "WHERE chat_type IN ('group', 'supergroup') ORDER BY chat_id"
+        )
+        return rows
 
     async def list_all(self) -> list[asyncpg.Record]:
         """Every chat the bot has a settings row for, with its title.

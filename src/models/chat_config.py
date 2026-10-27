@@ -85,6 +85,22 @@ class ChatConfig:
     reactions_enabled: bool = False
     reactions_history_enabled: bool = True
 
+    # Community mode (migration 036): greetings, welcome-backs, farewells.
+    # `community_enabled` is the master switch; the rest only shape it.
+    # Membership is tracked either way (`chat_member_state`), so switching the
+    # mode on recognises returns that predate it.
+    community_enabled: bool = False
+    # Greet on the newcomer's first message (a reply to it) instead of the
+    # moment they join -- for chats where most joiners only read.
+    greet_on_first_message: bool = False
+    welcome_back_enabled: bool = True
+    # Farewells: a line in the chat (only for someone who left on their own)
+    # and/or a note to the bot's admins. Independent; both off = silent.
+    farewell_public: bool = False
+    farewell_dm: bool = False
+    # "They'll be back" on a second or later departure.
+    returner_joke_enabled: bool = False
+
     # The channel this group is the discussion group of (migration 035).
     # Chat METADATA, not a setting: copied from the per-chat row only, never
     # from the global layer or the panel -- only Telegram decides which channel

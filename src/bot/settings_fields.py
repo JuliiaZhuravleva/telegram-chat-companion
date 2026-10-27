@@ -1,14 +1,14 @@
 """Registry of per-chat settings fields — shared by the chat settings panel
 (B-1) and the "settings by default" screen (C-1).
 
-Single source of truth for how each of the 27 per-chat settings fields (a
+Single source of truth for how each of the 33 per-chat settings fields (a
 subset of ``ChatConfig`` / ``ChatConfigService._CHAT_CONFIG_FIELDS``, see
 ``src/services/chat_config.py``) is grouped, labeled, typed, and addressed in
 inline-keyboard ``callback_data``. Both consumer screens must render the same
 grouping/labels/legacy split, so it lives here once rather than drifting
 between two handler modules.
 
-Excluded from this registry — 27 of the 28 mergeable ``ChatConfig`` fields
+Excluded from this registry — 33 of the 34 mergeable ``ChatConfig`` fields
 (``_CHAT_CONFIG_FIELDS``) appear here; the two names below do not, and only the
 first of them is in the merge at all:
 
@@ -20,12 +20,12 @@ first of them is in the merge at all:
   (``adm_kb_orgs:``) per the A-2 ADR; not part of ``ChatConfig`` either (it's
   written straight through ``ChatSettingsRepository``, never merged).
 
-Legacy vs. new (``FieldSpec.legacy``): 13 of these 27 columns still carry a
+Legacy vs. new (``FieldSpec.legacy``): 13 of these 33 columns still carry a
 SQL ``DEFAULT`` from migration 001 (``alembic/versions/001_initial_schema.py``),
 so ``ensure_exists()`` materializes a per-chat value on first contact and
 permanently shadows ``bot_config.default_*`` for that field on every chat the
 bot has already seen — the "inherited from default" story is false for them
-until the forward-only migration in C-2 (deferred to tech debt). The other 14
+until the forward-only migration in C-2 (deferred to tech debt). The other 20
 are nullable, no-DEFAULT columns (CLAUDE.md "Per-chat columns: nullable, no
 DEFAULT") where NULL honestly means "inherited". Consumers:
 
@@ -54,6 +54,7 @@ class FieldGroup(StrEnum):
     RULES = "rules"
     KB = "kb"
     REACTIONS = "reactions"
+    COMMUNITY = "community"
 
 
 class FieldType(StrEnum):
@@ -77,6 +78,7 @@ _GROUP_LABELS: dict[FieldGroup, dict[str, str]] = {
     FieldGroup.RULES: {"ru": "📏 Правила", "en": "📏 Rules"},
     FieldGroup.KB: {"ru": "📚 База знаний", "en": "📚 Knowledge Base"},
     FieldGroup.REACTIONS: {"ru": "😀 Реакции", "en": "😀 Reactions"},
+    FieldGroup.COMMUNITY: {"ru": "👋 Сообщество", "en": "👋 Community"},
 }
 
 
@@ -337,6 +339,55 @@ CHAT_SETTINGS_FIELDS: tuple[FieldSpec, ...] = (
         FieldGroup.REACTIONS,
         {"ru": "История реакций", "en": "Reaction history log"},
         "rh",
+        FieldType.BOOL,
+        legacy=False,
+    ),
+    # ── Community (migration 036) ────────────────────────────────────────
+    FieldSpec(
+        "community_enabled",
+        FieldGroup.COMMUNITY,
+        {"ru": "Режим сообщества", "en": "Community mode"},
+        "cm",
+        FieldType.BOOL,
+        legacy=False,
+    ),
+    FieldSpec(
+        "greet_on_first_message",
+        FieldGroup.COMMUNITY,
+        {"ru": "Приветствовать на первом сообщении", "en": "Greet on first message"},
+        "gf",
+        FieldType.BOOL,
+        legacy=False,
+    ),
+    FieldSpec(
+        "welcome_back_enabled",
+        FieldGroup.COMMUNITY,
+        {"ru": "«С возвращением»", "en": "Welcome back"},
+        "wb",
+        FieldType.BOOL,
+        legacy=False,
+    ),
+    FieldSpec(
+        "farewell_public",
+        FieldGroup.COMMUNITY,
+        {"ru": "Прощание в чате", "en": "Farewell in chat"},
+        "fp",
+        FieldType.BOOL,
+        legacy=False,
+    ),
+    FieldSpec(
+        "farewell_dm",
+        FieldGroup.COMMUNITY,
+        {"ru": "Уходы — админам в личку", "en": "Departures to admins' DM"},
+        "fd",
+        FieldType.BOOL,
+        legacy=False,
+    ),
+    FieldSpec(
+        "returner_joke_enabled",
+        FieldGroup.COMMUNITY,
+        {"ru": "Шутка «он вернётся»", "en": '"They\'ll be back" joke'},
+        "rj",
         FieldType.BOOL,
         legacy=False,
     ),

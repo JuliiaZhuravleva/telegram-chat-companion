@@ -13,7 +13,7 @@ from dishka import AsyncContainer
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
-from src.utils.senders import classify_sender, is_channel_post
+from src.utils.senders import classify_sender, is_channel_post, is_membership_notice
 
 logger = structlog.get_logger(__name__)
 
@@ -31,7 +31,7 @@ class MessageSaverMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if not isinstance(event, Message) or event.chat is None:
+        if not isinstance(event, Message) or event.chat is None or is_membership_notice(event):
             return await handler(event, data)
 
         chat_config: ChatConfig | None = data.get("chat_config")

@@ -63,6 +63,7 @@ class MigrationOutcome:
     facts_moved: int = 0
     rules_moved: int = 0
     aliases_moved: int = 0
+    members_moved: int = 0
 
 
 class ChatMigrationRepository:
@@ -163,6 +164,22 @@ class ChatMigrationRepository:
                 old_chat_id,
                 new_chat_id,
             )
+            # Not curated, but not rebuildable either: the bot cannot list
+            # members, so who left and who is a returner exists only here.
+            # Unlike the tables above it CAN already hold rows under the new id
+            # -- a join on the supergroup handled before the migration line --
+            # and a bare UPDATE would then abort the whole move on the primary
+            # key. The newer state wins; a superseded old row stays behind.
+            members_result = await conn.execute(
+                """
+                UPDATE chat_member_state AS s SET chat_id = $2
+                 WHERE s.chat_id = $1
+                   AND NOT EXISTS (SELECT 1 FROM chat_member_state t
+                                    WHERE t.chat_id = $2 AND t.user_id = s.user_id)
+                """,
+                old_chat_id,
+                new_chat_id,
+            )
 
         return MigrationOutcome(
             status="migrated",
@@ -170,6 +187,7 @@ class ChatMigrationRepository:
             facts_moved=_rows_affected(facts_result),
             rules_moved=_rows_affected(rules_result),
             aliases_moved=_rows_affected(aliases_result),
+            members_moved=_rows_affected(members_result),
         )
 
 

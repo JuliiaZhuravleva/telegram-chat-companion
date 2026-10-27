@@ -56,7 +56,7 @@ class TestMigrate:
     async def test_moves_settings_and_facts(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 0", "UPDATE 0"]
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 0", "UPDATE 0", "UPDATE 0"]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
@@ -103,26 +103,44 @@ class TestMigrate:
         )
 
     @pytest.mark.asyncio
+    async def test_moves_membership_state_without_overwriting_the_new_id(
+        self, repo: ChatMigrationRepository, conn: MagicMock
+    ) -> None:
+        """Left behind, every leaver is greeted as a stranger after the upgrade.
+
+        The guard is the point: a join handled on the new id before the
+        migration line would otherwise hit the primary key and roll back the
+        whole move. The collision itself is measured in the integration test.
+        """
+        await repo.migrate(OLD_ID, NEW_ID)
+
+        tables = [call.args[0] for call in conn.execute.call_args_list]
+        member_sql = [sql for sql in tables if "UPDATE chat_member_state" in sql]
+        assert member_sql, f"chat_member_state was never re-keyed; statements were: {tables}"
+        assert "NOT EXISTS" in member_sql[0]
+
+    @pytest.mark.asyncio
     async def test_reports_how_many_rules_moved(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
         """The count is the only in-prod signal that the third table moved."""
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 4", "UPDATE 2"]
+        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 4", "UPDATE 2", "UPDATE 7"]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
         assert outcome.rules_moved == 4
+        assert outcome.members_moved == 7
 
     @pytest.mark.asyncio
-    async def test_all_four_tables_move_in_one_transaction(
+    async def test_all_five_tables_move_in_one_transaction(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        """A half-applied move leaves settings, knowledge, rules and names on
-        different ids."""
+        """A half-applied move leaves settings, knowledge, rules, names and
+        membership on different ids."""
         await repo.migrate(OLD_ID, NEW_ID)
 
         conn.transaction.assert_called_once()
-        assert conn.execute.await_count == 4
+        assert conn.execute.await_count == 5
 
     @pytest.mark.asyncio
     async def test_locks_the_source_row_before_deciding(

@@ -7,7 +7,13 @@ from typing import Any
 
 import structlog
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, MessageReactionUpdated, TelegramObject
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    Message,
+    MessageReactionUpdated,
+    TelegramObject,
+)
 from dishka import AsyncContainer
 
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -72,12 +78,12 @@ class ChatConfigMiddleware(BaseMiddleware):
 
 
 def _extract_chat_id(event: TelegramObject) -> int | None:
-    """Extract chat_id from Message, CallbackQuery, or MessageReactionUpdated."""
+    """Extract chat_id from Message, CallbackQuery, MessageReactionUpdated or ChatMemberUpdated."""
     if isinstance(event, Message) and event.chat is not None:
         return event.chat.id
     if isinstance(event, CallbackQuery) and event.message and event.message.chat:
         return event.message.chat.id
-    if isinstance(event, MessageReactionUpdated):
+    if isinstance(event, MessageReactionUpdated | ChatMemberUpdated):
         return event.chat.id
     return None
 
@@ -93,7 +99,7 @@ def _extract_chat_info(event: TelegramObject) -> tuple[str | None, str, bool | N
     if isinstance(event, Message) and event.chat is not None:
         title = event.chat.title or event.chat.full_name
         return title, event.chat.type or "group", bool(event.chat.is_forum)
-    if isinstance(event, MessageReactionUpdated):
+    if isinstance(event, MessageReactionUpdated | ChatMemberUpdated):
         title = event.chat.title or event.chat.full_name
         return title, event.chat.type or "group", bool(event.chat.is_forum)
     return None, "group", None

@@ -223,8 +223,8 @@ class TestChatPanelRootKeyboard:
         assert any("on 0/8" in text or "on " in text for text in labels)
         assert not any("вкл" in text or "настро" in text for text in labels)
 
-    def test_seven_rows_total(self):
-        """4 group buttons + KB link + Reactions link + back (ADR-0010 Decision 3)."""
+    def test_eight_rows_total(self):
+        """5 group buttons + KB link + Reactions link + back (ADR-0010 Decision 3)."""
         kb = chat_panel_root_keyboard(
             "ru",
             chat_id=CHAT_ID,
@@ -233,7 +233,7 @@ class TestChatPanelRootKeyboard:
             kb_status=False,
             reactions_status=(False, True),
         )
-        assert len(kb.inline_keyboard) == 7
+        assert len(kb.inline_keyboard) == 8
 
 
 class TestChatPanelGroupKeyboard:
@@ -476,3 +476,32 @@ class TestInheritedMarkerGroup:
         )
         labels = _get_labels(kb)
         assert any("strict" in label and "унаследовано" in label for label in labels)
+
+
+class TestEveryGroupButtonOpens:
+    def test_the_handler_accepts_every_group_the_root_screen_emits(self):
+        """A group button whose screen the handler refuses is a dead button.
+
+        The root screen renders one button per registry group; the handler
+        keeps its own allow-list. A new group (COMMUNITY, migration 036) must
+        land in both, and nothing else connects them.
+        """
+        from src.bot.handlers.admin_chat_panel import _FIELD_OWNING_GROUPS
+
+        kb = chat_panel_root_keyboard(
+            "ru",
+            chat_id=CHAT_ID,
+            row=None,
+            config=_cfg(),
+            kb_status=False,
+            reactions_status=(False, True),
+        )
+        emitted = [
+            FieldGroup(button.callback_data.split(":")[3])
+            for row in kb.inline_keyboard
+            for button in row
+            if button.callback_data and button.callback_data.startswith("adm_pnl_grp:")
+        ]
+
+        assert FieldGroup.COMMUNITY in emitted
+        assert [g for g in emitted if g not in _FIELD_OWNING_GROUPS] == []

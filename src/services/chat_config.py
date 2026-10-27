@@ -161,6 +161,12 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "kb_enabled",
         "reactions_enabled",
         "reactions_history_enabled",
+        "community_enabled",
+        "greet_on_first_message",
+        "welcome_back_enabled",
+        "farewell_public",
+        "farewell_dm",
+        "returner_joke_enabled",
     }
 )
 

@@ -138,14 +138,21 @@ _SHORTCUT_CANDIDATES = {
 # (the registry is generic across consumers, it doesn't decide this).
 _LINK_ONLY_KEYS = frozenset({"kb_enabled", "reactions_enabled", "reactions_history_enabled"})
 
-# The four groups that own an ``adm_pnl_grp:`` screen (ADR-0010 Decisions 3/4).
+# The groups that own an ``adm_pnl_grp:`` screen (ADR-0010 Decisions 3/4;
+# COMMUNITY joined in migration 036).
 # KB and REACTIONS are groups in the registry but render as link rows, so no
 # button ever emits them here — a hand-crafted callback would otherwise get a
 # group screen showing kb_enabled as an ordinary toggle. The write path already
 # refuses those keys (_LINK_ONLY_KEYS below in handle_chat_panel_toggle); this
 # closes the rendering half so the two agree.
 _FIELD_OWNING_GROUPS = frozenset(
-    {FieldGroup.BEHAVIOR, FieldGroup.MODULES, FieldGroup.STICKERS, FieldGroup.RULES}
+    {
+        FieldGroup.BEHAVIOR,
+        FieldGroup.MODULES,
+        FieldGroup.STICKERS,
+        FieldGroup.RULES,
+        FieldGroup.COMMUNITY,
+    }
 )
 
 

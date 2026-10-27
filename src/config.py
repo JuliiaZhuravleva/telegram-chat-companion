@@ -169,6 +169,13 @@ class MaintenanceSettings(BaseSettings):
     # which is the question a five-day silent outage leaves behind.
     ai_failure_log_days: int | None = 90
 
+    # `chat_member_state` (migration 036) has no window and needs none: it is
+    # state, one row per person per chat, not a log. It is the only record of
+    # who left -- the Bot API cannot list members -- so ageing a row out would
+    # greet a returner as a stranger. A returner with NO row is recognised by
+    # their messages, so that half of the answer does age out with
+    # chat_messages_days.
+
 
 class EmbeddingBackfillSettings(BaseSettings):
     """Background worker that retries embeddings for pending ``chat_memory``
