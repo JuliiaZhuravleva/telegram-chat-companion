@@ -26,6 +26,9 @@ def mock_router_settings():
     s.gemini_api_key = "test-gemini-key"
     s.grok_api_key = None
     s.deepseek_api_key = None
+    # Explicit None: a MagicMock attribute is truthy and would read as configured.
+    s.cloudflare_api_token = None
+    s.cloudflare_account_id = None
     s.ai.default_provider = "gemini"
     s.ai.tasks = {}
     return s
@@ -312,6 +315,42 @@ class TestNamedModelGoesToItsProvider:
 
         with pytest.raises(AIProviderError, match="served by openai"):
             await router.generate_text("test", model="gpt-5-nano")
+
+        assert "generate_text" not in gemini.call_log
+
+    @pytest.mark.asyncio
+    async def test_an_opt_in_owner_is_asked_although_outside_the_chain(
+        self, mock_provider, text_chain
+    ):
+        # Cloudflare is in no chain by design (OPT_IN_PROVIDERS); configured,
+        # a named @cf/ model reaches it and nobody else.
+        text_chain.cloudflare_api_token = "cf-token"
+        text_chain.cloudflare_account_id = "cf-account"
+        gemini = mock_provider(name="gemini")
+        cloudflare = mock_provider(
+            name="cloudflare",
+            text_result=TextGenerationResult(text="{}", model="@cf/x", provider="cloudflare"),
+        )
+        router = AIRouter(text_chain)
+        router._providers["gemini"] = gemini
+        router._providers["cloudflare"] = cloudflare
+
+        result = await router.generate_text("test", model="@cf/google/gemma-4-26b-a4b-it")
+
+        assert result.provider == "cloudflare"
+        assert "generate_text" not in gemini.call_log
+
+    @pytest.mark.asyncio
+    async def test_an_unconfigured_opt_in_owner_fails_without_a_call(
+        self, mock_provider, text_chain
+    ):
+        text_chain.cloudflare_api_token = "cf-token"  # token without account id
+        gemini = mock_provider(name="gemini")
+        router = AIRouter(text_chain)
+        router._providers["gemini"] = gemini
+
+        with pytest.raises(AIProviderError, match="served by cloudflare"):
+            await router.generate_text("test", model="@cf/google/gemma-4-26b-a4b-it")
 
         assert "generate_text" not in gemini.call_log
 

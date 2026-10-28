@@ -36,6 +36,7 @@ from src.config import Settings
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.di import AppProvider, RepositoryProvider, ServiceProvider
+from src.services.advice.watcher import AdviceWatcher
 from src.services.ai.router import AIRouter
 from src.services.chat_config import ChatConfigService
 from src.services.health.checker import HealthChecker
@@ -302,6 +303,23 @@ async def main() -> None:
     )
     await chunk_indexer.start()
 
+    # Slice 3b: classifies blog comments for unsolicited advice and support and
+    # sends the owner a daily digest. Off unless `advice_watch.enabled`, and
+    # then only in chats with the flag on and a linked channel.
+    advice_watcher = AdviceWatcher(
+        pool=pool,
+        ai_router=ai_router,
+        chat_config=ChatConfigService(
+            settings.bot,
+            BotConfigRepository(pool),
+            ChatSettingsRepository(pool),
+        ),
+        bot=bot,
+        admin_ids=admin_ids,
+        config=settings.advice_watch,
+    )
+    await advice_watcher.start()
+
     try:
         logger.info("Bot started, listening for messages...")
         await dp.start_polling(bot)
@@ -313,6 +331,7 @@ async def main() -> None:
         command_sync_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await command_sync_task
+        await advice_watcher.stop()
         await chunk_indexer.stop()
         await embedding_backfill.stop()
         await retention_cleaner.stop()

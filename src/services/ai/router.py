@@ -27,6 +27,7 @@ from src.services.ai.base import (
     VisionResult,
 )
 from src.services.ai.capabilities import (
+    OPT_IN_PROVIDERS,
     get_providers_for_capability,
     provider_for_model,
     provider_supports,
@@ -111,6 +112,9 @@ class AIRouter:
         if self._settings.deepseek_api_key:
             logger.info("DeepSeek provider available")
 
+        if self._is_provider_available("cloudflare"):
+            logger.info("Cloudflare provider available (named models only)")
+
     async def _get_provider(self, provider_name: str) -> AIProvider:
         """Get or create a provider instance."""
         if provider_name in self._providers:
@@ -125,6 +129,13 @@ class AIRouter:
             from src.services.ai.providers.gemini import GeminiProvider
 
             self._providers[provider_name] = GeminiProvider(self._settings.gemini_api_key)
+        elif provider_name == "cloudflare" and self._is_provider_available("cloudflare"):
+            from src.services.ai.providers.cloudflare import CloudflareProvider
+
+            self._providers[provider_name] = CloudflareProvider(
+                str(self._settings.cloudflare_api_token),
+                account_id=str(self._settings.cloudflare_account_id),
+            )
         else:
             raise AIProviderError(
                 f"Provider {provider_name} not available or not configured",
@@ -161,6 +172,10 @@ class AIRouter:
             "grok": self._settings.grok_api_key,
             "deepseek": self._settings.deepseek_api_key,
         }
+        if provider_name == "cloudflare":
+            return bool(
+                self._settings.cloudflare_api_token and self._settings.cloudflare_account_id
+            )
         return bool(api_keys.get(provider_name))
 
     async def _log_failure(
@@ -288,10 +303,12 @@ class AIRouter:
         # A named model goes straight to its own provider. Walking the chain
         # with it sent `gpt-5-nano` to Gemini first on every relevancy check:
         # a 404, an extra round-trip and an error line that read as an outage
-        # (TD-058). An unrecognised name keeps the old walk.
+        # (TD-058). An unrecognised name keeps the old walk. An opt-in provider
+        # is in no chain by design, so for it "configured" is the whole test.
         owner = provider_for_model(caller_model) if caller_model is not None else None
         if owner is not None:
-            if owner not in chain:
+            opted_in = owner in OPT_IN_PROVIDERS and self._is_provider_available(owner)
+            if owner not in chain and not opted_in:
                 error = AIProviderError(
                     f"Model {caller_model} is served by {owner}, "
                     f"which is not in the text generation chain {chain}",

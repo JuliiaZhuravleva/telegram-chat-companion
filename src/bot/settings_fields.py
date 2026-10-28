@@ -391,6 +391,14 @@ CHAT_SETTINGS_FIELDS: tuple[FieldSpec, ...] = (
         FieldType.BOOL,
         legacy=False,
     ),
+    FieldSpec(
+        "advice_watch_enabled",
+        FieldGroup.COMMUNITY,
+        {"ru": "Следить за советами", "en": "Watch for advice"},
+        "aw",
+        FieldType.BOOL,
+        legacy=False,
+    ),
 )
 
 FIELDS_BY_KEY: dict[str, FieldSpec] = {field.key: field for field in CHAT_SETTINGS_FIELDS}

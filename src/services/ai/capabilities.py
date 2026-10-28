@@ -60,7 +60,20 @@ PROVIDER_CAPABILITIES: dict[str, ProviderCapabilities] = {
         "transcription": False,
         "function_calling": True,
     },
+    "cloudflare": {
+        "text_generation": True,  # @cf/google/gemma-4-26b-a4b-it (free daily allowance)
+        "embeddings": False,
+        "vision": False,
+        "transcription": False,
+        "function_calling": False,
+    },
 }
+
+# Providers that serve ONLY a caller who names one of their models. They are
+# never part of a default chain and never a fallback: an open model on a free
+# allowance is right for one bounded background job (the blog advice
+# classifier) and wrong as the thing a chat reply silently degrades to.
+OPT_IN_PROVIDERS: frozenset[str] = frozenset({"cloudflare"})
 
 # Default models for each provider (January 2026)
 # IMPORTANT: "text" key MUST be the cheapest model (nano/flash tier).
@@ -93,6 +106,9 @@ DEFAULT_MODELS: dict[str, dict[str, str]] = {
         "text_premium": "claude-opus-4-5",  # EXPENSIVE — requires approval
         "vision": "claude-sonnet-4",
     },
+    "cloudflare": {
+        "text": "@cf/google/gemma-4-26b-a4b-it",
+    },
 }
 
 # Which provider serves a model, by its name. A caller that names a model
@@ -104,6 +120,7 @@ MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
     "grok": ("grok-",),
     "deepseek": ("deepseek-",),
     "anthropic": ("claude-",),
+    "cloudflare": ("@cf/",),
 }
 
 
@@ -139,7 +156,9 @@ DEPRECATED_MODELS = [
 def get_providers_for_capability(capability: str) -> list[str]:
     """Get list of providers that support a capability."""
     return [
-        provider for provider, caps in PROVIDER_CAPABILITIES.items() if caps.get(capability, False)
+        provider
+        for provider, caps in PROVIDER_CAPABILITIES.items()
+        if caps.get(capability, False) and provider not in OPT_IN_PROVIDERS
     ]
 
 
