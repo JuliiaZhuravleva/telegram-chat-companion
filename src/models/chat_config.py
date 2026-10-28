@@ -100,6 +100,10 @@ class ChatConfig:
     farewell_dm: bool = False
     # "They'll be back" on a second or later departure.
     returner_joke_enabled: bool = False
+    # Blog advice classifier (slice 3b, migration 037): read this chat's
+    # comments and report unsolicited advice and real support to the owner.
+    # Runs only while `advice_watch.enabled` starts the worker.
+    advice_watch_enabled: bool = False
 
     # The channel this group is the discussion group of (migration 035).
     # Chat METADATA, not a setting: copied from the per-chat row only, never

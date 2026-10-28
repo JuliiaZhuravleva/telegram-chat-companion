@@ -48,6 +48,7 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "farewell_public",
         "farewell_dm",
         "returner_joke_enabled",
+        "advice_watch_enabled",
         "community_templates",
     }
 )

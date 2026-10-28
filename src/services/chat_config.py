@@ -167,6 +167,7 @@ _CHAT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "farewell_public",
         "farewell_dm",
         "returner_joke_enabled",
+        "advice_watch_enabled",
     }
 )
 

@@ -111,6 +111,12 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_per_1m=Decimal("15.00"),
         output_per_1m=Decimal("75.00"),
     ),
+    # --- Cloudflare Workers AI ---
+    # Billed in "neurons", not tokens: 10,000 a day free per account (shared
+    # with every other project on that account), ~45 per classifier call.
+    # Inside the allowance it costs nothing, and the advice worker caps its own
+    # daily calls well below it -- so free is the honest figure for /costs.
+    "@cf/google/gemma-4-26b-a4b-it": ModelPricing(is_free=True),
 }
 
 

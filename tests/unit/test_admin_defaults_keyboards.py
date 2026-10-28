@@ -47,6 +47,7 @@ def _all_values(**overrides: object) -> dict[str, object]:
         "farewell_public": False,
         "farewell_dm": False,
         "returner_joke_enabled": False,
+        "advice_watch_enabled": False,
     }
     base.update(overrides)
     return base

@@ -15,7 +15,7 @@ class TestProviderCapabilities:
     """Verify the capability matrix is well-formed."""
 
     EXPECTED_KEYS = {"text_generation", "embeddings", "vision", "transcription", "function_calling"}
-    EXPECTED_PROVIDERS = {"openai", "gemini", "grok", "deepseek", "anthropic"}
+    EXPECTED_PROVIDERS = {"openai", "gemini", "grok", "deepseek", "anthropic", "cloudflare"}
 
     def test_known_providers_exist(self):
         assert set(PROVIDER_CAPABILITIES.keys()) == self.EXPECTED_PROVIDERS
@@ -33,9 +33,16 @@ class TestProviderCapabilities:
 class TestGetProvidersForCapability:
     """Tests for get_providers_for_capability()."""
 
-    def test_text_generation_returns_all_five(self):
+    def test_text_generation_returns_all_five_vendors(self):
         providers = get_providers_for_capability("text_generation")
         assert len(providers) == 5
+
+    def test_an_opt_in_provider_is_never_a_default_chain_member(self):
+        # This list is the chain a task with no config walks. Cloudflare serves
+        # text, but only to a caller naming an @cf/ model -- a chat reply must
+        # never silently degrade to it.
+        assert "cloudflare" not in get_providers_for_capability("text_generation")
+        assert provider_supports("cloudflare", "text_generation") is True
 
     def test_transcription_returns_only_openai(self):
         providers = get_providers_for_capability("transcription")

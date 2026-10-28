@@ -188,6 +188,24 @@ chunk_retrieval:
   # had in its top k, which discards the one thing RRF is for.
   depth_multiplier: 2
 
+# Blog advice classifier (slice 3b). Reads members' comments in chats where
+# `advice_watch_enabled` is on, asks a free Workers AI model factual questions
+# about each, and sends the owner a daily digest of unsolicited advice and real
+# support. Says nothing in the chat. Needs CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID; without them every call fails and is retried later.
+advice_watch:
+  enabled: false
+  interval_seconds: 300
+  # How far back an unread comment is still worth reading.
+  lookback_hours: 48
+  # ~45 neurons a call; the free 10,000/day is shared with another project.
+  daily_call_cap: 120
+  # Local hour (Asia/Tbilisi) of the daily digest.
+  digest_hour: 21
+  model: "@cf/google/gemma-4-26b-a4b-it"
+  # A comment the model fails on this many times is skipped for good.
+  max_attempts: 3
+
 # Module Configuration
 # Set enabled: false to disable a module entirely
 modules:

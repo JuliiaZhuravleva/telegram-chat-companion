@@ -217,6 +217,28 @@ class ChunkIndexerSettings(BaseSettings):
     embed_per_pass: int = 100
 
 
+class AdviceWatchSettings(BaseSettings):
+    """Blog advice classifier (slice 3b): reads members' comments, reports to the owner.
+
+    Off by default, and twice gated: this flag starts the worker at all, and
+    `advice_watch_enabled` in the three-layer merge picks the chats it reads.
+    The model is a free Workers AI one, so `daily_call_cap` is not a price but
+    a share: the 10,000-neuron daily allowance (~45 per call) is shared with
+    another project on the same account, and going past it is billed.
+
+    `digest_hour` is in DISPLAY_TZ; the digest goes to `admin_ids` once a day
+    and only when there is something in it.
+    """
+
+    enabled: bool = False
+    interval_seconds: int = 300
+    lookback_hours: int = 48
+    daily_call_cap: int = 120
+    digest_hour: int = 21
+    model: str = "@cf/google/gemma-4-26b-a4b-it"
+    max_attempts: int = 3
+
+
 class ChunkRetrievalSettings(BaseSettings):
     """Hybrid retrieval over `chat_chunks` -- the read side (S5b).
 
@@ -274,6 +296,10 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
     grok_api_key: str | None = Field(default=None, alias="GROK_API_KEY")
     deepseek_api_key: str | None = Field(default=None, alias="DEEPSEEK_API_KEY")
+    # Cloudflare Workers AI needs both: the token authorizes, the account id is
+    # part of the endpoint URL. One without the other leaves the provider off.
+    cloudflare_api_token: str | None = Field(default=None, alias="CLOUDFLARE_API_TOKEN")
+    cloudflare_account_id: str | None = Field(default=None, alias="CLOUDFLARE_ACCOUNT_ID")
     youtube_api_key: str | None = Field(default=None, alias="YOUTUBE_API_KEY")
 
     # Nested settings (from YAML)
@@ -286,6 +312,7 @@ class Settings(BaseSettings):
     embedding_backfill: EmbeddingBackfillSettings = Field(default_factory=EmbeddingBackfillSettings)
     chunk_indexer: ChunkIndexerSettings = Field(default_factory=ChunkIndexerSettings)
     chunk_retrieval: ChunkRetrievalSettings = Field(default_factory=ChunkRetrievalSettings)
+    advice_watch: AdviceWatchSettings = Field(default_factory=AdviceWatchSettings)
     modules: dict[str, ModuleConfig] = Field(default_factory=dict)
 
     def __init__(self, **data: Any) -> None:
