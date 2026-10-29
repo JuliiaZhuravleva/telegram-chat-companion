@@ -74,6 +74,20 @@ class _CapReached(Exception):
     pass
 
 
+def _is_rate_limit(exc: Exception) -> bool:
+    """A quota refusal, as the router actually delivers it.
+
+    `AIRouter.generate_text` never lets a `RateLimitError` out: when the chain
+    is exhausted it raises a fresh `AIProviderError` *from* the last error. So
+    `isinstance(exc, RateLimitError)` alone was never true in production, and a
+    spent daily allocation (Cloudflare 4006, HTTP 429 -- found 2026-10-29) was
+    counted as a failed attempt: three passes later the series was checked off
+    without a verdict, for good. A rate limit is a passing condition and must
+    leave the series for a later pass.
+    """
+    return isinstance(exc, RateLimitError) or isinstance(exc.__cause__, RateLimitError)
+
+
 class AdviceWatcher:
     """Background task: blog comments -> verdicts -> the owner's daily digest.
 
@@ -220,8 +234,8 @@ class AdviceWatcher:
             try:
                 saved = await self._classify(chat_id, context)
             except (AIProviderError, FactsParseError) as exc:
-                if isinstance(exc, RateLimitError):
-                    raise
+                if _is_rate_limit(exc):
+                    raise RateLimitError(str(exc), provider=getattr(exc, "provider", "")) from exc
                 failed += 1
                 await self._record_failure(chat_id, context, exc)
                 continue
