@@ -193,8 +193,10 @@ chunk_retrieval:
 # about each, and sends the owner a daily digest of unsolicited advice and real
 # support. Says nothing in the chat. Needs CLOUDFLARE_API_TOKEN and
 # CLOUDFLARE_ACCOUNT_ID; without them every call fails and is retried later.
+# On since 2026-10-29: the worker runs, but a chat is read only once its own
+# `advice_watch_enabled` is on AND its linked channel is recorded.
 advice_watch:
-  enabled: false
+  enabled: true
   interval_seconds: 300
   # How far back an unread comment is still worth reading.
   lookback_hours: 48
