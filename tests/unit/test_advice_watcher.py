@@ -21,6 +21,7 @@ from src.services.advice import watcher as watcher_mod
 from src.services.advice.context import Line
 from src.services.advice.watcher import DIGEST_KEY, TASK_TYPE, AdviceWatcher
 from src.services.ai.base import AIProviderError, RateLimitError, TextGenerationResult
+from src.services.ai.router import AIRouter
 
 CHAT = -1009999990381
 CHANNEL = -1009999990382
@@ -376,6 +377,41 @@ class TestCostAndFailures:
 
         assert router.comment_calls == 1  # the second comment was not tried
         assert repo.checked == set()  # max_attempts=1 would have given up on a counted failure
+
+    async def test_a_rate_limit_through_the_real_router_is_not_a_failure(
+        self, make_chat_config, mock_provider
+    ):
+        # The fake router above raises a bare RateLimitError; the real one never
+        # does -- it re-raises a fresh AIProviderError *from* it. Only the real
+        # router shows whether the watcher still recognises a spent quota
+        # (2026-10-29: counted as failures, series given up without a verdict).
+        # Shaped like production: a text chain without Cloudflare, which is
+        # reached only because the classifier names its model.
+        settings = MagicMock()
+        settings.openai_api_key = settings.grok_api_key = settings.deepseek_api_key = None
+        settings.gemini_api_key = "gemini-test-key"
+        settings.cloudflare_api_token = "cf-test-token"
+        settings.cloudflare_account_id = "cf-test-account"
+        settings.ai.default_provider = "gemini"
+        settings.ai.tasks = {}
+        router = AIRouter(settings)
+        router._providers["gemini"] = mock_provider(name="gemini")
+        router._providers["cloudflare"] = mock_provider(
+            name="cloudflare", error=RateLimitError("4006 daily allocation", "cloudflare")
+        )
+        w, repo, _ = _watcher(
+            _thread(),
+            router=router,
+            config=AdviceWatchSettings(enabled=True, max_attempts=1),
+            make_chat_config=make_chat_config,
+        )
+
+        stats = await w.run_once()
+
+        assert "generate_text" in router._providers["cloudflare"].call_log
+        assert router._providers["gemini"].call_log == []
+        assert stats["failed"] == 0, "a spent quota was counted as a failed attempt"
+        assert repo.checked == set(), "the series was given up without a verdict"
 
 
 class TestDigest:
