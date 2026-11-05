@@ -197,6 +197,27 @@ class TestText:
         )
 
     @pytest.mark.asyncio
+    async def test_a_fenced_title_at_line_start_stays_plain_and_loses_the_fence(self) -> None:
+        """A chat titled «🔥 …» in a panel header is the chat's emoji, not the bot's mark."""
+        mw, bot = await _on()
+        text = f"⚙️ <b>Настройки чата</b>\n\n{fence('🔥 Чат друзей')} <code>-100</code>"
+        out = await _send(
+            mw, bot, EditMessageText(chat_id=1, message_id=2, text=text, reply_markup=_kb("✅ Да"))
+        )
+        assert out.text == (
+            '<tg-emoji emoji-id="m-settings">⚙️</tg-emoji> <b>Настройки чата</b>\n\n'
+            "🔥 Чат друзей <code>-100</code>"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_fence_leaves_message_text_even_when_off(self) -> None:
+        mw = CustomEmoji()
+        await mw.load(_bot(), None, None)
+        method = SendMessage(chat_id=1, text=f"{fence('🔥 чат')}\n✅ ok")
+        out = await _send(mw, _bot(), method)
+        assert out.text == "🔥 чат\n✅ ok"
+
+    @pytest.mark.asyncio
     async def test_plain_parse_mode_keeps_text_but_buttons_still_get_icons(self) -> None:
         mw, bot = await _on()
         out = await _send(

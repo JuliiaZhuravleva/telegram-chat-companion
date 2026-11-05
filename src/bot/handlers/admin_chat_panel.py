@@ -68,6 +68,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_chat_panel import (
     chat_panel_candidates_keyboard,
@@ -86,6 +87,7 @@ from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
 from src.utils.telegram import ChatReference, parse_chat_reference
+from src.utils.telegram_markdown import entities_to_markdown
 from src.utils.telegram_text import split_html
 
 logger = structlog.get_logger(__name__)
@@ -283,7 +285,7 @@ async def render_chat_panel(
     )
 
     title = row.get("chat_title") if row else None
-    label = escape(str(title)) if title else str(chat_id)
+    label = fence(escape(str(title))) if title else str(chat_id)
     text = f"{_PANEL_TITLE[lang]}\n\n{label} <code>{chat_id}</code>"
 
     keyboard = chat_panel_root_keyboard(
@@ -316,7 +318,7 @@ async def render_chat_panel_group(
     config = await chat_config_service.get_config(chat_id)
 
     title = row.get("chat_title") if row else None
-    label = escape(str(title)) if title else str(chat_id)
+    label = fence(escape(str(title))) if title else str(chat_id)
     text = f"{_PANEL_TITLE[lang]} › {group_label(group, lang)}\n\n{label} <code>{chat_id}</code>"
 
     keyboard = chat_panel_group_keyboard(
@@ -836,7 +838,7 @@ async def handle_chat_panel_sp_prompt(
     await callback.answer()
 
     title = row.get("chat_title")
-    label = escape(str(title)) if title else str(chat_id)
+    label = fence(escape(str(title))) if title else str(chat_id)
     current = str(row.get("system_prompt") or "").strip()
     body = f"<blockquote expandable>{escape(current)}</blockquote>" if current else _SP_NONE[lang]
     html = f"{_SP_CURRENT_TITLE[lang]}\n{label} <code>{chat_id}</code>\n\n{body}\n\n{_SP_ASK[lang]}"
@@ -886,7 +888,10 @@ async def handle_chat_panel_sp_input(
             )
             return
 
-        parts = [*list(data.get("sp_parts") or []), [message.message_id, message.text or ""]]
+        # Telegram turns **bold** and backticks into entities and drops the markers;
+        # put them back, or a Markdown prompt is saved without its emphasis.
+        text = entities_to_markdown(message.text or "", message.entities)
+        parts = [*list(data.get("sp_parts") or []), [message.message_id, text]]
         draft = _sp_draft(parts)
         if len(draft) > _SP_MAX_CHARS:
             # Refusing this part alone would let a later, shorter part in and

@@ -23,6 +23,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin import (
     approved_notification_keyboard,
@@ -1143,7 +1144,7 @@ async def handle_wl_remove_ask(
 
     row = await chat_settings_repo.get(chat_id)
     title = row.get("chat_title") if row else None
-    label = escape(str(title)) if title else str(chat_id)
+    label = fence(escape(str(title))) if title else str(chat_id)
 
     text = (
         f"{_WL_CONFIRM_TITLE[lang]}\n\n{label} <code>{chat_id}</code>\n\n{_WL_CONFIRM_BODY[lang]}"

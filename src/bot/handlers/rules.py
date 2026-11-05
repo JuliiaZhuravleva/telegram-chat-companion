@@ -23,6 +23,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.rules import (
     confirm_delete_rule_keyboard,
@@ -349,7 +350,7 @@ async def handle_rule_view(
         except json.JSONDecodeError:
             config = {}
 
-    name = escape(config.get("name", f"Rule #{rule_id}"))
+    name = fence(escape(config.get("name", f"Rule #{rule_id}")))
     enabled_icon = "✅" if rule.get("enabled") else "⏸"
     config_str = escape(json.dumps(config, ensure_ascii=False, indent=2))
 
@@ -475,7 +476,7 @@ async def handle_rule_delete_ask(
             config = _json.loads(config)
         except (ValueError, KeyError):
             config = {}
-    name = escape(config.get("name", f"#{rule_id}"))
+    name = fence(escape(config.get("name", f"#{rule_id}")))
 
     text = f"{_RULE_DEL_CONFIRM_TITLE[lang]}\n\n{name}\n\n{_RULE_DEL_CONFIRM_BODY[lang]}"
     await safe_edit_text(

@@ -177,6 +177,14 @@ class TestChatsListKeyboard:
         ]
         assert all(len(r) <= 3 for r in kb.inline_keyboard)
 
+    def test_a_title_starting_with_an_emoji_is_fenced(self):
+        """A chat called «✅ Чат» must not get the bot's drawn ✅ as its button icon."""
+        from src.bot.custom_emoji import FENCE
+
+        chats = [{"chat_id": -100, "chat_title": "✅ Чат", "chat_type": ""}]
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
+        assert kb.inline_keyboard[0][0].text == FENCE + "✅ Чат"
+
     def test_has_back_button(self):
         kb = chats_list_keyboard("en", [], page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)

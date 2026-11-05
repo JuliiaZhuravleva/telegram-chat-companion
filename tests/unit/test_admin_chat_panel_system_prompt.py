@@ -13,9 +13,10 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.types import Chat, Message, Sticker, User
+from aiogram.types import Chat, Message, MessageEntity, Sticker, User
 from magic_filter import MagicFilter
 
+from src.bot.custom_emoji import FENCE
 from src.bot.handlers.admin_chat_panel import (
     _SP_MAX_CHARS,
     handle_chat_panel_sp_cancel,
@@ -125,9 +126,15 @@ def _callback(data: str, user_id: int = ADMIN_ID, message_id: int = 900) -> Magi
     return callback
 
 
-def _message(text: str, message_id: int, user_id: int = ADMIN_ID) -> MagicMock:
+def _message(
+    text: str,
+    message_id: int,
+    user_id: int = ADMIN_ID,
+    entities: list[MessageEntity] | None = None,
+) -> MagicMock:
     message = MagicMock()
     message.text = text
+    message.entities = entities
     message.message_id = message_id
     message.chat = MagicMock()
     message.chat.id = DM_ID
@@ -167,6 +174,17 @@ class TestOpenEditor:
         assert "<blockquote expandable>Ты &lt;b&gt;бот&lt;/b&gt; &amp; друг</blockquote>" in text
         markup = callback.message.answer.call_args.kwargs["reply_markup"]
         assert markup.inline_keyboard[0][0].callback_data == f"adm_pnl_spx:ru:{CHAT_ID}"
+
+    @pytest.mark.asyncio
+    async def test_a_chat_title_starting_with_an_emoji_is_fenced(self) -> None:
+        """The title sits at the start of a line, where the emoji middleware draws marks."""
+        callback = _callback(f"adm_pnl_sp:ru:{CHAT_ID}")
+        repo = _chat_settings_repo({"chat_title": "🔥 Чат", "system_prompt": ""})
+
+        await handle_chat_panel_sp_prompt(callback, FakeState(), repo, _bot_config_repo())
+
+        (text,) = _sent_texts(callback.message.answer)
+        assert f"\n{FENCE}🔥 Чат <code>{CHAT_ID}</code>" in text
 
     @pytest.mark.asyncio
     async def test_long_prompt_is_split_and_buttons_go_on_the_last_part(self) -> None:
@@ -238,6 +256,25 @@ class TestInput:
         assert markup.inline_keyboard[0][0].callback_data == f"adm_pnl_spok:ru:{CHAT_ID}:10"
         assert state.data["sp_parts"] == [[10, "Новая <инструкция>"]]
         assert len(state.data["sp_previews"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_markdown_the_client_turned_into_entities_is_saved_as_typed(self) -> None:
+        """The admin pasted ``## Тон\n**Коротко** и `code```; Telegram sent bold and code."""
+        state = _editing()
+        message = _message(
+            "## Тон\nКоротко и code",
+            message_id=10,
+            entities=[
+                MessageEntity(type="bold", offset=7, length=7),
+                MessageEntity(type="code", offset=17, length=4),
+            ],
+        )
+
+        await handle_chat_panel_sp_input(message, state, _bot(), _bot_config_repo())
+
+        assert state.data["sp_parts"] == [[10, "## Тон\n**Коротко** и `code`"]]
+        (text,) = _sent_texts(message.answer)
+        assert "**Коротко** и `code`" in text  # the preview shows what will be saved
 
     @pytest.mark.asyncio
     async def test_second_message_appends_and_replaces_the_old_preview(self) -> None:

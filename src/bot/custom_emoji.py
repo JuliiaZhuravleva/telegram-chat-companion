@@ -4,7 +4,8 @@
 call only when the module is on and the message is a *screen*: its inline keyboard carries a
 callback of the admin panel, the rules editor, help or the knowledge base
 (``SCREEN_PREFIXES``). Model replies, transcripts, summaries and greetings carry no such
-keyboard and go out byte for byte as before.
+keyboard and go out byte for byte as before (only the fence below is removed, and only the bot
+ever writes it).
 
 On a screen:
 
@@ -17,9 +18,10 @@ On a screen:
   ``<blockquote>``, ``<code>`` or ``<pre>``, stay plain: that is where chat titles, quoted
   prompts and other people's text live. At most ``MAX_PER_MESSAGE`` per message.
 
-Labels built from data (chat titles, names, a sticker's own emoji) are passed through
-``fence()`` by the keyboard that builds them; a fenced label is never given an icon, and the
-fence is removed from every message, on or off.
+Labels built from data (chat titles, rule names, a sticker's own emoji) are passed through
+``fence()`` where they are built: in a keyboard, or at the start of a line of a screen's text. A
+fenced label is never given an icon or a mark, and the fence is removed from every message, on
+or off.
 
 Sets are read once at startup with getStickerSet from ``CUSTOM_EMOJI_BUTTONS`` and
 ``CUSTOM_EMOJI_MARKS``. A set belongs to the bot that uploaded it, so the dev bot and the
@@ -159,17 +161,19 @@ class CustomEmoji(BaseRequestMiddleware):
         self, bot: Bot, method: TelegramMethod[TelegramType], *, rich: bool
     ) -> TelegramMethod[TelegramType]:
         update: dict[str, Any] = {}
+        html = False
         if rich:
             parse_mode = getattr(method, "parse_mode", None)
             if isinstance(parse_mode, Default):
                 parse_mode = bot.default[parse_mode.name] if bot.default else None
-            if parse_mode == "HTML":
-                for field in ("text", "caption"):
-                    value = getattr(method, field, None)
-                    if isinstance(value, str):
-                        new = self._text(value)
-                        if new != value:
-                            update[field] = new
+            html = parse_mode == "HTML"
+        for field in ("text", "caption"):
+            value = getattr(method, field, None)
+            if isinstance(value, str):
+                # Swap first: a fenced line no longer starts with a glyph, so it stays plain.
+                new = (self._text(value) if html else value).replace(FENCE, "")
+                if new != value:
+                    update[field] = new
         markup = getattr(method, "reply_markup", None)
         if isinstance(markup, InlineKeyboardMarkup):
             rows = [[self._button(b, rich=rich) for b in row] for row in markup.inline_keyboard]
