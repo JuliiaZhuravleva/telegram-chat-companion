@@ -9,7 +9,8 @@ keyboard and go out byte for byte as before.
 On a screen:
 
 - a callback button whose label starts with a glyph of the BUTTONS set and a space gets that
-  picture as ``icon_custom_emoji_id`` and loses the glyph. A label that is only a glyph keeps
+  picture as ``icon_custom_emoji_id`` and loses the glyph; so does a numbered row button
+  ``"3 ❌"``, which keeps only its number. A label that is only a glyph keeps
   it (a client without icons would show an empty button); URL buttons are left alone;
 - in HTML text, a glyph of the MARKS set at the start of a line (after opening tags) becomes
   ``<tg-emoji>`` with the glyph as its fallback. Glyphs mid-line, and anything inside
@@ -74,6 +75,7 @@ class CustomEmoji(BaseRequestMiddleware):
         self._buttons: Table = {}
         self._marks: Table = {}
         self._lead: re.Pattern[str] | None = None
+        self._tail: re.Pattern[str] | None = None
         self._line: re.Pattern[str] | None = None
         self.on = False
         self.off_reason = "unset"
@@ -108,6 +110,8 @@ class CustomEmoji(BaseRequestMiddleware):
             self._off("the sets hold no custom emoji")
             return
         self._lead = self._pattern(self._buttons, r"^({}){}?+ (?=\S)")
+        # "3 ❌": a row number and an action glyph; the glyph becomes the icon, the number stays.
+        self._tail = self._pattern(self._buttons, r"^\d+ ({}){}?+$")
         self._line = self._pattern(self._marks, r"^([ \t]*)({}){}?+")
         self.on = True
         self.off_reason = ""
@@ -122,6 +126,7 @@ class CustomEmoji(BaseRequestMiddleware):
 
     def _off(self, reason: str) -> None:
         self._buttons, self._marks, self._lead, self._line = {}, {}, None, None
+        self._tail = None
         self.on = False
         self.off_reason = reason[:200]
         if reason != "unset":
@@ -212,13 +217,15 @@ class CustomEmoji(BaseRequestMiddleware):
         if not rich or self._lead is None or button.url or button.icon_custom_emoji_id:
             return button
         lead = self._lead.match(text)
-        if lead is None:
-            return button
+        if lead is not None:
+            label, glyph = text[lead.end() :], lead.group(1)
+        else:
+            tail = self._tail.match(text) if self._tail is not None else None
+            if tail is None:
+                return button
+            label, glyph = text[: tail.start(1)].rstrip(), tail.group(1)
         return button.model_copy(
-            update={
-                "text": text[lead.end() :],
-                "icon_custom_emoji_id": self._buttons[lead.group(1)],
-            }
+            update={"text": label, "icon_custom_emoji_id": self._buttons[glyph]}
         )
 
 

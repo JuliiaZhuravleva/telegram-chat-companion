@@ -89,13 +89,17 @@ class TestButtons:
             mw,
             bot,
             SendMessage(
-                chat_id=1, text="x", reply_markup=_kb("⚙️ Настройки", "◀️ Назад", "1 ❌", "✅")
+                chat_id=1,
+                text="x",
+                reply_markup=_kb("⚙️ Настройки", "◀️ Назад", "1 ❌", "12 ⚙️", "1 ❌ x", "✅"),
             ),
         )
         assert _buttons(out) == [
             ("Настройки", "b-settings"),
             ("Назад", "b-back"),  # ◀️ borrows the ⬅️ picture
-            ("1 ❌", None),  # the number leads: an icon would sit before it
+            ("1", "b-decline"),  # a numbered row button keeps its number
+            ("12", "b-settings"),
+            ("1 ❌ x", None),  # more than a number and a glyph: left alone
             ("✅", None),  # only a glyph: a client without icons would show nothing
         ]
 
