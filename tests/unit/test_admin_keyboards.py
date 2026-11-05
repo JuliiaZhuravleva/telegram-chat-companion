@@ -161,6 +161,30 @@ class TestChatsListKeyboard:
         # Must NOT directly delete from the list row anymore
         assert not any(c.startswith("adm_wl_rm:") for c in callbacks)
 
+    def test_each_row_opens_that_chats_settings(self):
+        """Julia 2026-11-05: from the whitelist there was no way into a chat's
+        settings — only the main menu's separate chat picker led there."""
+        chats = [
+            {"chat_id": -100, "chat_title": "Alpha", "chat_type": "group"},
+            {"chat_id": -200, "chat_title": "Beta", "chat_type": "supergroup"},
+        ]
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
+        rows = kb.inline_keyboard[:2]
+        assert [[b.text for b in r][1:] for r in rows] == [["1 ⚙️", "1 ❌"], ["2 ⚙️", "2 ❌"]]
+        assert [r[1].callback_data for r in rows] == [
+            "adm_pnl_menu:ru:-100",
+            "adm_pnl_menu:ru:-200",
+        ]
+        assert all(len(r) <= 3 for r in kb.inline_keyboard)
+
+    def test_a_title_starting_with_an_emoji_is_fenced(self):
+        """A chat called «✅ Чат» must not get the bot's drawn ✅ as its button icon."""
+        from src.bot.custom_emoji import FENCE
+
+        chats = [{"chat_id": -100, "chat_title": "✅ Чат", "chat_type": ""}]
+        kb = chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
+        assert kb.inline_keyboard[0][0].text == FENCE + "✅ Чат"
+
     def test_has_back_button(self):
         kb = chats_list_keyboard("en", [], page=0, total_pages=1, start_index=0)
         callbacks = _get_callbacks(kb)

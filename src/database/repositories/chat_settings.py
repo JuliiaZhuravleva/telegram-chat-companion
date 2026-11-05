@@ -110,16 +110,21 @@ class ChatSettingsRepository:
             *values,
         )
 
-    async def set_field(self, chat_id: int, field: str, value: Any) -> None:
-        """Update a single field for a chat (row must exist)."""
+    async def set_field(self, chat_id: int, field: str, value: Any) -> bool:
+        """Update a single field for a chat; ``False`` means no row matched.
+
+        The bool lets a caller that reports success to a person check it
+        first, instead of announcing a write that touched nothing.
+        """
         if field not in _WRITABLE_COLUMNS:
             raise ValueError(f"Unknown chat_settings column: {field}")
 
-        await self._pool.execute(
+        status = await self._pool.execute(
             f"UPDATE chat_settings SET {field} = $2 WHERE chat_id = $1",  # noqa: S608
             chat_id,
             value,
         )
+        return str(status).split()[-1] != "0"
 
     async def toggle_bool_field(self, chat_id: int, field: str, effective: bool) -> bool | None:
         """Flip a bool column atomically, returning the value now stored.

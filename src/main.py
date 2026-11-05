@@ -20,6 +20,7 @@ from dishka import make_async_container
 from dishka.integrations.aiogram import setup_dishka
 
 from src.bot.commands import sync_and_report
+from src.bot.custom_emoji import CustomEmoji
 from src.bot.errors import handle_unexpected_error
 from src.bot.handlers import router as main_router
 from src.bot.middleware import (
@@ -163,6 +164,11 @@ async def main() -> None:
     # in, which is the wrong direction. See the module docstring for why it
     # retries `TelegramRetryAfter` and nothing else.
     bot.session.middleware(FloodControlMiddleware())
+    # Innermost, so a flood retry re-sends the same rewritten call. Never raises:
+    # a set that cannot be read leaves the bot on plain emoji.
+    custom_emoji = CustomEmoji()
+    await custom_emoji.load(bot, settings.custom_emoji_buttons, settings.custom_emoji_marks)
+    bot.session.middleware(custom_emoji)
 
     # Initialize dispatcher
     dp = Dispatcher()

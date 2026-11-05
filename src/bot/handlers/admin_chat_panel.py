@@ -23,6 +23,11 @@ Handles:
   state and re-renders the STICKERS group screen (2026-08-07 review —
   commands also pass through the input handler via
   ``~F.text.startswith("/")``; ADR-0010 Decision 5 for the re-render target).
+- ``adm_pnl_sp:*`` / ``adm_pnl_spok:*`` / ``adm_pnl_spre:*`` / ``adm_pnl_spx:*``
+  — the per-chat ``system_prompt`` editor: show the current prompt in an
+  expandable quote, take a new one as text (a paste Telegram splits into
+  several messages is reassembled), preview it, and write only on «Save».
+  Its own state, ``AdminStates.awaiting_system_prompt``.
 - ``/panel <query>``  — D-1 shortcut: opens a chat's panel directly by
   ``t.me/...``/``t.me/c/...`` link or a title substring, skipping the
   picker; several title matches render ``chat_panel_candidates_keyboard``
@@ -51,6 +56,8 @@ navigation, B-2).
 
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
 from html import escape
 from typing import Any
 
@@ -61,12 +68,15 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_chat_panel import (
     chat_panel_candidates_keyboard,
     chat_panel_group_keyboard,
     chat_panel_picker_keyboard,
     chat_panel_root_keyboard,
+    system_prompt_cancel_keyboard,
+    system_prompt_confirm_keyboard,
     tolerance_cancel_keyboard,
 )
 from src.bot.settings_fields import FieldGroup, FieldType, field_by_code, group_label
@@ -77,6 +87,8 @@ from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
 from src.utils.telegram import ChatReference, parse_chat_reference
+from src.utils.telegram_markdown import entities_to_markdown
+from src.utils.telegram_text import split_html
 
 logger = structlog.get_logger(__name__)
 
@@ -110,6 +122,65 @@ _TOLERANCE_CANCELLED = {"ru": "Ввод отменён.", "en": "Input cancelled
 _TOLERANCE_SAVED = {
     "ru": "Уровень приличия установлен: {value}",
     "en": "Tolerance level set to {value}",
+}
+
+# system_prompt editor
+_SP_MAX_CHARS = 12000
+_SP_CURRENT_TITLE = {"ru": "📝 <b>Инструкция для чата</b>", "en": "📝 <b>Chat instruction</b>"}
+_SP_NONE = {
+    "ru": "<i>Своей инструкции у чата нет.</i>",
+    "en": "<i>This chat has no instruction of its own.</i>",
+}
+_SP_ASK = {
+    "ru": "Пришли новую инструкцию сообщением — она заменит эту. Или нажми «Отмена».",
+    "en": "Send the new instruction as a message — it replaces this one. Or tap «Cancel».",
+}
+_SP_PREVIEW_TITLE = {
+    "ru": "📝 <b>Новая инструкция</b> · {n} симв.",
+    "en": "📝 <b>New instruction</b> · {n} chars",
+}
+_SP_CONFIRM = {
+    "ru": "Сохраняем? Если это ещё не всё — пришли продолжение, оно допишется в конец.",
+    "en": "Save it? If there is more, send the rest — it is appended at the end.",
+}
+_SP_TOO_LONG = {
+    "ru": (
+        "Слишком длинно: вышло бы {n} симв., можно до {max}. "
+        "Эта часть не вошла, поэтому черновик неполный и сохранить его нельзя. "
+        "Нажми «Заново» и пришли текст покороче."
+    ),
+    "en": (
+        "Too long: that would make {n} chars, the limit is {max}. "
+        "This part did not fit, so the draft is incomplete and cannot be saved. "
+        "Tap «Start over» and send a shorter text."
+    ),
+}
+_SP_INCOMPLETE = {
+    "ru": "Черновик неполный: часть текста не влезла. Нажми «Заново».",
+    "en": "The draft is incomplete: part of the text did not fit. Tap «Start over».",
+}
+_SP_OUTDATED = {
+    "ru": "Это старое превью — черновик с тех пор изменился. Нажми кнопку под последним.",
+    "en": "This preview is outdated — the draft has changed since. Use the latest one.",
+}
+_SP_REDO_TEXT = {
+    "ru": "📝 <b>Новая инструкция</b>\n\nЧерновик очищен. Пришли инструкцию сообщением.",
+    "en": "📝 <b>New instruction</b>\n\nDraft cleared. Send the instruction as a message.",
+}
+_SP_SAVED = {
+    "ru": "<i>✓ Инструкция сохранена · {n} симв.</i>",
+    "en": "<i>✓ Instruction saved · {n} chars</i>",
+}
+_SP_SAVED_TOAST = {"ru": "Сохранено", "en": "Saved"}
+_SP_CANCELLED = {"ru": "<i>Инструкция не изменена.</i>", "en": "<i>Instruction unchanged.</i>"}
+_SP_STALE = {
+    "ru": (
+        "<i>Черновик не найден — ввод уже закрыт или бот перезапускался. "
+        "Инструкция не изменена.</i>"
+    ),
+    "en": (
+        "<i>No draft found — the input was closed or the bot restarted. Instruction unchanged.</i>"
+    ),
 }
 
 # D-1 shortcut (/panel <query>)
@@ -214,7 +285,7 @@ async def render_chat_panel(
     )
 
     title = row.get("chat_title") if row else None
-    label = escape(str(title)) if title else str(chat_id)
+    label = fence(escape(str(title))) if title else str(chat_id)
     text = f"{_PANEL_TITLE[lang]}\n\n{label} <code>{chat_id}</code>"
 
     keyboard = chat_panel_root_keyboard(
@@ -247,7 +318,7 @@ async def render_chat_panel_group(
     config = await chat_config_service.get_config(chat_id)
 
     title = row.get("chat_title") if row else None
-    label = escape(str(title)) if title else str(chat_id)
+    label = fence(escape(str(title))) if title else str(chat_id)
     text = f"{_PANEL_TITLE[lang]} › {group_label(group, lang)}\n\n{label} <code>{chat_id}</code>"
 
     keyboard = chat_panel_group_keyboard(
@@ -630,6 +701,376 @@ async def handle_chat_panel_tolerance_cancel(
         lang,
         chat_id,
         FieldGroup.STICKERS,
+    )
+
+
+# ── system_prompt editor ─────────────────────────────────────────────────────
+
+# One lock per admin. A paste longer than Telegram's 4096 arrives as several
+# messages at once, and aiogram handles updates concurrently: without the
+# lock two parts read the same draft and the second write drops the first.
+_sp_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def _sp_draft(parts: list[list[Any]]) -> str:
+    """Reassemble the draft in message order, not in arrival order.
+
+    Each update passes several awaiting middlewares before it reaches the
+    handler, so the parts of one paste can reach the lock out of order;
+    ``message_id`` is the order the admin sent them in.
+    """
+    return "\n".join(str(text) for _, text in sorted(parts, key=lambda p: int(p[0])))
+
+
+async def _send_split(
+    target: Message, html: str, reply_markup: InlineKeyboardMarkup
+) -> list[Message]:
+    """Send ``html`` as as many messages as Telegram needs; buttons on the last.
+
+    A prompt is verbatim user text and may exceed 4096 on its own, so it goes
+    through ``split_html`` (CLAUDE.md: a rejected send is no message at all).
+    """
+    pieces = split_html(html)
+    sent: list[Message] = []
+    for i, piece in enumerate(pieces):
+        last = i == len(pieces) - 1
+        sent.append(
+            await target.answer(
+                piece, parse_mode="HTML", reply_markup=reply_markup if last else None
+            )
+        )
+    return sent
+
+
+def _parse_lang_chat(callback: CallbackQuery) -> tuple[str, int | None]:
+    parts = (callback.data or "").split(":")
+    lang = _get_lang(parts[1] if len(parts) > 1 else None)
+    try:
+        return lang, int(parts[2])
+    except (ValueError, IndexError):
+        return lang, None
+
+
+def _parse_rev(callback: CallbackQuery) -> int | None:
+    """The draft version a Save / «Start over» button was made for."""
+    parts = (callback.data or "").split(":")
+    try:
+        return int(parts[3])
+    except (ValueError, IndexError):
+        return None
+
+
+async def _sp_guard(callback: CallbackQuery, bot_config_repo: BotConfigRepository) -> bool:
+    if not _is_private(callback):
+        await callback.answer()
+        return False
+    if not await check_admin_direct(
+        bot_config_repo, callback.from_user.id if callback.from_user else None
+    ):
+        await callback.answer(_NOT_ADMIN["en"], show_alert=True)
+        return False
+    return True
+
+
+async def _sp_draft_for(state: FSMContext, chat_id: int) -> tuple[dict[str, Any], str] | None:
+    """The live draft for ``chat_id``, or ``None`` when the button is stale.
+
+    Stale means: the state is gone (MemoryStorage does not survive a restart,
+    /cancel cleared it), another flow replaced it, or it belongs to another
+    chat's editor.
+    """
+    if await state.get_state() != AdminStates.awaiting_system_prompt.state:
+        return None
+    data = await state.get_data()
+    if data.get("sp_chat_id") != chat_id:
+        return None
+    return data, _sp_draft(list(data.get("sp_parts") or []))
+
+
+async def _show_behavior_with_notice(
+    callback: CallbackQuery,
+    notice: str,
+    chat_settings_repo: ChatSettingsRepository,
+    bot_config_repo: BotConfigRepository,
+    chat_config_service: ChatConfigService,
+    lang: str,
+    chat_id: int,
+) -> None:
+    """Edit the tapped message into the BEHAVIOR group screen, notice on top."""
+    text, keyboard = await render_chat_panel_group(
+        chat_settings_repo, bot_config_repo, chat_config_service, lang, chat_id, FieldGroup.BEHAVIOR
+    )
+    if isinstance(callback.message, Message):
+        await safe_edit_text(
+            callback.message, f"{notice}\n\n{text}", reply_markup=keyboard, parse_mode="HTML"
+        )
+
+
+@router.callback_query(F.data.startswith("adm_pnl_sp:"))
+async def handle_chat_panel_sp_prompt(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Show the chat's current system prompt and wait for a new one."""
+    if not await _sp_guard(callback, bot_config_repo):
+        return
+    lang, chat_id = _parse_lang_chat(callback)
+    if chat_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    row = await chat_settings_repo.get(chat_id)
+    if row is None:
+        await callback.answer(_NO_ROW[lang], show_alert=True)
+        return
+
+    await state.set_state(AdminStates.awaiting_system_prompt)
+    await state.update_data(
+        sp_chat_id=chat_id,
+        sp_lang=lang,
+        sp_parts=[],
+        sp_previews=[],
+        sp_rev=0,
+        sp_overflow=False,
+    )
+    await callback.answer()
+
+    title = row.get("chat_title")
+    label = fence(escape(str(title))) if title else str(chat_id)
+    current = str(row.get("system_prompt") or "").strip()
+    body = f"<blockquote expandable>{escape(current)}</blockquote>" if current else _SP_NONE[lang]
+    html = f"{_SP_CURRENT_TITLE[lang]}\n{label} <code>{chat_id}</code>\n\n{body}\n\n{_SP_ASK[lang]}"
+    if isinstance(callback.message, Message):
+        await _send_split(callback.message, html, system_prompt_cancel_keyboard(lang, chat_id))
+
+
+@router.message(
+    AdminStates.awaiting_system_prompt,
+    F.chat.type == "private",
+    F.text,
+    ~F.text.startswith("/"),
+)
+async def handle_chat_panel_sp_input(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """Append one message to the draft and show the whole draft for approval.
+
+    Appending, not replacing: a prompt longer than 4096 reaches the bot as
+    several messages, and each must extend the draft rather than discard the
+    part before it. «Start over» is the way to discard. Commands pass through
+    (``~F.text.startswith("/")``); non-text messages do not match at all.
+    """
+    user_id = message.from_user.id if message.from_user else 0
+    if not await check_admin_direct(bot_config_repo, user_id or None):
+        await state.clear()
+        return
+
+    async with _sp_locks[user_id]:
+        data = await state.get_data()
+        chat_id = data.get("sp_chat_id")
+        lang = _get_lang(data.get("sp_lang"))
+        if chat_id is None:
+            await state.clear()
+            return
+
+        rev = int(data.get("sp_rev") or 0)
+        if data.get("sp_overflow"):
+            # A part was already refused: anything added now would sit after a
+            # hole, and a preview of it would look complete.
+            await message.reply(
+                _SP_INCOMPLETE[lang],
+                reply_markup=system_prompt_confirm_keyboard(lang, chat_id, rev, can_save=False),
+            )
+            return
+
+        # Telegram turns **bold** and backticks into entities and drops the markers;
+        # put them back, or a Markdown prompt is saved without its emphasis.
+        text = entities_to_markdown(message.text or "", message.entities)
+        parts = [*list(data.get("sp_parts") or []), [message.message_id, text]]
+        draft = _sp_draft(parts)
+        if len(draft) > _SP_MAX_CHARS:
+            # Refusing this part alone would let a later, shorter part in and
+            # save a prompt with its middle missing. The whole draft is
+            # incomplete from here on, so Save goes away until «Start over».
+            await state.update_data(sp_overflow=True)
+            await message.reply(
+                _SP_TOO_LONG[lang].format(n=len(draft), max=_SP_MAX_CHARS),
+                reply_markup=system_prompt_confirm_keyboard(lang, chat_id, rev, can_save=False),
+            )
+            return
+
+        # The previous preview showed a shorter draft; its «Save» would now
+        # save more than it shows. Only the newest preview stays.
+        for old_id in data.get("sp_previews") or []:
+            try:
+                await bot.delete_message(chat_id=message.chat.id, message_id=int(old_id))
+            except Exception:
+                logger.debug("sp_preview_delete_failed", message_id=old_id)
+
+        html = (
+            f"{_SP_PREVIEW_TITLE[lang].format(n=len(draft))}\n"
+            f"<blockquote expandable>{escape(draft)}</blockquote>\n\n{_SP_CONFIRM[lang]}"
+        )
+        rev = message.message_id
+        sent = await _send_split(message, html, system_prompt_confirm_keyboard(lang, chat_id, rev))
+        await state.update_data(
+            sp_parts=parts, sp_previews=[m.message_id for m in sent], sp_rev=rev
+        )
+
+
+@router.callback_query(F.data.startswith("adm_pnl_spok:"))
+async def handle_chat_panel_sp_save(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Write the draft as the chat's system prompt."""
+    if not await _sp_guard(callback, bot_config_repo):
+        return
+    lang, chat_id = _parse_lang_chat(callback)
+    if chat_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    async with _sp_locks[user_id]:
+        found = await _sp_draft_for(state, chat_id)
+        if found is not None and found[0].get("sp_overflow"):
+            await callback.answer(_SP_INCOMPLETE[lang], show_alert=True)
+            return
+        if found is not None and _parse_rev(callback) != found[0].get("sp_rev"):
+            await callback.answer(_SP_OUTDATED[lang], show_alert=True)
+            return
+        draft = found[1].strip() if found else ""
+        if not draft:
+            await callback.answer()
+            await _show_behavior_with_notice(
+                callback,
+                _SP_STALE[lang],
+                chat_settings_repo,
+                bot_config_repo,
+                chat_config_service,
+                lang,
+                chat_id,
+            )
+            return
+
+        written = await chat_settings_repo.set_field(chat_id, "system_prompt", draft)
+        if not written:
+            logger.warning("System prompt write affected no chat_settings row", chat_id=chat_id)
+            await callback.answer(_NO_ROW[lang], show_alert=True)
+            return
+        chat_config_service.invalidate(chat_id)
+        await state.clear()
+
+    logger.info("System prompt updated", chat_id=chat_id, admin_id=user_id, length=len(draft))
+    await callback.answer(_SP_SAVED_TOAST[lang])
+    await _show_behavior_with_notice(
+        callback,
+        _SP_SAVED[lang].format(n=len(draft)),
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        lang,
+        chat_id,
+    )
+
+
+@router.callback_query(F.data.startswith("adm_pnl_spre:"))
+async def handle_chat_panel_sp_redo(
+    callback: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Drop the draft and wait for the prompt again."""
+    if not await _sp_guard(callback, bot_config_repo):
+        return
+    lang, chat_id = _parse_lang_chat(callback)
+    if chat_id is None:
+        await callback.answer("Invalid data", show_alert=True)
+        return
+
+    user_id = callback.from_user.id if callback.from_user else 0
+    async with _sp_locks[user_id]:
+        found = await _sp_draft_for(state, chat_id)
+        if found is None:
+            await callback.answer()
+            await _show_behavior_with_notice(
+                callback,
+                _SP_STALE[lang],
+                chat_settings_repo,
+                bot_config_repo,
+                chat_config_service,
+                lang,
+                chat_id,
+            )
+            return
+        if _parse_rev(callback) != found[0].get("sp_rev"):
+            await callback.answer(_SP_OUTDATED[lang], show_alert=True)
+            return
+        here = callback.message.message_id if isinstance(callback.message, Message) else None
+        for old_id in found[0].get("sp_previews") or []:
+            if old_id == here or not isinstance(callback.message, Message):
+                continue
+            try:
+                await bot.delete_message(chat_id=callback.message.chat.id, message_id=int(old_id))
+            except Exception:
+                logger.debug("sp_preview_delete_failed", message_id=old_id)
+        await state.update_data(sp_parts=[], sp_previews=[], sp_rev=0, sp_overflow=False)
+
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await safe_edit_text(
+            callback.message,
+            _SP_REDO_TEXT[lang],
+            reply_markup=system_prompt_cancel_keyboard(lang, chat_id),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(F.data.startswith("adm_pnl_spx:"))
+async def handle_chat_panel_sp_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+) -> None:
+    """Leave the editor without writing and return to the BEHAVIOR screen.
+
+    Clears the state only when it is this chat's editor: an old screen's
+    «Cancel» must not close another chat's draft or another flow. Malformed
+    data still clears this editor -- the way out is the one thing this
+    handler may never refuse.
+    """
+    if not await _sp_guard(callback, bot_config_repo):
+        return
+    lang, chat_id = _parse_lang_chat(callback)
+    if await state.get_state() == AdminStates.awaiting_system_prompt.state:
+        data = await state.get_data()
+        if chat_id is None or data.get("sp_chat_id") == chat_id:
+            await state.clear()
+    await callback.answer()
+    if chat_id is None:
+        return
+    await _show_behavior_with_notice(
+        callback,
+        _SP_CANCELLED[lang],
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        lang,
+        chat_id,
     )
 
 

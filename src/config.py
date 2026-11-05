@@ -280,6 +280,10 @@ class Settings(BaseSettings):
 
     # Required settings (from environment)
     telegram_bot_token: str = Field(alias="TELEGRAM_BOT_TOKEN")
+    # The bot's drawn emoji (src/bot/custom_emoji.py). A set belongs to the bot that
+    # uploaded it, so each bot names its own copy; unset = plain emoji everywhere.
+    custom_emoji_buttons: str | None = Field(None, alias="CUSTOM_EMOJI_BUTTONS")
+    custom_emoji_marks: str | None = Field(None, alias="CUSTOM_EMOJI_MARKS")
     database_url: str = Field(alias="DATABASE_URL")
 
     # Optional API keys (from environment)

@@ -19,6 +19,7 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
 from src.bot.nav import back_callback, origin_suffix
 
 
@@ -39,7 +40,7 @@ def kb_chat_picker_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=title,
+                    text=fence(title),
                     callback_data=f"adm_kb_menu:{lang}:{chat_id}",
                 ),
             ]
@@ -138,7 +139,7 @@ def kb_organizers_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=display_name,
+                    text=fence(display_name),
                     callback_data=f"adm_kb_org_rm:{lang}:{chat_id}:{user_id}{suffix}",
                 ),
             ]
@@ -252,7 +253,7 @@ def kb_organizer_picker_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=_candidate_label(candidate),
+                    text=fence(_candidate_label(candidate)),
                     callback_data=f"adm_kb_org_pick:{lang}:{chat_id}:{user_id}{suffix}",
                 ),
             ]

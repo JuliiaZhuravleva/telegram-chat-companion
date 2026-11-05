@@ -10,6 +10,7 @@ from typing import cast
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
 from src.utils.telegram import build_chat_url
 
 # ---------------------------------------------------------------------------
@@ -367,14 +368,17 @@ def chats_list_keyboard(
         chat_id_int = cast(int, chat["chat_id"])
         url = build_chat_url(chat_id_int, str(ctype))
         if url:
-            title_btn = InlineKeyboardButton(text=label, url=url)
+            title_btn = InlineKeyboardButton(text=fence(label), url=url)
         else:
             # Non-linkable chat (old-style group) — use noop to avoid
             # refreshing the message with identical content.
-            title_btn = InlineKeyboardButton(text=label, callback_data="noop")
+            title_btn = InlineKeyboardButton(text=fence(label), callback_data="noop")
         rows.append(
             [
                 title_btn,
+                # Settings for this chat: the same panel the main menu's chat
+                # picker opens, so the whitelist is not a dead end.
+                _numbered_button(i, "⚙️", f"adm_pnl_menu:{lang}:{chat_id_int}"),
                 _numbered_button(i, "❌", f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}"),
             ]
         )

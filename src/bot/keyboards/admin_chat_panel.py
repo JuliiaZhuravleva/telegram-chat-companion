@@ -41,6 +41,7 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
 from src.bot.nav import PANEL_ORIGIN
 from src.bot.settings_fields import FieldGroup, FieldSpec, FieldType, fields_by_group, group_label
 from src.models.chat_config import ChatConfig
@@ -87,6 +88,62 @@ def tolerance_cancel_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
     )
 
 
+_SP_CANCEL = {"ru": "❌ Отмена", "en": "❌ Cancel"}
+_SP_SAVE = {"ru": "✅ Сохранить", "en": "✅ Save"}
+_SP_REDO = {"ru": "🔄 Заново", "en": "🔄 Start over"}
+
+
+def system_prompt_cancel_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
+    """The exit from the system-prompt input state, under the current prompt."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=_SP_CANCEL[lang], callback_data=f"adm_pnl_spx:{lang}:{chat_id}"
+                )
+            ]
+        ]
+    )
+
+
+def system_prompt_confirm_keyboard(
+    lang: str, chat_id: int, rev: int, *, can_save: bool = True
+) -> InlineKeyboardMarkup:
+    """Save / start over / cancel, under the preview of a new prompt.
+
+    ``rev`` is the draft version this preview shows (the id of the last
+    message added to it). Save and «Start over» carry it, so a button under an
+    older preview -- or under a preview from an earlier editing session --
+    cannot act on a draft it does not show. ``can_save=False`` drops Save for a
+    draft that lost a part to the length cap.
+
+    The prefixes differ from ``adm_pnl_sp:`` at the character after ``sp``,
+    so ``startswith("adm_pnl_sp:")`` cannot swallow them.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if can_save:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=_SP_SAVE[lang],
+                    callback_data=f"adm_pnl_spok:{lang}:{chat_id}:{rev}",
+                    style="success",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=_SP_REDO[lang], callback_data=f"adm_pnl_spre:{lang}:{chat_id}:{rev}"
+            ),
+            InlineKeyboardButton(
+                text=_SP_CANCEL[lang], callback_data=f"adm_pnl_spx:{lang}:{chat_id}"
+            ),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def chat_panel_picker_keyboard(
     chats: list[dict[str, object]],
     *,
@@ -110,7 +167,7 @@ def chat_panel_picker_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=text,
+                    text=fence(text),
                     callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
                 ),
             ]
@@ -149,7 +206,11 @@ def chat_panel_candidates_keyboard(
         chat_id = chat.get("chat_id")
         title = str(chat.get("chat_title") or chat_id)[:35]
         rows.append(
-            [InlineKeyboardButton(text=title, callback_data=f"adm_pnl_menu:{lang}:{chat_id}")]
+            [
+                InlineKeyboardButton(
+                    text=fence(title), callback_data=f"adm_pnl_menu:{lang}:{chat_id}"
+                )
+            ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -340,9 +401,14 @@ def chat_panel_group_keyboard(
             # FSM edit flow (admin_chat_panel.py handler), independent of
             # F-1's still-deferred generic non-BOOL editing -- every other
             # non-BOOL field stays read-only ("noop") until F-1 lands.
-            callback_data = (
-                f"adm_pnl_tol:{lang}:{chat_id}" if field.key == "tolerance_level" else "noop"
-            )
+            if field.key == "tolerance_level":
+                callback_data = f"adm_pnl_tol:{lang}:{chat_id}"
+            elif field.key == "system_prompt":
+                # Own FSM flow too: show the current prompt, take a new one,
+                # confirm before writing (admin_chat_panel.py, ``adm_pnl_sp*``).
+                callback_data = f"adm_pnl_sp:{lang}:{chat_id}"
+            else:
+                callback_data = "noop"
         rows.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
 
     rows.append(

@@ -10,6 +10,8 @@ from src.bot.keyboards.admin_chat_panel import (
     chat_panel_group_keyboard,
     chat_panel_picker_keyboard,
     chat_panel_root_keyboard,
+    system_prompt_cancel_keyboard,
+    system_prompt_confirm_keyboard,
 )
 from src.bot.settings_fields import FIELDS_BY_KEY, FieldGroup, group_label
 from src.models.chat_config import ChatConfig
@@ -251,16 +253,46 @@ class TestChatPanelGroupKeyboard:
         assert btn is not None
         assert "✅" in btn.text
 
-    def test_non_bool_field_is_read_only_noop(self):
+    def test_system_prompt_field_opens_its_editor(self):
+        """It used to be ``noop`` -- the button did nothing when tapped
+        (Julia, 2026-11-05). It must open the editor, never the bool toggle."""
         config = self._config(system_prompt="Be nice")
         kb = chat_panel_group_keyboard(
             "ru", chat_id=CHAT_ID, group=FieldGroup.BEHAVIOR, config=config, row=None
         )
-        labels = _get_labels(kb)
-        assert any("Be nice" in label for label in labels)
-        # system_prompt's row must not be wired to the generic toggle handler.
         sp_rows = [btn for row in kb.inline_keyboard for btn in row if "Be nice" in btn.text]
-        assert all(btn.callback_data == "noop" for btn in sp_rows)
+        assert len(sp_rows) == 1
+        assert sp_rows[0].callback_data == f"adm_pnl_sp:ru:{CHAT_ID}"
+
+    def test_other_non_bool_field_stays_read_only_noop(self):
+        config = self._config(language="xx-test")
+        kb = chat_panel_group_keyboard(
+            "ru", chat_id=CHAT_ID, group=FieldGroup.BEHAVIOR, config=config, row=None
+        )
+        rows = [btn for row in kb.inline_keyboard for btn in row if "xx-test" in btn.text]
+        assert len(rows) == 1
+        assert rows[0].callback_data == "noop"
+
+    def test_system_prompt_keyboards_carry_distinct_prefixes(self):
+        """``startswith("adm_pnl_sp:")`` must not also catch save/redo/cancel."""
+        cancel = system_prompt_cancel_keyboard("ru", CHAT_ID)
+        confirm = system_prompt_confirm_keyboard("ru", CHAT_ID, 2147483647)
+        datas = [b.callback_data for kb in (cancel, confirm) for r in kb.inline_keyboard for b in r]
+        assert sorted(datas) == sorted(
+            [
+                f"adm_pnl_spx:ru:{CHAT_ID}",
+                f"adm_pnl_spok:ru:{CHAT_ID}:2147483647",
+                f"adm_pnl_spre:ru:{CHAT_ID}:2147483647",
+                f"adm_pnl_spx:ru:{CHAT_ID}",
+            ]
+        )
+        assert not any(d.startswith("adm_pnl_sp:") for d in datas)
+        assert all(len(d.encode()) <= 64 for d in datas)
+
+    def test_incomplete_draft_keyboard_has_no_save(self):
+        kb = system_prompt_confirm_keyboard("ru", CHAT_ID, 5, can_save=False)
+        datas = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert datas == [f"adm_pnl_spre:ru:{CHAT_ID}:5", f"adm_pnl_spx:ru:{CHAT_ID}"]
 
     def test_tolerance_field_gets_dedicated_edit_flow(self):
         config = self._config(tolerance_level=0.5)

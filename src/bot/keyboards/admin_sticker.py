@@ -9,6 +9,8 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
+
 # Preset explicitness values (A-4 / ADR-0009 Decision 7, closing paragraph):
 # a preset tap writes a known-valid value directly, no FSM round-trip. Index
 # into this tuple (not the raw float) rides in callback_data -- shorter and
@@ -35,7 +37,7 @@ def sticker_sets_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"{title} ({learned}/{total_count})",
+                    text=fence(f"{title} ({learned}/{total_count})"),
                     callback_data=f"adm_stk_set:{lang}:{set_name}:0",
                 ),
             ]
@@ -134,7 +136,7 @@ def sticker_set_detail_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=label,
+                    text=fence(label),
                     callback_data=f"adm_stk_view:{lang}:{fuid}",
                 ),
             ]
