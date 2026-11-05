@@ -276,18 +276,23 @@ class TestChatPanelGroupKeyboard:
     def test_system_prompt_keyboards_carry_distinct_prefixes(self):
         """``startswith("adm_pnl_sp:")`` must not also catch save/redo/cancel."""
         cancel = system_prompt_cancel_keyboard("ru", CHAT_ID)
-        confirm = system_prompt_confirm_keyboard("ru", CHAT_ID)
+        confirm = system_prompt_confirm_keyboard("ru", CHAT_ID, 2147483647)
         datas = [b.callback_data for kb in (cancel, confirm) for r in kb.inline_keyboard for b in r]
         assert sorted(datas) == sorted(
             [
                 f"adm_pnl_spx:ru:{CHAT_ID}",
-                f"adm_pnl_spok:ru:{CHAT_ID}",
-                f"adm_pnl_spre:ru:{CHAT_ID}",
+                f"adm_pnl_spok:ru:{CHAT_ID}:2147483647",
+                f"adm_pnl_spre:ru:{CHAT_ID}:2147483647",
                 f"adm_pnl_spx:ru:{CHAT_ID}",
             ]
         )
         assert not any(d.startswith("adm_pnl_sp:") for d in datas)
         assert all(len(d.encode()) <= 64 for d in datas)
+
+    def test_incomplete_draft_keyboard_has_no_save(self):
+        kb = system_prompt_confirm_keyboard("ru", CHAT_ID, 5, can_save=False)
+        datas = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert datas == [f"adm_pnl_spre:ru:{CHAT_ID}:5", f"adm_pnl_spx:ru:{CHAT_ID}"]
 
     def test_tolerance_field_gets_dedicated_edit_flow(self):
         config = self._config(tolerance_level=0.5)

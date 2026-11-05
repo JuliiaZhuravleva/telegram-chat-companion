@@ -30,6 +30,7 @@ from src.models.chat_config import ChatConfig
 from src.utils.telegram_text import parsed_length
 
 ADMIN_ID = 111
+REV = 10  # draft version = id of the last message added; _editing() parts end at 10
 CHAT_ID = -1001234567890
 DM_ID = 111
 
@@ -63,7 +64,14 @@ class FakeState:
 
 
 def _editing(chat_id: int = CHAT_ID, **data: Any) -> FakeState:
-    base = {"sp_chat_id": chat_id, "sp_lang": "ru", "sp_parts": [], "sp_previews": []}
+    base = {
+        "sp_chat_id": chat_id,
+        "sp_lang": "ru",
+        "sp_parts": [],
+        "sp_previews": [],
+        "sp_rev": REV,
+        "sp_overflow": False,
+    }
     base.update(data)
     return FakeState(AdminStates.awaiting_system_prompt.state, base)
 
@@ -227,7 +235,7 @@ class TestInput:
         assert "<blockquote expandable>Новая &lt;инструкция&gt;</blockquote>" in text
         assert "Сохраняем?" in text
         markup = message.answer.call_args.kwargs["reply_markup"]
-        assert markup.inline_keyboard[0][0].callback_data == f"adm_pnl_spok:ru:{CHAT_ID}"
+        assert markup.inline_keyboard[0][0].callback_data == f"adm_pnl_spok:ru:{CHAT_ID}:10"
         assert state.data["sp_parts"] == [[10, "Новая <инструкция>"]]
         assert len(state.data["sp_previews"]) == 1
 
@@ -280,7 +288,36 @@ class TestInput:
         assert "Слишком длинно" in message.reply.call_args.args[0]
         assert state.data["sp_parts"] == [[10, "x" * (_SP_MAX_CHARS - 5)]]
         assert state.data["sp_previews"] == [77]
+        assert state.data["sp_overflow"] is True
         bot.delete_message.assert_not_awaited()
+        markup = message.reply.call_args.kwargs["reply_markup"]
+        assert not any(
+            b.callback_data.startswith("adm_pnl_spok:") for r in markup.inline_keyboard for b in r
+        )
+
+    @pytest.mark.asyncio
+    async def test_after_a_refused_part_later_parts_do_not_fill_the_hole(self) -> None:
+        """Review finding: parts 1, 2 accepted, 3 refused, 4 short enough — the
+        preview of 1+2+4 looked complete and Save wrote a prompt missing its middle."""
+        bot = _bot()
+        state = _editing()
+        chunk = "z" * 4096
+        for mid in (10, 11, 12):
+            await handle_chat_panel_sp_input(_message(chunk, mid), state, bot, _bot_config_repo())
+        fourth = _message("short tail", 13)
+        await handle_chat_panel_sp_input(fourth, state, bot, _bot_config_repo())
+
+        assert [p[0] for p in state.data["sp_parts"]] == [10, 11]
+        fourth.answer.assert_not_awaited()
+        fourth.reply.assert_awaited_once()
+
+        repo = _chat_settings_repo({"chat_title": "Чат"})
+        old_save = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:11")
+        await handle_chat_panel_sp_save(
+            old_save, state, repo, _bot_config_repo(), _config_service()
+        )
+        repo.set_field.assert_not_awaited()
+        assert old_save.answer.call_args.kwargs.get("show_alert") is True
 
     @pytest.mark.asyncio
     async def test_non_admin_input_clears_the_state(self) -> None:
@@ -361,7 +398,7 @@ class TestSave:
         state = _editing(sp_parts=[[11, "второе  "], [10, "  первое"]])
         repo = _chat_settings_repo({"chat_title": "Чат"})
         service = _config_service()
-        callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}")
+        callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}")
 
         await handle_chat_panel_sp_save(callback, state, repo, _bot_config_repo(), service)
 
@@ -377,7 +414,7 @@ class TestSave:
     @pytest.mark.asyncio
     async def test_stale_button_after_restart_writes_nothing(self) -> None:
         repo = _chat_settings_repo({"chat_title": "Чат"})
-        callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}")
+        callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}")
 
         await handle_chat_panel_sp_save(
             callback, FakeState(), repo, _bot_config_repo(), _config_service()
@@ -392,7 +429,7 @@ class TestSave:
         repo = _chat_settings_repo({"chat_title": "Чат"})
 
         await handle_chat_panel_sp_save(
-            _callback(f"adm_pnl_spok:ru:{CHAT_ID}"),
+            _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}"),
             state,
             repo,
             _bot_config_repo(),
@@ -409,7 +446,7 @@ class TestSave:
         repo = _chat_settings_repo({"chat_title": "Чат"})
 
         await handle_chat_panel_sp_save(
-            _callback(f"adm_pnl_spok:ru:{CHAT_ID}"),
+            _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}"),
             state,
             repo,
             _bot_config_repo(),
@@ -423,7 +460,7 @@ class TestSave:
         state = _editing(sp_parts=[[10, "текст"]])
         repo = _chat_settings_repo({"chat_title": "Чат"}, written=False)
         service = _config_service()
-        callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}")
+        callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}")
 
         await handle_chat_panel_sp_save(callback, state, repo, _bot_config_repo(), service)
 
@@ -437,7 +474,7 @@ class TestSave:
         repo = _chat_settings_repo({"chat_title": "Чат"})
 
         await handle_chat_panel_sp_save(
-            _callback(f"adm_pnl_spok:ru:{CHAT_ID}", user_id=999),
+            _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}", user_id=999),
             state,
             repo,
             _bot_config_repo(),
@@ -452,7 +489,7 @@ class TestRedoAndCancel:
     async def test_redo_empties_the_draft_and_keeps_waiting(self) -> None:
         state = _editing(sp_parts=[[10, "черновик"]], sp_previews=[55, 900])
         bot = _bot()
-        callback = _callback(f"adm_pnl_spre:ru:{CHAT_ID}", message_id=900)
+        callback = _callback(f"adm_pnl_spre:ru:{CHAT_ID}:{REV}", message_id=900)
 
         await handle_chat_panel_sp_redo(
             callback, state, bot, _chat_settings_repo({}), _bot_config_repo(), _config_service()
@@ -487,3 +524,117 @@ class TestRedoAndCancel:
         )
 
         assert state.state is None
+
+    @pytest.mark.asyncio
+    async def test_cancel_from_another_chats_screen_keeps_this_draft(self) -> None:
+        state = _editing(chat_id=-100999, sp_parts=[[10, "черновик"]])
+
+        await handle_chat_panel_sp_cancel(
+            _callback(f"adm_pnl_spx:ru:{CHAT_ID}"),
+            state,
+            _chat_settings_repo({"chat_title": "Чат"}),
+            _bot_config_repo(),
+            _config_service(),
+        )
+
+        assert state.state == AdminStates.awaiting_system_prompt.state
+        assert state.data["sp_parts"] == [[10, "черновик"]]
+
+    @pytest.mark.asyncio
+    async def test_cancel_does_not_close_another_flow(self) -> None:
+        state = FakeState(AdminStates.awaiting_setting_value.state, {"chat_id": CHAT_ID})
+
+        await handle_chat_panel_sp_cancel(
+            _callback(f"adm_pnl_spx:ru:{CHAT_ID}"),
+            state,
+            _chat_settings_repo({"chat_title": "Чат"}),
+            _bot_config_repo(),
+            _config_service(),
+        )
+
+        assert state.state == AdminStates.awaiting_setting_value.state
+
+
+class TestDraftVersion:
+    """Review finding: Save and «Start over» checked only state and chat_id,
+    so a button under an older preview acted on a draft it did not show."""
+
+    @pytest.mark.asyncio
+    async def test_save_under_an_older_preview_writes_nothing(self) -> None:
+        state = _editing()
+        bot = _bot()
+        await handle_chat_panel_sp_input(_message("A", 20), state, bot, _bot_config_repo())
+        await handle_chat_panel_sp_input(_message("B", 21), state, bot, _bot_config_repo())
+        repo = _chat_settings_repo({"chat_title": "Чат"})
+
+        old = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:20")
+        await handle_chat_panel_sp_save(old, state, repo, _bot_config_repo(), _config_service())
+
+        repo.set_field.assert_not_awaited()
+        assert old.answer.call_args.kwargs.get("show_alert") is True
+        assert state.state == AdminStates.awaiting_system_prompt.state
+
+        new = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:21")
+        await handle_chat_panel_sp_save(new, state, repo, _bot_config_repo(), _config_service())
+        repo.set_field.assert_awaited_once_with(CHAT_ID, "system_prompt", "A\nB")
+
+    @pytest.mark.asyncio
+    async def test_preview_from_an_earlier_session_cannot_save_the_new_draft(self) -> None:
+        """Send A, cancel, reopen, send B, tap Save under A's preview."""
+        repo = _chat_settings_repo({"chat_title": "Чат", "system_prompt": ""})
+        state = FakeState()
+        bot = _bot()
+        await handle_chat_panel_sp_prompt(
+            _callback(f"adm_pnl_sp:ru:{CHAT_ID}"), state, repo, _bot_config_repo()
+        )
+        await handle_chat_panel_sp_input(_message("A", 30), state, bot, _bot_config_repo())
+        await handle_chat_panel_sp_cancel(
+            _callback(f"adm_pnl_spx:ru:{CHAT_ID}"),
+            state,
+            repo,
+            _bot_config_repo(),
+            _config_service(),
+        )
+        await handle_chat_panel_sp_prompt(
+            _callback(f"adm_pnl_sp:ru:{CHAT_ID}"), state, repo, _bot_config_repo()
+        )
+        await handle_chat_panel_sp_input(_message("B", 32), state, bot, _bot_config_repo())
+
+        stale = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:30")
+        await handle_chat_panel_sp_save(stale, state, repo, _bot_config_repo(), _config_service())
+
+        repo.set_field.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_start_over_under_an_older_preview_keeps_the_draft(self) -> None:
+        state = _editing(sp_parts=[[10, "x"], [11, "y"]], sp_rev=11)
+
+        await handle_chat_panel_sp_redo(
+            _callback(f"adm_pnl_spre:ru:{CHAT_ID}:10"),
+            state,
+            _bot(),
+            _chat_settings_repo({}),
+            _bot_config_repo(),
+            _config_service(),
+        )
+
+        assert len(state.data["sp_parts"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_start_over_resets_version_and_overflow(self) -> None:
+        state = _editing(sp_parts=[[10, "x"]], sp_overflow=True)
+
+        await handle_chat_panel_sp_redo(
+            _callback(f"adm_pnl_spre:ru:{CHAT_ID}:{REV}"),
+            state,
+            _bot(),
+            _chat_settings_repo({}),
+            _bot_config_repo(),
+            _config_service(),
+        )
+
+        assert state.data["sp_rev"] == 0
+        assert state.data["sp_overflow"] is False
+        message = _message("заново", 40)
+        await handle_chat_panel_sp_input(message, state, _bot(), _bot_config_repo())
+        assert state.data["sp_parts"] == [[40, "заново"]]

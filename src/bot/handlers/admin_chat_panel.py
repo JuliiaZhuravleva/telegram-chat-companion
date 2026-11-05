@@ -144,12 +144,22 @@ _SP_CONFIRM = {
 _SP_TOO_LONG = {
     "ru": (
         "Слишком длинно: вышло бы {n} симв., можно до {max}. "
-        "Это сообщение не добавлено, черновик прежний."
+        "Эта часть не вошла, поэтому черновик неполный и сохранить его нельзя. "
+        "Нажми «Заново» и пришли текст покороче."
     ),
     "en": (
         "Too long: that would make {n} chars, the limit is {max}. "
-        "This message was not added; the draft is unchanged."
+        "This part did not fit, so the draft is incomplete and cannot be saved. "
+        "Tap «Start over» and send a shorter text."
     ),
+}
+_SP_INCOMPLETE = {
+    "ru": "Черновик неполный: часть текста не влезла. Нажми «Заново».",
+    "en": "The draft is incomplete: part of the text did not fit. Tap «Start over».",
+}
+_SP_OUTDATED = {
+    "ru": "Это старое превью — черновик с тех пор изменился. Нажми кнопку под последним.",
+    "en": "This preview is outdated — the draft has changed since. Use the latest one.",
 }
 _SP_REDO_TEXT = {
     "ru": "📝 <b>Новая инструкция</b>\n\nЧерновик очищен. Пришли инструкцию сообщением.",
@@ -739,6 +749,15 @@ def _parse_lang_chat(callback: CallbackQuery) -> tuple[str, int | None]:
         return lang, None
 
 
+def _parse_rev(callback: CallbackQuery) -> int | None:
+    """The draft version a Save / «Start over» button was made for."""
+    parts = (callback.data or "").split(":")
+    try:
+        return int(parts[3])
+    except (ValueError, IndexError):
+        return None
+
+
 async def _sp_guard(callback: CallbackQuery, bot_config_repo: BotConfigRepository) -> bool:
     if not _is_private(callback):
         await callback.answer()
@@ -806,7 +825,14 @@ async def handle_chat_panel_sp_prompt(
         return
 
     await state.set_state(AdminStates.awaiting_system_prompt)
-    await state.update_data(sp_chat_id=chat_id, sp_lang=lang, sp_parts=[], sp_previews=[])
+    await state.update_data(
+        sp_chat_id=chat_id,
+        sp_lang=lang,
+        sp_parts=[],
+        sp_previews=[],
+        sp_rev=0,
+        sp_overflow=False,
+    )
     await callback.answer()
 
     title = row.get("chat_title")
@@ -850,12 +876,26 @@ async def handle_chat_panel_sp_input(
             await state.clear()
             return
 
+        rev = int(data.get("sp_rev") or 0)
+        if data.get("sp_overflow"):
+            # A part was already refused: anything added now would sit after a
+            # hole, and a preview of it would look complete.
+            await message.reply(
+                _SP_INCOMPLETE[lang],
+                reply_markup=system_prompt_confirm_keyboard(lang, chat_id, rev, can_save=False),
+            )
+            return
+
         parts = [*list(data.get("sp_parts") or []), [message.message_id, message.text or ""]]
         draft = _sp_draft(parts)
         if len(draft) > _SP_MAX_CHARS:
+            # Refusing this part alone would let a later, shorter part in and
+            # save a prompt with its middle missing. The whole draft is
+            # incomplete from here on, so Save goes away until «Start over».
+            await state.update_data(sp_overflow=True)
             await message.reply(
                 _SP_TOO_LONG[lang].format(n=len(draft), max=_SP_MAX_CHARS),
-                reply_markup=system_prompt_confirm_keyboard(lang, chat_id),
+                reply_markup=system_prompt_confirm_keyboard(lang, chat_id, rev, can_save=False),
             )
             return
 
@@ -871,8 +911,11 @@ async def handle_chat_panel_sp_input(
             f"{_SP_PREVIEW_TITLE[lang].format(n=len(draft))}\n"
             f"<blockquote expandable>{escape(draft)}</blockquote>\n\n{_SP_CONFIRM[lang]}"
         )
-        sent = await _send_split(message, html, system_prompt_confirm_keyboard(lang, chat_id))
-        await state.update_data(sp_parts=parts, sp_previews=[m.message_id for m in sent])
+        rev = message.message_id
+        sent = await _send_split(message, html, system_prompt_confirm_keyboard(lang, chat_id, rev))
+        await state.update_data(
+            sp_parts=parts, sp_previews=[m.message_id for m in sent], sp_rev=rev
+        )
 
 
 @router.callback_query(F.data.startswith("adm_pnl_spok:"))
@@ -894,6 +937,12 @@ async def handle_chat_panel_sp_save(
     user_id = callback.from_user.id if callback.from_user else 0
     async with _sp_locks[user_id]:
         found = await _sp_draft_for(state, chat_id)
+        if found is not None and found[0].get("sp_overflow"):
+            await callback.answer(_SP_INCOMPLETE[lang], show_alert=True)
+            return
+        if found is not None and _parse_rev(callback) != found[0].get("sp_rev"):
+            await callback.answer(_SP_OUTDATED[lang], show_alert=True)
+            return
         draft = found[1].strip() if found else ""
         if not draft:
             await callback.answer()
@@ -961,6 +1010,9 @@ async def handle_chat_panel_sp_redo(
                 chat_id,
             )
             return
+        if _parse_rev(callback) != found[0].get("sp_rev"):
+            await callback.answer(_SP_OUTDATED[lang], show_alert=True)
+            return
         here = callback.message.message_id if isinstance(callback.message, Message) else None
         for old_id in found[0].get("sp_previews") or []:
             if old_id == here or not isinstance(callback.message, Message):
@@ -969,7 +1021,7 @@ async def handle_chat_panel_sp_redo(
                 await bot.delete_message(chat_id=callback.message.chat.id, message_id=int(old_id))
             except Exception:
                 logger.debug("sp_preview_delete_failed", message_id=old_id)
-        await state.update_data(sp_parts=[], sp_previews=[])
+        await state.update_data(sp_parts=[], sp_previews=[], sp_rev=0, sp_overflow=False)
 
     await callback.answer()
     if isinstance(callback.message, Message):
@@ -991,13 +1043,18 @@ async def handle_chat_panel_sp_cancel(
 ) -> None:
     """Leave the editor without writing and return to the BEHAVIOR screen.
 
-    Clears the state even when the callback data is malformed: the way out
-    is the one thing this handler may never refuse.
+    Clears the state only when it is this chat's editor: an old screen's
+    «Cancel» must not close another chat's draft or another flow. Malformed
+    data still clears this editor -- the way out is the one thing this
+    handler may never refuse.
     """
     if not await _sp_guard(callback, bot_config_repo):
         return
     lang, chat_id = _parse_lang_chat(callback)
-    await state.clear()
+    if await state.get_state() == AdminStates.awaiting_system_prompt.state:
+        data = await state.get_data()
+        if chat_id is None or data.get("sp_chat_id") == chat_id:
+            await state.clear()
     await callback.answer()
     if chat_id is None:
         return
