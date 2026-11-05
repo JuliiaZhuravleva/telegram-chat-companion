@@ -375,6 +375,9 @@ def chats_list_keyboard(
         rows.append(
             [
                 title_btn,
+                # Settings for this chat: the same panel the main menu's chat
+                # picker opens, so the whitelist is not a dead end.
+                _numbered_button(i, "⚙️", f"adm_pnl_menu:{lang}:{chat_id_int}"),
                 _numbered_button(i, "❌", f"adm_wl_rm_ask:{lang}:{chat_id_int}:{page}"),
             ]
         )
