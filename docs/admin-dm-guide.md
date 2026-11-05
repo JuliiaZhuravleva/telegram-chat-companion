@@ -142,7 +142,8 @@ them all.
 ### The three lists
 
 **💬 Чаты / Chats** — currently whitelisted chats, five per page. Each row is a link to the
-chat plus a numbered ❌ that asks for confirmation and then **disables** the chat. This is a
+chat, a ⚙️ that opens that chat's settings panel (§9), and a numbered ❌ that asks for
+confirmation and then **disables** the chat. This is a
 soft switch: settings, history and knowledge base survive, the bot simply stops responding,
 and the chat can be re-approved later.
 
@@ -334,7 +335,14 @@ Pick a chat, get every option grouped into 💬 Behaviour, 🧩 Modules, 🎨 St
   re-prompted*, never clamped. Commands still work while the prompt is open, and the prompt
   carries a Cancel button — that is the way out, since an invalid value keeps the prompt
   active.
-- **Every other non-boolean option is read-only for now** (trigger words, prompt, chances,
+- **`Системный промпт` / system prompt** has its own editor (under «Поведение»): the current
+  instruction is shown in a collapsed quote, the new one is sent as a message — a long paste
+  that Telegram splits into several messages is joined back in `message_id` order — and a
+  preview is written to the database only on «Сохранить». `**bold**` and backticks that the
+  client turned into formatting are written back as Markdown, so what is saved is what was
+  typed. Buttons carry the draft's revision, so an old preview cannot be saved over a newer
+  draft; a draft over 12 000 characters cannot be saved until «Заново».
+- **Every other non-boolean option is read-only for now** (trigger words, chances,
   intervals, rules mode). They are displayed so the panel tells the whole truth about the
   chat; a generic editor for them is not built yet.
 - **`· inherited`** appears on an option whose per-chat value is unset. Thirteen of the 26
@@ -408,5 +416,4 @@ you navigate them.
   from the whitelist is not (it is a switch).
 - **No per-admin preferences.** Language and notification switches are shared.
 - **No broadcast.** There is no way to send a message to chats from the panel.
-- **No editing of the older per-chat options** (trigger words, system prompt, chances,
-  intervals) — those are read-only in the panel and set via config or the database.
+- **No editing of the older per-chat options** (trigger words, chances, intervals) — those are read-only in the panel and set via config or the database.

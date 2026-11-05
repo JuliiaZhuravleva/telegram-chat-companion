@@ -18,6 +18,8 @@ Configuration is loaded from three sources (later wins):
 | `OPENAI_PROJECT_ID` | No | Project (`proj_…`) the cost verification reports on. Required together with `OPENAI_ADMIN_API_KEY` — without it the costs endpoint answers organization-wide. Find it under [projects](https://platform.openai.com/settings/organization/projects) |
 | `GROK_API_KEY` | No | xAI Grok API key |
 | `DEEPSEEK_API_KEY` | No | DeepSeek API key |
+| `CUSTOM_EMOJI_BUTTONS` | No | Name of a custom emoji set whose pictures replace the leading emoji of buttons on the bot's own screens (admin panel, rules, help, knowledge base). Model replies, transcripts and summaries are never touched. A set belongs to the bot that uploaded it, so the dev bot and the production bot each need their own copy. Unset or unreadable: plain emoji, the bot starts as usual (`src/bot/custom_emoji.py`) |
+| `CUSTOM_EMOJI_MARKS` | No | The same for the emoji at the start of a line in those screens' text. Either variable alone is enough to switch the module on |
 
 ## YAML Configuration
 
