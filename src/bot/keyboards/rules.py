@@ -12,6 +12,8 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
+
 # ---------------------------------------------------------------------------
 # i18n labels
 # ---------------------------------------------------------------------------
@@ -66,7 +68,7 @@ def rules_chat_list_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=label,
+                    text=fence(label),
                     callback_data=f"ar_list:{lang}:{chat['chat_id']}:0",
                 ),
             ]

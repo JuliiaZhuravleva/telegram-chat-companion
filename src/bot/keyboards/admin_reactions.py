@@ -13,6 +13,7 @@ import math
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
 from src.bot.nav import back_callback, origin_suffix
 from src.bot.settings_fields import FIELDS_BY_KEY
 
@@ -34,7 +35,7 @@ def reactions_chat_picker_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=title,
+                    text=fence(title),
                     callback_data=f"adm_react_menu:{lang}:{chat_id}",
                 ),
             ]

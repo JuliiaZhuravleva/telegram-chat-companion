@@ -41,6 +41,7 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.bot.custom_emoji import fence
 from src.bot.nav import PANEL_ORIGIN
 from src.bot.settings_fields import FieldGroup, FieldSpec, FieldType, fields_by_group, group_label
 from src.models.chat_config import ChatConfig
@@ -166,7 +167,7 @@ def chat_panel_picker_keyboard(
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=text,
+                    text=fence(text),
                     callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
                 ),
             ]
@@ -205,7 +206,11 @@ def chat_panel_candidates_keyboard(
         chat_id = chat.get("chat_id")
         title = str(chat.get("chat_title") or chat_id)[:35]
         rows.append(
-            [InlineKeyboardButton(text=title, callback_data=f"adm_pnl_menu:{lang}:{chat_id}")]
+            [
+                InlineKeyboardButton(
+                    text=fence(title), callback_data=f"adm_pnl_menu:{lang}:{chat_id}"
+                )
+            ]
         )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
