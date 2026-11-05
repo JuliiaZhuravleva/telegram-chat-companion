@@ -31,3 +31,9 @@ class AdminStates(StatesGroup):
 
     # Knowledge Base: waiting for a forwarded message / @username to add an organizer
     awaiting_kb_organizer = State()
+
+    # Chat settings panel: waiting for a new per-chat system prompt. Its own
+    # state, not awaiting_setting_value: that one belongs to the tolerance
+    # flow, whose input handler parses a float and would answer a pasted
+    # prompt with "enter a number".
+    awaiting_system_prompt = State()
