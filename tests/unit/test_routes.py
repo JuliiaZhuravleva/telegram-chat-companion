@@ -243,9 +243,6 @@ RETIRED_WRITES_TODAY = frozenset(
         ("keyboards/admin.py", "adm_wl:"),
         ("keyboards/admin.py", "adm_wl_chats:"),
         ("keyboards/admin_chat_panel.py", "adm_kb_menu:"),
-        ("keyboards/admin_kb.py", "adm_kb:"),
-        ("keyboards/admin_kb.py", "adm_kb_menu:"),
-        ("keyboards/admin_kb.py", "adm_kb_toggle:"),
         ("keyboards/admin_sticker.py", "adm_stk_set:"),
         ("keyboards/rules.py", "adm_rules:"),
         ("screens/hub.py", "adm_kb:"),
@@ -293,7 +290,6 @@ INVALID_ALERTS_TODAY = {
     "handlers/access_card.py": 2,
     "handlers/admin.py": 10,
     "handlers/admin_defaults.py": 1,
-    "handlers/admin_kb.py": 7,
     "handlers/admin_sticker.py": 1,
     "handlers/rules.py": 1,
 }

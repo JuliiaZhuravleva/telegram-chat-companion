@@ -376,21 +376,29 @@ Rules are also gated by the per-chat `rules_enabled` switch on the chat settings
 
 ## A4 — Knowledge base organizers
 
-### A4.1 📚 Knowledge Base
+### A4.1 👥 Organizers
 
-Per-chat, so it starts with a chat picker.
-
-The per-chat menu has two things: the **organizer list** and the **kb_enabled** switch. The
-switch flips the *effective* value, so a chat that is on only because the global default says
-so turns off on the first tap, as one would expect.
+Reached from a chat's **🧠 Память** section (§A2), which also holds the knowledge base's
+on/off switch; **⬅️ Память** goes back there. There is no separate knowledge-base menu or
+chat picker any more.
 
 **Organizers** are the non-admin users allowed to write facts with `/remember` in that chat.
 Facts saved by an organizer carry a lower authority than facts saved by a bot admin, which is
 what decides who wins when two facts contradict.
 
-The organizers screen has two buttons: **➕ Добавить** and **👥 Из участников**.
+The screen lists them three per page, each as **✖️ {name}**. A tap removes that person at
+once — no confirmation — and the screen answers «✓ {name} больше не организатор» with
+**↩️ Вернуть**, which puts them back where they were in the list. The page you were on is
+kept. An empty list says so, and that bot admins can always save facts.
 
-**➕ Добавить** sends a prompt with a keyboard under the input field:
+**➕ Добавить** opens the chat's participants, four per page, most active first — the path
+that needs nothing from the admin's contacts. People already on the list carry **✓**; a tap
+on one of them only shows «Уже организатор». A tap on anyone else adds them and returns to
+the list, on the page where they landed, with «✓ {name} теперь организатор». Names come from
+Telegram and are cut with «…» to fit a phone-width button.
+
+**✏️ Нет в списке** on that screen sends the add prompt as a new message with a keyboard under
+the input field:
 
 1. **🔍 Найти в Telegram** opens Telegram's own person picker (`request_users`) — search
    by name or username across the admin's contacts and chats, the same as choosing whom to
@@ -399,20 +407,21 @@ The organizers screen has two buttons: **➕ Добавить** and **👥 Из 
    reports that the person is not in the chat now, they are added anyway with a ⚠️ line —
    an organizer may join later. Clients that cannot open the picker send the label as text;
    the bot answers with the alternatives below and keeps the prompt open.
-2. **Forward a message** from them. If Telegram hides the original sender (forward privacy),
-   the bot says exactly that and suggests the alternatives — it does not report "not found".
+2. **Forward a message** from them.
 3. **Send their `@username`.** There is no username lookup in the Bot API, so this only works
-   for usernames the bot has already recorded posting *in that chat*; "I know this username
-   but not from this chat" is reported as its own case.
+   for usernames the bot has already recorded posting *in that chat*.
 
-**✖️ Отмена** on that keyboard (or `/cancel`) ends the prompt. Every exit removes the
-keyboard. A pick made from a keyboard that outlived its prompt adds nobody and says so.
+When a forward or an `@username` names nobody the bot can add, the answer says which of four
+things happened — the forward hides its author (forward privacy), the forward came from a
+channel or a group rather than a person, the `@username` is known but not from this chat, or
+nobody by that name was found — with **👥 Из участников** and **✖️ Отмена** under it. The
+prompt stays open, so the next forward or `@username` is read too.
 
-**👥 Из участников** lists the five most active posters per page, by message count — the
-path that needs nothing from the admin's contacts.
-
-Removing an organizer is a single tap on their name in the list — no confirmation, since
-re-adding is trivial.
+Every way out of the prompt — an add, **✖️ Отмена** on either keyboard, a pick from the
+participant list, going back to the organizers — removes the keyboard on a short line of its
+own («✓ … теперь организатор.» or «Добавление организатора отменено.») and then sends the
+organizer list as a new message. `/cancel` ends the prompt too. A pick made from a keyboard
+that outlived its prompt adds nobody and says so.
 
 ---
 
