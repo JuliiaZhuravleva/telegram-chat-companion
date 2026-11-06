@@ -237,11 +237,7 @@ def test_every_written_prefix_is_routed():
     assert unknown == {}, "a keyboard writes a prefix routes.ROUTES does not know"
 
 
-RETIRED_WRITES_TODAY = frozenset(
-    {
-        ("keyboards/admin_chat_panel.py", "adm_kb_menu:"),
-    }
-)
+RETIRED_WRITES_TODAY: frozenset[tuple[str, str]] = frozenset()
 """Where a ``retired`` or ``compat`` prefix is still written on the base the
 areas start from. A ratchet: each area deletes its own pairs (and may then
 delete them here); nothing may add one. A retired write is a button that
@@ -393,7 +389,6 @@ ROUTER_ORDER = (
     "fsm_cancel",
     "admin_sticker",
     "admin_kb",
-    "admin_reactions",
     "admin_chat_panel",
     "admin_defaults",
     "access_card",

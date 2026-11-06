@@ -4,15 +4,9 @@ Every other chat screen is `Screen` data now (``src/bot/screens/chat.py``).
 The editor's prompt and preview are verbatim user text split over several
 messages, which a `Screen` does not model yet, so its three keyboards stay
 here.
-
-``chat_panel_root_keyboard`` is a shim, not a screen: the knowledge-base
-area's tests still feed its ``adm_kb_menu:`` link to the old KB sub-panel.
-It goes when that area drops the sub-panel.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -70,12 +64,3 @@ def system_prompt_confirm_keyboard(
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def chat_panel_root_keyboard(lang: str, *, chat_id: int, **_old: Any) -> InlineKeyboardMarkup:
-    """The old root's KB link row, alone. Shim for the KB area's tests; see the module docstring."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🧠 KB", callback_data=f"adm_kb_menu:{lang}:{chat_id}:p")]
-        ]
-    )

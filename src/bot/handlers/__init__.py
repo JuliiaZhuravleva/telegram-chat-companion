@@ -9,7 +9,6 @@ from src.bot.handlers.admin import router as admin_router
 from src.bot.handlers.admin_chat_panel import router as admin_chat_panel_router
 from src.bot.handlers.admin_defaults import router as admin_defaults_router
 from src.bot.handlers.admin_kb import router as admin_kb_router
-from src.bot.handlers.admin_reactions import router as admin_reactions_router
 from src.bot.handlers.admin_sticker import router as admin_sticker_router
 from src.bot.handlers.callbacks import router as callbacks_router
 from src.bot.handlers.chat_events import router as chat_events_router
@@ -46,15 +45,14 @@ from src.bot.screens.stale import router as stale_router
 #                        body decides to do nothing is indistinguishable from a
 #                        broken bot.
 #  3. admin_kb         — adm_kb_* callbacks + organizer-add reply handler.
-#  4. admin_reactions  — adm_react_* callbacks (R-D1).
-#  5. admin_chat_panel — adm_pnl_* callbacks (B-1; own prefix, no overlap).
-#  6. admin_defaults   — adm_defs_* / adm_defs_tgl_* callbacks (C-1; own prefix,
+#  4. admin_chat_panel — adm_pnl_* callbacks (B-1; own prefix, no overlap).
+#  5. admin_defaults   — adm_defs_* / adm_defs_tgl_* callbacks (C-1; own prefix,
 #                        replaces the placeholder that used to live in admin).
-#  7. access_card     — adm_approve: / adm_reject: from the access card DM
+#  6. access_card     — adm_approve: / adm_reject: from the access card DM
 #                        (moved out of admin; own prefixes, no overlap).
-#  8. admin           — its own commands + adm_ callbacks.
-#  9. rules           — ar_ callbacks + FSM state.
-# 10. stale           — the catch-all for every adm_/ar_ payload no router
+#  7. admin           — its own commands + adm_ callbacks.
+#  8. rules           — ar_ callbacks + FSM state.
+#  9. stale           — the catch-all for every adm_/ar_ payload no router
 #                        above took (retired, garbled, or not yet landed): it
 #                        shows the hub with "this button is out of date" instead
 #                        of leaving the button spinning. AFTER every router that
@@ -63,10 +61,10 @@ from src.bot.screens.stale import router as stale_router
 #                        adm_/ar_ (commands has kb_undo:/kb_view:, callbacks
 #                        help_*). Verified by `tests/unit/test_routes.py`, which
 #                        walks this tree with every known payload.
-# 11. commands        — /start /help /summary /remember /kb + kb_view:/kb_undo:.
-# 12. callbacks
-# 13. media           — voice / photo / sticker.
-# 14. message         — the generic `F.text` catch-all, and therefore LAST: it
+# 10. commands        — /start /help /summary /remember /kb + kb_view:/kb_undo:.
+# 11. callbacks
+# 12. media           — voice / photo / sticker.
+# 13. message         — the generic `F.text` catch-all, and therefore LAST: it
 #                       matches every group text message, so anything registered
 #                       after it is unreachable.
 #
@@ -87,7 +85,6 @@ install_container_alias(router)
 router.include_router(fsm_cancel_router)
 router.include_router(admin_sticker_router)
 router.include_router(admin_kb_router)
-router.include_router(admin_reactions_router)
 router.include_router(admin_chat_panel_router)
 router.include_router(admin_defaults_router)
 router.include_router(access_card_router)
