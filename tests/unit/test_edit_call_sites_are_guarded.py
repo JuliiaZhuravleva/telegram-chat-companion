@@ -59,10 +59,6 @@ DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
         "Message object to hand safe_edit_reply_markup); a message too old or already "
         "gone must not stop the value from being saved, so TelegramBadRequest is suppressed",
     ),
-    ("callbacks.py", "handle_summary_callback"): (
-        1,
-        "broad except that logs; summary refresh is best-effort",
-    ),
     ("progress.py", "finish"): (
         1,
         "turns the progress placeholder INTO the result, and must know whether that "

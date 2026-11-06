@@ -1,8 +1,15 @@
-"""Configurable daily AI spend limit — check and warn on overrun.
+"""Configurable daily AI spend limit — check, and tell the bot admins on overrun.
 
 The daily limit is stored in ``bot_config`` under the key
 ``daily_spend_limit_usd`` as a JSON number (e.g. ``1.5``).  When the key
-is absent or ``null`` the service is disabled and always returns ``None``.
+is absent or ``null`` the limit is off and nobody is told anything.
+
+An overrun goes to the bot admins as a card in their DM (``card.spend``), at
+most once per UTC day, and never into the chat whose message happened to tip
+the total over: the members there can do nothing about it, and the warning
+used to repeat under every reply for the rest of the day. The day the card
+went out is remembered in ``bot_config`` under ``spend_card_sent_day``, so a
+restart does not send it again.
 
 Example — set a $2/day limit via the admin bot-config API::
 
@@ -13,24 +20,27 @@ Example — set a $2/day limit via the admin bot-config API::
 
 from __future__ import annotations
 
-from datetime import timedelta
+import asyncio
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import structlog
 
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.response_log import ResponseLogRepository
+from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
 _DAILY_LIMIT_KEY = "daily_spend_limit_usd"
+SENT_DAY_KEY = "spend_card_sent_day"
+"""``bot_config`` key: the UTC date (``YYYY-MM-DD``) the spend card last went out."""
 
-# Localised warning templates.  Keys must match ChatConfig.language values.
-# Dynamic parts: {total} and {limit} — both plain floats, no HTML special chars.
-_WARNING_TEXT: dict[str, str] = {
-    "ru": "⚠️ Дневной лимит расходов на AI превышён: ${total:.4f} / ${limit:.4f} USD.",
-    "en": "⚠️ Daily AI spend limit exceeded: ${total:.4f} / ${limit:.4f} USD.",
-}
+# One process, many concurrent replies: without this, two replies finishing
+# together both read "not sent today" and every admin gets the card twice. A
+# module-level lock because the service itself is built per request.
+_CARD_LOCK = asyncio.Lock()
 
 
 class SpendLimitService:
@@ -81,18 +91,68 @@ class SpendLimitService:
             return None, today_total, False
         return limit, today_total, today_total > limit
 
-    async def get_warning_if_exceeded(self, lang: str = "ru") -> str | None:
-        """Return a localised warning string if the daily limit is exceeded.
+    async def notify_admins_if_exceeded(self, bot: Any, *, now: datetime | None = None) -> int:
+        """Send every bot admin the spend card if today's total is over the limit.
 
-        Returns ``None`` when the limit is not set, not yet exceeded, or on
-        any error.  Safe to call after every AI response.
+        At most once per UTC day. Returns how many admins received it, 0 when
+        nothing was due. Never raises: it runs after every AI reply.
+
+        The day is claimed BEFORE sending. If every send then fails (an admin
+        blocked the bot, Telegram is down), the card is lost for the day rather
+        than retried under every following reply — a retry on each message is
+        how one failure becomes a hundred attempts.
+
+        Cheap on the common path: once today's card is out, each call is one
+        ``bot_config`` read and no ``response_log`` aggregate.
         """
+        if bot is None:
+            return 0
+        today = (now or datetime.now(UTC)).date().isoformat()
         try:
-            limit, today_total, is_exceeded = await self.check()
-            if not is_exceeded or limit is None:
-                return None
-            template = _WARNING_TEXT.get(lang) or _WARNING_TEXT["ru"]
-            return template.format(total=float(today_total), limit=float(limit))
+            async with _CARD_LOCK:
+                if await self._bot_config.get(SENT_DAY_KEY) == today:
+                    return 0
+                limit, total, exceeded = await self.check()
+                if not exceeded or limit is None:
+                    return 0
+                admin_ids = parse_admin_ids(await self._bot_config.get("admin_ids"))
+                if not admin_ids:
+                    logger.warning("spend_card_no_admins", total=str(total), limit=str(limit))
+                    return 0
+                await self._bot_config.set(
+                    SENT_DAY_KEY, today, description="UTC day the spend card was last sent"
+                )
+                raw_settings = await self._bot_config.get("admin_settings")
         except Exception:
-            logger.warning("SpendLimitService.get_warning_if_exceeded failed")
-            return None
+            logger.warning("spend_card_check_failed", exc_info=True)
+            return 0
+
+        # Imported here: the screen package imports render, render imports
+        # reply_flow, and reply_flow imports this module.
+        from src.bot.screens import cards
+        from src.bot.screens.render import render_text, to_markup
+
+        screen = cards.spend_card(cards.admin_lang(raw_settings), total=total, limit=limit)
+        sent = 0
+        for admin_id in admin_ids:
+            try:
+                await bot.send_message(
+                    admin_id,
+                    render_text(screen),
+                    parse_mode="HTML",
+                    reply_markup=to_markup(screen),
+                )
+                sent += 1
+            except Exception as exc:
+                logger.warning(
+                    "spend_card_send_failed", admin_id=admin_id, error_type=type(exc).__name__
+                )
+        logger.info(
+            "spend_card_sent",
+            day=today,
+            sent=sent,
+            admins=len(admin_ids),
+            total=str(total),
+            limit=str(limit),
+        )
+        return sent

@@ -12,7 +12,6 @@ from aiogram.types import InlineKeyboardMarkup
 
 from src.database.repositories.bot_config import BotConfigRepository
 from src.utils import parse_admin_ids
-from src.utils.telegram import build_chat_url
 
 logger = structlog.get_logger(__name__)
 
@@ -136,21 +135,15 @@ class AbuseNotificationService:
         self,
         *,
         chat_id: int,
-        chat_title: str | None,
-        chat_type: str | None = None,
-        chat_username: str | None = None,
-        user_id: int | None,
-        user_first_name: str | None = None,
-        user_last_name: str | None = None,
-        user_username: str | None = None,
-        message_text: str | None = None,
-        reason: str = "message",
+        text: str,
         bot: Any = None,
         reply_markup: InlineKeyboardMarkup | None = None,
-        # Legacy compat
-        username: str | None = None,
     ) -> bool:
-        """Tell the admins a chat wants in. Returns whether anyone was told.
+        """Deliver an access card to every bot admin. Returns whether anyone got it.
+
+        The card is built by the caller (``src/bot/access_requests.py``, from
+        ``screens/cards.py``) in the admin's language; this service never
+        imports the screen layer.
 
         The return value is load-bearing, not decoration: there are three ways
         this sends nothing at all — no bot object, the `unauthorized`
@@ -168,19 +161,6 @@ class AbuseNotificationService:
         if not admin_ids:
             return False
 
-        text = self._format_unauthorized(
-            chat_id=chat_id,
-            chat_title=chat_title,
-            chat_type=chat_type,
-            chat_username=chat_username,
-            user_id=user_id,
-            user_first_name=user_first_name or username,
-            user_last_name=user_last_name,
-            user_username=user_username,
-            message_text=message_text,
-            reason=reason,
-        )
-
         sent = False
         for admin_id in admin_ids:
             try:
@@ -195,75 +175,10 @@ class AbuseNotificationService:
                 logger.warning(
                     "Failed to notify admin",
                     admin_id=admin_id,
+                    chat_id=chat_id,
                     error_type=type(exc).__name__,
                 )
         return sent
-
-    @staticmethod
-    def _format_unauthorized(
-        *,
-        chat_id: int,
-        chat_title: str | None,
-        chat_type: str | None,
-        chat_username: str | None,
-        user_id: int | None,
-        user_first_name: str | None,
-        user_last_name: str | None,
-        user_username: str | None,
-        message_text: str | None,
-        reason: str = "message",
-    ) -> str:
-        """Build the detailed HTML card for a chat waiting on approval.
-
-        The heading follows `reason`: a card produced by the bot being ADDED to
-        a chat is not an access *attempt*, and calling it one sends the admin
-        looking for a message that does not exist.
-        """
-        heading = (
-            "➕ <b>Bot added to a new chat</b>"
-            if reason == "added"
-            else "🔒 <b>Unauthorized access</b>"
-        )
-        lines: list[str] = [heading, ""]
-
-        # -- Chat info --
-        chat_label = escape(chat_title) if chat_title else str(chat_id)
-        # For private-chat unauthorized notifications, the "User" block below
-        # already carries a tg://user?id= link — suppress the duplicate here
-        # by not passing chat_type when it's "private".
-        url = build_chat_url(
-            chat_id,
-            chat_type if chat_type != "private" else None,
-            chat_username,
-        )
-        chat_display = f'<a href="{url}">{chat_label}</a>' if url else chat_label
-        if chat_type:
-            chat_display += f" ({escape(chat_type)})"
-        lines.append(f"<b>Chat:</b> {chat_display}")
-        lines.append(f"<b>Chat ID:</b> <code>{chat_id}</code>")
-
-        lines.append("")
-
-        # -- User info --
-        full_name = escape(user_first_name) if user_first_name else ""
-        if user_last_name:
-            full_name += f" {escape(user_last_name)}"
-        full_name = full_name.strip() or "unknown"
-
-        if user_id:
-            lines.append(f'<b>User:</b> <a href="tg://user?id={user_id}">{full_name}</a>')
-            lines.append(f"<b>User ID:</b> <code>{user_id}</code>")
-        else:
-            lines.append(f"<b>User:</b> {full_name}")
-
-        if user_username:
-            lines.append(f"<b>Username:</b> @{escape(user_username)}")
-
-        # -- Message preview --
-        if message_text:
-            lines.append(f"\n<b>Message:</b> {escape(message_text[:100])}")
-
-        return "\n".join(lines)
 
     async def notify_ai_fallback(
         self,

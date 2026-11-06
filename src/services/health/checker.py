@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import html as html_lib
 import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 import structlog
@@ -20,6 +21,10 @@ from src.services.health.diagnosis import hint_for
 from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
 from src.utils import parse_admin_ids
 from src.utils.telegram_text import split_html
+
+if TYPE_CHECKING:
+    from src.bot.screens.i18n import Lang
+    from src.bot.screens.model import Screen
 
 logger = structlog.get_logger(__name__)
 
@@ -91,6 +96,34 @@ def _fingerprint_of_rows(rows: list[dict[str, Any]]) -> set[str]:
     return fingerprints
 
 
+def _issue_text(issue: HealthIssue, lang: Lang, *, at: datetime) -> str:
+    """The problem line for the card, from the issue's facts; its message otherwise."""
+    from src.bot.screens import cards
+
+    if isinstance(issue, DbIssue):
+        return cards.db_down_line(lang, issue.cause)
+    if isinstance(issue, FallbackIssue):
+        return cards.fallback_line(lang, issue.count)
+    if isinstance(issue, AIFailureIssue):
+        return cards.failure_line(
+            lang,
+            task=issue.task,
+            count=issue.count,
+            provider=issue.provider,
+            since=issue.since,
+            at=at,
+        )
+    # A plain HealthIssue carries no facts to say again, only its text.
+    return issue.message
+
+
+def _admin_lang(config: dict[str, Any]) -> Lang:
+    """The admins' panel language from the loaded ``admin_settings``; Russian if unreadable."""
+    from src.bot.screens.cards import admin_lang
+
+    return admin_lang(config.get("admin_settings"))
+
+
 def _format_since(since: datetime) -> str:
     """Render how long a condition has been holding, compactly."""
     delta = datetime.now(UTC) - since
@@ -98,6 +131,113 @@ def _format_since(since: datetime) -> str:
     minutes = remainder // 60
     elapsed = f"{hours}h {minutes}m" if hours else f"{minutes}m"
     return f"{since.strftime('%d.%m %H:%M UTC')} ({elapsed})"
+
+
+# ---------------------------------------------------------------------------
+# The issues `_run_check` raises
+# ---------------------------------------------------------------------------
+#
+# Each carries the FACTS behind its message, so the card can say it in the
+# admin's language. The English `message` is unchanged and is still what
+# `health_log` stores and what a keyless fingerprint would fall back to; every
+# issue below has a key, so its fingerprint never reads the message at all.
+
+_DB_MESSAGES: Mapping[str, str] = {
+    "connection": "Database connectivity failed: connection unavailable",
+    "query": "Database connectivity failed: query error",
+    "unexpected": "Database connectivity failed: unexpected error",
+}
+
+
+@dataclass
+class DbIssue(HealthIssue):
+    """The database did not answer ``SELECT 1``."""
+
+    cause: str = "unexpected"  # connection / query / unexpected
+
+
+@dataclass
+class FallbackIssue(HealthIssue):
+    """The fallback provider answered in the window."""
+
+    count: int = 0
+
+
+@dataclass
+class AIFailureIssue(HealthIssue):
+    """Every provider for one task failed in the window."""
+
+    task: str = ""
+    count: int = 0
+    provider: str | None = None
+    since: datetime | None = None
+
+
+def db_issue(cause: str) -> DbIssue:
+    """The CRITICAL database issue for ``cause`` (connection / query / unexpected)."""
+    return DbIssue(
+        severity=HealthStatus.CRITICAL,
+        message=_DB_MESSAGES.get(cause, _DB_MESSAGES["unexpected"]),
+        key="db",
+        cause=cause,
+    )
+
+
+def fallback_issue(count: int) -> FallbackIssue:
+    """The fallback provider answered ``count`` times in the last 15 minutes."""
+    return FallbackIssue(
+        severity=HealthStatus.WARNING,
+        message=f"AI fallback activated {count} time(s) in last 15 min",
+        key="ai_fallback",
+        count=count,
+    )
+
+
+def ai_failure_issue(failure: Mapping[str, Any]) -> AIFailureIssue:
+    """One row of `HealthRepository.get_ai_failure_details` as an issue."""
+    task = failure["task_type"]
+    detail = failure.get("error_message")
+    provider = failure.get("provider")
+    since = failure.get("since")
+    # One issue per task, not one line listing every task: the
+    # provider's error and the advice differ per task, and a single
+    # merged line has nowhere to put either. It also gives each
+    # task its own de-duplication key, so transcription breaking
+    # while embeddings are already broken is a NEW alert rather
+    # than a silent change inside an existing one.
+    hint = hint_for(detail)
+    body = f"{provider}: {detail}" if provider and detail else detail
+    return AIFailureIssue(
+        severity=HealthStatus.WARNING,
+        message=(
+            f"AI calls failed outright in last 15 min: "
+            f"{task} x{failure['count']}"
+            + (f" ({provider})" if provider else "")
+            + (f", holding since {_format_since(since)}" if since else "")
+        ),
+        # The CAUSE is part of the identity, not just the task.
+        # With the task alone, credits running out and then the
+        # key being revoked six hours later are "the same
+        # problem": no new alert, and the notification still
+        # advises topping up an account that is now fine. The
+        # two components chosen are stable per cycle -- unlike
+        # the count, which is why the message cannot be used.
+        key=":".join(
+            part for part in ("ai_failure", task, failure.get("error_type"), hint) if part
+        ),
+        # Capped here as well as in the Gemini provider: this
+        # is where the value becomes a Telegram message, and
+        # the provider's own cap protects only its own errors.
+        # A 60 KB `error_message` from anywhere else would
+        # become sixteen sequential sends and meet flood
+        # control halfway through an alert.
+        detail=_clip(body),
+        hint=hint,
+        task=task,
+        count=int(failure["count"]),
+        provider=provider,
+        since=since,
+    )
 
 
 _HEALTHCHECK_FILE = Path("/tmp/healthcheck")
@@ -213,6 +353,7 @@ class HealthChecker:
             "health_alert_reminder_seconds",
             "health_recovery_confirm_checks",
             "admin_ids",
+            "admin_settings",
         ):
             val = await repo.get(key)
             if val is not None:
@@ -235,33 +376,15 @@ class HealthChecker:
         except asyncpg.InterfaceError:
             result.db_ok = False
             logger.error("Health check DB failed: connection interface error", exc_info=True)
-            result.issues.append(
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: connection unavailable",
-                    key="db",
-                )
-            )
+            result.issues.append(db_issue("connection"))
         except asyncpg.PostgresError:
             result.db_ok = False
             logger.error("Health check DB failed: PostgreSQL error", exc_info=True)
-            result.issues.append(
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: query error",
-                    key="db",
-                )
-            )
+            result.issues.append(db_issue("query"))
         except Exception:
             result.db_ok = False
             logger.error("Health check DB failed: unexpected error", exc_info=True)
-            result.issues.append(
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: unexpected error",
-                    key="db",
-                )
-            )
+            result.issues.append(db_issue("unexpected"))
 
         # 2. Message activity (metric only — no alert on inactivity)
         try:
@@ -276,15 +399,7 @@ class HealthChecker:
                 timedelta(minutes=15),
             )
             if result.fallbacks_15m > 0:
-                result.issues.append(
-                    HealthIssue(
-                        severity=HealthStatus.WARNING,
-                        message=(
-                            f"AI fallback activated {result.fallbacks_15m} time(s) in last 15 min"
-                        ),
-                        key="ai_fallback",
-                    )
-                )
+                result.issues.append(fallback_issue(result.fallbacks_15m))
         except Exception as exc:
             result.checks_degraded = True
             logger.warning("Failed to get fallback count", error_type=type(exc).__name__)
@@ -298,50 +413,7 @@ class HealthChecker:
         # every provider for the task was exhausted and the user got nothing.
         try:
             failures = await health_repo.get_ai_failure_details(timedelta(minutes=15))
-            for failure in failures:
-                task = failure["task_type"]
-                detail = failure.get("error_message")
-                provider = failure.get("provider")
-                since = failure.get("since")
-                # One issue per task, not one line listing every task: the
-                # provider's error and the advice differ per task, and a single
-                # merged line has nowhere to put either. It also gives each
-                # task its own de-duplication key, so transcription breaking
-                # while embeddings are already broken is a NEW alert rather
-                # than a silent change inside an existing one.
-                hint = hint_for(detail)
-                body = f"{provider}: {detail}" if provider and detail else detail
-                result.issues.append(
-                    HealthIssue(
-                        severity=HealthStatus.WARNING,
-                        message=(
-                            f"AI calls failed outright in last 15 min: "
-                            f"{task} x{failure['count']}"
-                            + (f" ({provider})" if provider else "")
-                            + (f", holding since {_format_since(since)}" if since else "")
-                        ),
-                        # The CAUSE is part of the identity, not just the task.
-                        # With the task alone, credits running out and then the
-                        # key being revoked six hours later are "the same
-                        # problem": no new alert, and the notification still
-                        # advises topping up an account that is now fine. The
-                        # two components chosen are stable per cycle -- unlike
-                        # the count, which is why the message cannot be used.
-                        key=":".join(
-                            part
-                            for part in ("ai_failure", task, failure.get("error_type"), hint)
-                            if part
-                        ),
-                        # Capped here as well as in the Gemini provider: this
-                        # is where the value becomes a Telegram message, and
-                        # the provider's own cap protects only its own errors.
-                        # A 60 KB `error_message` from anywhere else would
-                        # become sixteen sequential sends and meet flood
-                        # control halfway through an alert.
-                        detail=_clip(body),
-                        hint=hint,
-                    )
-                )
+            result.issues.extend(ai_failure_issue(failure) for failure in failures)
         except Exception as exc:
             result.checks_degraded = True
             logger.warning("Failed to get AI failure counts", error_type=type(exc).__name__)
@@ -399,13 +471,16 @@ class HealthChecker:
         # reminder. An unrecorded send is the safe direction -- it can repeat;
         # an unsent record cannot be recovered from.
         delivered = False
+        lang = _admin_lang(config)
         if decision == "recovered":
-            delivered = await self._send_alert(result, config, text=self._format_recovery(cleared))
+            delivered = await self._send_alert(
+                result, config, card=self._recovery_card(cleared, lang=lang)
+            )
         elif decision is not None:
             delivered = await self._send_alert(
                 result,
                 config,
-                text=self._format_alert(result, reminder=decision == "reminder"),
+                card=self._alert_card(result, lang=lang, reminder=decision == "reminder"),
             )
 
         result.alert_sent = delivered
@@ -463,8 +538,11 @@ class HealthChecker:
         last_alert: dict[str, Any] | None,
         *,
         manual: bool = False,
-    ) -> tuple[str | None, list[str]]:
-        """Decide whether to say anything. Returns (reason, cleared-messages).
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        """Decide whether to say anything. Returns (reason, cleared rows).
+
+        The cleared rows are the previous alert's stored issues, so the
+        all-clear can name each one by its key in the admin's language.
 
         Reason is "new" (the set of conditions changed), "reminder" (unchanged
         but old), "recovered" (all clear) or None (stay quiet).
@@ -514,11 +592,12 @@ class HealthChecker:
             held_for = now - self._clean_since
             if previous and self._clean_checks >= confirm and held_for >= confirm * interval:
                 cleared = [
-                    str(row.get("message", ""))
+                    row
                     for row in previous_rows
-                    if isinstance(row, dict)  # a legacy or hand-written row may not be
+                    # a legacy or hand-written row may not be a dict
+                    if isinstance(row, dict) and (row.get("message") or row.get("key"))
                 ]
-                return "recovered", [c for c in cleared if c]
+                return "recovered", cleared
             return None, []
 
         self._clean_checks = 0
@@ -555,14 +634,15 @@ class HealthChecker:
         result: HealthCheckResult,
         config: dict[str, Any],
         *,
-        text: str | None = None,
+        card: Screen | None = None,
     ) -> bool:
-        """Send alert to first admin via Telegram. True when it went out.
+        """Send the card to every bot admin. True when at least one admin got all of it.
 
         The return value is what `alert_sent` is recorded from: this channel
         can fail (flood control, a network blip) exactly when it is most
         needed, and a de-duplicator told "delivered" by a failed send goes
-        quiet for hours about a live problem.
+        quiet for hours about a live problem. One admin is enough to count as
+        told; an admin who blocked the bot must not hold the others hostage.
         """
         admin_ids = parse_admin_ids(config.get("admin_ids", ""))
         if not admin_ids:
@@ -572,92 +652,112 @@ class HealthChecker:
             logger.error("Health alert not sent: no admin_ids configured")
             return False
 
-        first_admin = admin_ids[0]
-        body = text if text is not None else self._format_alert(result)
+        if card is None:
+            card = self._alert_card(result, lang=_admin_lang(config))
 
-        try:
-            # Through `split_html`, because this message now carries a
-            # provider's error text, which is external and unbounded. A body
-            # over the limit is not a truncated alert -- it is NO alert, and
-            # the one time that matters is while something is already broken.
-            for piece in split_html(body):
-                await self._bot.send_message(
-                    first_admin,
-                    piece,
-                    parse_mode="HTML",
+        # Imported here: the screen package imports render, and render
+        # imports the reply path, which imports services.
+        from src.bot.screens.render import render_text, to_markup
+
+        # Through `split_html`, because this message carries a provider's
+        # error text, which is external and unbounded. A body over the limit
+        # is not a truncated alert -- it is NO alert, and the one time that
+        # matters is while something is already broken. The button goes on
+        # the last piece, under the text it refers to.
+        pieces = split_html(render_text(card))
+        markup = to_markup(card)
+        delivered = False
+        for admin_id in admin_ids:
+            try:
+                for index, piece in enumerate(pieces):
+                    last = index == len(pieces) - 1
+                    await self._bot.send_message(
+                        admin_id,
+                        piece,
+                        parse_mode="HTML",
+                        reply_markup=markup if last else None,
+                    )
+            except Exception as exc:
+                # The likeliest cause (rate limit under load) is exactly when
+                # the alert is most needed; the next admin is still tried.
+                logger.warning(
+                    "Failed to send health alert",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
                 )
-        except Exception as exc:
-            # The one that matters most: this is the channel that reports the bot
-            # is unhealthy, and the likeliest cause of it failing (rate limit
-            # under load) is exactly when the alert is most needed.
-            logger.warning(
-                "Failed to send health alert",
-                admin_id=first_admin,
-                error_type=type(exc).__name__,
-            )
-            return False
-        return True
+                continue
+            delivered = True
+        return delivered
 
     # ------------------------------------------------------------------
     # Formatting
     # ------------------------------------------------------------------
+    #
+    # The whole card is in the admin's language: the frame, and each problem
+    # line said from its facts (`cards.*_line`). What is stored and compared
+    # is untouched -- `health_log` keeps the English message, and every issue
+    # `_run_check` raises has a key, so the fingerprint never reads the text.
+    # The provider's own error (`detail`) is shown as it came.
 
     @staticmethod
-    def _format_recovery(cleared: list[str]) -> str:
-        """Format the all-clear, naming what stopped failing."""
+    def _recovery_card(
+        cleared: Sequence[Mapping[str, Any]], *, lang: Lang = "ru", at: datetime | None = None
+    ) -> Screen:
+        """The all-clear, naming what stopped failing."""
+        from src.bot.screens import cards
+
         lines = [
-            "\u2705 <b>Bot Health Recovered</b>",
-            f"<b>Time:</b> {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
+            cards.cleared_line(
+                lang, key=str(row.get("key") or ""), message=str(row.get("message") or "")
+            )
+            for row in cleared
         ]
-        if cleared:
-            lines.append("")
-            lines.append("<b>Cleared:</b>")
-            lines.extend(f"  \u2714\ufe0f {html_lib.escape(item)}" for item in cleared)
-        return "\n".join(lines)
+        # Two cleared issues of one kind (the db issue has one key for three
+        # causes) say the same line once.
+        unique = list(dict.fromkeys(line for line in lines if line))
+        return cards.recovered_card(lang, at=at or datetime.now(UTC), cleared=unique)
 
     @staticmethod
-    def _format_alert(result: HealthCheckResult, *, reminder: bool = False) -> str:
-        """Format HTML alert message for Telegram."""
-        status_emoji = {
-            HealthStatus.CRITICAL: "\U0001f6a8",
-            HealthStatus.WARNING: "\u26a0\ufe0f",
-            HealthStatus.HEALTHY: "\u2705",
-        }
-        emoji = status_emoji.get(result.status, "\u2753")
-        title = "Bot Health Alert" + (
-            " \u2014 \u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435"
-            if reminder
-            else ""
-        )
+    def _alert_card(
+        result: HealthCheckResult, *, lang: Lang = "ru", reminder: bool = False
+    ) -> Screen:
+        """The health card: what is wrong, since when, and the 💡 line."""
+        from src.bot.screens import cards
 
-        lines = [
-            f"{emoji} <b>{title}</b>",
-            f"<b>Status:</b> {result.status.value.upper()}",
-            f"<b>Time:</b> {result.checked_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        issues = [
+            cards.IssueLine(
+                critical=issue.severity == HealthStatus.CRITICAL,
+                message=_issue_text(issue, lang, at=result.checked_at),
+                detail=issue.detail,
+                hint=cards.hint_line(lang, issue.hint),
+            )
+            for issue in result.issues
         ]
-
-        if result.issues:
-            lines.append("")
-            lines.append("<b>Issues:</b>")
-            for issue in result.issues:
-                icon = "\U0001f525" if issue.severity == HealthStatus.CRITICAL else "\u26a0\ufe0f"
-                lines.append(f"  {icon} {html_lib.escape(issue.message)}")
-                if issue.detail:
-                    # Escaped but NOT wrapped in <code>: Telegram drops link
-                    # entities inside code spans, and a billing URL that is not
-                    # clickable is the detail this whole change exists to
-                    # deliver. A bare URL in plain text is auto-linked.
-                    lines.append(f"     {html_lib.escape(issue.detail)}")
-                if issue.hint:
-                    lines.append(f"     \U0001f4a1 {html_lib.escape(issue.hint)}")
-
-        lines.append("")
-        lines.append(
-            f"<i>Messages (30m): {result.messages_30m}"
-            f" | Fallbacks (15m): {result.fallbacks_15m}</i>",
+        return cards.health_card(
+            lang,
+            at=result.checked_at,
+            critical=result.status == HealthStatus.CRITICAL,
+            issues=issues,
+            messages_30m=result.messages_30m,
+            fallbacks_15m=result.fallbacks_15m,
+            reminder=reminder,
         )
 
-        return "\n".join(lines)
+    @classmethod
+    def _format_recovery(cls, cleared: Sequence[Mapping[str, Any]], *, lang: Lang = "ru") -> str:
+        """The all-clear as the HTML text that is sent."""
+        from src.bot.screens.render import render_text
+
+        return render_text(cls._recovery_card(cleared, lang=lang))
+
+    @classmethod
+    def _format_alert(
+        cls, result: HealthCheckResult, *, reminder: bool = False, lang: Lang = "ru"
+    ) -> str:
+        """The health card as the HTML text that is sent."""
+        from src.bot.screens.render import render_text
+
+        return render_text(cls._alert_card(result, lang=lang, reminder=reminder))
 
     # ------------------------------------------------------------------
     # Docker healthcheck file

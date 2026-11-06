@@ -384,6 +384,15 @@ class TestCopyIsHtmlSafe:
                     bad[f"{name}[{lang}]"] = offenders
         assert not bad, f"copy would be rejected by Telegram's HTML parser: {bad}"
 
+    def test_the_invalid_count_screen_parses_as_html(self) -> None:
+        """The refusal moved to a screen builder; the same guard follows it there."""
+        from src.bot.screens.entry import summary_invalid
+
+        for lang in ("ru", "en"):
+            text = summary_invalid(lang, user_id=1, low=20, high=1000).text
+            assert self._offending_tags(text) == [], text
+            assert "1000" in text
+
     def test_the_guard_itself_catches_the_original_string(self) -> None:
         """Negative control: the exact copy that shipped must be flagged."""
         original = "🤔 Не понял количество сообщений. Формат: /summary <число от 20 до 1000>."

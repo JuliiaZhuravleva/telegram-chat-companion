@@ -1,13 +1,14 @@
 """Tests for the access card: the DM an admin gets when an unknown chat adds the bot.
 
-The card's keyboards and its approve/reject handlers moved out of
-``keyboards/admin.py`` / ``handlers/admin.py`` unchanged; these are the tests
-that moved with them, plus the two shared operations the panel's requests
-screen calls (`approve_attempt`, `reject_attempt`).
+The card itself is built in ``screens/cards.py`` (its rows are checked by the
+screen rules over its samples); these are the handler tests — what a tap does
+to the card — plus the two shared operations the panel's requests screen
+calls (`approve_attempt`, `reject_attempt`).
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,11 +21,7 @@ from src.bot.handlers.access_card import (
     handle_reject_notification,
     reject_attempt,
 )
-from src.bot.keyboards.access_card import (
-    access_keyboard,
-    approved_notification_keyboard,
-    rejected_notification_keyboard,
-)
+from src.bot.screens import cards
 
 # Obviously-fake ids (this repo is public).
 CHAT_ID = -100
@@ -51,6 +48,10 @@ def _make_callback(data: str, user_id: int = 12345) -> MagicMock:
     inner_msg.delete = AsyncMock()
     inner_msg.chat = MagicMock()
     inner_msg.chat.type = "private"
+    inner_msg.chat.id = 500042
+    inner_msg.message_id = 7
+    inner_msg.date = datetime.now(UTC) - timedelta(minutes=5)
+    inner_msg.text = "🙏 Новый чат просит доступ"
     callback.message = inner_msg
     return callback
 
@@ -67,60 +68,6 @@ def _make_chat_settings_repo() -> AsyncMock:
 
 def _pending(**extra):
     return {"id": ATTEMPT_ID, "chat_id": CHAT_ID, "status": "pending", **extra}
-
-
-# ---------------------------------------------------------------------------
-# Keyboards
-# ---------------------------------------------------------------------------
-
-
-class TestAccessKeyboard:
-    def test_has_approve_and_reject(self):
-        kb = access_keyboard("ru", attempt_id=42)
-        callbacks = _get_callbacks(kb)
-        assert "adm_approve:ru:42" in callbacks
-        assert "adm_reject:ru:42" in callbacks
-
-    def test_english_labels(self):
-        kb = access_keyboard("en", attempt_id=1)
-        labels = _get_labels(kb)
-        assert any("Approve" in lab for lab in labels)
-        assert any("Reject" in lab for lab in labels)
-
-
-class TestNotificationStatusKeyboards:
-    def test_approved_keyboard_ru(self):
-        kb = approved_notification_keyboard("ru", CHAT_ID)
-        labels = _get_labels(kb)
-        assert any("Одобрено" in label for label in labels)
-
-    def test_approved_keyboard_en(self):
-        kb = approved_notification_keyboard("en", CHAT_ID)
-        labels = _get_labels(kb)
-        assert any("Approved" in label for label in labels)
-
-    def test_approved_keyboard_links_to_chat_panel(self):
-        """D-1: settings button deep-links straight to adm_pnl_menu: (ADR-0006
-        Decision 4) with the same chat_id, no picker step."""
-        kb = approved_notification_keyboard("ru", CHAT_ID)
-        callbacks = _get_callbacks(kb)
-        assert "adm_pnl_menu:ru:-100" in callbacks
-
-    def test_approved_keyboard_settings_label_both_languages(self):
-        """The label used to come from ``keyboards.admin._t("chat_panel")``; the
-        move inlined it, so pin both spellings."""
-        assert "⚙️ Настройки чата" in _get_labels(approved_notification_keyboard("ru", CHAT_ID))
-        assert "⚙️ Chat settings" in _get_labels(approved_notification_keyboard("en", CHAT_ID))
-
-    def test_rejected_keyboard_ru(self):
-        kb = rejected_notification_keyboard("ru")
-        labels = _get_labels(kb)
-        assert any("Отклонено" in label for label in labels)
-
-    def test_rejected_keyboard_en(self):
-        kb = rejected_notification_keyboard("en")
-        labels = _get_labels(kb)
-        assert any("Rejected" in label for label in labels)
 
 
 # ---------------------------------------------------------------------------
@@ -200,37 +147,62 @@ def test_panel_requests_use_the_same_operations():
 # ---------------------------------------------------------------------------
 
 
+def _sent_text(cb: MagicMock) -> str:
+    return cb.message.edit_text.await_args.args[0]
+
+
+def _sent_callbacks(cb: MagicMock) -> list[str]:
+    markup = cb.message.edit_text.await_args.kwargs["reply_markup"]
+    return [btn.callback_data for row in markup.inline_keyboard for btn in row]
+
+
 class TestApproveNotification:
     @pytest.mark.asyncio
-    async def test_approves_pending_attempt(self):
+    async def test_approves_and_redraws_the_card_with_a_status_line(self):
         cb = _make_callback("adm_approve:ru:42")
         admin_repo = _make_admin_repo()
-        admin_repo.get_attempt = AsyncMock(return_value=_pending())
+        admin_repo.get_attempt = AsyncMock(return_value=_pending(chat_title="Тестовый чат"))
         admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
         chat_settings_repo = _make_chat_settings_repo()
 
         await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
 
         admin_repo.approve_all_for_chat.assert_awaited_once_with(CHAT_ID)
-        chat_settings_repo.upsert.assert_awaited_once_with(CHAT_ID, enabled=True)
-        cb.message.edit_reply_markup.assert_awaited_once()
+        text = _sent_text(cb)
+        assert text.splitlines()[0] == "<i>✓ Одобрено</i>"
+        assert "Тестовый чат" in text, "the request stays readable under the status"
+        assert _sent_callbacks(cb) == ["adm_pnl_menu:ru:-100"]
+        assert cb.answer.await_args.args[0] == "Одобрено"
 
     @pytest.mark.asyncio
-    async def test_approved_keyboard_links_to_chat_settings_panel(self):
-        """D-1 regression: settings button after approve carries the right chat_id."""
-        cb = _make_callback("adm_approve:ru:42")
+    async def test_an_added_card_keeps_its_heading(self):
+        cb = _make_callback("adm_approve:en:42")
+        cb.message.text = "➕ Bot added to a new chat"
         admin_repo = _make_admin_repo()
         admin_repo.get_attempt = AsyncMock(return_value=_pending())
-        admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
-        chat_settings_repo = _make_chat_settings_repo()
 
-        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
+        await handle_approve_notification(cb, admin_repo, _make_chat_settings_repo(), is_admin=True)
 
-        keyboard = cb.message.edit_reply_markup.call_args.kwargs["reply_markup"]
-        assert "adm_pnl_menu:ru:-100" in _get_callbacks(keyboard)
+        assert _sent_text(cb).splitlines()[2].startswith("➕")
 
     @pytest.mark.asyncio
-    async def test_already_handled(self):
+    async def test_a_card_older_than_48_hours_keeps_its_text(self):
+        cb = _make_callback("adm_approve:ru:42")
+        cb.message.date = datetime.now(UTC) - access_card.TEXT_EDIT_WINDOW - timedelta(minutes=1)
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value=_pending())
+
+        await handle_approve_notification(cb, admin_repo, _make_chat_settings_repo(), is_admin=True)
+
+        cb.message.edit_text.assert_not_awaited()
+        markup = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
+        assert [b.callback_data for row in markup.inline_keyboard for b in row] == [
+            "adm_pnl_menu:ru:-100"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_second_tap_redraws_the_resolved_state_without_an_alert(self):
+        """Double tap: the request is approved already; show that, do not shout."""
         cb = _make_callback("adm_approve:ru:42")
         admin_repo = _make_admin_repo()
         admin_repo.get_attempt = AsyncMock(return_value={**_pending(), "status": "approved"})
@@ -238,9 +210,47 @@ class TestApproveNotification:
 
         await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
 
-        admin_repo.update_attempt_status.assert_not_awaited()
-        cb.answer.assert_awaited()
+        admin_repo.approve_all_for_chat.assert_not_awaited()
+        assert cb.answer.call_args.kwargs.get("show_alert") is not True
+        assert _sent_text(cb).startswith("<i>✓ Одобрено</i>")
+
+    @pytest.mark.asyncio
+    async def test_a_second_tap_on_an_unchanged_card_is_silent(self):
+        """Telegram says "not modified" when the card already shows this state."""
+        from aiogram.exceptions import TelegramBadRequest
+
+        cb = _make_callback("adm_approve:ru:42")
+        cb.message.edit_text = AsyncMock(
+            side_effect=TelegramBadRequest(method=MagicMock(), message="message is not modified")
+        )
+        cb.message.answer = AsyncMock()
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value={**_pending(), "status": "approved"})
+
+        await handle_approve_notification(cb, admin_repo, _make_chat_settings_repo(), is_admin=True)
+
+        cb.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_approve_on_a_card_rejected_from_the_panel_shows_rejected(self):
+        cb = _make_callback("adm_approve:ru:42")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value={**_pending(), "status": "rejected"})
+
+        await handle_approve_notification(cb, admin_repo, _make_chat_settings_repo(), is_admin=True)
+
+        assert _sent_callbacks(cb) == ["adm_wl_rejected:ru:0"]
+
+    @pytest.mark.asyncio
+    async def test_a_vanished_request_is_an_alert(self):
+        cb = _make_callback("adm_approve:ru:42")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value=None)
+
+        await handle_approve_notification(cb, admin_repo, _make_chat_settings_repo(), is_admin=True)
+
         assert cb.answer.call_args.kwargs.get("show_alert") is True
+        cb.message.edit_text.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_blocks_non_admin(self):
@@ -254,19 +264,23 @@ class TestApproveNotification:
         assert cb.answer.call_args.kwargs.get("show_alert") is True
 
     @pytest.mark.asyncio
-    async def test_garbled_attempt_id(self):
-        cb = _make_callback("adm_approve:ru:not-a-number")
+    @pytest.mark.parametrize("data", ["adm_approve:ru:not-a-number", "adm_approve:ru"])
+    async def test_garbled_payload_shows_the_stale_panel(self, data, monkeypatch):
+        cb = _make_callback(data)
         admin_repo = _make_admin_repo()
+        stale = AsyncMock()
+        monkeypatch.setattr(access_card, "show_stale", stale)
 
         await handle_approve_notification(cb, admin_repo, _make_chat_settings_repo(), is_admin=True)
 
         admin_repo.get_attempt.assert_not_awaited()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
+        stale.assert_awaited_once()
+        assert stale.await_args.args[1] == "ru"
 
 
 class TestRejectNotification:
     @pytest.mark.asyncio
-    async def test_rejects_pending_attempt(self):
+    async def test_rejects_and_redraws_the_card(self):
         cb = _make_callback("adm_reject:ru:42")
         admin_repo = _make_admin_repo()
         admin_repo.get_attempt = AsyncMock(return_value=_pending())
@@ -275,9 +289,8 @@ class TestRejectNotification:
         await handle_reject_notification(cb, admin_repo, is_admin=True)
 
         admin_repo.update_attempt_status.assert_awaited_once_with(42, "rejected")
-        cb.message.edit_reply_markup.assert_awaited_once()
-        keyboard = cb.message.edit_reply_markup.call_args.kwargs["reply_markup"]
-        assert _get_callbacks(keyboard) == ["noop"]
+        assert _sent_text(cb).startswith("<i>✓ Отклонено.")
+        assert _sent_callbacks(cb) == ["adm_wl_rejected:ru:0"]
 
     @pytest.mark.asyncio
     async def test_already_handled(self):
@@ -288,6 +301,7 @@ class TestRejectNotification:
         await handle_reject_notification(cb, admin_repo, is_admin=True)
 
         admin_repo.update_attempt_status.assert_not_awaited()
+        assert _sent_text(cb).startswith("<i>✓ Rejected.")
 
     @pytest.mark.asyncio
     async def test_blocks_non_admin(self):
@@ -297,3 +311,20 @@ class TestRejectNotification:
         await handle_reject_notification(cb, admin_repo, is_admin=False)
 
         admin_repo.get_attempt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_garbled_payload_shows_the_stale_panel(self, monkeypatch):
+        cb = _make_callback("adm_reject:en:x")
+        stale = AsyncMock()
+        monkeypatch.setattr(access_card, "show_stale", stale)
+
+        await handle_reject_notification(cb, _make_admin_repo(), is_admin=True)
+
+        stale.assert_awaited_once()
+        assert stale.await_args.args[1] == "en"
+
+
+def test_the_card_without_a_queue_row_has_no_buttons():
+    who = cards.Applicant(chat_id=CHAT_ID, chat_title="Тестовый чат")
+    assert cards.access_card("ru", who, attempt_id=None).rows == ()
+    assert cards.access_card("ru", who, attempt_id=ATTEMPT_ID).rows

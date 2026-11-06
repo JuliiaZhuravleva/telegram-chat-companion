@@ -133,6 +133,8 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_lang_set:": (LANG, LANG),
     "help_summary:": (UID, 500),
     "help_close:": (UID,),
+    "help_dm:": (LANG, "start"),
+    "help_callme:": (LANG, "acc"),
     "kb_view:": (LANG, PAGE),
     "kb_undo:": (INT4, UID),
 }
@@ -275,9 +277,7 @@ def test_the_retired_write_ratchet_says_no():
 
 
 _INVALID_RE = re.compile(r"""answer\(\s*["']Invalid (?:data|type|preset|chat ID)["']""")
-INVALID_ALERTS_TODAY = {
-    "handlers/access_card.py": 2,
-}
+INVALID_ALERTS_TODAY = {}
 """Untranslated ``"Invalid data"`` popups a live handler shows for a payload it
 cannot parse, on the base the areas start from. A payload a handler cannot
 parse is a stale button and owes the user `screens.stale.show_stale` — the
