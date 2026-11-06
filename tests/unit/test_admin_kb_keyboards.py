@@ -20,9 +20,8 @@ from src.bot.keyboards.admin_kb import (
     kb_org_add_prompt_keyboard,
     kb_organizer_picker_keyboard,
     kb_organizers_keyboard,
-    kb_undo_keyboard,
-    kb_view_keyboard,
 )
+from src.bot.keyboards.kb import kb_undo_keyboard, kb_view_keyboard
 from src.bot.nav import PANEL_ORIGIN
 
 CHAT_ID = -1001234567890

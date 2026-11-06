@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from collections.abc import Mapping
 from html import escape
 from typing import Any
 
@@ -79,6 +80,8 @@ from src.bot.keyboards.admin_chat_panel import (
     system_prompt_confirm_keyboard,
     tolerance_cancel_keyboard,
 )
+from src.bot.screens.deps import resolve
+from src.bot.screens.render import show_markup, with_notice
 from src.bot.settings_fields import FieldGroup, FieldType, field_by_code, group_label
 from src.bot.states.admin import AdminStates
 from src.bot.utils import check_admin_direct, safe_edit_text
@@ -331,9 +334,10 @@ async def render_chat_panel_group(
     return text, keyboard
 
 
-async def _render_picker(
-    callback: CallbackQuery, admin_repo: AdminRepository, lang: str, page: int
-) -> None:
+async def render_chat_picker(
+    admin_repo: AdminRepository, lang: str, page: int
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Text and keyboard of the chat picker (``adm_pnl:``), page clamped into range."""
     # C-1: most-active-first (msgs in the last rolling 24h), with a per-chat
     # counter in the caption -- otherwise the order looks arbitrary. Own
     # method (not the shared get_enabled_chats_page): KB/Reactions/whitelist
@@ -348,9 +352,61 @@ async def _render_picker(
     keyboard = chat_panel_picker_keyboard(
         chats, lang=lang, page=page, total=total, per_page=_PER_PAGE
     )
+    return text, keyboard
 
+
+async def _render_picker(
+    callback: CallbackQuery, admin_repo: AdminRepository, lang: str, page: int
+) -> None:
+    text, keyboard = await render_chat_picker(admin_repo, lang, page)
     if isinstance(callback.message, Message):
         await safe_edit_text(callback.message, text, reply_markup=keyboard)
+
+
+# ── Stable entries (other areas call these; signatures are shared) ─────────
+
+
+async def show_chat(
+    target: CallbackQuery | Message,
+    lang: str,
+    chat_id: int,
+    *,
+    notice: str | None = None,
+    data: Mapping[str, Any],
+) -> Message | None:
+    """Show one chat's root screen: edit in place for a button, a new message otherwise.
+
+    ``data`` is the calling handler's ``**kwargs``; the repositories come from
+    the request container in it (`screens.deps`). ``notice`` is plain text,
+    shown as the ``✓`` line above the screen. Renders through today's
+    `render_chat_panel`, so the screen looks exactly as the ``adm_pnl_menu:``
+    button shows it.
+    """
+    text, keyboard = await render_chat_panel(
+        await resolve(data, ChatSettingsRepository),
+        await resolve(data, BotConfigRepository),
+        await resolve(data, ChatConfigService),
+        _get_lang(lang),
+        chat_id,
+    )
+    return await show_markup(
+        target, with_notice(text, notice), keyboard, screen_id="chat", parse_mode="HTML"
+    )
+
+
+async def show_chats(
+    target: CallbackQuery | Message,
+    lang: str,
+    page: int = 0,
+    *,
+    notice: str | None = None,
+    data: Mapping[str, Any],
+) -> Message | None:
+    """Show the list of connected chats, the same way the ``adm_pnl:`` button does."""
+    text, keyboard = await render_chat_picker(
+        await resolve(data, AdminRepository), _get_lang(lang), page
+    )
+    return await show_markup(target, with_notice(text, notice), keyboard, screen_id="chats")
 
 
 async def _render_and_show_panel(

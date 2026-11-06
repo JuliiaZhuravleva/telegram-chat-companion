@@ -32,7 +32,7 @@ from typing import Any
 
 import structlog
 
-from src.bot.keyboards.admin import access_keyboard
+from src.bot.keyboards.access_card import access_keyboard
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.services.abuse.notifications import AbuseNotificationService

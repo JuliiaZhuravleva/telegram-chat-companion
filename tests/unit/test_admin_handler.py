@@ -9,7 +9,6 @@ import pytest
 
 from src.bot.handlers.admin import (
     handle_admin_command,
-    handle_approve_notification,
     handle_close,
     handle_health,
     handle_language_menu,
@@ -17,7 +16,6 @@ from src.bot.handlers.admin import (
     handle_menu,
     handle_notification_toggle,
     handle_notifications_menu,
-    handle_reject_notification,
     handle_stats,
     handle_sticker_notification_cycle,
     handle_wl_approve,
@@ -548,99 +546,6 @@ class TestWlRemove:
         await handle_wl_remove(cb, admin_repo, chat_settings_repo, is_admin=False)
 
         chat_settings_repo.set_field.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# adm_approve / adm_reject (notification) callbacks
-# ---------------------------------------------------------------------------
-
-
-class TestApproveNotification:
-    @pytest.mark.asyncio
-    async def test_approves_pending_attempt(self):
-        cb = _make_callback("adm_approve:ru:42")
-        admin_repo = _make_admin_repo()
-        admin_repo.get_attempt = AsyncMock(
-            return_value={"id": 42, "chat_id": -100, "status": "pending"}
-        )
-        admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
-        chat_settings_repo = _make_chat_settings_repo()
-
-        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
-
-        admin_repo.approve_all_for_chat.assert_awaited_once_with(-100)
-        chat_settings_repo.upsert.assert_awaited_once_with(-100, enabled=True)
-        cb.message.edit_reply_markup.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_approved_keyboard_links_to_chat_settings_panel(self):
-        """D-1 regression: settings button after approve carries the right chat_id."""
-        cb = _make_callback("adm_approve:ru:42")
-        admin_repo = _make_admin_repo()
-        admin_repo.get_attempt = AsyncMock(
-            return_value={"id": 42, "chat_id": -100, "status": "pending"}
-        )
-        admin_repo.approve_all_for_chat = AsyncMock(return_value=1)
-        chat_settings_repo = _make_chat_settings_repo()
-
-        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
-
-        keyboard = cb.message.edit_reply_markup.call_args.kwargs["reply_markup"]
-        callback_datas = [btn.callback_data for row in keyboard.inline_keyboard for btn in row]
-        assert "adm_pnl_menu:ru:-100" in callback_datas
-
-    @pytest.mark.asyncio
-    async def test_already_handled(self):
-        cb = _make_callback("adm_approve:ru:42")
-        admin_repo = _make_admin_repo()
-        admin_repo.get_attempt = AsyncMock(
-            return_value={"id": 42, "chat_id": -100, "status": "approved"}
-        )
-        chat_settings_repo = _make_chat_settings_repo()
-
-        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=True)
-
-        admin_repo.update_attempt_status.assert_not_awaited()
-        cb.answer.assert_awaited()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-    @pytest.mark.asyncio
-    async def test_blocks_non_admin(self):
-        cb = _make_callback("adm_approve:ru:42")
-        admin_repo = _make_admin_repo()
-        chat_settings_repo = _make_chat_settings_repo()
-
-        await handle_approve_notification(cb, admin_repo, chat_settings_repo, is_admin=False)
-
-        admin_repo.get_attempt.assert_not_awaited()
-
-
-class TestRejectNotification:
-    @pytest.mark.asyncio
-    async def test_rejects_pending_attempt(self):
-        cb = _make_callback("adm_reject:ru:42")
-        admin_repo = _make_admin_repo()
-        admin_repo.get_attempt = AsyncMock(
-            return_value={"id": 42, "chat_id": -100, "status": "pending"}
-        )
-        admin_repo.update_attempt_status = AsyncMock(return_value={"id": 42, "status": "rejected"})
-
-        await handle_reject_notification(cb, admin_repo, is_admin=True)
-
-        admin_repo.update_attempt_status.assert_awaited_once_with(42, "rejected")
-        cb.message.edit_reply_markup.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_already_handled(self):
-        cb = _make_callback("adm_reject:en:42")
-        admin_repo = _make_admin_repo()
-        admin_repo.get_attempt = AsyncMock(
-            return_value={"id": 42, "chat_id": -100, "status": "rejected"}
-        )
-
-        await handle_reject_notification(cb, admin_repo, is_admin=True)
-
-        admin_repo.update_attempt_status.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

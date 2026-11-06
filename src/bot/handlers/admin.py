@@ -25,8 +25,8 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
+from src.bot.handlers.access_card import approve_attempt, reject_attempt
 from src.bot.keyboards.admin import (
-    approved_notification_keyboard,
     chats_list_keyboard,
     confirm_delete_attempt_keyboard,
     confirm_remove_chat_keyboard,
@@ -37,12 +37,12 @@ from src.bot.keyboards.admin import (
     notifications_keyboard,
     pending_list_keyboard,
     rejected_list_keyboard,
-    rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
     wl_approved_keyboard,
 )
-from src.bot.utils import safe_edit_reply_markup, safe_edit_text
+from src.bot.screens.hub import show_hub
+from src.bot.utils import safe_edit_text
 from src.config import Settings
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -256,17 +256,14 @@ async def handle_admin_command(
     message: Message,
     admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    **kwargs: Any,
 ) -> None:
     """Show admin panel main menu (private chat only)."""
     if message.chat.type != "private":
         return
 
     lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
-    await message.answer(
-        _MENU_TITLE[lang],
-        parse_mode="HTML",
-        reply_markup=main_menu_keyboard(lang),
-    )
+    await show_hub(message, lang, data=kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -284,16 +281,7 @@ async def handle_menu(callback: CallbackQuery, **kwargs: Any) -> None:
     parts = (callback.data or "").split(":")
     lang = _get_lang(parts[1] if len(parts) > 1 else None)
 
-    await callback.answer()
-
-    msg = callback.message
-    if isinstance(msg, Message):
-        await safe_edit_text(
-            msg,
-            _MENU_TITLE[lang],
-            parse_mode="HTML",
-            reply_markup=main_menu_keyboard(lang),
-        )
+    await show_hub(callback, lang, data=kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -1518,125 +1506,6 @@ async def handle_wl_delete(
 
 
 # ---------------------------------------------------------------------------
-# Helpers: approve / reject logic
-# ---------------------------------------------------------------------------
-
-
-async def _do_approve(
-    admin_repo: AdminRepository,
-    chat_settings_repo: ChatSettingsRepository,
-    attempt_id: int,
-) -> dict[str, Any] | None:
-    """Approve attempt: update status + enable chat. Returns attempt or None."""
-    attempt = await admin_repo.get_attempt(attempt_id)
-    if not attempt or attempt.get("status") != "pending":
-        return None
-    chat_id = attempt["chat_id"]
-    await admin_repo.approve_all_for_chat(chat_id)
-    fields: dict[str, Any] = {"enabled": True}
-    if attempt.get("chat_title"):
-        fields["chat_title"] = attempt["chat_title"]
-    if attempt.get("chat_type"):
-        fields["chat_type"] = attempt["chat_type"]
-    await chat_settings_repo.upsert(chat_id, **fields)
-    return attempt
-
-
-async def _do_reject(
-    admin_repo: AdminRepository,
-    attempt_id: int,
-) -> dict[str, Any] | None:
-    """Reject attempt: update status. Returns attempt or None."""
-    attempt = await admin_repo.get_attempt(attempt_id)
-    if not attempt or attempt.get("status") != "pending":
-        return None
-    await admin_repo.update_attempt_status(attempt_id, "rejected")
-    return attempt
-
-
-# ---------------------------------------------------------------------------
-# Callback: approve/reject from notification messages
-# ---------------------------------------------------------------------------
-
-
-@router.callback_query(F.data.startswith("adm_approve:"))
-async def handle_approve_notification(
-    callback: CallbackQuery,
-    admin_repo: FromDishka[AdminRepository],
-    chat_settings_repo: FromDishka[ChatSettingsRepository],
-    **kwargs: Any,
-) -> None:
-    """Approve access from inline notification message."""
-    if not _guard_admin(kwargs, callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    try:
-        attempt_id = int(parts[2]) if len(parts) > 2 else None
-    except ValueError:
-        attempt_id = None
-
-    if attempt_id is None:
-        await callback.answer("Invalid data", show_alert=True)
-        return
-
-    attempt = await _do_approve(admin_repo, chat_settings_repo, attempt_id)
-    if attempt is None:
-        await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
-        return
-
-    await callback.answer(_WL_APPROVED[lang])
-
-    # Replace buttons with status indicator + settings-panel link (D-1)
-    msg = callback.message
-    if isinstance(msg, Message):
-        await safe_edit_reply_markup(
-            msg,
-            reply_markup=approved_notification_keyboard(lang, attempt["chat_id"]),
-        )
-
-
-@router.callback_query(F.data.startswith("adm_reject:"))
-async def handle_reject_notification(
-    callback: CallbackQuery,
-    admin_repo: FromDishka[AdminRepository],
-    **kwargs: Any,
-) -> None:
-    """Reject access from inline notification message."""
-    if not _guard_admin(kwargs, callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    try:
-        attempt_id = int(parts[2]) if len(parts) > 2 else None
-    except ValueError:
-        attempt_id = None
-
-    if attempt_id is None:
-        await callback.answer("Invalid data", show_alert=True)
-        return
-
-    attempt = await _do_reject(admin_repo, attempt_id)
-    if attempt is None:
-        await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
-        return
-
-    await callback.answer(_WL_REJECTED[lang])
-
-    # Replace buttons with status indicator
-    msg = callback.message
-    if isinstance(msg, Message):
-        await safe_edit_reply_markup(
-            msg,
-            reply_markup=rejected_notification_keyboard(lang),
-        )
-
-
-# ---------------------------------------------------------------------------
 # Callback: approve/reject from admin panel pending list
 # ---------------------------------------------------------------------------
 
@@ -1666,7 +1535,7 @@ async def handle_wl_approve(
         await callback.answer("Invalid data", show_alert=True)
         return
 
-    attempt = await _do_approve(admin_repo, chat_settings_repo, attempt_id)
+    attempt = await approve_attempt(admin_repo, chat_settings_repo, attempt_id)
     if attempt is None:
         await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
         return
@@ -1714,7 +1583,7 @@ async def handle_wl_reject(
         await callback.answer("Invalid data", show_alert=True)
         return
 
-    attempt = await _do_reject(admin_repo, attempt_id)
+    attempt = await reject_attempt(admin_repo, attempt_id)
     if attempt is None:
         await callback.answer(_WL_ALREADY_HANDLED[lang], show_alert=True)
         return

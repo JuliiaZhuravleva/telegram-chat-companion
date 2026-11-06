@@ -288,31 +288,6 @@ def costs_keyboard(lang: str, current_period: str = "24h") -> InlineKeyboardMark
 
 
 # ---------------------------------------------------------------------------
-# Unauthorized access approve/reject (sent in admin notifications)
-# ---------------------------------------------------------------------------
-
-
-def access_keyboard(lang: str, attempt_id: int) -> InlineKeyboardMarkup:
-    """Approve/reject buttons for unauthorized access notification."""
-    approve_label = {"ru": "✅ Одобрить", "en": "✅ Approve"}
-    reject_label = {"ru": "❌ Отклонить", "en": "❌ Reject"}
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=approve_label.get(lang, "Approve"),
-                    callback_data=f"adm_approve:{lang}:{attempt_id}",
-                ),
-                InlineKeyboardButton(
-                    text=reject_label.get(lang, "Reject"),
-                    callback_data=f"adm_reject:{lang}:{attempt_id}",
-                ),
-            ],
-        ]
-    )
-
-
-# ---------------------------------------------------------------------------
 # Shared: numbered list-item buttons
 # ---------------------------------------------------------------------------
 #
@@ -627,42 +602,6 @@ def wl_approved_keyboard(lang: str, chat_id: int, page: int) -> InlineKeyboardMa
                     callback_data=f"adm_wl_pending:{lang}:{page}",
                 ),
             ],
-        ]
-    )
-
-
-# ---------------------------------------------------------------------------
-# Notification status indicators (replace buttons after action)
-# ---------------------------------------------------------------------------
-
-
-def approved_notification_keyboard(lang: str, chat_id: int) -> InlineKeyboardMarkup:
-    """Status indicator + settings-panel link after approval (D-1).
-
-    Replaces the approve/reject buttons on the DM notification. ``chat_id``
-    is already known at approve time, so the settings button links straight
-    to the per-chat panel (ADR-0006 Decision 4) -- no picker step needed.
-    """
-    label = {"ru": "✅ Одобрено", "en": "✅ Approved"}
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text=label.get(lang, "✅ Approved"), callback_data="noop"),
-                InlineKeyboardButton(
-                    text=_t("chat_panel", lang),
-                    callback_data=f"adm_pnl_menu:{lang}:{chat_id}",
-                ),
-            ],
-        ]
-    )
-
-
-def rejected_notification_keyboard(lang: str) -> InlineKeyboardMarkup:
-    """Status indicator after rejection (replaces approve/reject buttons)."""
-    label = {"ru": "❌ Отклонено", "en": "❌ Rejected"}
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=label.get(lang, "❌ Rejected"), callback_data="noop")],
         ]
     )
 

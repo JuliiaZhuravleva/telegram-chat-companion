@@ -17,8 +17,8 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.keyboards.admin_kb import kb_undo_keyboard, kb_view_keyboard
 from src.bot.keyboards.help import help_keyboard
+from src.bot.keyboards.kb import kb_undo_keyboard, kb_view_keyboard
 from src.bot.progress import ProgressNotice
 from src.bot.utils import is_user_chat_admin, resolve_display_name, safe_edit_text
 from src.database.repositories.aliases import AliasRepository, AliasWriteOutcome

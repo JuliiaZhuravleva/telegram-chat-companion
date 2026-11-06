@@ -11,7 +11,7 @@ was a process restart, i.e. a deploy.
 Two properties make this an escape rather than another dialog:
 
 **It is included FIRST.** `handlers/__init__.py` decides which handler consumes
-an update, and the FSM-owning routers sit at positions 2, 3, 5 and 8. Measured
+an update, and the FSM-owning routers sit at positions 2, 3, 5 and 9. Measured
 with the real `main_router.propagate_event`: appended LAST, `/cancel` in
 `awaiting_rule_config` is eaten by the rules handler and answered "Невалидный
 JSON" -- the cancel handler never runs. At position 1 it fires in every state.

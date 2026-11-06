@@ -14,13 +14,14 @@ Callback routes (all DM-only, admin-only):
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from html import escape
 from typing import Any
 
 import structlog
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.custom_emoji import fence
@@ -33,6 +34,8 @@ from src.bot.keyboards.rules import (
     rules_chat_list_keyboard,
     rules_list_keyboard,
 )
+from src.bot.screens.deps import resolve
+from src.bot.screens.render import show_markup, with_notice
 from src.bot.states.admin import AdminStates
 from src.bot.utils import safe_edit_text
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -303,6 +306,37 @@ async def handle_rules_list(
             parse_mode="HTML",
             reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
         )
+
+
+async def render_rules(
+    rules_repo: RulesRepository, lang: str, chat_id: int, page: int = 0
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Text and keyboard of one chat's rules list (``ar_list:``)."""
+    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
+    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
+    text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
+    return text, rules_list_keyboard(lang, rules, page, total_pages, chat_id)
+
+
+async def show_rules(
+    target: CallbackQuery | Message,
+    lang: str,
+    chat_id: int,
+    *,
+    notice: str | None = None,
+    data: Mapping[str, Any],
+) -> Message | None:
+    """Show one chat's rules list (first page): edit in place, or a new message.
+
+    Stable entry other areas call; ``data`` is the calling handler's
+    ``**kwargs`` (`screens.deps`). Renders as the ``ar_list:`` button does.
+    """
+    text, keyboard = await render_rules(
+        await resolve(data, RulesRepository), _get_lang(lang), chat_id
+    )
+    return await show_markup(
+        target, with_notice(text, notice), keyboard, screen_id="rules", parse_mode="HTML"
+    )
 
 
 # ---------------------------------------------------------------------------

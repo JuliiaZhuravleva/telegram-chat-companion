@@ -37,3 +37,11 @@ class AdminStates(StatesGroup):
     # flow, whose input handler parses a float and would answer a pasted
     # prompt with "enter a number".
     awaiting_system_prompt = State()
+
+    # Rule builder (button-driven): the three steps that take typed input —
+    # the trigger words, the reply text, and a reaction typed as an emoji.
+    # Everything else the builder collects arrives by button and lives in
+    # FSM data, not in a state of its own.
+    awaiting_rule_words = State()
+    awaiting_rule_text = State()
+    awaiting_rule_react = State()

@@ -4,8 +4,6 @@ from unittest.mock import patch
 
 import src.bot.keyboards.admin as admin_kb
 from src.bot.keyboards.admin import (
-    access_keyboard,
-    approved_notification_keyboard,
     chats_list_keyboard,
     confirm_delete_attempt_keyboard,
     confirm_remove_chat_keyboard,
@@ -15,7 +13,6 @@ from src.bot.keyboards.admin import (
     notifications_keyboard,
     pending_list_keyboard,
     rejected_list_keyboard,
-    rejected_notification_keyboard,
     stats_keyboard,
     whitelist_menu_keyboard,
     wl_approved_keyboard,
@@ -131,20 +128,6 @@ class TestWhitelistMenuKeyboard:
         kb = whitelist_menu_keyboard("en")
         callbacks = _get_callbacks(kb)
         assert any("adm_menu:" in c for c in callbacks)
-
-
-class TestAccessKeyboard:
-    def test_has_approve_and_reject(self):
-        kb = access_keyboard("ru", attempt_id=42)
-        callbacks = _get_callbacks(kb)
-        assert "adm_approve:ru:42" in callbacks
-        assert "adm_reject:ru:42" in callbacks
-
-    def test_english_labels(self):
-        kb = access_keyboard("en", attempt_id=1)
-        labels = _get_labels(kb)
-        assert any("Approve" in lab for lab in labels)
-        assert any("Reject" in lab for lab in labels)
 
 
 class TestChatsListKeyboard:
@@ -485,35 +468,6 @@ class TestNumberedButtonSharedAcrossLists:
         with patch.object(admin_kb, "_numbered_button", wraps=admin_kb._numbered_button) as helper:
             admin_kb.chats_list_keyboard("ru", chats, page=0, total_pages=1, start_index=0)
         assert helper.called
-
-
-class TestNotificationStatusKeyboards:
-    def test_approved_keyboard_ru(self):
-        kb = approved_notification_keyboard("ru", -100)
-        labels = _get_labels(kb)
-        assert any("Одобрено" in label for label in labels)
-
-    def test_approved_keyboard_en(self):
-        kb = approved_notification_keyboard("en", -100)
-        labels = _get_labels(kb)
-        assert any("Approved" in label for label in labels)
-
-    def test_approved_keyboard_links_to_chat_panel(self):
-        """D-1: settings button deep-links straight to adm_pnl_menu: (ADR-0006
-        Decision 4) with the same chat_id, no picker step."""
-        kb = approved_notification_keyboard("ru", -100)
-        callbacks = _get_callbacks(kb)
-        assert "adm_pnl_menu:ru:-100" in callbacks
-
-    def test_rejected_keyboard_ru(self):
-        kb = rejected_notification_keyboard("ru")
-        labels = _get_labels(kb)
-        assert any("Отклонено" in label for label in labels)
-
-    def test_rejected_keyboard_en(self):
-        kb = rejected_notification_keyboard("en")
-        labels = _get_labels(kb)
-        assert any("Rejected" in label for label in labels)
 
 
 class TestWlApprovedKeyboard:
