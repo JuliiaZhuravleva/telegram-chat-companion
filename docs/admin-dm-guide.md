@@ -446,7 +446,9 @@ chat's language; every card follows the admins' panel language (🌐 Language, �
 | DM, `/help` or 📖 | 📖 **Что я умею** with **⬅️ Старт** back to the greeting |
 
 **📋 Саммари** posts a *new* summary under the help; the help itself stays, so it can be pressed
-again. A button whose data can no longer be read answers with a short toast in the chat's
+again once that summary is out. A press while a summary for the same help is still being made
+gets a short "Уже готовлю саммари…" toast and starts nothing, so a double tap is one paid call,
+not two. A button whose data can no longer be read answers with a short toast in the chat's
 language ("Эта кнопка устарела…") — these buttons are in front of ordinary members, so they
 never show the panel's stale screen.
 
@@ -481,8 +483,10 @@ an attempt (chat, user, first 200 characters of the message) and DMs every admin
 is headed ➕ **Бота добавили в новый чат**, because there is no message to go looking for. The
 group also gets one line from the bot — "Привет! Я начну работать, когда админ бота одобрит этот
 чат." — in the chat's language, so the person who added it is not left wondering. That line is
-not sent to channels, to a chat that was rejected before, or while the 30-minute card cooldown
-for that chat is running.
+not sent to channels, to a chat that was rejected before, while the 30-minute card cooldown
+for that chat is running, or when the request could not be filed at all (the bot cannot tell
+whether that chat was rejected, so it promises nothing). A request filed with a hitch — the
+admins got a card but its row or its buttons failed — still gets the line.
 
 Three things deliberately do NOT produce a card: a promotion inside a chat the bot is already
 in (member → administrator is not a new chat); re-adding the bot to a chat that is still
@@ -513,8 +517,11 @@ changes, are in §A1.2.
 line per problem — the provider's error and a 💡 hint under it when there is one — and the
 message and fallback counts. **📊 Состояние** opens the health screen (§A1.3). An unchanged
 problem is repeated as a reminder ("…всё ещё идут") at most every 6 hours, and when it clears
-for good the admins get 💚 **Бот снова здоров** naming what stopped failing. The card's frame is
-in the panel language; the problem lines are the checker's own wording, which is English today.
+for good the admins get 💚 **Бот снова здоров** naming what stopped failing. The whole card is
+in the panel language, problem lines and hints included: "База данных недоступна: нет
+соединения", "Запасной ИИ включался 7 раз за 15 минут", "Вызовы ИИ не прошли за 15 минут:
+расшифровка ×5 (gemini), с 03.11 12:00 UTC (2 ч 5 мин)". Only the provider's own error text under a line
+stays as the provider wrote it.
 
 **Spend.** When the day's AI spend passes the daily limit (`bot_config.daily_spend_limit_usd`;
 no limit set means no card), every bot admin gets

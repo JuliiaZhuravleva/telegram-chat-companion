@@ -9,6 +9,7 @@ import pytest
 
 from src.models.enums import ResponseType, TriggerType
 from src.services.ai.base import TranscriptionResult
+from src.services.costs.spend_limit import SpendLimitService
 from src.services.modules.voice.transcription import _HEADER_LABEL
 from src.services.relevancy.gate import GateDecision
 from src.services.text.pipeline import PipelineResult
@@ -416,17 +417,20 @@ async def test_the_transcript_pipeline_runs_at_most_once():
 
 @pytest.mark.asyncio
 async def test_post_send_bookkeeping_runs_for_a_voice_answer():
-    """finish_reply(): cost row, cooldown and the spend warning. The photo path
-    shipped without these once (TD-028); this path must not repeat it."""
+    """finish_reply(): cost row, cooldown and the spend check. The photo path
+    shipped without these once (TD-028); this path must not repeat it. The
+    check now DMs the admins a card and posts nothing into the chat."""
     deps = _make_voice_deps(transcript="привет бот", trigger_words=("бот",))
-    deps["spend_limit_svc"].get_warning_if_exceeded = AsyncMock(return_value="⚠️ over budget")
+    deps["spend_limit_svc"].notify_admins_if_exceeded = AsyncMock(return_value=1)
 
     await _run_voice_handler(deps)
 
     deps["pipeline"].post_send.assert_awaited_once()
     assert deps["pipeline"].post_send.call_args.kwargs["bot_message_id"] == 77
-    warned = [c for c in deps["message"].answer.await_args_list if "over budget" in str(c)]
-    assert warned, "the voice path never emitted the spend warning"
+    deps["spend_limit_svc"].notify_admins_if_exceeded.assert_awaited_once_with(deps["message"].bot)
+    # The transcription and the reply; nothing about spend reaches the chat.
+    sent = [str(c) for c in deps["message"].answer.await_args_list]
+    assert not [s for s in sent if "$" in s or "лимит" in s.lower() or "limit" in s.lower()], sent
 
 
 @pytest.mark.asyncio
@@ -469,8 +473,11 @@ def _permissive_gate():
 
 
 def _no_spend_warning():
-    svc = MagicMock()
-    svc.get_warning_if_exceeded = AsyncMock(return_value=None)
+    # spec_set: a renamed or removed method fails here instead of being
+    # silently re-created by MagicMock -- which is how three tests kept
+    # asserting a chat warning that no longer existed.
+    svc = MagicMock(spec_set=SpendLimitService)
+    svc.notify_admins_if_exceeded = AsyncMock(return_value=0)
     return svc
 
 
@@ -720,8 +727,7 @@ def _make_photo_deps(
     relevancy_gate.evaluate = AsyncMock(
         return_value=GateDecision(should_respond=True, tier="fast_rules", reason="test-allow")
     )
-    spend_limit_svc = MagicMock()
-    spend_limit_svc.get_warning_if_exceeded = AsyncMock(return_value=None)
+    spend_limit_svc = _no_spend_warning()
     abuse_checker = MagicMock()
     abuse_checker.is_in_cooldown = AsyncMock(return_value=False)
 
@@ -1352,14 +1358,17 @@ async def test_ai_chosen_sticker_is_sent_on_the_photo_path():
 @pytest.mark.asyncio
 async def test_spend_limit_warning_fires_on_the_photo_path():
     """A daily limit that silently does not apply to photo traffic is worse
-    than no limit — it still reads as enforced."""
+    than no limit — it still reads as enforced. The admins get the card;
+    the chat gets only the reply."""
     deps = _make_photo_deps(caption="look at this")
-    deps["spend_limit_svc"].get_warning_if_exceeded = AsyncMock(return_value="⚠️ over budget")
+    deps["spend_limit_svc"].notify_admins_if_exceeded = AsyncMock(return_value=1)
+    answers_before = deps["message"].answer.await_count
 
     await _run_photo_handler(deps)
 
-    warned = [call for call in deps["message"].answer.await_args_list if "over budget" in str(call)]
-    assert warned, "the photo path never emitted the spend warning"
+    deps["spend_limit_svc"].notify_admins_if_exceeded.assert_awaited_once_with(deps["message"].bot)
+    sent = [str(c) for c in deps["message"].answer.await_args_list[answers_before:]]
+    assert not [s for s in sent if "$" in s or "лимит" in s.lower() or "limit" in s.lower()], sent
 
 
 @pytest.mark.asyncio
@@ -1375,10 +1384,10 @@ async def test_spend_warning_is_checked_after_post_send_writes_the_cost_row():
 
     async def _record_spend_check(*_args, **_kwargs):
         order.append("spend_check")
-        return None
+        return 0
 
     deps["pipeline"].post_send = AsyncMock(side_effect=_record_post_send)
-    deps["spend_limit_svc"].get_warning_if_exceeded = AsyncMock(side_effect=_record_spend_check)
+    deps["spend_limit_svc"].notify_admins_if_exceeded = AsyncMock(side_effect=_record_spend_check)
 
     await _run_photo_handler(deps)
 

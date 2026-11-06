@@ -243,3 +243,53 @@ async def test_close_by_someone_else_is_refused() -> None:
 
     callback.message.delete.assert_not_awaited()
     assert "не для вас" in callback.answer.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_a_second_tap_while_the_first_runs_starts_no_second_summary() -> None:
+    """A summary is a paid call that takes seconds; a double tap paid twice."""
+    import asyncio
+
+    release = asyncio.Event()
+    service = MagicMock()
+
+    async def _slow(*_args: object, **_kwargs: object) -> str:
+        await release.wait()
+        return "<b>x</b>"
+
+    service.generate = AsyncMock(side_effect=_slow)
+    config = _make_chat_config(save_messages=True)
+    first, second = _make_callback(count=100), _make_callback(count=500)
+
+    running = asyncio.create_task(handle_summary_callback(first, config, service))
+    await asyncio.sleep(0)  # let the first press reach generate()
+    try:
+        # Bounded: without the guard the second press waits on the same
+        # unreleased model call, and the test must fail rather than hang.
+        await asyncio.wait_for(handle_summary_callback(second, config, service), timeout=2)
+    finally:
+        release.set()
+        await running
+
+    assert service.generate.await_count == 1
+    second.answer.assert_awaited_once_with("Уже готовлю саммари…")
+    second.message.answer.assert_not_awaited()
+
+    # Once it is done the button works again -- the claim is released.
+    third = _make_callback()
+    await handle_summary_callback(third, config, _summary_service("<b>y</b>"))
+    third.message.answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_raises_releases_the_button() -> None:
+    service = MagicMock()
+    service.generate = AsyncMock(side_effect=RuntimeError("model down"))
+    config = _make_chat_config(save_messages=True)
+
+    with pytest.raises(RuntimeError):
+        await handle_summary_callback(_make_callback(), config, service)
+
+    again = _summary_service("<b>x</b>")
+    await handle_summary_callback(_make_callback(), config, again)
+    again.generate.assert_awaited_once()

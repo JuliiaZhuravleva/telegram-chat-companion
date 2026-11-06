@@ -97,6 +97,22 @@ async def _matches(callback: Any, text: str, chat_type: str, *, is_admin: bool) 
     return passed
 
 
+async def _first_message_handler(router: Any, event: Message, **data: Any) -> Any:
+    """The callback aiogram would run for ``event``: own handlers first, then sub-routers."""
+    observer = router.message
+    passed, extra = await observer._handler.check(event, **data)
+    if passed:
+        for handler in observer.handlers:
+            matched, _ = await handler.check(event, **{**data, **extra})
+            if matched:
+                return handler.callback
+    for sub in router.sub_routers:
+        found = await _first_message_handler(sub, event, **data)
+        if found is not None:
+            return found
+    return None
+
+
 # ---------------------------------------------------------------------------
 # /start
 # ---------------------------------------------------------------------------
@@ -325,6 +341,29 @@ class TestAdminHintInGroup:
 
         names = [r.name for r in router.sub_routers]
         assert names.index("admin") < names.index("commands")
+
+    @pytest.mark.asyncio
+    async def test_a_group_admin_command_reaches_the_hint_across_the_whole_router(self) -> None:
+        """Walk the real router tree in aiogram's order and find who takes the update.
+
+        The filter tests above hold for this handler alone; whether the hint is
+        ever SENT depends on every router included before it. Today the
+        panel's own /admin handler (admin router, first in line) has no
+        chat-type filter, takes the group command and returns: that is the
+        panel's change to make, so this is an expected failure until it lands
+        and turns into a plain pass by itself afterwards.
+        """
+        from src.bot.handlers import admin as admin_handlers
+        from src.bot.handlers import router
+
+        event = _real_message("/admin", "supergroup")
+        taker = await _first_message_handler(
+            router, event, bot=_bot(), is_admin=True, raw_state=None
+        )
+
+        if taker is getattr(admin_handlers, "handle_admin_command", None):
+            pytest.xfail("the panel's /admin handler still takes group commands (area A1)")
+        assert taker is handle_admin_in_group, taker
 
 
 # ---------------------------------------------------------------------------

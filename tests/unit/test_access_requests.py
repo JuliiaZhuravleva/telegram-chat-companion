@@ -419,3 +419,52 @@ async def test_the_card_goes_out_in_the_admin_language_and_says_it_was_an_add() 
         "adm_approve:en:42",
         "adm_reject:en:42",
     ]
+
+
+@pytest.mark.asyncio
+async def test_what_the_applicant_typed_is_escaped_on_the_card() -> None:
+    """Name, surname, username, chat title and message are all theirs, not ours.
+
+    The card goes out with ``parse_mode=HTML``: an unescaped ``<`` in any of
+    them is either markup the stranger wrote into the admin's DM or, more
+    likely, a "can't parse entities" rejection -- no card at all.
+    """
+    admin_repo = AsyncMock()
+    admin_repo.has_rejected_attempt = AsyncMock(return_value=False)
+    admin_repo.log_unauthorized = AsyncMock(return_value=42)
+    admin_repo.get_admin_language = AsyncMock(return_value="ru")
+    config = AsyncMock()
+
+    async def _get(key: str) -> object:
+        return "500042" if key == "admin_ids" else None
+
+    config.get = AsyncMock(side_effect=_get)
+    service = AccessRequestService(
+        admin_repo=admin_repo,
+        bot_config_repo=config,
+        notifier=AbuseNotificationService(config),
+        cooldown=NotifyCooldown(),
+    )
+    bot = AsyncMock()
+
+    await service.submit(
+        AccessRequest(
+            chat_id=GROUP_ID,
+            chat_title="<i>T&T</i>",
+            chat_type="supergroup",
+            user_id=500001,
+            user_first_name="<b>Ann",
+            user_last_name="&Co</b>",
+            user_username="ann_<x>",
+            message_text='<a href="tg://x">hi</a> & bye',
+        ),
+        bot=bot,
+    )
+
+    text = bot.send_message.await_args.args[1]
+    for raw in ("<b>Ann", "&Co</b>", "<i>T&T</i>", "<x>", '<a href="tg://x">'):
+        assert raw not in text, raw
+    assert "&lt;b&gt;Ann &amp;Co&lt;/b&gt;" in text
+    assert "&lt;i&gt;T&amp;T&lt;/i&gt;" in text
+    assert "@ann_&lt;x&gt;" in text
+    assert "💬 &lt;a href=&quot;tg://x&quot;&gt;hi&lt;/a&gt; &amp; bye" in text

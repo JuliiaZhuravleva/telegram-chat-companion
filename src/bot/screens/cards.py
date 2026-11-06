@@ -17,10 +17,10 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from typing import Any, Final
 
-from src.bot.screens.i18n import Lang, Tr, lang_of
+from src.bot.screens.i18n import Lang, Tr, lang_of, plural_ru
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.routes import cb
 from src.utils.telegram import build_chat_url
@@ -208,6 +208,147 @@ _COUNTS: Final = Tr(
 )
 
 
+# The problem lines. The checker hands over FACTS -- which check, how many,
+# since when -- and the words are chosen here, in the admin's language. The
+# checker's own English message is still what ``health_log`` stores and what a
+# keyless fingerprint falls back to; it is not what the admin reads.
+_DB_DOWN: Final[Mapping[str, Tr]] = {
+    "connection": Tr(
+        "База данных недоступна: нет соединения", "The database is unreachable: no connection"
+    ),
+    "query": Tr(
+        "База данных недоступна: запросы не выполняются",
+        "The database is unreachable: queries fail",
+    ),
+    "unexpected": Tr(
+        "База данных недоступна: непредвиденная ошибка",
+        "The database is unreachable: an unexpected error",
+    ),
+}
+_FALLBACKS: Final = Tr(
+    "Запасной ИИ включался {count} {times} за 15 минут",
+    "The fallback AI stepped in {count} {times} in 15 min",
+)
+_FAILED_CALLS: Final = Tr(
+    "Вызовы ИИ не прошли за 15 минут: {task} ×{count}",
+    "AI calls failed outright in 15 min: {task} ×{count}",
+)
+_SINCE: Final = Tr(", с {since}", ", since {since}")
+_EMBEDDINGS: Final = Tr("эмбеддинги", "embeddings")
+_REPLIES: Final = Tr("ответы", "replies")
+# Both spellings: ``ai_failure_log`` says "embeddings"/"text_generation",
+# ``response_log`` says "embedding"/"text". An unknown task shows its raw name.
+_TASKS: Final[Mapping[str, Tr]] = {
+    "embeddings": _EMBEDDINGS,
+    "embedding": _EMBEDDINGS,
+    "transcription": Tr("расшифровка", "transcription"),
+    "vision": Tr("картинки", "images"),
+    "text_generation": _REPLIES,
+    "text": _REPLIES,
+}
+_CLEARED_DB: Final = Tr("База данных отвечает", "The database answers")
+_CLEARED_FALLBACK: Final = Tr(
+    "Основной ИИ отвечает без запасного", "The main AI answers without the fallback"
+)
+_CLEARED_TASK: Final = Tr("Вызовы ИИ проходят: {task}", "AI calls go through: {task}")
+# English for each of ``diagnosis``'s hints, keyed by the Russian text it
+# returns. Keyed by the text rather than given its own id because the hint is
+# part of the failure's de-duplication key: changing what ``diagnosis`` stores
+# would make every open failure alert once more. A hint missing here is shown
+# in Russian, and a unit test keeps that from happening.
+_HINT_EN: Final[Mapping[str, str]] = {
+    "Кредиты провайдера кончились — само не пройдёт, нужно пополнить "
+    "(Gemini: https://ai.studio/projects, вкладка Billing)": (
+        "Provider credits have run out — this will not pass by itself, top up "
+        "(Gemini: https://ai.studio/projects, the Billing tab)"
+    ),
+    "Ключ недействителен — перевыпустить и обновить секрет в vault": (
+        "The key is invalid — issue a new one and update the secret in the vault"
+    ),
+    "Ключу запрещён этот вызов — проверить, включён ли API в проекте": (
+        "The key may not make this call — check that the API is enabled in the project"
+    ),
+    "Выбрана суточная квота — пройдёт само после сброса (у Gemini это 11:00 по Тбилиси)": (
+        "The daily quota is used up — passes by itself after the reset "
+        "(11:00 Tbilisi time for Gemini)"
+    ),
+    "Минутная квота — пройдёт само; если держится, воркер бьёт пачкой": (
+        "The per-minute quota — passes by itself; if it holds, a worker is sending in bursts"
+    ),
+    "Похоже на биллинг, а не на скорость — проверить баланс проекта": (
+        "Looks like billing rather than rate — check the project balance"
+    ),
+}
+
+
+def _task(lang: Lang, task: str) -> str:
+    label = _TASKS.get(task)
+    return label(lang) if label else task
+
+
+def _held(lang: Lang, since: datetime, at: datetime) -> str:
+    """``03.11 14:05 UTC (2 ч 5 мин)``: when it started and how long it has held."""
+    seconds = max(int((at - since).total_seconds()), 0)
+    hours, minutes = seconds // 3600, seconds % 3600 // 60
+    if lang == "en":
+        elapsed = f"{hours}h {minutes}m" if hours else f"{minutes}m"
+    else:
+        elapsed = f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
+    return f"{since.strftime('%d.%m %H:%M UTC')} ({elapsed})"
+
+
+def db_down_line(lang: Lang, cause: str) -> str:
+    """The database check failed; ``cause`` is connection / query / unexpected."""
+    return _DB_DOWN.get(cause, _DB_DOWN["unexpected"])(lang)
+
+
+def fallback_line(lang: Lang, count: int) -> str:
+    """The fallback provider answered ``count`` times in the window."""
+    if lang == "en":
+        times = "time" if count == 1 else "times"
+    else:
+        times = plural_ru(count, "раз", "раза", "раз")
+    return _FALLBACKS(lang).format(count=count, times=times)
+
+
+def failure_line(
+    lang: Lang,
+    *,
+    task: str,
+    count: int,
+    provider: str | None,
+    since: datetime | None,
+    at: datetime,
+) -> str:
+    """Every provider for ``task`` failed ``count`` times; since when, measured at ``at``."""
+    line = _FAILED_CALLS(lang).format(task=_task(lang, task), count=count)
+    if provider:
+        line += f" ({provider})"
+    if since:
+        line += _SINCE(lang).format(since=_held(lang, since, at))
+    return line
+
+
+def hint_line(lang: Lang, hint: str | None) -> str | None:
+    """``diagnosis``'s advice in the admin's language (it is written in Russian)."""
+    if not hint or lang != "en":
+        return hint
+    return _HINT_EN.get(hint, hint)
+
+
+def cleared_line(lang: Lang, *, key: str, message: str) -> str:
+    """What stopped failing, from a stored issue's key; its message when the key is unknown."""
+    if key == "db":
+        return _CLEARED_DB(lang)
+    if key == "ai_fallback":
+        return _CLEARED_FALLBACK(lang)
+    if key.startswith("ai_failure:"):
+        task = key.split(":")[1]
+        if task:
+            return _CLEARED_TASK(lang).format(task=_task(lang, task))
+    return message
+
+
 @dataclass(frozen=True, slots=True)
 class IssueLine:
     """One problem on the health card."""
@@ -282,13 +423,19 @@ _SPEND_BODY: Final = Tr(
 _COSTS: Final = Tr("💰 Расходы", "💰 Costs")
 
 
-def _usd(amount: Decimal) -> str:
-    return f"{amount:.2f}"
+_CENT: Final = Decimal("0.01")
 
 
 def spend_card(lang: Lang, *, total: Decimal, limit: Decimal) -> Screen:
-    """Over the daily cap: how much, against what; the costs screen is one tap away."""
-    body = _SPEND_BODY(lang).format(total=_usd(total), limit=_usd(limit))
+    """Over the daily cap: how much, against what; the costs screen is one tap away.
+
+    The total is rounded up and the limit down, so a card that says "exceeded"
+    never shows two equal numbers: plain rounding prints $1.004 over $1.00 as
+    "$1.00 при лимите $1.00".
+    """
+    shown_total = total.quantize(_CENT, rounding=ROUND_CEILING)
+    shown_limit = limit.quantize(_CENT, rounding=ROUND_FLOOR)
+    body = _SPEND_BODY(lang).format(total=f"{shown_total:.2f}", limit=f"{shown_limit:.2f}")
     return Screen(
         id="card.spend",
         text=f"{_SPEND_TITLE(lang)}\n\n{body}",

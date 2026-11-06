@@ -41,6 +41,7 @@ _OLD_BUTTON = Tr(
     "This button is out of date. Send the command again.",
 )
 _GENERATING = Tr("⏳ Генерирую саммари…", "⏳ Generating the summary…")
+_SUMMARY_BUSY = Tr("Уже готовлю саммари…", "Already working on the summary…")
 _SUMMARY_FAILED = Tr("Не удалось создать саммари.", "Failed to generate summary.")
 _CLOSED = Tr("Закрыто", "Closed")
 _CALLME_TAKEN = Tr(
@@ -55,6 +56,12 @@ _CALLME_FAILED = Tr("Не смог сохранить, попробуйте ещ
 
 _SUMMARY_MIN = 20
 _SUMMARY_MAX = 1000
+
+# (chat id, message id) of the /help messages whose summary button is being
+# answered right now. A summary is a paid model call that takes seconds, and
+# a double tap -- or 100 and then 500 -- used to start two of them. In memory
+# and per process, like the thing it guards: a restart ends the call too.
+_SUMMARIES_IN_FLIGHT: set[tuple[int, int]] = set()
 
 
 def _chat_lang(chat_config: ChatConfig) -> str:
@@ -127,25 +134,34 @@ async def handle_summary_callback(
         await _old_button(callback, lang, why="no message")
         return
 
-    await callback.answer()
+    # Check and claim with no await in between, so two taps cannot both pass.
+    key = (msg.chat.id, msg.message_id)
+    if key in _SUMMARIES_IN_FLIGHT:
+        await callback.answer(_SUMMARY_BUSY(lang_of(lang)))
+        return
+    _SUMMARIES_IN_FLIGHT.add(key)
+    try:
+        await callback.answer()
 
-    # The thread id MUST come from TopicMiddleware's handler kwarg, which is
-    # None unless the chat is a real forum — reading it raw off the bot's own
-    # message picks up the thread id Telegram stamps on linked-channel
-    # discussion comments, silently narrowing the summary (TD-102).
-    async with ProgressNotice(msg, text=_GENERATING(lang_of(lang))) as notice:
-        html = await summary_service.generate(
-            msg.chat.id,
-            count=count,
-            language=lang,
-            message_thread_id=message_thread_id,
-            linked_channel_id=chat_config.linked_channel_id,
-        )
+        # The thread id MUST come from TopicMiddleware's handler kwarg, which is
+        # None unless the chat is a real forum — reading it raw off the bot's own
+        # message picks up the thread id Telegram stamps on linked-channel
+        # discussion comments, silently narrowing the summary (TD-102).
+        async with ProgressNotice(msg, text=_GENERATING(lang_of(lang))) as notice:
+            html = await summary_service.generate(
+                msg.chat.id,
+                count=count,
+                language=lang,
+                message_thread_id=message_thread_id,
+                linked_channel_id=chat_config.linked_channel_id,
+            )
 
-    if html:
-        await notice.finish(split_html(html), language=lang)
-    else:
-        await notice.fail(_SUMMARY_FAILED(lang_of(lang)))
+        if html:
+            await notice.finish(split_html(html), language=lang)
+        else:
+            await notice.fail(_SUMMARY_FAILED(lang_of(lang)))
+    finally:
+        _SUMMARIES_IN_FLIGHT.discard(key)
 
 
 # ---------------------------------------------------------------------------

@@ -7,7 +7,7 @@ what the handlers send. One sample per state that changes the rows.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Final
 
@@ -181,52 +181,96 @@ def access_no(lang: Lang) -> Screen:
     return cards.access_rejected(lang, _applicant(lang))
 
 
-_ISSUES: Final = {
-    "ru": (
-        cards.IssueLine(
-            critical=True,
-            message="Основной ИИ не отвечает",
-            detail="429: quota exceeded",
-            hint="Пополните баланс у провайдера, бот пока отвечает запасным",
-        ),
-        cards.IssueLine(critical=False, message="Эмбеддинги запаздывают на 40 минут"),
-    ),
-    "en": (
-        cards.IssueLine(
-            critical=True,
-            message="The main AI does not answer",
-            detail="429: quota exceeded",
-            hint="Top up the provider balance; the bot answers with the fallback meanwhile",
-        ),
-        cards.IssueLine(critical=False, message="Embeddings lag 40 minutes behind"),
-    ),
-}
+# The health samples go through the checker's own path -- the issues
+# `_run_check` raises, the real `diagnosis` hints, `HealthChecker`'s card
+# builders -- so the sheet shows the words an admin is actually sent. Only the
+# provider's error text is invented (the shape of a real one).
+_CREDITS_ERROR: Final = (
+    "429 RESOURCE_EXHAUSTED. Your prepayment credits are depleted. "
+    "Please go to AI Studio at https://ai.studio/projects to manage your project and billing."
+)
+_DAILY_ERROR: Final = "429 Quota exceeded for metric: generate_content requests per day"
 
 
-@sample("card.health", section="Карточки от бота", title="Сбой", nav="card")
+def _failure(task: str, count: int, error: str, *, held: timedelta) -> dict[str, object]:
+    """A row as `HealthRepository.get_ai_failure_details` returns it."""
+    return {
+        "task_type": task,
+        "count": count,
+        "provider": "gemini",
+        "error_type": "RateLimitError",
+        "error_message": error,
+        "since": _AT - held,
+    }
+
+
+def _health_card(lang: Lang, *issues: object, fallbacks: int, reminder: bool = False) -> Screen:
+    from src.services.health.checker import HealthChecker
+    from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
+
+    found = [i for i in issues if isinstance(i, HealthIssue)]
+    critical = any(i.severity == HealthStatus.CRITICAL for i in found)
+    result = HealthCheckResult(
+        status=HealthStatus.CRITICAL if critical else HealthStatus.WARNING,
+        checked_at=_AT,
+        db_ok=not critical,
+        messages_30m=0 if critical else 42,
+        fallbacks_15m=fallbacks,
+        issues=found,
+    )
+    return HealthChecker._alert_card(result, lang=lang, reminder=reminder)
+
+
+@sample("card.health", section="Карточки от бота", title="Сбой: база данных", nav="card")
 def health(lang: Lang) -> Screen:
-    return cards.health_card(
-        lang, at=_AT, critical=True, issues=_ISSUES[lang], messages_30m=42, fallbacks_15m=7
+    from src.services.health.checker import db_issue
+
+    return _health_card(lang, db_issue("connection"), fallbacks=0)
+
+
+@sample("card.health", section="Карточки от бота", title="Перебои: ИИ и подсказка", nav="card")
+def health_warning(lang: Lang) -> Screen:
+    from src.services.health.checker import ai_failure_issue, fallback_issue
+
+    return _health_card(
+        lang,
+        fallback_issue(7),
+        ai_failure_issue(
+            _failure("transcription", 5, _CREDITS_ERROR, held=timedelta(hours=2, minutes=5))
+        ),
+        fallbacks=7,
     )
 
 
 @sample("card.health", section="Карточки от бота", title="Перебои: напоминание", nav="card")
 def health_reminder(lang: Lang) -> Screen:
-    return cards.health_card(
+    from src.services.health.checker import ai_failure_issue
+
+    return _health_card(
         lang,
-        at=_AT,
-        critical=False,
-        issues=_ISSUES[lang][1:],
-        messages_30m=42,
-        fallbacks_15m=0,
+        ai_failure_issue(_failure("embeddings", 31, _DAILY_ERROR, held=timedelta(hours=6))),
+        fallbacks=0,
         reminder=True,
     )
 
 
 @sample("card.recovered", section="Карточки от бота", title="Снова здоров", nav="card")
 def recovered(lang: Lang) -> Screen:
-    cleared = (Tr("Основной ИИ отвечает", "The main AI answers")(lang),)
-    return cards.recovered_card(lang, at=_AT, cleared=cleared)
+    from src.services.health.checker import (
+        HealthChecker,
+        _issue_row,
+        ai_failure_issue,
+        fallback_issue,
+    )
+
+    stored = [
+        _issue_row(issue)
+        for issue in (
+            ai_failure_issue(_failure("transcription", 5, _CREDITS_ERROR, held=timedelta(0))),
+            fallback_issue(7),
+        )
+    ]
+    return HealthChecker._recovery_card(stored, lang=lang, at=_AT)
 
 
 @sample("card.spend", section="Карточки от бота", title="Дневной лимит превышен", nav="card")

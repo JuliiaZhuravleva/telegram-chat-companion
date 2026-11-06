@@ -48,11 +48,18 @@ _WHITELISTABLE_CHAT_TYPES = frozenset({"group", "supergroup", "channel"})
 # Where the bot says hello on joining an unapproved chat. Not a channel: a
 # channel post goes out to every subscriber under the channel's name.
 _GREETED_CHAT_TYPES = frozenset({"group", "supergroup"})
-# `submit()` outcomes after which the chat hears nothing. "cooldown": the bot
-# was removed and re-added inside the window — one hello per window, as one
-# admin card. "rejected": an admin already said no, and the bot stays silent
-# there; telling that chat "wait for approval" would be a promise nobody keeps.
-_NO_GREETING = frozenset({"cooldown", "rejected"})
+# `submit()` outcomes after which the chat is told "wait for approval": the
+# ones where the rejection check RAN and passed, so the promise can be kept.
+# None is the happy path. "db_error": the queue row failed, but the admins got
+# the card and the chat is filed again by the next message in it.
+# "keyboard_error": the row is in the panel's list, only the card's buttons
+# are missing. An allow-list, so an outcome added later is silent until
+# someone decides otherwise. Silent: "cooldown" (removed and re-added inside
+# the window — one hello per window, as one admin card), "rejected" (an admin
+# already said no; "wait for approval" would be a promise nobody keeps) and
+# "error" (submit failed before or during the rejection check, so the chat may
+# be a rejected one, and possibly no admin was told).
+_GREET_AFTER: frozenset[str | None] = frozenset({None, "db_error", "keyboard_error"})
 
 # What a supergroup re-key leaves on the OLD chat_id, named in full so the gap
 # is a log field rather than an assumption. `custom_rules` was silently in this
@@ -128,8 +135,9 @@ async def handle_my_chat_member(
 
     When a request is filed for a group, the group itself hears one line —
     "I will start once the bot's admin approves this chat" — unless the chat
-    is a channel, was rejected before, or is inside the notification cooldown
-    (see ``_GREETED_CHAT_TYPES`` and ``_NO_GREETING``).
+    is a channel, was rejected before, is inside the notification cooldown, or
+    the request could not be filed at all (see ``_GREETED_CHAT_TYPES`` and
+    ``_GREET_AFTER``).
     """
     chat = event.chat
     status = event.new_chat_member.status
@@ -187,7 +195,7 @@ async def handle_my_chat_member(
         if (
             requested
             and (chat.type or "") in _GREETED_CHAT_TYPES
-            and result.suppressed not in _NO_GREETING
+            and result.suppressed in _GREET_AFTER
         ):
             greeted = await _greet(bot, chat.id, row.get("language") if row else None)
 

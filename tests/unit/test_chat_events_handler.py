@@ -264,9 +264,11 @@ class TestGreetingOnJoin:
         access.submit.assert_awaited_once()
         bot.send_message.assert_not_awaited()
 
-    @pytest.mark.parametrize("suppressed", ["rejected", "cooldown"])
+    @pytest.mark.parametrize("suppressed", ["rejected", "cooldown", "error"])
     @pytest.mark.asyncio
     async def test_a_rejected_or_cooling_chat_hears_nothing(self, suppressed: str) -> None:
+        """On "error" submit failed before the rejection check could answer,
+        so the chat may be one an admin already rejected."""
         repo, config_service = _make_repos()
         bot = self._bot()
 
@@ -275,6 +277,20 @@ class TestGreetingOnJoin:
         )
 
         bot.send_message.assert_not_awaited()
+
+    @pytest.mark.parametrize("suppressed", ["db_error", "keyboard_error"])
+    @pytest.mark.asyncio
+    async def test_a_request_filed_with_a_hitch_still_greets(self, suppressed: str) -> None:
+        """The rejection check passed and the admins got a card (one without
+        buttons), so "wait for approval" is still true."""
+        repo, config_service = _make_repos()
+        bot = self._bot()
+
+        await handle_my_chat_member(
+            _make_member_update("member"), repo, config_service, self._access(suppressed), bot
+        )
+
+        bot.send_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_an_approved_chat_or_a_promotion_hears_nothing(self) -> None:

@@ -709,8 +709,11 @@ language variants of every scope — so it is a release decision, not a refactor
   `Command("admin", "settings")` + group/supergroup + `IsAdmin()` in the `commands` router,
   which is included after `admin`. The panel's own `/admin` handler has no chat-type filter
   today, so it consumes the group update and returns; the hint becomes reachable once that
-  handler gets its private-chat filter (§A1). `tests/unit/test_commands_entry.py` pins both the
-  hint's filters and the router order, so it holds as soon as both changes are in.
+  handler gets its private-chat filter (§A1). `tests/unit/test_commands_entry.py` pins the
+  hint's filters and the router order, and also walks the **real** router tree with a group
+  `/admin` from a bot admin to see which handler takes it. That walk is an `xfail` naming §A1
+  while the panel's handler is the taker, and turns into a plain pass the moment the filter
+  lands — no edit needed here.
 - **Public buttons answer an unreadable payload with a toast, not `show_stale`.**
   `help_summary:`, `help_close:`, `help_dm:` and `help_callme:` sit in front of ordinary
   members; the stale screen is the admin panel. They log `public_button_unreadable` and answer
@@ -718,7 +721,11 @@ language variants of every scope — so it is a release decision, not a refactor
   `adm_approve:` / `adm_reject:` are admin buttons and *do* call `show_stale`.
 - **`help_summary:` posts a new message** through `ProgressNotice` and `split_html`; it no longer
   edits the help into a summary, so the old continuation tracking (`_CONTINUATIONS`) and
-  `summary_keyboard` are gone with their tests.
+  `summary_keyboard` are gone with their tests. A summary is a paid call that takes seconds,
+  so the handler claims `(chat id, help message id)` in the module-level
+  `_SUMMARIES_IN_FLIGHT` set — checked and added with no `await` in between — and releases
+  it in a `finally`. A second press on the same help while the first runs gets the
+  `_SUMMARY_BUSY` toast and calls no model. Per process, like the call it guards.
 - **`/summary` with an unreadable or too large count** (`/summary abc`, `/summary 5000`) answers
   `summary.invalid` and calls no model; a count under 20 keeps its one-line "too few" reply.
 
@@ -727,8 +734,12 @@ language variants of every scope — so it is a release decision, not a refactor
 `handle_my_chat_member` posts `entry.group_added` into the chat after
 `AccessRequestService.submit` when all of these hold: the update is a join, the chat is
 whitelistable and not already enabled (so a request was actually filed), the chat type is
-`group` or `supergroup` (never a channel), and `submit`'s `suppressed` is neither
-`"cooldown"` nor `"rejected"`. The language is the chat row's `language`. A failed send is
+`group` or `supergroup` (never a channel), and `submit`'s `suppressed` is in the allow-list
+`_GREET_AFTER`: `None`, `"db_error"` (the row failed, the card went out) or
+`"keyboard_error"` (the row is queued, the card has no buttons) — in those the rejection
+check ran and passed, so "wait for approval" is true. `"cooldown"`, `"rejected"` and
+`"error"` (submit raised, possibly before the rejection check) stay silent, and so does any
+outcome added later until someone puts it on the list. The language is the chat row's `language`. A failed send is
 logged as `group_added_greeting_failed` and swallowed — the card to the admins is the part
 that matters, and it has already gone out.
 
@@ -766,11 +777,25 @@ after `post_send` has written the reply's own cost row. Nothing is posted into t
 **Health card.** `_send_alert` renders `cards.health_card` / `cards.recovered_card` in the
 language from `admin_settings` (now part of `_load_config`), splits the text with `split_html`
 and puts the 📊 button on the last piece. It returns True when at least one admin got every
-piece, and `alert_sent` is recorded from that. The issue lines are passed through unchanged
-from `_run_check` / `diagnosis`: the fingerprint falls back to an issue's **message** when it
-has no `key`, so rewording a message makes that issue look new once after the deploy. This
-change rewords only the frame (title, counts, button), not any issue message, so it causes no
-extra alert; a future change to issue wording will cause exactly one per open keyless issue.
+piece, and `alert_sent` is recorded from that.
+
+The whole card is in the admin language, and **what is stored and compared did not change**.
+`_run_check` builds its issues with `db_issue`, `fallback_issue` and `ai_failure_issue`:
+`HealthIssue` subclasses (`DbIssue`, `FallbackIssue`, `AIFailureIssue`) that keep the exact
+English `message`, the same `key`, `detail` and `hint` as before, and additionally carry the
+facts — the cause, the count, the task, the provider, since when. `_issue_text` words the line
+from those facts through `cards.db_down_line` / `fallback_line` / `failure_line`; a plain
+`HealthIssue` shows its message. Hints come from `diagnosis.hint_for` in Russian and are part
+of the `ai_failure:…` key, so they are never reworded at the source: `cards.hint_line` looks
+the English one up in `_HINT_EN`, keyed by the Russian text, and
+`test_every_diagnosis_hint_has_an_english_line` fails when a hint is added without one.
+`detail` is the provider's own error and is shown as is. The recovery card is worded from the
+**stored key** of each cleared issue (`cards.cleared_line`: `db`, `ai_fallback`,
+`ai_failure:<task>`); a key it does not know shows the stored message. `_issue_row` stores
+the same fields as before (the facts are not persisted), and the messages and fingerprints are
+pinned to the previous release's wording by `test_what_is_stored_and_compared_did_not_change`,
+so the deploy causes no extra alert. The
+§A1.3 health screen still lists the stored messages, which are English.
 
 The sticker notification sends the sticker first, then the description as a reply to it, and
 records the pair in `admin_sticker_notifications` so a later text reply resolves to the right

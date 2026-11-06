@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -94,6 +96,27 @@ def _fingerprint_of_rows(rows: list[dict[str, Any]]) -> set[str]:
     return fingerprints
 
 
+def _issue_text(issue: HealthIssue, lang: Lang, *, at: datetime) -> str:
+    """The problem line for the card, from the issue's facts; its message otherwise."""
+    from src.bot.screens import cards
+
+    if isinstance(issue, DbIssue):
+        return cards.db_down_line(lang, issue.cause)
+    if isinstance(issue, FallbackIssue):
+        return cards.fallback_line(lang, issue.count)
+    if isinstance(issue, AIFailureIssue):
+        return cards.failure_line(
+            lang,
+            task=issue.task,
+            count=issue.count,
+            provider=issue.provider,
+            since=issue.since,
+            at=at,
+        )
+    # A plain HealthIssue carries no facts to say again, only its text.
+    return issue.message
+
+
 def _admin_lang(config: dict[str, Any]) -> Lang:
     """The admins' panel language from the loaded ``admin_settings``; Russian if unreadable."""
     from src.bot.screens.cards import admin_lang
@@ -108,6 +131,113 @@ def _format_since(since: datetime) -> str:
     minutes = remainder // 60
     elapsed = f"{hours}h {minutes}m" if hours else f"{minutes}m"
     return f"{since.strftime('%d.%m %H:%M UTC')} ({elapsed})"
+
+
+# ---------------------------------------------------------------------------
+# The issues `_run_check` raises
+# ---------------------------------------------------------------------------
+#
+# Each carries the FACTS behind its message, so the card can say it in the
+# admin's language. The English `message` is unchanged and is still what
+# `health_log` stores and what a keyless fingerprint would fall back to; every
+# issue below has a key, so its fingerprint never reads the message at all.
+
+_DB_MESSAGES: Mapping[str, str] = {
+    "connection": "Database connectivity failed: connection unavailable",
+    "query": "Database connectivity failed: query error",
+    "unexpected": "Database connectivity failed: unexpected error",
+}
+
+
+@dataclass
+class DbIssue(HealthIssue):
+    """The database did not answer ``SELECT 1``."""
+
+    cause: str = "unexpected"  # connection / query / unexpected
+
+
+@dataclass
+class FallbackIssue(HealthIssue):
+    """The fallback provider answered in the window."""
+
+    count: int = 0
+
+
+@dataclass
+class AIFailureIssue(HealthIssue):
+    """Every provider for one task failed in the window."""
+
+    task: str = ""
+    count: int = 0
+    provider: str | None = None
+    since: datetime | None = None
+
+
+def db_issue(cause: str) -> DbIssue:
+    """The CRITICAL database issue for ``cause`` (connection / query / unexpected)."""
+    return DbIssue(
+        severity=HealthStatus.CRITICAL,
+        message=_DB_MESSAGES.get(cause, _DB_MESSAGES["unexpected"]),
+        key="db",
+        cause=cause,
+    )
+
+
+def fallback_issue(count: int) -> FallbackIssue:
+    """The fallback provider answered ``count`` times in the last 15 minutes."""
+    return FallbackIssue(
+        severity=HealthStatus.WARNING,
+        message=f"AI fallback activated {count} time(s) in last 15 min",
+        key="ai_fallback",
+        count=count,
+    )
+
+
+def ai_failure_issue(failure: Mapping[str, Any]) -> AIFailureIssue:
+    """One row of `HealthRepository.get_ai_failure_details` as an issue."""
+    task = failure["task_type"]
+    detail = failure.get("error_message")
+    provider = failure.get("provider")
+    since = failure.get("since")
+    # One issue per task, not one line listing every task: the
+    # provider's error and the advice differ per task, and a single
+    # merged line has nowhere to put either. It also gives each
+    # task its own de-duplication key, so transcription breaking
+    # while embeddings are already broken is a NEW alert rather
+    # than a silent change inside an existing one.
+    hint = hint_for(detail)
+    body = f"{provider}: {detail}" if provider and detail else detail
+    return AIFailureIssue(
+        severity=HealthStatus.WARNING,
+        message=(
+            f"AI calls failed outright in last 15 min: "
+            f"{task} x{failure['count']}"
+            + (f" ({provider})" if provider else "")
+            + (f", holding since {_format_since(since)}" if since else "")
+        ),
+        # The CAUSE is part of the identity, not just the task.
+        # With the task alone, credits running out and then the
+        # key being revoked six hours later are "the same
+        # problem": no new alert, and the notification still
+        # advises topping up an account that is now fine. The
+        # two components chosen are stable per cycle -- unlike
+        # the count, which is why the message cannot be used.
+        key=":".join(
+            part for part in ("ai_failure", task, failure.get("error_type"), hint) if part
+        ),
+        # Capped here as well as in the Gemini provider: this
+        # is where the value becomes a Telegram message, and
+        # the provider's own cap protects only its own errors.
+        # A 60 KB `error_message` from anywhere else would
+        # become sixteen sequential sends and meet flood
+        # control halfway through an alert.
+        detail=_clip(body),
+        hint=hint,
+        task=task,
+        count=int(failure["count"]),
+        provider=provider,
+        since=since,
+    )
 
 
 _HEALTHCHECK_FILE = Path("/tmp/healthcheck")
@@ -246,33 +376,15 @@ class HealthChecker:
         except asyncpg.InterfaceError:
             result.db_ok = False
             logger.error("Health check DB failed: connection interface error", exc_info=True)
-            result.issues.append(
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: connection unavailable",
-                    key="db",
-                )
-            )
+            result.issues.append(db_issue("connection"))
         except asyncpg.PostgresError:
             result.db_ok = False
             logger.error("Health check DB failed: PostgreSQL error", exc_info=True)
-            result.issues.append(
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: query error",
-                    key="db",
-                )
-            )
+            result.issues.append(db_issue("query"))
         except Exception:
             result.db_ok = False
             logger.error("Health check DB failed: unexpected error", exc_info=True)
-            result.issues.append(
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: unexpected error",
-                    key="db",
-                )
-            )
+            result.issues.append(db_issue("unexpected"))
 
         # 2. Message activity (metric only — no alert on inactivity)
         try:
@@ -287,15 +399,7 @@ class HealthChecker:
                 timedelta(minutes=15),
             )
             if result.fallbacks_15m > 0:
-                result.issues.append(
-                    HealthIssue(
-                        severity=HealthStatus.WARNING,
-                        message=(
-                            f"AI fallback activated {result.fallbacks_15m} time(s) in last 15 min"
-                        ),
-                        key="ai_fallback",
-                    )
-                )
+                result.issues.append(fallback_issue(result.fallbacks_15m))
         except Exception as exc:
             result.checks_degraded = True
             logger.warning("Failed to get fallback count", error_type=type(exc).__name__)
@@ -309,50 +413,7 @@ class HealthChecker:
         # every provider for the task was exhausted and the user got nothing.
         try:
             failures = await health_repo.get_ai_failure_details(timedelta(minutes=15))
-            for failure in failures:
-                task = failure["task_type"]
-                detail = failure.get("error_message")
-                provider = failure.get("provider")
-                since = failure.get("since")
-                # One issue per task, not one line listing every task: the
-                # provider's error and the advice differ per task, and a single
-                # merged line has nowhere to put either. It also gives each
-                # task its own de-duplication key, so transcription breaking
-                # while embeddings are already broken is a NEW alert rather
-                # than a silent change inside an existing one.
-                hint = hint_for(detail)
-                body = f"{provider}: {detail}" if provider and detail else detail
-                result.issues.append(
-                    HealthIssue(
-                        severity=HealthStatus.WARNING,
-                        message=(
-                            f"AI calls failed outright in last 15 min: "
-                            f"{task} x{failure['count']}"
-                            + (f" ({provider})" if provider else "")
-                            + (f", holding since {_format_since(since)}" if since else "")
-                        ),
-                        # The CAUSE is part of the identity, not just the task.
-                        # With the task alone, credits running out and then the
-                        # key being revoked six hours later are "the same
-                        # problem": no new alert, and the notification still
-                        # advises topping up an account that is now fine. The
-                        # two components chosen are stable per cycle -- unlike
-                        # the count, which is why the message cannot be used.
-                        key=":".join(
-                            part
-                            for part in ("ai_failure", task, failure.get("error_type"), hint)
-                            if part
-                        ),
-                        # Capped here as well as in the Gemini provider: this
-                        # is where the value becomes a Telegram message, and
-                        # the provider's own cap protects only its own errors.
-                        # A 60 KB `error_message` from anywhere else would
-                        # become sixteen sequential sends and meet flood
-                        # control halfway through an alert.
-                        detail=_clip(body),
-                        hint=hint,
-                    )
-                )
+            result.issues.extend(ai_failure_issue(failure) for failure in failures)
         except Exception as exc:
             result.checks_degraded = True
             logger.warning("Failed to get AI failure counts", error_type=type(exc).__name__)
@@ -477,8 +538,11 @@ class HealthChecker:
         last_alert: dict[str, Any] | None,
         *,
         manual: bool = False,
-    ) -> tuple[str | None, list[str]]:
-        """Decide whether to say anything. Returns (reason, cleared-messages).
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        """Decide whether to say anything. Returns (reason, cleared rows).
+
+        The cleared rows are the previous alert's stored issues, so the
+        all-clear can name each one by its key in the admin's language.
 
         Reason is "new" (the set of conditions changed), "reminder" (unchanged
         but old), "recovered" (all clear) or None (stay quiet).
@@ -528,11 +592,12 @@ class HealthChecker:
             held_for = now - self._clean_since
             if previous and self._clean_checks >= confirm and held_for >= confirm * interval:
                 cleared = [
-                    str(row.get("message", ""))
+                    row
                     for row in previous_rows
-                    if isinstance(row, dict)  # a legacy or hand-written row may not be
+                    # a legacy or hand-written row may not be a dict
+                    if isinstance(row, dict) and (row.get("message") or row.get("key"))
                 ]
-                return "recovered", [c for c in cleared if c]
+                return "recovered", cleared
             return None, []
 
         self._clean_checks = 0
@@ -628,18 +693,29 @@ class HealthChecker:
     # Formatting
     # ------------------------------------------------------------------
     #
-    # The card frame (title, counts, the 📊 button) is in the admin's
-    # language. The issue lines are what `_run_check` and `diagnosis` wrote,
-    # unchanged: the de-duplication fingerprint falls back to an issue's
-    # message when it has no key, so rewording a message here would make
-    # every such issue look new once after the deploy.
+    # The whole card is in the admin's language: the frame, and each problem
+    # line said from its facts (`cards.*_line`). What is stored and compared
+    # is untouched -- `health_log` keeps the English message, and every issue
+    # `_run_check` raises has a key, so the fingerprint never reads the text.
+    # The provider's own error (`detail`) is shown as it came.
 
     @staticmethod
-    def _recovery_card(cleared: list[str], *, lang: Lang = "ru") -> Screen:
+    def _recovery_card(
+        cleared: Sequence[Mapping[str, Any]], *, lang: Lang = "ru", at: datetime | None = None
+    ) -> Screen:
         """The all-clear, naming what stopped failing."""
         from src.bot.screens import cards
 
-        return cards.recovered_card(lang, at=datetime.now(UTC), cleared=cleared)
+        lines = [
+            cards.cleared_line(
+                lang, key=str(row.get("key") or ""), message=str(row.get("message") or "")
+            )
+            for row in cleared
+        ]
+        # Two cleared issues of one kind (the db issue has one key for three
+        # causes) say the same line once.
+        unique = list(dict.fromkeys(line for line in lines if line))
+        return cards.recovered_card(lang, at=at or datetime.now(UTC), cleared=unique)
 
     @staticmethod
     def _alert_card(
@@ -651,9 +727,9 @@ class HealthChecker:
         issues = [
             cards.IssueLine(
                 critical=issue.severity == HealthStatus.CRITICAL,
-                message=issue.message,
+                message=_issue_text(issue, lang, at=result.checked_at),
                 detail=issue.detail,
-                hint=issue.hint,
+                hint=cards.hint_line(lang, issue.hint),
             )
             for issue in result.issues
         ]
@@ -668,7 +744,7 @@ class HealthChecker:
         )
 
     @classmethod
-    def _format_recovery(cls, cleared: list[str], *, lang: Lang = "ru") -> str:
+    def _format_recovery(cls, cleared: Sequence[Mapping[str, Any]], *, lang: Lang = "ru") -> str:
         """The all-clear as the HTML text that is sent."""
         from src.bot.screens.render import render_text
 

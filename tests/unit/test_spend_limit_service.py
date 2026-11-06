@@ -354,3 +354,25 @@ class TestFinishReplyCallSite:
         )
 
         message.answer.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("total", "limit", "shown"),
+    [
+        # Over by less than half a cent: plain rounding printed "$1.00 / $1.00".
+        ("1.004", "1.00", "$1.01 при лимите $1.00"),
+        # A limit with sub-cent digits is never shown above what it is.
+        ("1.0101", "1.009", "$1.02 при лимите $1.00"),
+        # Whole cents are shown as they are.
+        ("1.27", "1.00", "$1.27 при лимите $1.00"),
+    ],
+)
+def test_an_exceeded_card_never_shows_the_total_at_or_under_the_limit(
+    total: str, limit: str, shown: str
+) -> None:
+    from src.bot.screens import cards
+    from src.bot.screens.render import render_text
+
+    text = render_text(cards.spend_card("ru", total=Decimal(total), limit=Decimal(limit)))
+
+    assert shown in text
