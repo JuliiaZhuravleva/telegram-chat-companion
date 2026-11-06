@@ -21,7 +21,7 @@ their part (§F.6, §A2.1), so an area adds to its own part without renumbering 
 | [src/bot/handlers/access_card.py](../src/bot/handlers/access_card.py) | Approve / reject from the access card (`adm_approve:`, `adm_reject:`) and the `approve_attempt` / `reject_attempt` operations the whitelist list shares |
 | [src/bot/handlers/admin_chat_panel.py](../src/bot/handlers/admin_chat_panel.py) | Per-chat settings panel (`adm_pnl*`), including the `tolerance_level` FSM flow |
 | [src/bot/handlers/admin_defaults.py](../src/bot/handlers/admin_defaults.py) | Global-settings screen (`adm_defs*`) |
-| [src/bot/handlers/admin_kb.py](../src/bot/handlers/admin_kb.py) | Knowledge-base panel and organizer management (`adm_kb*`) |
+| [src/bot/handlers/admin_kb.py](../src/bot/handlers/admin_kb.py) | Knowledge-base organizers of one chat (`adm_kb_org*`, `adm_kb_orgs:`) |
 | [src/bot/handlers/admin_reactions.py](../src/bot/handlers/admin_reactions.py) | Reactions panel (`adm_react*`) |
 | [src/bot/handlers/admin_sticker.py](../src/bot/handlers/admin_sticker.py) | Sticker browser, re-analysis, DM sticker check, description-merge reply (`adm_stk*`) |
 | [src/bot/handlers/rules.py](../src/bot/handlers/rules.py) | Rules engine UI (`adm_rules:`, `ar_*`) |
@@ -133,9 +133,10 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `adm_pnl_tgl:` | `lang:chat_id:code` | generic bool toggle |
 | `adm_pnl_tol:` / `adm_pnl_tolcancel:` | `lang:chat_id` | tolerance prompt / cancel |
 | `adm_defs:` / `adm_defs_tgl:` | `lang` / `lang:code` | global settings / toggle |
-| `adm_kb:` / `adm_kb_menu:` / `adm_kb_toggle:` | `lang:page` / `lang:chat_id` / `lang:chat_id` | KB picker / menu / toggle |
-| `adm_kb_orgs:` / `adm_kb_org_rm:` | `lang:chat_id:page` / `lang:chat_id:user_id` | organizer list / remove |
-| `adm_kb_org_add:` / `adm_kb_org_list:` / `adm_kb_org_pick:` | `lang:chat_id[:page][:user_id]` | add prompt / picker / pick |
+| `adm_kb:` / `adm_kb_menu:` / `adm_kb_toggle:` | — | retired: the KB picker and menu are gone, the switch lives in the chat's memory section |
+| `adm_kb_orgs:` / `adm_kb_org_rm:` / `adm_kb_org_undo:` | `lang:chat_id:page` / `lang:chat_id:user_id` / `lang:chat_id:user_id:position` | organizer list / remove at once / put back at `position` |
+| `adm_kb_org_list:` / `adm_kb_org_pick:` | `lang:chat_id:page` / `lang:chat_id:user_id` | participant list / add the tapped one |
+| `adm_kb_org_add:` / `adm_kb_org_x:` | `lang:chat_id` | add prompt (new message, reply keyboard) / leave it from the failure answer |
 | `adm_react:` / `adm_react_menu:` / `adm_react_toggle:` | `lang:page` / `lang:chat_id` / `lang:chat_id:field` | reactions picker / menu / toggle |
 | `adm_stk_sets:` / `adm_stk_set:` / `adm_stk_view:` | `lang:page` / `lang:set_name:page` / `lang:file_unique_id` | packs / pack / sticker card |
 | `adm_stk_back:` | `lang:set_name:page` | leave card, delete sticker message |
@@ -152,7 +153,7 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | State | Set by | Consumed by | Escape |
 |---|---|---|---|
 | `awaiting_setting_value` | `adm_pnl_tol:` | `admin_chat_panel.handle_chat_panel_tolerance_input` | `adm_pnl_tolcancel:` button, `/cancel`, or a typed `/command` (filtered out — but see the caption caveat in §F.2) |
-| `awaiting_kb_organizer` | `adm_kb_org_add:` (data: `kb_chat_id`, `kb_lang`; the prompt is a **new** message carrying a one-time reply keyboard with a `request_users` button, `request_id=1`) | `admin_kb.handle_kb_organizer_shared` (the `users_shared` service message — matched in **any** state and registered **before** the reader, which would otherwise take a pick for an empty message and answer «not found»; without this state or with a foreign `request_id` it writes nothing and answers stale), then `admin_kb.handle_kb_organizer_add_reply` for a forward or `@username` (clears state on entry, **before** the authority check) | the `✖️ Отмена` keyboard label, picking from the participant list, `/cancel`, or a typed `/command`; the `🔍 Найти в Telegram` label arriving as *text* means the client cannot open the picker — answered with the fallback, state kept; a forwarded message whose text starts with `/` or equals a label is still an organizer add, not a command. Every message exit, `/cancel` included, sends `ReplyKeyboardRemove`; an exit by an inline edit (participant list) cannot, so a late pick there gets the stale answer |
+| `awaiting_kb_organizer` | `adm_kb_org_add:` (data: `kb_chat_id`, `kb_lang`; the prompt is a **new** message carrying a one-time reply keyboard with a `request_users` button, `request_id=REQUEST_IDS.ORG_PICK`) | `admin_kb.handle_kb_organizer_shared` (the `users_shared` service message, filtered on that `request_id` — a pick from another picker never reaches it — and matched in **any** state, registered **before** the reader, which would otherwise take a pick for an empty message and answer «not found»; without this state it writes nothing and answers stale), then `admin_kb.handle_kb_organizer_add_reply` for a forward or `@username` (clears state on entry, **before** the authority check; a failed lookup re-arms it and answers `org.fail`) | the `✖️ Отмена` keyboard label, `adm_kb_org_x:`, a pick from the participant list, `adm_kb_orgs:`, `/cancel`, or a typed `/command`; the `🔍 Найти в Telegram` label arriving as *text* means the client cannot open the picker — answered with the fallback, state kept; a forwarded message whose text starts with `/` or equals a label is still an organizer add, not a command. Every exit through `admin_kb` clears the state, sends `ReplyKeyboardRemove` on a line of its own and then the organizer list as a new message (a message cannot carry both keyboards). `adm_kb_org_x:` tapped while some *other* dialog is open shows the list and leaves that dialog alone |
 | `awaiting_rule_config` | `ar_type:` | `rules.handle_rule_config_input` (`IsAdmin`-gated since TD-049) | `ar_cancel:` button, `/cancel`, any `/command` incl. in a caption, or navigating back to any rules screen |
 | `awaiting_sticker_edit`, `awaiting_sticker` | — | — | declared, currently unused |
 | `awaiting_rule_words`, `awaiting_rule_text`, `awaiting_rule_react` | — | — | declared for the button-driven rule builder (A3); unused until it lands |
@@ -628,10 +629,29 @@ this area's rule builder.
 
 ## A4 — Knowledge base organizers
 
-Files: [src/bot/handlers/admin_kb.py](../src/bot/handlers/admin_kb.py),
-[src/bot/keyboards/admin_kb.py](../src/bot/keyboards/admin_kb.py). The `/remember` and `/kb`
-keyboards are in `keyboards/kb.py`, outside the panel. The organizer prompt's reply keyboard
-and its `request_users` id are described with the state in §F.5.
+Files: [src/bot/handlers/admin_kb.py](../src/bot/handlers/admin_kb.py) (reads and writes
+`chat_settings.kb_organizer_ids`, picks the screen),
+[src/bot/screens/orgs.py](../src/bot/screens/orgs.py) (the four screens as data: `orgs`,
+`org.list`, `org.add`, `org.fail`),
+[src/bot/keyboards/admin_kb.py](../src/bot/keyboards/admin_kb.py) (only what the handlers
+match: the picker's `request_id` and the reply labels). The `/remember` and `/kb` keyboards
+are in `keyboards/kb.py`, outside the panel. The prompt's state is described in §F.5.
+
+- **Remove is undo, not confirm.** `adm_kb_org_rm:` writes at once; the result carries
+  `adm_kb_org_undo:` with the person's former index as a fourth field, so `↩️ Вернуть` puts
+  them back in place. A second undo, or an undo after someone re-added them, writes nothing.
+  The page shown after either is derived from the index (`orgs.page_of`), not from the payload.
+- **Names are looked up per page.** `_names` asks Telegram only for the people on the page
+  being drawn, concurrently (`asyncio.gather` over `resolve_display_name`); a name already
+  known from the event (a pick, a forward) is not asked again. A failed lookup reads
+  «участник {id}».
+- **Names are clipped by width, not length** (`orgs.clip` to `orgs.NAME_PX`, 90 % of a
+  one-button row by lint's estimate). The estimate is a per-script average; rendered at
+  390 px, long mixed names clipped to the full row still overflowed by up to 20 px and fit
+  from 92 %. A name of one wide letter repeated still overflows; Telegram's client cuts it.
+- **Leaving the prompt is two messages.** `_leave_prompt` sends the line carrying
+  `ReplyKeyboardRemove`, then the `orgs` screen with inline buttons as a new message — the
+  same in every exit, callback or message.
 
 ---
 
