@@ -5,8 +5,10 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiogram.types import ReactionTypeEmoji
+from aiogram.types import InlineKeyboardMarkup, ReactionTypeEmoji
 
+from src.bot.screens import rules as screens
+from src.bot.screens.render import render_text, to_markup
 from src.models.rules import Rule, RuleAction, RuleType
 from src.services.rules.engine import RuleActionResult
 from src.services.rules.executor import RuleActionExecutor
@@ -50,9 +52,10 @@ def _make_message(
     return msg
 
 
-def _make_executor(admin_ids: str = "12345") -> RuleActionExecutor:
+def _make_executor(admin_ids: str = "12345", admin_settings: object = None) -> RuleActionExecutor:
     repo = AsyncMock()
-    repo.get = AsyncMock(return_value=admin_ids)
+    config = {"admin_ids": admin_ids, "admin_settings": admin_settings}
+    repo.get = AsyncMock(side_effect=lambda key: config.get(key))
     return RuleActionExecutor(repo)
 
 
@@ -114,6 +117,72 @@ class TestNotifyAdmin:
         assert "&lt;script&gt;" in sent_text
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("admin_settings", "lang"),
+        [
+            (None, "ru"),
+            ('{"lang": "en"}', "en"),
+            ({"lang": "en"}, "en"),
+            ('{"lang": "de"}', "ru"),
+            ("not json", "ru"),
+            ("[1, 2]", "ru"),
+        ],
+        ids=["unset", "en", "en-as-dict", "unknown", "garbled", "not-a-dict"],
+    )
+    async def test_sends_the_rule_card_in_the_panels_language(
+        self, admin_settings: object, lang: str
+    ) -> None:
+        """The card the admin DM shows, built by the screen itself: its button
+        opens the rule as a new message, so the card stays as the record."""
+        executor = _make_executor("111", admin_settings)
+        bot = AsyncMock()
+        msg = _make_message(text="buy spam here")
+        msg.chat.title = "Test chat"
+
+        action = RuleActionResult(
+            rule=_make_rule(rule_id=7, config={"name": "spam-words", "keywords": ["spam"]}),
+            action=RuleAction.NOTIFY_ADMIN,
+            params={"match_detail": "contains:spam"},
+        )
+        await executor.execute(action, message=msg, bot=bot)
+
+        expected = screens.rule_card(
+            lang,
+            rule_id=7,
+            chat_id=-1001,
+            name="spam-words",
+            chat_title="Test chat",
+            first_name="Alice",
+            username="alice",
+            match_detail="contains:spam",
+            excerpt="buy spam here",
+        )
+        bot.send_message.assert_awaited_once_with(
+            111, render_text(expected), parse_mode="HTML", reply_markup=to_markup(expected)
+        )
+        markup = bot.send_message.await_args.kwargs["reply_markup"]
+        assert isinstance(markup, InlineKeyboardMarkup)
+        assert markup.inline_keyboard[0][0].callback_data == f"ar_view:{lang}:7:-1001:n"
+
+    @pytest.mark.asyncio
+    async def test_a_chat_without_a_title_is_named_by_its_id(self) -> None:
+        executor = _make_executor("111")
+        bot = AsyncMock()
+        msg = _make_message()
+        msg.chat.title = None
+
+        action = RuleActionResult(
+            rule=_make_rule(config={"keywords": ["spam"]}),
+            action=RuleAction.NOTIFY_ADMIN,
+            params={},
+        )
+        await executor.execute(action, message=msg, bot=bot)
+
+        text = bot.send_message.await_args.args[1]
+        assert f"Чат: <code>{screens.chat_id_text(-1001)}</code>" in text
+        assert "spam" in text, "an unnamed rule is shown by its words"
+
+    @pytest.mark.asyncio
     async def test_send_failure_logged_not_raised(self) -> None:
         executor = _make_executor("111")
         bot = AsyncMock()
@@ -162,9 +231,7 @@ class TestWarnUser:
         )
         await executor.execute(action, message=msg, bot=bot)
 
-        msg.reply.assert_called_once()
-        assert "automated rule" in msg.reply.call_args[0][0].lower()
-        assert msg.reply.call_args[1].get("parse_mode") is None
+        msg.reply.assert_called_once_with(screens.WARN_FALLBACK("ru"), parse_mode=None)
 
 
 # ---------------------------------------------------------------------------
@@ -200,30 +267,29 @@ class TestCustomResponse:
         assert "greeting" in reply_text
 
     @pytest.mark.asyncio
-    async def test_html_escaping_in_substitution(self) -> None:
+    async def test_values_go_in_as_they_are_because_the_reply_is_plain_text(self) -> None:
+        """``parse_mode=None``: Telegram shows the text verbatim, so an escaped
+        value would reach the chat as ``Tom &amp; Jerry``, and markup in a
+        name cannot render as markup."""
         executor = _make_executor()
         bot = AsyncMock()
-        msg = _make_message(
-            first_name='<a href="https://evil.com">click</a>',
-            username="normal",
-        )
+        msg = _make_message(first_name='Tom & <a href="https://x.test">J</a>', username="t_j")
 
         action = RuleActionResult(
             rule=_make_rule(
                 config={
-                    "name": "test",
-                    "response_template": "Hello {first_name}!",
+                    "name": "R&D",
+                    "response_template": "Hi {first_name} (@{username}), {rule_name}",
                 }
             ),
             action=RuleAction.CUSTOM_RESPONSE,
-            params={"response_template": "Hello {first_name}!"},
+            params={},
         )
         await executor.execute(action, message=msg, bot=bot)
 
-        reply_text = msg.reply.call_args[0][0]
-        assert "<a href" not in reply_text
-        assert "&lt;a href" in reply_text
-        assert msg.reply.call_args[1].get("parse_mode") is None
+        msg.reply.assert_awaited_once_with(
+            'Hi Tom & <a href="https://x.test">J</a> (@t_j), R&D', parse_mode=None
+        )
 
     @pytest.mark.asyncio
     async def test_empty_template_skipped(self) -> None:
