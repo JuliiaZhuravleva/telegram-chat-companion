@@ -288,8 +288,35 @@ def kb_pager(lang: Lang, page: int, pages: int) -> tuple[Button, ...] | None:
     return pager(page, pages, lambda p: cb("kb_view:", lang, p))
 
 
-def _kb(screen_id: str, lang: Lang, *, total: int, body: str, page: int, pages: int) -> Screen:
-    title = f"{_KB_TITLE(lang)} · {_facts(lang, total)}"
+KB_TITLE_UNITS: Final = 40
+"""How much of a chat's name the DM heading shows, in UTF-16 units as Telegram
+counts them: a phone line, and a fixed cost the handler's length budget can
+count on (a title may be 128 characters, each an astral emoji)."""
+
+
+def _units(text: str) -> int:
+    return sum(2 if ord(ch) > 0xFFFF else 1 for ch in text)
+
+
+def _kb_label(title: str | None, lang: Lang, total: int) -> str:
+    """The chat's name, escaped and capped; the fact count when the chat has no name."""
+    name = " ".join((title or "").split())
+    if not name:
+        return _facts(lang, total)
+    if _units(name) > KB_TITLE_UNITS:
+        kept: list[str] = []
+        room = KB_TITLE_UNITS - 1  # the "…"
+        for ch in name:
+            room -= _units(ch)
+            if room < 0:
+                break
+            kept.append(ch)
+        name = "".join(kept).rstrip() + "…"
+    return html.escape(name)
+
+
+def _kb(screen_id: str, lang: Lang, *, label: str, body: str, page: int, pages: int) -> Screen:
+    title = f"{_KB_TITLE(lang)} · {label}"
     row = kb_pager(lang, page, pages)
     return Screen(
         id=screen_id,
@@ -303,12 +330,17 @@ def kb_group(lang: Lang, *, total: int, body: str, page: int, pages: int) -> Scr
 
     ``body`` is already-escaped HTML (the handler fits it under Telegram's limit).
     """
-    return _kb("kb.group", lang, total=total, body=body, page=page, pages=pages)
+    return _kb("kb.group", lang, label=_facts(lang, total), body=body, page=page, pages=pages)
 
 
-def kb_dm(lang: Lang, *, total: int, body: str, page: int, pages: int) -> Screen:
-    """``/kb`` in a DM: facts by topic, each with who and when; same pager."""
-    return _kb("kb.dm", lang, total=total, body=body, page=page, pages=pages)
+def kb_dm(lang: Lang, *, title: str | None, total: int, body: str, page: int, pages: int) -> Screen:
+    """``/kb`` in a DM: the chat's name on top, facts by topic with who and when; same pager.
+
+    ``title`` is the chat's name as Telegram gives it (raw, escaped here); a
+    chat with no name shows the fact count instead.
+    """
+    label = _kb_label(title, lang, total)
+    return _kb("kb.dm", lang, label=label, body=body, page=page, pages=pages)
 
 
 # ---------------------------------------------------------------------------

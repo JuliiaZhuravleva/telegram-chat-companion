@@ -1679,3 +1679,99 @@ class TestHandleKbViewPage:
 
         repo.get_active_facts.assert_not_awaited()
         callback.message.edit_text.assert_not_awaited()
+
+
+def _private_chat(chat: MagicMock, *, first: Any, last: Any = None, title: Any = None) -> None:
+    """A private chat as Telegram sends it: no title, the person's names instead."""
+    chat.title = title
+    chat.first_name = first
+    chat.last_name = last
+
+
+class TestKbDmHeadingNamesTheChat:
+    """``kb.dm`` says whose knowledge base it is -- ``📚 База знаний · <the
+    chat's name>`` -- not the fact count, which the group heading keeps. A
+    private chat has no title, so its name is the person's first and last
+    name, which is user input and is escaped.
+    """
+
+    @pytest.mark.asyncio
+    async def test_command_heading_is_the_chat_name(self) -> None:
+        msg = _make_message(chat_type="private")
+        _private_chat(msg.chat, first="Аня", last="Петрова")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(7))
+
+        await handle_kb_view_dm(msg, _make_chat_config(), repo)
+
+        text = msg.answer.call_args[0][0]
+        assert text.startswith("📚 <b>База знаний</b> · Аня Петрова\n\n"), text[:80]
+        assert "7 фактов" not in text
+
+    @pytest.mark.asyncio
+    async def test_the_name_is_escaped(self) -> None:
+        msg = _make_message(chat_type="private")
+        _private_chat(msg.chat, first="<b>Аня</b>", last="& Ко")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(2))
+
+        await handle_kb_view_dm(msg, _make_chat_config(language="en"), repo)
+
+        text = msg.answer.call_args[0][0]
+        assert text.startswith("📚 <b>Knowledge base</b> · &lt;b&gt;Аня&lt;/b&gt; &amp; Ко\n\n")
+
+    @pytest.mark.asyncio
+    async def test_a_chat_with_a_title_shows_the_title(self) -> None:
+        msg = _make_message(chat_type="private")
+        _private_chat(msg.chat, first="Аня", title="Тестовый <чат>")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(2))
+
+        await handle_kb_view_dm(msg, _make_chat_config(), repo)
+
+        assert msg.answer.call_args[0][0].startswith("📚 <b>База знаний</b> · Тестовый &lt;чат&gt;")
+
+    @pytest.mark.asyncio
+    async def test_the_next_page_keeps_the_name(self) -> None:
+        callback = _make_kb_view_callback("kb_view:ru:1", chat_type="private")
+        _private_chat(callback.message.chat, first="Аня")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(7))
+
+        await handle_kb_view_page(callback, _make_chat_config(), repo)
+
+        text = callback.message.edit_text.call_args[0][0]
+        assert text.startswith("📚 <b>База знаний</b> · Аня\n\n"), text[:80]
+        assert "факт номер 5" in text
+
+    @pytest.mark.asyncio
+    async def test_no_name_at_all_falls_back_to_the_count(self) -> None:
+        msg = _make_message(chat_type="private")
+        _private_chat(msg.chat, first="  ")
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(7))
+
+        await handle_kb_view_dm(msg, _make_chat_config(), repo)
+
+        assert msg.answer.call_args[0][0].startswith("📚 <b>База знаний</b> · 7 фактов\n\n")
+
+    @pytest.mark.asyncio
+    async def test_a_long_name_is_capped_for_the_phone_and_the_length_budget(self) -> None:
+        """A name may be 64+64 characters, each an astral emoji (2 UTF-16 units):
+        the heading takes at most ``KB_TITLE_UNITS`` of them, so the room
+        ``_fit_message`` keeps beside the body still holds."""
+        from src.bot.screens.entry import KB_TITLE_UNITS
+
+        msg = _make_message(chat_type="private")
+        _private_chat(msg.chat, first="🦊" * 64, last="&" * 64)
+        repo = _make_knowledge_repo()
+        repo.get_active_facts = AsyncMock(return_value=_make_facts(2))
+
+        await handle_kb_view_dm(msg, _make_chat_config(), repo)
+
+        heading = msg.answer.call_args[0][0].split("\n\n", 1)[0]
+        name = heading.removeprefix("📚 <b>База знаний</b> · ")
+        assert name.endswith("…") and name.startswith("🦊")
+        assert len(name.encode("utf-16-le")) // 2 <= KB_TITLE_UNITS
+        visible = len("📚 База знаний · ".encode("utf-16-le")) // 2 + KB_TITLE_UNITS
+        assert visible + len("\n\n… и ещё 99\n") <= 80  # `_fit_message`'s reserve

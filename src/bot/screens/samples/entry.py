@@ -340,9 +340,11 @@ _DM_FACTS: Final = Tr(
 )
 
 
-@sample("kb.dm", section="В чатах", title="/kb в личке", nav="card")
+# A private chat has no title, so the heading names the DM by the person's
+# name -- what Telegram's ``Chat`` gives for it (first and last name).
+@sample("kb.dm", section="В чатах", title="/kb в личке", nav="card", user_data=(fake.PERSON,))
 def kb_dm(lang: Lang) -> Screen:
-    return entry.kb_dm(lang, total=7, body=_DM_FACTS(lang), page=1, pages=2)
+    return entry.kb_dm(lang, title=fake.PERSON, total=7, body=_DM_FACTS(lang), page=1, pages=2)
 
 
 _NAME: Final = Tr("Костя", "Kostya")
