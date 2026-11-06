@@ -9,9 +9,16 @@ import pytest
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestUsers,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
-from src.bot.custom_emoji import FENCE, MAX_PER_MESSAGE, CustomEmoji, fence
+from src.bot.custom_emoji import FENCE, MAX_PER_MESSAGE, CustomEmoji, bare_label, fence
 
 BTN = {"⚙": "b-settings", "⬅": "b-back", "✅": "b-on", "❌": "b-decline", "🔥": "b-alarm"}
 MARK = {"⚙": "m-settings", "✅": "m-on", "⚠": "m-warn", "🔥": "m-alarm"}
@@ -272,3 +279,74 @@ class TestFailures:
                 make_request, bot, SendMessage(chat_id=1, text="✅", reply_markup=_kb("✅ Да"))
             )
         assert mw.on
+
+
+class TestReplyKeyboards:
+    """The organizer picker's prompt carries a REPLY keyboard, its answers remove it.
+
+    Before this, ``_is_screen`` knew only inline keyboards, so the prompt and every answer
+    went out with plain emoji while the screen they came from was drawn.
+    """
+
+    @staticmethod
+    def _prompt() -> SendMessage:
+        return SendMessage(
+            chat_id=1,
+            text="⚙️ <b>Новый</b>",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [
+                        KeyboardButton(
+                            text="✅ Найти",
+                            request_users=KeyboardButtonRequestUsers(request_id=1),
+                        )
+                    ],
+                    [KeyboardButton(text="❌ Отмена")],
+                    [KeyboardButton(text="без значка")],
+                ],
+                one_time_keyboard=True,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_reply_button_gets_the_icon_and_keeps_its_request(self) -> None:
+        mw, bot = await _on()
+        out = await _send(mw, bot, self._prompt())
+        rows = out.reply_markup.keyboard
+        assert [(b.text, b.icon_custom_emoji_id) for r in rows for b in r] == [
+            ("Найти", "b-on"),
+            ("Отмена", "b-decline"),
+            ("без значка", None),
+        ]
+        assert rows[0][0].request_users.request_id == 1
+        assert out.reply_markup.one_time_keyboard is True
+        assert out.text.startswith('<tg-emoji emoji-id="m-settings">')
+
+    @pytest.mark.asyncio
+    async def test_an_answer_that_removes_the_keyboard_is_drawn(self) -> None:
+        mw, bot = await _on()
+        out = await _send(
+            mw, bot, SendMessage(chat_id=1, text="✅ готово", reply_markup=ReplyKeyboardRemove())
+        )
+        assert out.text.startswith('<tg-emoji emoji-id="m-on">')
+        assert isinstance(out.reply_markup, ReplyKeyboardRemove)
+
+    @pytest.mark.asyncio
+    async def test_off_the_reply_keyboard_goes_out_unchanged(self) -> None:
+        mw = CustomEmoji()
+        await mw.load(_bot(), None, None)
+        method = self._prompt()
+        assert await _send(mw, _bot(), method) is method
+
+
+class TestBareLabel:
+    def test_strips_one_leading_glyph_with_its_selector(self) -> None:
+        assert bare_label("✖️ Отмена") == "Отмена"
+        assert bare_label("🔍 Найти в Telegram") == "Найти в Telegram"
+
+    def test_an_iconed_label_is_already_bare(self) -> None:
+        assert bare_label("Отмена") == "Отмена"
+
+    def test_digits_and_words_are_not_glyphs(self) -> None:
+        assert bare_label("3 ❌") == "3 ❌"
+        assert bare_label("@anya") == "@anya"

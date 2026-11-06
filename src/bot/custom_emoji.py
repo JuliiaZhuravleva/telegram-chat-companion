@@ -3,7 +3,8 @@
 ``CustomEmoji`` is a SESSION request middleware, so it sees every outgoing call. It rewrites a
 call only when the module is on and the message is a *screen*: its inline keyboard carries a
 callback of the admin panel, the rules editor, help or the knowledge base
-(``SCREEN_PREFIXES``). Model replies, transcripts, summaries and greetings carry no such
+(``SCREEN_PREFIXES``), or it opens or closes a reply keyboard — the bot shows one only in an
+admin prompt (the organizer picker), and a prompt with its answers is a screen too. Model replies, transcripts, summaries and greetings carry no such
 keyboard and go out byte for byte as before (only the fence below is removed, and only the bot
 ever writes it).
 
@@ -13,6 +14,9 @@ On a screen:
   picture as ``icon_custom_emoji_id`` and loses the glyph; so does a numbered row button
   ``"3 ❌"``, which keeps only its number. A label that is only a glyph keeps
   it (a client without icons would show an empty button); URL buttons are left alone;
+- a reply-keyboard button is treated the same way. Its text is what the client SENDS on a tap,
+  so the handler matching it must accept the label with and without the glyph
+  (``bare_label``) — the glyph is gone when the module is on and present when it is off;
 - in HTML text, a glyph of the MARKS set at the start of a line (after opening tags) becomes
   ``<tg-emoji>`` with the glyph as its fallback. Glyphs mid-line, and anything inside
   ``<blockquote>``, ``<code>`` or ``<pre>``, stay plain: that is where chat titles, quoted
@@ -45,7 +49,13 @@ from aiogram.client.session.middlewares.base import (
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.methods import Response, TelegramMethod
 from aiogram.methods.base import TelegramType
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -66,6 +76,18 @@ def fence(label: str) -> str:
     """Mark a button label built from data so a leading emoji in it is never made an icon."""
     # Every glyph of the sets sits above U+2000; letters, digits and "-100…" ids do not.
     return FENCE + label if label and ord(label[0]) >= 0x2000 and not label[0].isalpha() else label
+
+
+def bare_label(text: str) -> str:
+    """A button label without its leading glyph: what a reply button sends once it has an icon.
+
+    ``"✖️ Отмена"`` and ``"Отмена"`` both give ``"Отмена"``. Compare a reply-keyboard tap
+    through this, never the raw label.
+    """
+    i = 0
+    while i < len(text) and ord(text[i]) >= 0x2000 and not text[i].isalnum():
+        i += 1
+    return text[i:].lstrip() if i else text
 
 
 def _strip(glyph: str) -> str:
@@ -179,6 +201,10 @@ class CustomEmoji(BaseRequestMiddleware):
             rows = [[self._button(b, rich=rich) for b in row] for row in markup.inline_keyboard]
             if rows != markup.inline_keyboard:
                 update["reply_markup"] = markup.model_copy(update={"inline_keyboard": rows})
+        elif isinstance(markup, ReplyKeyboardMarkup) and rich:
+            reply_rows = [[self._reply_button(b) for b in row] for row in markup.keyboard]
+            if reply_rows != markup.keyboard:
+                update["reply_markup"] = markup.model_copy(update={"keyboard": reply_rows})
         return method.model_copy(update=update) if update else method
 
     def _text(self, text: str) -> str:
@@ -232,8 +258,24 @@ class CustomEmoji(BaseRequestMiddleware):
             update={"text": label, "icon_custom_emoji_id": self._buttons[glyph]}
         )
 
+    def _reply_button(self, button: KeyboardButton | str) -> KeyboardButton | str:
+        # Only the leading-glyph form: a reply button has no row numbers.
+        if isinstance(button, str) or self._lead is None or button.icon_custom_emoji_id:
+            return button
+        lead = self._lead.match(button.text)
+        if lead is None:
+            return button
+        return button.model_copy(
+            update={
+                "text": button.text[lead.end() :],
+                "icon_custom_emoji_id": self._buttons[lead.group(1)],
+            }
+        )
+
 
 def _is_screen(markup: object) -> bool:
+    if isinstance(markup, ReplyKeyboardMarkup | ReplyKeyboardRemove):
+        return True
     if not isinstance(markup, InlineKeyboardMarkup):
         return False
     return any(

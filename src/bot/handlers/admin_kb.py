@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from html import escape as html_escape
 from typing import Any
 
@@ -38,6 +39,7 @@ from aiogram.types import (
 )
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import bare_label
 from src.bot.keyboards.admin_kb import (
     ORG_CANCEL_LABEL,
     ORG_PICK_LABEL,
@@ -145,6 +147,19 @@ _ADD_NOT_IN_CHAT = {
 # The add flow ends on every answer of the reader (it clears state on entry),
 # so each answer also takes the picker keyboard away.
 _NO_KEYBOARD = ReplyKeyboardRemove()
+
+
+def _is_label(labels: dict[str, str]) -> Callable[[str], bool]:
+    """Match a reply-keyboard tap with or without its glyph.
+
+    With drawn emoji on, ``CustomEmoji`` moves the glyph into the button's icon, so the tap
+    sends ``"Отмена"``; with them off it sends ``"✖️ Отмена"``. Matching only the full label
+    would send every tap of an iconed button to the @username reader as «не нашёл».
+    """
+    wanted = {bare_label(v) for v in labels.values()}
+    return lambda text: bare_label(text) in wanted
+
+
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
 
 # B-2: participant picker, alternative to the forward/@username prompt above.
@@ -708,7 +723,7 @@ async def handle_kb_organizer_shared(
     AdminStates.awaiting_kb_organizer,
     F.chat.type == "private",
     F.forward_origin.is_(None),
-    F.text.in_(set(ORG_CANCEL_LABEL.values())),
+    F.text.func(_is_label(ORG_CANCEL_LABEL)),
 )
 async def handle_kb_organizer_cancel_label(message: Message, state: FSMContext) -> None:
     """«✖️ Отмена» under the prompt. A label is user text, so it is routed
@@ -722,7 +737,7 @@ async def handle_kb_organizer_cancel_label(message: Message, state: FSMContext) 
     AdminStates.awaiting_kb_organizer,
     F.chat.type == "private",
     F.forward_origin.is_(None),
-    F.text.in_(set(ORG_PICK_LABEL.values())),
+    F.text.func(_is_label(ORG_PICK_LABEL)),
 )
 async def handle_kb_organizer_pick_label_as_text(message: Message, state: FSMContext) -> None:
     """The picker's label arrived as text: this client cannot show the picker.

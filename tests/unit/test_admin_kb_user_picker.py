@@ -312,3 +312,67 @@ class TestSharedUserLabel:
 
     def test_nothing_falls_back_to_the_id(self) -> None:
         assert _shared_user_label(SharedUser(user_id=42)) == "42"
+
+
+class TestDrawnIconsDoNotBreakTheLabels:
+    """With drawn emoji on, ``CustomEmoji`` moves a reply button's glyph into its icon.
+
+    The tap then sends the label WITHOUT the glyph. These tests render the real prompt
+    keyboard through the real middleware and route the exact text a client would send.
+    """
+
+    @staticmethod
+    async def _tap_texts() -> list[str]:
+        from aiogram.client.default import DefaultBotProperties
+        from aiogram.methods import SendMessage
+
+        from src.bot.custom_emoji import CustomEmoji
+        from src.bot.keyboards.admin_kb import kb_org_add_prompt_keyboard
+
+        def sticker(glyph: str, cid: str) -> object:
+            return type("S", (), {"emoji": glyph, "custom_emoji_id": cid})()
+
+        found = type("Set", (), {"stickers": [sticker("✖️", "x"), sticker("🔍", "s")]})()
+        bot = AsyncMock()
+        bot.default = DefaultBotProperties(parse_mode="HTML")
+        bot.get_sticker_set = AsyncMock(return_value=found)
+        mw = CustomEmoji()
+        await mw.load(bot, "buttons", None)
+        sent: list[SendMessage] = []
+
+        async def make_request(_bot: object, m: SendMessage) -> str:
+            sent.append(m)
+            return "ok"
+
+        await mw(
+            make_request,  # type: ignore[arg-type]
+            bot,
+            SendMessage(chat_id=1, text="x", reply_markup=kb_org_add_prompt_keyboard("ru")),
+        )
+        rows = sent[0].reply_markup.keyboard  # type: ignore[union-attr]
+        assert all(b.icon_custom_emoji_id for r in rows for b in r), "icons were not applied"
+        return [b.text for r in rows for b in r]
+
+    @pytest.mark.usefixtures("admin")
+    async def test_the_iconed_cancel_tap_still_cancels(self) -> None:
+        _, cancel = await self._tap_texts()
+        assert cancel == "Отмена"
+        msg, data, bot = _make_message(text=cancel)
+        state = await _parked_in_prompt()
+
+        await _propagate(msg, data, state)
+
+        assert _written_ids(data) is None
+        assert await state.get_state() is None
+        assert [s.text for s in _sends(bot)] == ["Добавление организатора отменено."]  # type: ignore[attr-defined]
+
+    @pytest.mark.usefixtures("admin")
+    async def test_the_iconed_picker_label_still_gets_the_fallback(self) -> None:
+        pick, _ = await self._tap_texts()
+        msg, data, bot = _make_message(text=pick)
+        state = await _parked_in_prompt()
+
+        await _propagate(msg, data, state)
+
+        assert _written_ids(data) is None
+        assert [s.text for s in _sends(bot)] == [admin_kb._PICK_UNSUPPORTED["ru"]]  # type: ignore[attr-defined]
