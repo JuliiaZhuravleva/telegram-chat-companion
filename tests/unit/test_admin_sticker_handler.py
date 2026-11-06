@@ -1,15 +1,23 @@
-"""Tests for admin sticker reply handler, detail/back navigation, and helpers."""
+"""Admin sticker handlers: the pack catalogue, a sticker's card, its sub-screens.
+
+Every handler runs through the real screen layer (`show()` and the builders),
+so the assertions read what the admin would see: the text Telegram receives
+and the buttons under it. Only the stale-button screen is patched — it renders
+the hub, which belongs to another module.
+"""
 
 from __future__ import annotations
 
+import hashlib
+from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Message
+from aiogram.types import Chat, InlineKeyboardMarkup, Message
 
 from src.bot.handlers.admin_sticker import (
-    _build_detail_text,
     _extract_file_unique_id_from_reply,
     _resolve_default_tolerance_level,
     handle_admin_sticker_check,
@@ -18,54 +26,235 @@ from src.bot.handlers.admin_sticker import (
     handle_clear,
     handle_clear_ask,
     handle_run_analysis,
-    handle_sticker_back,
-    handle_sticker_detail,
+    handle_sticker_card,
     handle_sticker_explicitness_cancel,
     handle_sticker_explicitness_edit_prompt,
     handle_sticker_explicitness_input,
     handle_sticker_explicitness_preset,
     handle_sticker_explicitness_reset,
+    handle_sticker_pack,
+    handle_sticker_score,
+    handle_sticker_set_legacy,
+    handle_sticker_sets,
+    handle_sticker_view,
 )
-from src.bot.keyboards.admin_sticker import (
-    _EXPLICITNESS_PRESETS,
-    _status_badge,
-    sticker_clear_confirm_keyboard,
-    sticker_detail_keyboard,
-    sticker_dm_check_keyboard,
-    sticker_explicitness_cancel_keyboard,
-    sticker_reanalyze_retry_keyboard,
-    sticker_set_detail_keyboard,
+from src.bot.screens.model import Screen
+from src.bot.screens.stickers import (
+    ERROR_REASONS,
+    PRESETS,
+    PackPage,
+    PackRow,
+    SetsPage,
+    build_stk_card,
+    build_stk_clear_ask,
+    build_stk_error,
+    build_stk_score,
+    build_stk_score_in,
+    build_stk_set,
+    build_stk_sets,
+    build_stk_unknown,
+    facts_from_row,
+    pack_key,
 )
 from src.bot.states.admin import AdminStates
 from src.services.modules.sticker.models import ReanalyzeResult, StickerLearningResult
 from src.utils.telegram import TelegramFileError
 
+MOD = "src.bot.handlers.admin_sticker"
+ADMIN = 12345
+FUID = "AgADvh4AAlkbCFI"
+PACK = "test_set"
+KEY = pack_key(PACK)
+PACK_ROW: dict[str, Any] = {"set_name": PACK, "set_title": "Test Pack", "total_count": 5}
 
-def _state() -> MagicMock:
-    """FSMContext stand-in for the explicitness handlers.
+Buttons = list[tuple[str, str | None]]
 
-    The preset and reset buttons stay tappable on a card sitting above an
-    open "введите число" prompt, so both must clear the state they did not
-    open — see the tests at the bottom of this file.
-    """
+
+# ---------------------------------------------------------------------------
+# Doubles
+# ---------------------------------------------------------------------------
+
+
+def _row(**overrides: Any) -> dict[str, Any]:
+    """One ``sticker_knowledge`` row, analysed, automatically scored."""
+    row: dict[str, Any] = {
+        "file_id": "CAACAgIAAxkB",
+        "file_unique_id": FUID,
+        "set_name": PACK,
+        "visual_description": "happy cat waving a paw",
+        "emotion": "joy",
+        "character_or_meme": None,
+        "suggested_contexts": None,
+        "total_uses": 5,
+        "bot_uses": 2,
+        "emoji": "😺",
+        "analysis_failed": False,
+        "explicitness_score": 0.25,
+        "explicitness_is_manual": False,
+    }
+    row.update(overrides)
+    return row
+
+
+def _state(current: str | None = None, data: dict[str, Any] | None = None) -> MagicMock:
     state = MagicMock()
+    state.get_state = AsyncMock(return_value=current)
     state.clear = AsyncMock()
     state.set_state = AsyncMock()
     state.update_data = AsyncMock()
-    state.get_data = AsyncMock(return_value={})
+    state.get_data = AsyncMock(return_value=data or {})
     return state
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _sent(message_id: int) -> MagicMock:
+    """A message the bot has just sent into the admin's DM."""
+    msg = MagicMock()
+    msg.message_id = message_id
+    msg.chat.id = ADMIN
+    return msg
 
 
-def _make_reply_message(
-    text: str | None = None,
-    caption: str | None = None,
+def _callback(data: str, *, message_id: int = 200, reply_to: Any = None) -> MagicMock:
+    """A tap on a button under message ``message_id`` in the admin's DM.
+
+    ``reply_to``: what that message replies to — None for a catalogue card,
+    the admin's sticker for a notification or a DM check.
+    """
+    cb = MagicMock()
+    cb.data = data
+    cb.from_user.id = ADMIN
+    cb.answer = AsyncMock()
+    msg = MagicMock(spec=Message)
+    msg.chat = MagicMock()
+    msg.chat.id = ADMIN
+    msg.chat.type = "private"
+    msg.message_id = message_id
+    msg.reply_to_message = reply_to
+    msg.edit_text = AsyncMock()
+    msg.delete = AsyncMock()
+    msg.answer = AsyncMock(return_value=_sent(message_id + 2))
+    msg.answer_sticker = AsyncMock(return_value=_sent(message_id + 1))
+    cb.message = msg
+    cb.bot = MagicMock()
+    cb.bot.delete_message = AsyncMock()
+    return cb
+
+
+def _sticker_repo(
+    row: dict[str, Any] | None = None,
+    *,
+    missing: bool = False,
+    pack: dict[str, Any] | None = PACK_ROW,
+    sets: list[dict[str, Any]] | None = None,
+    stickers: list[dict[str, Any]] | None = None,
+    card_sticker_msg: int | None = None,
 ) -> MagicMock:
-    """Mock a replied-to message with optional text/caption."""
+    repo = MagicMock()
+    repo.get_by_file_unique_id = AsyncMock(return_value=None if missing else (row or _row()))
+    repo.get_sticker_set = AsyncMock(return_value=pack)
+    repo.get_set_by_key = AsyncMock(return_value=pack)
+    repo.count_sets = AsyncMock(return_value=len(sets or []))
+    repo.get_all_sets_with_stats = AsyncMock(return_value=list(sets or []))
+    repo.count_stickers_in_set = AsyncMock(return_value=len(stickers or []))
+    repo.get_stickers_in_set = AsyncMock(return_value=list(stickers or []))
+    repo.get_card_sticker_msg = AsyncMock(return_value=card_sticker_msg)
+    repo.release_card = AsyncMock()
+    repo.save_notification = AsyncMock(return_value=1)
+    repo.clear_analysis = AsyncMock()
+    repo.set_manual_explicitness_score = AsyncMock(return_value=True)
+    repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
+    repo.get_notification_by_reply = AsyncMock(return_value=None)
+    repo.upsert_sticker_set = AsyncMock()
+    return repo
+
+
+def _admin_repo(lang: str = "ru", sticker: str = "on") -> MagicMock:
+    repo = MagicMock()
+    repo.get_admin_language = AsyncMock(return_value=lang)
+    repo.get_notification_settings = AsyncMock(return_value={"sticker": sticker})
+    return repo
+
+
+def _bot_config_repo(
+    admin_ids: str = str(ADMIN), tolerance_level: float | None = None
+) -> MagicMock:
+    repo = MagicMock()
+    repo.get = AsyncMock(return_value=admin_ids)
+    defaults = {} if tolerance_level is None else {"tolerance_level": tolerance_level}
+    repo.get_defaults = AsyncMock(return_value=defaults)
+    return repo
+
+
+def _service(
+    *,
+    reanalyze: ReanalyzeResult | None = None,
+    learn: StickerLearningResult | None = None,
+) -> MagicMock:
+    svc = MagicMock()
+    svc.reanalyze = AsyncMock(return_value=reanalyze or ReanalyzeResult(ok=True))
+    svc.learn = AsyncMock(
+        return_value=learn
+        or StickerLearningResult(
+            is_new=True, file_unique_id=FUID, visual_description="happy cat waving a paw"
+        )
+    )
+    svc.merge_admin_description = AsyncMock(return_value="Updated desc")
+    return svc
+
+
+def _bot() -> MagicMock:
+    bot = MagicMock()
+    bot.send_chat_action = AsyncMock()
+    return bot
+
+
+@pytest.fixture()
+def stale():
+    with patch(f"{MOD}.show_stale", new=AsyncMock()) as mock:
+        yield mock
+
+
+# ---------------------------------------------------------------------------
+# Reading what the admin sees
+# ---------------------------------------------------------------------------
+
+
+def _buttons(markup: InlineKeyboardMarkup | None) -> Buttons:
+    if markup is None:
+        return []
+    return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+
+
+def _edit(cb: MagicMock, index: int = -1) -> tuple[str, Buttons]:
+    """The screen the button's message was edited into (``index``-th edit)."""
+    call = cb.message.edit_text.call_args_list[index]
+    return call.args[0], _buttons(call.kwargs.get("reply_markup"))
+
+
+def _new(mock: AsyncMock, index: int = -1) -> tuple[str, Buttons]:
+    """The screen sent as a new message through ``answer``/``reply``."""
+    call = mock.call_args_list[index]
+    return call.args[0], _buttons(call.kwargs.get("reply_markup"))
+
+
+def _callbacks(buttons: Buttons) -> list[str | None]:
+    return [data for _, data in buttons]
+
+
+CARD_BUTTONS: Buttons = [
+    ("🔁 Разобрать заново", f"adm_stk_reanalyze:ru:{FUID}"),
+    ("🧹 Очистить", f"adm_stk_clr_ask:ru:{FUID}"),
+    ("🔞 Откровенность", f"adm_stk_score:ru:{FUID}"),
+    ("⬅️ Test Pack", f"adm_stk_pk:ru:{KEY}:0"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+def _reply_target(text: str | None = None, caption: str | None = None) -> MagicMock:
     msg = MagicMock()
     msg.text = text
     msg.caption = caption
@@ -73,2088 +262,1327 @@ def _make_reply_message(
     return msg
 
 
-def _make_message(
-    text: str = "new description",
-    user_id: int = 12345,
-    chat_type: str = "private",
-    reply_text: str | None = "🆔 AgADvh4AAlkbCFI\n<b>Описание:</b> test",
-    reply_caption: str | None = None,
-) -> MagicMock:
-    """Mock aiogram Message for admin sticker reply tests."""
-    msg = MagicMock()
-    msg.text = text
-    msg.chat = MagicMock()
-    msg.chat.id = user_id
-    msg.chat.type = chat_type
-    msg.from_user = MagicMock()
-    msg.from_user.id = user_id
-    msg.reply = AsyncMock()
-
-    reply = _make_reply_message(text=reply_text, caption=reply_caption)
-    msg.reply_to_message = reply
-    return msg
-
-
-def _make_bot() -> MagicMock:
-    """Mock aiogram Bot for typing_indicator wiring (I-5)."""
-    bot = MagicMock()
-    bot.send_chat_action = AsyncMock()
-    return bot
-
-
-# ---------------------------------------------------------------------------
-# _extract_file_unique_id_from_reply
-# ---------------------------------------------------------------------------
-
-
 class TestExtractFileUniqueIdFromReply:
     def test_extracts_id_from_text(self) -> None:
-        reply = _make_reply_message(text="🆔 AgADvh4AAlkbCFI\nОписание: test")
+        reply = _reply_target(text="🆔 AgADvh4AAlkbCFI\nОписание: test")
         assert _extract_file_unique_id_from_reply(reply) == "AgADvh4AAlkbCFI"
 
     def test_extracts_id_from_caption(self) -> None:
-        reply = _make_reply_message(caption="🆔 AgADvh4AAlkbCFI")
+        reply = _reply_target(caption="🆔 AgADvh4AAlkbCFI")
         assert _extract_file_unique_id_from_reply(reply) == "AgADvh4AAlkbCFI"
 
     def test_prefers_text_over_caption(self) -> None:
-        reply = _make_reply_message(
-            text="🆔 ID_FROM_TEXT",
-            caption="🆔 ID_FROM_CAPTION",
-        )
+        reply = _reply_target(text="🆔 ID_FROM_TEXT", caption="🆔 ID_FROM_CAPTION")
         assert _extract_file_unique_id_from_reply(reply) == "ID_FROM_TEXT"
 
     def test_returns_none_when_no_id(self) -> None:
-        reply = _make_reply_message(text="Just some text without ID")
-        assert _extract_file_unique_id_from_reply(reply) is None
+        assert _extract_file_unique_id_from_reply(_reply_target(text="no id here")) is None
 
     def test_returns_none_when_both_none(self) -> None:
-        reply = _make_reply_message(text=None, caption=None)
-        assert _extract_file_unique_id_from_reply(reply) is None
+        assert _extract_file_unique_id_from_reply(_reply_target()) is None
 
     def test_handles_id_with_dashes_and_underscores(self) -> None:
-        reply = _make_reply_message(text="🆔 AgAD-vh_4AA-lkb")
+        reply = _reply_target(text="🆔 AgAD-vh_4AA-lkb")
         assert _extract_file_unique_id_from_reply(reply) == "AgAD-vh_4AA-lkb"
 
     def test_handles_no_space_after_emoji(self) -> None:
-        reply = _make_reply_message(text="🆔AgADvh4AAlkbCFI")
+        reply = _reply_target(text="🆔AgADvh4AAlkbCFI")
         assert _extract_file_unique_id_from_reply(reply) == "AgADvh4AAlkbCFI"
-
-
-# ---------------------------------------------------------------------------
-# handle_admin_sticker_reply
-# ---------------------------------------------------------------------------
-
-
-class TestHandleAdminStickerReply:
-    @pytest.fixture()
-    def sticker_repo(self) -> MagicMock:
-        repo = MagicMock()
-        repo.get_notification_by_reply = AsyncMock(return_value=None)
-        return repo
-
-    @pytest.fixture()
-    def sticker_service(self) -> MagicMock:
-        svc = MagicMock()
-        svc.merge_admin_description = AsyncMock(return_value="Updated desc")
-        return svc
-
-    @pytest.mark.asyncio()
-    async def test_db_lookup_success(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
-        msg = _make_message(text="better description")
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        sticker_service.merge_admin_description.assert_awaited_once_with(
-            "AgADvh4AAlkbCFI", "better description"
-        )
-        msg.reply.assert_awaited_once()
-        assert "обновлено" in msg.reply.call_args[0][0].lower()
-
-    @pytest.mark.asyncio()
-    async def test_text_fallback_when_db_returns_none(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = None
-        msg = _make_message(
-            text="better description",
-            reply_text="🆔 FallbackID123\nОписание: old",
-        )
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        sticker_service.merge_admin_description.assert_awaited_once_with(
-            "FallbackID123", "better description"
-        )
-
-    @pytest.mark.asyncio()
-    async def test_caption_fallback_for_collage_reply(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = None
-        msg = _make_message(
-            text="better description",
-            reply_text=None,
-            reply_caption="🆔 CaptionID456",
-        )
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        sticker_service.merge_admin_description.assert_awaited_once_with(
-            "CaptionID456", "better description"
-        )
-
-    @pytest.mark.asyncio()
-    async def test_silent_return_when_no_id_found(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = None
-        msg = _make_message(
-            text="better description",
-            reply_text="No ID here",
-        )
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        sticker_service.merge_admin_description.assert_not_awaited()
-        msg.reply.assert_not_awaited()
-
-    @pytest.mark.asyncio()
-    async def test_merge_failure_shows_error(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
-        sticker_service.merge_admin_description.return_value = None
-        msg = _make_message(text="better description")
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        msg.reply.assert_awaited_once()
-        assert "re-analyze" in msg.reply.call_args[0][0].lower()
-
-    @pytest.mark.asyncio()
-    async def test_content_filter_shows_rephrase(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
-        sticker_service.merge_admin_description.side_effect = ValueError("content_filter")
-        msg = _make_message(text="better description")
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        msg.reply.assert_awaited_once()
-        assert "переформулировать" in msg.reply.call_args[0][0].lower()
-
-    # Note: the non-private-chat case is guarded at router-registration time
-    # by `F.chat.type == "private"` in the @router.message decorator
-    # (src/bot/handlers/admin_sticker.py). aiogram drops the update before it
-    # ever reaches this handler, so a handler-level unit test cannot exercise
-    # that path — it is verified by inspection of the decorator.
-
-    @pytest.mark.asyncio()
-    async def test_ignores_empty_text(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        sticker_repo.get_notification_by_reply.return_value = {"file_unique_id": "AgADvh4AAlkbCFI"}
-        msg = _make_message(text="   ")
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, _make_bot())
-
-        sticker_service.merge_admin_description.assert_not_awaited()
-
-
-class TestHandleAdminStickerReplyTypingIndicator:
-    """Regression guard: the merge_admin_description() LLM call must run
-    under the shared typing_indicator helper (I-5).
-    """
-
-    @pytest.fixture()
-    def sticker_repo(self) -> MagicMock:
-        repo = MagicMock()
-        repo.get_notification_by_reply = AsyncMock(
-            return_value={"file_unique_id": "AgADvh4AAlkbCFI"}
-        )
-        return repo
-
-    @pytest.fixture()
-    def sticker_service(self) -> MagicMock:
-        svc = MagicMock()
-        svc.merge_admin_description = AsyncMock(return_value="Updated desc")
-        return svc
-
-    @pytest.mark.asyncio()
-    async def test_wraps_merge_call(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        msg = _make_message(text="better description")
-        bot = _make_bot()
-
-        with patch("src.bot.handlers.admin_sticker.typing_indicator") as mock_indicator:
-            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
-            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
-
-            await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, bot)
-
-        mock_indicator.assert_called_once_with(bot, msg.chat.id, None)
-        sticker_service.merge_admin_description.assert_awaited_once()
-
-    @pytest.mark.asyncio()
-    async def test_forwards_message_thread_id(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        msg = _make_message(text="better description")
-        bot = _make_bot()
-
-        with patch("src.bot.handlers.admin_sticker.typing_indicator") as mock_indicator:
-            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
-            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
-
-            await handle_admin_sticker_reply(
-                msg, sticker_repo, sticker_service, bot, message_thread_id=777
-            )
-
-        mock_indicator.assert_called_once_with(bot, msg.chat.id, 777)
-
-    @pytest.mark.asyncio()
-    async def test_no_indicator_when_no_file_unique_id(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        """Guard-clause rejection (no id found) never reaches the merge
-        call -- the indicator must not fire."""
-        sticker_repo.get_notification_by_reply.return_value = None
-        msg = _make_message(text="better description", reply_text="No ID here")
-        bot = _make_bot()
-
-        with patch("src.bot.handlers.admin_sticker.typing_indicator") as mock_indicator:
-            await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, bot)
-
-        mock_indicator.assert_not_called()
-
-    @pytest.mark.asyncio()
-    async def test_indicator_stops_even_if_merge_raises(
-        self, sticker_repo: MagicMock, sticker_service: MagicMock
-    ) -> None:
-        """The real typing_indicator (ChatActionSender) guarantees the
-        action stops on exception; here we assert a generic exception from
-        inside the async-with block still reaches the handler's own
-        ``except Exception`` fallback (i.e. we don't accidentally swallow
-        or short-circuit it earlier by wrapping the call)."""
-        sticker_service.merge_admin_description.side_effect = RuntimeError("boom")
-        msg = _make_message(text="better description")
-        bot = _make_bot()
-
-        await handle_admin_sticker_reply(msg, sticker_repo, sticker_service, bot)
-
-        msg.reply.assert_awaited_once()
-        assert "не смог объединить" in msg.reply.call_args[0][0].lower()
-
-
-# ---------------------------------------------------------------------------
-# Callback test helpers
-# ---------------------------------------------------------------------------
-
-_SAMPLE_STICKER = {
-    "file_id": "CAACAgIAAxkB",
-    "file_unique_id": "AgADvh4AAlkbCFI",
-    "set_name": "test_set",
-    "visual_description": "happy cat",
-    "emotion": "joy",
-    "character_or_meme": None,
-    "suggested_contexts": None,
-    "total_uses": 5,
-    "bot_uses": 2,
-    "emoji": "😺",
-    "is_animated": False,
-    "is_video": False,
-    "analysis_failed": False,
-}
-
-
-def _make_callback(
-    data: str,
-    user_id: int = 12345,
-    chat_type: str = "private",
-    message_id: int = 200,
-) -> MagicMock:
-    """Mock aiogram CallbackQuery for sticker admin tests."""
-    cb = MagicMock()
-    cb.data = data
-    cb.from_user = MagicMock()
-    cb.from_user.id = user_id
-    cb.answer = AsyncMock()
-
-    msg = MagicMock(spec=Message)
-    msg.chat = MagicMock()
-    msg.chat.id = user_id
-    msg.chat.type = chat_type
-    msg.message_id = message_id
-    msg.delete = AsyncMock()
-    msg.edit_text = AsyncMock()
-    msg.answer = AsyncMock()
-
-    sticker_sent = MagicMock()
-    sticker_sent.message_id = message_id + 1
-    msg.answer_sticker = AsyncMock(return_value=sticker_sent)
-
-    bot = MagicMock()
-    bot.delete_message = AsyncMock()
-    bot.send_message = AsyncMock()
-    msg.bot = bot
-
-    cb.message = msg
-    return cb
-
-
-def _make_bot_config_repo(
-    admin_ids: str = "12345", tolerance_level: float | None = None
-) -> MagicMock:
-    repo = MagicMock()
-    repo.get = AsyncMock(return_value=admin_ids)
-    # A-1: _resolve_default_tolerance_level() reads defaults["tolerance_level"];
-    # None (the default here) exercises the ChatConfig dataclass fallback (0.5).
-    defaults = {} if tolerance_level is None else {"tolerance_level": tolerance_level}
-    repo.get_defaults = AsyncMock(return_value=defaults)
-    return repo
-
-
-def _make_sticker_repo(
-    sticker: dict | None = None,
-    set_count: int = 0,
-    sticker_count: int = 0,
-    latest_sticker_msg: int | None = None,
-) -> MagicMock:
-    repo = MagicMock()
-    repo.get_by_file_unique_id = AsyncMock(return_value=sticker or _SAMPLE_STICKER)
-    repo.count_stickers_in_set = AsyncMock(return_value=sticker_count)
-    repo.get_stickers_in_set = AsyncMock(return_value=[])
-    repo.count_sets = AsyncMock(return_value=set_count)
-    repo.get_all_sets_with_stats = AsyncMock(return_value=[])
-    repo.get_latest_sticker_msg = AsyncMock(return_value=latest_sticker_msg)
-    repo.save_notification = AsyncMock(return_value=1)
-    return repo
-
-
-# ---------------------------------------------------------------------------
-# handle_sticker_detail — delete + re-send pattern
-# ---------------------------------------------------------------------------
-
-
-class TestHandleStickerDetail:
-    @pytest.mark.asyncio()
-    async def test_deletes_old_message_and_sends_sticker_then_description(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        # Old message deleted
-        cb.message.delete.assert_awaited_once()
-        # Sticker sent
-        cb.message.answer_sticker.assert_awaited_once_with("CAACAgIAAxkB")
-        # Description sent as new message (not edit_text)
-        cb.message.answer.assert_awaited_once()
-        call_kwargs = cb.message.answer.call_args
-        assert "Описание" in call_kwargs[0][0]
-        # edit_text should NOT be called
-        cb.message.edit_text.assert_not_awaited()
-
-    @pytest.mark.asyncio()
-    async def test_back_button_uses_adm_stk_back_format(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        call_kwargs = cb.message.answer.call_args
-        keyboard = call_kwargs[1]["reply_markup"]
-        back_button = keyboard.inline_keyboard[-1][0]
-        # Back button uses adm_stk_back without sticker_msg_id (DB lookup instead)
-        assert back_button.callback_data == "adm_stk_back:ru:test_set:0"
-
-    @pytest.mark.asyncio()
-    async def test_cleans_up_previous_sticker_via_db(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo(latest_sticker_msg=150)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        # Previous sticker message deleted via DB lookup
-        cb.message.bot.delete_message.assert_awaited_once_with(
-            chat_id=cb.message.chat.id,
-            message_id=150,
-        )
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI", user_id=99999)
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        cb.answer.assert_awaited_once()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-        cb.message.delete.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# handle_sticker_back — cleanup sticker + description, send set list
-# ---------------------------------------------------------------------------
-
-
-class TestHandleStickerBack:
-    @pytest.mark.asyncio()
-    async def test_deletes_sticker_and_description_messages(self) -> None:
-        cb = _make_callback("adm_stk_back:ru:test_set:0")
-        sticker_repo = _make_sticker_repo(sticker_count=5, latest_sticker_msg=150)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_back(cb, sticker_repo, bot_config_repo)
-
-        # Sticker message deleted via DB lookup
-        cb.message.bot.delete_message.assert_awaited_once_with(
-            chat_id=cb.message.chat.id,
-            message_id=150,
-        )
-        # Description message deleted
-        cb.message.delete.assert_awaited_once()
-        # New set list message sent
-        cb.message.answer.assert_awaited_once()
-
-    @pytest.mark.asyncio()
-    async def test_works_without_sticker_msg_in_db(self) -> None:
-        """Graceful handling when no sticker message found in DB."""
-        cb = _make_callback("adm_stk_back:ru:test_set:0")
-        sticker_repo = _make_sticker_repo(sticker_count=5, latest_sticker_msg=None)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_back(cb, sticker_repo, bot_config_repo)
-
-        # No sticker deletion attempted
-        cb.message.bot.delete_message.assert_not_awaited()
-        # Description still deleted, set list still sent
-        cb.message.delete.assert_awaited_once()
-        cb.message.answer.assert_awaited_once()
-
-
-# ---------------------------------------------------------------------------
-# sticker_detail_keyboard — callback_data format
-# ---------------------------------------------------------------------------
-
-
-class TestStickerDetailKeyboard:
-    def test_back_button_with_set_name(self) -> None:
-        kb = sticker_detail_keyboard(
-            "AgADvh4AAlkbCFI",
-            lang="ru",
-            set_name="test_set",
-        )
-        back_btn = kb.inline_keyboard[-1][0]
-        # Always uses adm_stk_back (cleanup via DB, not callback_data)
-        assert back_btn.callback_data == "adm_stk_back:ru:test_set:0"
-
-    def test_long_set_name_no_truncation_issue(self) -> None:
-        long_set_name = "a" * 50
-        kb = sticker_detail_keyboard(
-            "AgADvh4AAlkbCFI",
-            lang="ru",
-            set_name=long_set_name,
-        )
-        back_btn = kb.inline_keyboard[-1][0]
-        # No sticker_msg_id in callback_data, so no 64-byte overflow
-        assert back_btn.callback_data == f"adm_stk_back:ru:{long_set_name}:0"
-
-    def test_without_set_name(self) -> None:
-        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru")
-        back_btn = kb.inline_keyboard[-1][0]
-        assert back_btn.callback_data == "adm_stk_sets:ru:0"
-
-    def test_has_clear_and_reanalyze_buttons(self) -> None:
-        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        # Run-now button actually triggers analysis
-        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
-        # Clear button routes through confirm step (adm_stk_clr_ask:)
-        assert "adm_stk_clr_ask:ru:AgADvh4AAlkbCFI" in callbacks
-
-    def test_clear_confirm_keyboard_has_yes_and_cancel(self) -> None:
-        kb = sticker_clear_confirm_keyboard("AgADvh4AAlkbCFI", lang="ru")
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        assert "adm_stk_clr:ru:AgADvh4AAlkbCFI" in callbacks
-        # Cancel returns to sticker detail (no destructive action on cancel)
-        assert "adm_stk_view:ru:AgADvh4AAlkbCFI" in callbacks
-
-    def test_reanalyze_retry_keyboard_ru(self) -> None:
-        kb = sticker_reanalyze_retry_keyboard("AgADvh4AAlkbCFI", lang="ru")
-        assert len(kb.inline_keyboard) == 1
-        btn = kb.inline_keyboard[0][0]
-        assert "Повторить" in btn.text
-        assert btn.callback_data == "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI"
-
-    def test_reanalyze_retry_keyboard_en(self) -> None:
-        kb = sticker_reanalyze_retry_keyboard("AgADvh4AAlkbCFI", lang="en")
-        btn = kb.inline_keyboard[0][0]
-        assert "Retry" in btn.text
-        assert btn.callback_data == "adm_stk_reanalyze:en:AgADvh4AAlkbCFI"
-
-
-# ---------------------------------------------------------------------------
-# handle_clear_ask — shows confirm dialog, does NOT clear
-# ---------------------------------------------------------------------------
-
-
-class TestHandleClearAsk:
-    @pytest.mark.asyncio()
-    async def test_shows_confirm_does_not_clear(self) -> None:
-        cb = _make_callback("adm_stk_clr_ask:ru:AgADvh4AAlkbCFI")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_clear_ask(cb, bot_config_repo)
-
-        cb.message.edit_text.assert_awaited_once()
-        text_arg = cb.message.edit_text.call_args[0][0]
-        # Confirm text mentions both what's cleared AND what's preserved
-        assert "описание" in text_arg.lower() or "описания" in text_arg.lower()
-        assert "заметки" in text_arg.lower() or "заметк" in text_arg.lower()
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized(self) -> None:
-        cb = _make_callback("adm_stk_clr_ask:ru:AgADvh4AAlkbCFI", user_id=99999)
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_clear_ask(cb, bot_config_repo)
-
-        cb.message.edit_text.assert_not_awaited()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-
-# ---------------------------------------------------------------------------
-# handle_clear — calls repo.clear_analysis (broad scope)
-# ---------------------------------------------------------------------------
-
-
-class TestHandleClear:
-    @pytest.mark.asyncio()
-    async def test_clears_analysis(self) -> None:
-        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.clear_analysis = AsyncMock()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_clear(cb, sticker_repo, bot_config_repo)
-
-        sticker_repo.clear_analysis.assert_awaited_once_with("AgADvh4AAlkbCFI")
-        # Re-renders the detail in place rather than leaving the confirm prompt.
-        cb.message.edit_text.assert_awaited_once()
-        cb.answer.assert_awaited_once()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-    @pytest.mark.asyncio()
-    async def test_rerenders_not_analyzed_detail_after_clear(self) -> None:
-        # After clearing, the repo returns the sticker with visual fields nulled;
-        # handle_clear must edit the message back to the detail view showing the
-        # ⏳ not-analyzed badge (regression: it used to stay on the confirm prompt).
-        cleared = {
-            **_SAMPLE_STICKER,
-            "visual_description": None,
-            "emotion": None,
-            "character_or_meme": None,
-            "suggested_contexts": None,
-        }
-        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo(sticker=cleared)
-        sticker_repo.clear_analysis = AsyncMock()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_clear(cb, sticker_repo, bot_config_repo)
-
-        cb.message.edit_text.assert_awaited_once()
-        text_arg = cb.message.edit_text.call_args[0][0]
-        assert "не выполнен" in text_arg
-        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
-        buttons = [b.text for row in kb.inline_keyboard for b in row]
-        assert any("Запустить заново" in b for b in buttons)
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized_does_not_clear(self) -> None:
-        cb = _make_callback("adm_stk_clr:ru:AgADvh4AAlkbCFI", user_id=99999)
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.clear_analysis = AsyncMock()
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_clear(cb, sticker_repo, bot_config_repo)
-
-        sticker_repo.clear_analysis.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# handle_run_analysis — edit-in-place lifecycle (A-2)
-# ---------------------------------------------------------------------------
-
-
-def _make_sticker_service_success(
-    desc: str = "happy cat",
-) -> MagicMock:
-    """Sticker service mock returning a successful ReanalyzeResult."""
-    svc = MagicMock()
-    svc.reanalyze = AsyncMock(return_value=ReanalyzeResult(ok=True, visual_description=desc))
-    return svc
-
-
-def _make_sticker_service_failure(
-    reason: str = "vision",
-) -> MagicMock:
-    """Sticker service mock returning a failed ReanalyzeResult with the given reason."""
-    svc = MagicMock()
-    svc.reanalyze = AsyncMock(
-        return_value=ReanalyzeResult(ok=False, reason=reason)  # type: ignore[arg-type]
-    )
-    return svc
-
-
-class TestHandleRunAnalysis:
-    # ── helpers ────────────────────────────────────────────────────────
-
-    def _make_repo_with_desc(self, desc: str = "happy cat") -> MagicMock:
-        """Sticker repo that returns a sticker with a description (post-analysis)."""
-        repo = MagicMock()
-        repo.get_by_file_unique_id = AsyncMock(
-            return_value={**_SAMPLE_STICKER, "visual_description": desc}
-        )
-        return repo
-
-    # ── success path ───────────────────────────────────────────────────
-
-    @pytest.mark.asyncio()
-    async def test_success_edits_message_in_place_ru(self) -> None:
-        """Success: message is edited (not sent) with ✅ and description (ru)."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_success("happy cat")
-        sticker_repo = self._make_repo_with_desc("happy cat")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        # Must edit in-place — no new message
-        cb.message.bot.send_message.assert_not_awaited()
-        assert cb.message.edit_text.await_count >= 1
-
-    @pytest.mark.asyncio()
-    async def test_success_result_text_contains_checkmark_ru(self) -> None:
-        """Success result text contains ✅ in Russian."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_success()
-        sticker_repo = self._make_repo_with_desc()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        # Last edit_text call = the result message
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "✅" in result_text
-        assert "Анализ обновлён" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_success_result_text_contains_checkmark_en(self) -> None:
-        """Success result text contains ✅ in English."""
-        cb = _make_callback("adm_stk_reanalyze:en:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_success()
-        sticker_repo = self._make_repo_with_desc()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "✅" in result_text
-        assert "Analysis updated" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_success_result_html_escapes_description(self) -> None:
-        """Description with HTML chars is escaped before insertion."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_success("<b>evil</b>")
-        sticker_repo = self._make_repo_with_desc("<b>evil</b>")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "<b>evil</b>" not in result_text
-        assert "&lt;b&gt;evil&lt;/b&gt;" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_success_restores_full_keyboard(self) -> None:
-        """On success the sticker detail keyboard (with re-analyze + clear) is restored."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_success()
-        sticker_repo = self._make_repo_with_desc()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_kwargs = cb.message.edit_text.call_args_list[-1][1]
-        keyboard = result_kwargs["reply_markup"]
-        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-        assert any("adm_stk_reanalyze" in c for c in callbacks)
-        assert any("adm_stk_clr_ask" in c for c in callbacks)
-
-    # ── in-progress ⏳ edit ────────────────────────────────────────────
-
-    @pytest.mark.asyncio()
-    async def test_shows_in_progress_edit_before_analysis(self) -> None:
-        """⏳ edit happens as the FIRST edit_text call, before reanalyze is awaited."""
-        edit_calls: list[str] = []
-        reanalyze_called_after: list[int] = []
-
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-
-        async def _mock_reanalyze(_bot: object, _fuid: str) -> ReanalyzeResult:
-            reanalyze_called_after.append(len(edit_calls))
-            return ReanalyzeResult(ok=True, visual_description="cat")
-
-        async def _mock_edit_text(text: str, **_kwargs: object) -> None:
-            edit_calls.append(text)
-
-        cb.message.edit_text = AsyncMock(side_effect=_mock_edit_text)
-
-        sticker_service = MagicMock()
-        sticker_service.reanalyze = AsyncMock(side_effect=_mock_reanalyze)
-        sticker_repo = self._make_repo_with_desc("cat")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        # ⏳ edit came before reanalyze
-        assert reanalyze_called_after[0] == 1
-        assert "⏳" in edit_calls[0]
-
-    @pytest.mark.asyncio()
-    async def test_in_progress_edit_hides_buttons(self) -> None:
-        """⏳ edit uses empty keyboard to disable buttons."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_success()
-        sticker_repo = self._make_repo_with_desc()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        first_call = cb.message.edit_text.call_args_list[0]
-        keyboard = first_call[1]["reply_markup"]
-        assert keyboard.inline_keyboard == []
-
-    @pytest.mark.asyncio()
-    async def test_analysis_continues_when_in_progress_edit_fails(self) -> None:
-        """If the ⏳ edit raises TelegramBadRequest, analysis still runs and result is shown."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-
-        call_count = 0
-
-        async def _edit_text_side_effect(_text: str, **_kwargs: object) -> None:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                # Simulate in-progress edit failing (double-tap / network)
-                raise TelegramBadRequest(
-                    method="editMessageText", message="message is not modified"
-                )
-
-        cb.message.edit_text = AsyncMock(side_effect=_edit_text_side_effect)
-
-        sticker_service = _make_sticker_service_success()
-        sticker_repo = self._make_repo_with_desc()
-        bot_config_repo = _make_bot_config_repo()
-
-        # Should not raise; analysis must still run and result edit must be attempted
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        sticker_service.reanalyze.assert_awaited_once()
-        assert call_count == 2  # ⏳ attempt + ✅ result
-
-    # ── failure paths ──────────────────────────────────────────────────
-
-    @pytest.mark.asyncio()
-    async def test_failure_download_shows_reason_ru(self) -> None:
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_failure("download")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "⚠️" in result_text
-        assert "Ошибка загрузки" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_failure_vision_shows_reason_ru(self) -> None:
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_failure("vision")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "⚠️" in result_text
-        assert "Ошибка API" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_failure_content_filter_shows_reason_ru(self) -> None:
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_failure("content_filter")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "⚠️" in result_text
-        assert "Контент заблокирован" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_failure_empty_shows_reason_ru(self) -> None:
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_failure("empty")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "⚠️" in result_text
-        assert "Пустой ответ" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_failure_shows_reasons_in_english(self) -> None:
-        cb = _make_callback("adm_stk_reanalyze:en:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_failure("download")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "Download error" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_failure_shows_retry_button(self) -> None:
-        """Failure result keyboard contains the Retry button pointing to adm_stk_reanalyze."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-        sticker_service = _make_sticker_service_failure("vision")
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        result_kwargs = cb.message.edit_text.call_args_list[-1][1]
-        keyboard = result_kwargs["reply_markup"]
-        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-        assert any("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in c for c in callbacks)
-
-    # ── double-tap guard ───────────────────────────────────────────────
-
-    @pytest.mark.asyncio()
-    async def test_result_edit_not_modified_is_suppressed(self) -> None:
-        """TelegramBadRequest 'message is not modified' on result edit is silently suppressed."""
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI")
-
-        call_count = 0
-
-        async def _edit_text_side_effect(text: str, **_kwargs: object) -> None:
-            nonlocal call_count
-            call_count += 1
-            if "✅" in text or "⚠️" in text:
-                # Result edit raises "not modified" (double-tap: already showed result)
-                raise TelegramBadRequest(
-                    method="editMessageText", message="message is not modified"
-                )
-
-        cb.message.edit_text = AsyncMock(side_effect=_edit_text_side_effect)
-        sticker_service = _make_sticker_service_success()
-        sticker_repo = self._make_repo_with_desc()
-        bot_config_repo = _make_bot_config_repo()
-
-        # Must not raise
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-        assert call_count == 2  # both edits attempted, second suppressed
-
-    # ── not authorized ─────────────────────────────────────────────────
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized_does_not_run(self) -> None:
-        cb = _make_callback("adm_stk_reanalyze:ru:AgADvh4AAlkbCFI", user_id=99999)
-        sticker_service = MagicMock()
-        sticker_service.reanalyze = AsyncMock()
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_run_analysis(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        sticker_service.reanalyze.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# _status_badge — unified status vocabulary helper
-# ---------------------------------------------------------------------------
-
-
-class TestStatusBadgeHelper:
-    """Tests for the unified _status_badge helper (A-1)."""
-
-    # ── ⏳ not-analyzed ─────────────────────────────────────────────────
-
-    def test_not_analyzed_short_ru(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
-        badge = _status_badge(sticker, "ru", short=True)
-        assert "⏳" in badge
-        assert "Не выполнен" in badge
-
-    def test_not_analyzed_short_en(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
-        badge = _status_badge(sticker, "en", short=True)
-        assert "⏳" in badge
-        assert "Not analyzed" in badge
-
-    def test_not_analyzed_long_ru(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
-        badge = _status_badge(sticker, "ru", short=False)
-        assert "⏳" in badge
-        assert "Визуальный анализ не выполнен" in badge
-
-    def test_not_analyzed_long_en(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": False}
-        badge = _status_badge(sticker, "en", short=False)
-        assert "⏳" in badge
-        assert "Visual analysis" in badge
-
-    # ── ⚠️ failed ─────────────────────────────────────────────────────
-
-    def test_failed_short_ru(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
-        badge = _status_badge(sticker, "ru", short=True)
-        assert "⚠️" in badge
-        assert "Ошибка" in badge
-
-    def test_failed_short_en(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
-        badge = _status_badge(sticker, "en", short=True)
-        assert "⚠️" in badge
-        assert "Failed" in badge
-
-    def test_failed_long_ru(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
-        badge = _status_badge(sticker, "ru", short=False)
-        assert "⚠️" in badge
-        assert "Анализ провалился" in badge
-
-    def test_failed_long_en(self) -> None:
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
-        badge = _status_badge(sticker, "en", short=False)
-        assert "⚠️" in badge
-        assert "Analysis failed" in badge
-
-    # ── ✅ analyzed ───────────────────────────────────────────────────
-
-    def test_analyzed_short_truncates_at_25_chars(self) -> None:
-        long_desc = "a" * 30
-        sticker: dict[str, object] = {"visual_description": long_desc, "analysis_failed": False}
-        badge = _status_badge(sticker, "ru", short=True)
-        assert badge == "a" * 25
-
-    def test_analyzed_short_no_truncation_under_25(self) -> None:
-        sticker: dict[str, object] = {"visual_description": "short", "analysis_failed": False}
-        badge = _status_badge(sticker, "ru", short=True)
-        assert badge == "short"
-
-    def test_analyzed_long_returns_full_description(self) -> None:
-        desc = "a happy cat with a big smile"
-        sticker: dict[str, object] = {"visual_description": desc, "analysis_failed": False}
-        badge = _status_badge(sticker, "ru", short=False)
-        assert badge == desc
-
-    # ── priority: failed takes precedence over not-analyzed ──────────
-
-    def test_failed_takes_priority_over_not_analyzed(self) -> None:
-        """analysis_failed=True + visual_description=None → ⚠️ (not ⏳)."""
-        sticker: dict[str, object] = {"visual_description": None, "analysis_failed": True}
-        badge_long = _status_badge(sticker, "ru", short=False)
-        assert "⚠️" in badge_long
-        assert "⏳" not in badge_long
-
-    # ── missing keys are treated as falsy ────────────────────────────
-
-    def test_missing_keys_treated_as_not_analyzed(self) -> None:
-        badge = _status_badge({}, "ru", short=True)
-        assert "⏳" in badge
-
-
-# ---------------------------------------------------------------------------
-# sticker_set_detail_keyboard — now uses _status_badge vocabulary
-# ---------------------------------------------------------------------------
-
-_STICKERS_FOR_KB: list[dict[str, object]] = [
-    {
-        "file_unique_id": "analyzed_id",
-        "emoji": "😀",
-        "total_uses": 5,
-        "analysis_failed": False,
-        "visual_description": "a happy cat face with big eyes",
-    },
-    {
-        "file_unique_id": "pending_id",
-        "emoji": "😢",
-        "total_uses": 3,
-        "analysis_failed": False,
-        "visual_description": None,
-    },
-    {
-        "file_unique_id": "failed_id",
-        "emoji": "😠",
-        "total_uses": 1,
-        "analysis_failed": True,
-        "visual_description": None,
-    },
-]
-
-
-class TestStickerSetDetailKeyboardStatusBadge:
-    """Keyboard uses _status_badge — one vocabulary for ✅/⏳/⚠️ (A-1)."""
-
-    def _labels(self, lang: str) -> list[str]:
-        kb = sticker_set_detail_keyboard(
-            _STICKERS_FOR_KB,
-            set_name="test_set",
-            lang=lang,
-            page=0,
-            total=3,
-        )
-        return [btn.text for row in kb.inline_keyboard for btn in row]
-
-    def test_analyzed_shows_truncated_description_ru(self) -> None:
-        labels = self._labels("ru")
-        assert any("a happy cat face with big" in label for label in labels)
-
-    def test_not_analyzed_shows_pending_badge_ru(self) -> None:
-        labels = self._labels("ru")
-        assert any("⏳" in label and "Не выполнен" in label for label in labels)
-
-    def test_not_analyzed_shows_pending_badge_en(self) -> None:
-        labels = self._labels("en")
-        assert any("⏳" in label and "Not analyzed" in label for label in labels)
-
-    def test_failed_shows_warning_badge_ru(self) -> None:
-        labels = self._labels("ru")
-        assert any("⚠️" in label and "Ошибка" in label for label in labels)
-
-    def test_failed_shows_warning_badge_en(self) -> None:
-        labels = self._labels("en")
-        assert any("⚠️" in label and "Failed" in label for label in labels)
-
-    def test_old_failed_bracket_label_not_present(self) -> None:
-        """Regression: [FAILED] label must no longer appear."""
-        for lang in ("ru", "en"):
-            labels = self._labels(lang)
-            assert not any("[FAILED]" in label for label in labels)
-
-    def test_old_awaits_label_not_present(self) -> None:
-        """Regression: 'ожидает анализа' must no longer appear (replaced by ⏳ badge)."""
-        labels = self._labels("ru")
-        assert not any("ожидает анализа" in label for label in labels)
-
-
-# ---------------------------------------------------------------------------
-# handle_sticker_detail — status badge used for ⏳ / ⚠️ display (A-1)
-# ---------------------------------------------------------------------------
-
-
-class TestHandleStickerDetailStatusBadge:
-    """Detail view uses _status_badge for the not-analyzed and failed cases."""
-
-    @pytest.mark.asyncio()
-    async def test_not_analyzed_shows_pending_badge_ru(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": False}
-        sticker_repo = _make_sticker_repo(sticker=sticker)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        text = cb.message.answer.call_args[0][0]
-        assert "⏳" in text
-        assert "Визуальный анализ не выполнен" in text
-
-    @pytest.mark.asyncio()
-    async def test_not_analyzed_shows_pending_badge_en(self) -> None:
-        cb = _make_callback("adm_stk_view:en:AgADvh4AAlkbCFI")
-        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": False}
-        sticker_repo = _make_sticker_repo(sticker=sticker)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        text = cb.message.answer.call_args[0][0]
-        assert "⏳" in text
-        assert "Visual analysis" in text
-
-    @pytest.mark.asyncio()
-    async def test_failed_shows_warning_badge_ru(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
-        sticker_repo = _make_sticker_repo(sticker=sticker)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        text = cb.message.answer.call_args[0][0]
-        assert "⚠️" in text
-        assert "Анализ провалился" in text
-
-    @pytest.mark.asyncio()
-    async def test_failed_shows_warning_badge_en(self) -> None:
-        cb = _make_callback("adm_stk_view:en:AgADvh4AAlkbCFI")
-        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
-        sticker_repo = _make_sticker_repo(sticker=sticker)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        text = cb.message.answer.call_args[0][0]
-        assert "⚠️" in text
-        assert "Analysis failed" in text
-
-    @pytest.mark.asyncio()
-    async def test_failed_does_not_also_show_pending_badge(self) -> None:
-        """Regression: failed state must show only ⚠️, not both ⚠️ and ⏳."""
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker = {**_SAMPLE_STICKER, "visual_description": None, "analysis_failed": True}
-        sticker_repo = _make_sticker_repo(sticker=sticker)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        text = cb.message.answer.call_args[0][0]
-        assert "⏳" not in text
-
-    @pytest.mark.asyncio()
-    async def test_analyzed_shows_description_not_badge(self) -> None:
-        """Analyzed sticker: description shown inline, no ⏳ or ⚠️."""
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        # _SAMPLE_STICKER has visual_description="happy cat"
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
-
-        text = cb.message.answer.call_args[0][0]
-        assert "Описание" in text
-        assert "happy cat" in text
-        assert "⏳" not in text
-        assert "⚠️" not in text
-
-
-# ---------------------------------------------------------------------------
-# handle_admin_sticker_check / handle_admin_sticker_dm_analyze — DM check (B-1)
-# ---------------------------------------------------------------------------
-
-
-def _make_sticker(
-    file_unique_id: str = "AgADvh4AAlkbCFI",
-    file_id: str = "CAACAgIAAxkB",
-    set_name: str | None = "test_set",
-    emoji: str | None = "😺",
-    is_animated: bool = False,
-    is_video: bool = False,
-) -> MagicMock:
-    """Mock aiogram Sticker with just the attributes the handlers touch."""
-    sticker = MagicMock()
-    sticker.file_unique_id = file_unique_id
-    sticker.file_id = file_id
-    sticker.set_name = set_name
-    sticker.emoji = emoji
-    sticker.is_animated = is_animated
-    sticker.is_video = is_video
-    return sticker
-
-
-def _make_sticker_dm_message(
-    sticker: MagicMock | None = None,
-    user_id: int = 12345,
-    chat_type: str = "private",
-) -> MagicMock:
-    """Mock aiogram Message carrying a sticker, sent by the admin in DM."""
-    msg = MagicMock()
-    msg.sticker = sticker if sticker is not None else _make_sticker()
-    msg.chat = MagicMock()
-    msg.chat.id = user_id
-    msg.chat.type = chat_type
-    msg.from_user = MagicMock()
-    msg.from_user.id = user_id
-    msg.reply = AsyncMock()
-    return msg
-
-
-def _make_admin_repo(lang: str = "ru") -> MagicMock:
-    repo = MagicMock()
-    repo.get_admin_language = AsyncMock(return_value=lang)
-    return repo
-
-
-def _cb_with_reply(
-    callback_data: str = "adm_stk_dmchk:ru:AgADvh4AAlkbCFI",
-    sticker: MagicMock | None = None,
-    user_id: int = 12345,
-) -> MagicMock:
-    """Callback whose message.reply_to_message carries `sticker` (default:
-    a matching _make_sticker()) -- mirrors the real flow, where
-    handle_admin_sticker_check() sent the analyze prompt as a reply to the
-    admin's original sticker message.
-    """
-    cb = _make_callback(callback_data, user_id=user_id)
-    reply_msg = MagicMock()
-    reply_msg.sticker = sticker if sticker is not None else _make_sticker()
-    cb.message.reply_to_message = reply_msg
-    return cb
-
-
-def _cb_without_reply(
-    callback_data: str = "adm_stk_dmchk:ru:AgADvh4AAlkbCFI",
-    user_id: int = 12345,
-) -> MagicMock:
-    cb = _make_callback(callback_data, user_id=user_id)
-    cb.message.reply_to_message = None
-    return cb
-
-
-class TestHandleAdminStickerCheck:
-    """Admin sends a sticker in DM (no command) -- B-1 catalog check."""
-
-    @pytest.mark.asyncio()
-    async def test_known_sticker_replies_with_detail(self) -> None:
-        msg = _make_sticker_dm_message()
-        sticker_repo = _make_sticker_repo()  # returns _SAMPLE_STICKER
-        admin_repo = _make_admin_repo("ru")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
-
-        msg.reply.assert_awaited_once()
-        text = msg.reply.call_args[0][0]
-        assert "happy cat" in text
-        assert msg.reply.call_args.kwargs["parse_mode"] == "HTML"
-        keyboard = msg.reply.call_args.kwargs["reply_markup"]
-        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
-
-    @pytest.mark.asyncio()
-    async def test_unknown_sticker_shows_analyze_button_ru(self) -> None:
-        msg = _make_sticker_dm_message(sticker=_make_sticker(file_unique_id="unknownID"))
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.get_by_file_unique_id = AsyncMock(return_value=None)
-        admin_repo = _make_admin_repo("ru")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
-
-        msg.reply.assert_awaited_once()
-        text = msg.reply.call_args[0][0]
-        assert "нет в базе" in text
-        keyboard = msg.reply.call_args.kwargs["reply_markup"]
-        btn = keyboard.inline_keyboard[0][0]
-        assert btn.callback_data == "adm_stk_dmchk:ru:unknownID"
-        assert "Проанализировать" in btn.text
-
-    @pytest.mark.asyncio()
-    async def test_unknown_sticker_shows_analyze_button_en(self) -> None:
-        msg = _make_sticker_dm_message(sticker=_make_sticker(file_unique_id="unknownID"))
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.get_by_file_unique_id = AsyncMock(return_value=None)
-        admin_repo = _make_admin_repo("en")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
-
-        text = msg.reply.call_args[0][0]
-        assert "isn't in the catalog" in text
-        btn = msg.reply.call_args.kwargs["reply_markup"].inline_keyboard[0][0]
-        assert "Analyze" in btn.text
-
-    @pytest.mark.asyncio()
-    async def test_no_sticker_on_message_is_noop(self) -> None:
-        """Defensive guard: message.sticker is None (shouldn't happen given
-        the F.sticker filter, but the handler must not blow up)."""
-        msg = _make_sticker_dm_message()
-        msg.sticker = None
-        sticker_repo = _make_sticker_repo()
-        admin_repo = _make_admin_repo("ru")
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_admin_sticker_check(msg, sticker_repo, admin_repo, bot_config_repo)
-
-        msg.reply.assert_not_awaited()
-        sticker_repo.get_by_file_unique_id.assert_not_awaited()
-
-    # Note: admin+private scoping is enforced at router-registration time by
-    # `F.sticker, F.chat.type == "private", IsAdmin()` on the @router.message
-    # decorator (src/bot/handlers/admin_sticker.py) -- same pattern as
-    # handle_admin_sticker_reply above. aiogram drops the update before it
-    # reaches this handler for a non-admin or a non-DM chat, so that path is
-    # verified by inspection of the decorator, not by a handler-level test.
-
-
-class TestHandleAdminStickerDmAnalyze:
-    """The "🔍 Проанализировать" button -- B-1's not-found branch."""
-
-    @pytest.mark.asyncio()
-    async def test_success_edits_in_place_with_detail(self) -> None:
-        cb = _cb_with_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock(
-            return_value=StickerLearningResult(
-                is_new=True,
-                file_unique_id="AgADvh4AAlkbCFI",
-                visual_description="happy cat",
-                analysis_failed=False,
-            )
-        )
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.get_sticker_set = AsyncMock(return_value={"set_name": "test_set"})
-        bot_config_repo = _make_bot_config_repo()
-
-        with patch(
-            "src.bot.handlers.admin_sticker.download_telegram_file",
-            new=AsyncMock(return_value=b"fake-bytes"),
-        ):
-            await handle_admin_sticker_dm_analyze(
-                cb, sticker_service, sticker_repo, bot_config_repo
-            )
-
-        sticker_service.learn.assert_awaited_once()
-        cb.message.bot.send_message.assert_not_awaited()
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "happy cat" in result_text
-
-    @pytest.mark.asyncio()
-    async def test_shows_in_progress_edit_before_download(self) -> None:
-        cb = _cb_with_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock(
-            return_value=StickerLearningResult(
-                is_new=True,
-                file_unique_id="AgADvh4AAlkbCFI",
-                visual_description="cat",
-                analysis_failed=False,
-            )
-        )
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        with patch(
-            "src.bot.handlers.admin_sticker.download_telegram_file",
-            new=AsyncMock(return_value=b"fake-bytes"),
-        ):
-            await handle_admin_sticker_dm_analyze(
-                cb, sticker_service, sticker_repo, bot_config_repo
-            )
-
-        first_call = cb.message.edit_text.call_args_list[0]
-        assert "⏳" in first_call[0][0]
-        assert first_call[1]["reply_markup"].inline_keyboard == []
-
-    @pytest.mark.asyncio()
-    async def test_missing_reply_to_message_shows_alert_and_skips_learn(self) -> None:
-        cb = _cb_without_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock()
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_admin_sticker_dm_analyze(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        sticker_service.learn.assert_not_awaited()
-        cb.answer.assert_awaited_once()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-    @pytest.mark.asyncio()
-    async def test_mismatched_file_unique_id_shows_alert_and_skips_learn(self) -> None:
-        # Reply carries a DIFFERENT sticker than callback_data references --
-        # e.g. the admin sent a second sticker before tapping the first
-        # prompt's button. Must not analyze the wrong sticker.
-        cb = _cb_with_reply(sticker=_make_sticker(file_unique_id="someOtherID"))
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock()
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_admin_sticker_dm_analyze(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        sticker_service.learn.assert_not_awaited()
-        cb.answer.assert_awaited_once()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-    @pytest.mark.asyncio()
-    async def test_download_failure_shows_reason_and_retry_button(self) -> None:
-        cb = _cb_with_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock()
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        with patch(
-            "src.bot.handlers.admin_sticker.download_telegram_file",
-            new=AsyncMock(side_effect=TelegramFileError("boom")),
-        ):
-            await handle_admin_sticker_dm_analyze(
-                cb, sticker_service, sticker_repo, bot_config_repo
-            )
-
-        sticker_service.learn.assert_not_awaited()
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "⚠️" in result_text
-        assert "Ошибка загрузки" in result_text
-        keyboard = cb.message.edit_text.call_args_list[-1][1]["reply_markup"]
-        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
-
-    @pytest.mark.asyncio()
-    async def test_analysis_failed_shows_retry_button(self) -> None:
-        cb = _cb_with_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock(
-            return_value=StickerLearningResult(
-                is_new=True,
-                file_unique_id="AgADvh4AAlkbCFI",
-                analysis_failed=True,
-                failure_reason="vision",
-            )
-        )
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
-
-        with patch(
-            "src.bot.handlers.admin_sticker.download_telegram_file",
-            new=AsyncMock(return_value=b"fake-bytes"),
-        ):
-            await handle_admin_sticker_dm_analyze(
-                cb, sticker_service, sticker_repo, bot_config_repo
-            )
-
-        result_text = cb.message.edit_text.call_args_list[-1][0][0]
-        assert "⚠️" in result_text
-        assert "Ошибка API" in result_text
-        keyboard = cb.message.edit_text.call_args_list[-1][1]["reply_markup"]
-        callbacks = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-        assert "adm_stk_reanalyze:ru:AgADvh4AAlkbCFI" in callbacks
-
-    @pytest.mark.asyncio()
-    async def test_registers_new_sticker_set(self) -> None:
-        cb = _cb_with_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock(
-            return_value=StickerLearningResult(
-                is_new=True,
-                file_unique_id="AgADvh4AAlkbCFI",
-                visual_description="cat",
-                analysis_failed=False,
-            )
-        )
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.get_sticker_set = AsyncMock(return_value=None)
-        sticker_repo.upsert_sticker_set = AsyncMock()
-        bot_config_repo = _make_bot_config_repo()
-
-        tg_set = MagicMock()
-        tg_set.name = "test_set"
-        tg_set.title = "Test Set"
-        tg_set.thumbnail = None
-        set_sticker = MagicMock()
-        set_sticker.is_animated = False
-        set_sticker.is_video = False
-        tg_set.stickers = [set_sticker]
-        cb.message.bot.get_sticker_set = AsyncMock(return_value=tg_set)
-
-        with patch(
-            "src.bot.handlers.admin_sticker.download_telegram_file",
-            new=AsyncMock(return_value=b"fake-bytes"),
-        ):
-            await handle_admin_sticker_dm_analyze(
-                cb, sticker_service, sticker_repo, bot_config_repo
-            )
-
-        sticker_repo.upsert_sticker_set.assert_awaited_once()
-
-    @pytest.mark.asyncio()
-    async def test_skips_set_registration_when_already_known(self) -> None:
-        cb = _cb_with_reply()
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock(
-            return_value=StickerLearningResult(
-                is_new=True,
-                file_unique_id="AgADvh4AAlkbCFI",
-                visual_description="cat",
-                analysis_failed=False,
-            )
-        )
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.get_sticker_set = AsyncMock(return_value={"set_name": "test_set"})
-        sticker_repo.upsert_sticker_set = AsyncMock()
-        bot_config_repo = _make_bot_config_repo()
-
-        with patch(
-            "src.bot.handlers.admin_sticker.download_telegram_file",
-            new=AsyncMock(return_value=b"fake-bytes"),
-        ):
-            await handle_admin_sticker_dm_analyze(
-                cb, sticker_service, sticker_repo, bot_config_repo
-            )
-
-        sticker_repo.upsert_sticker_set.assert_not_awaited()
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized_does_not_run(self) -> None:
-        cb = _cb_with_reply(user_id=99999)
-        sticker_service = MagicMock()
-        sticker_service.learn = AsyncMock()
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_admin_sticker_dm_analyze(cb, sticker_service, sticker_repo, bot_config_repo)
-
-        sticker_service.learn.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# sticker_dm_check_keyboard — callback_data format
-# ---------------------------------------------------------------------------
-
-
-class TestStickerDmCheckKeyboard:
-    def test_single_analyze_button_ru(self) -> None:
-        kb = sticker_dm_check_keyboard("AgADvh4AAlkbCFI", lang="ru")
-        assert len(kb.inline_keyboard) == 1
-        btn = kb.inline_keyboard[0][0]
-        assert "Проанализировать" in btn.text
-        assert btn.callback_data == "adm_stk_dmchk:ru:AgADvh4AAlkbCFI"
-
-    def test_single_analyze_button_en(self) -> None:
-        kb = sticker_dm_check_keyboard("AgADvh4AAlkbCFI", lang="en")
-        btn = kb.inline_keyboard[0][0]
-        assert "Analyze" in btn.text
-        assert btn.callback_data == "adm_stk_dmchk:en:AgADvh4AAlkbCFI"
-
-
-# ---------------------------------------------------------------------------
-# _resolve_default_tolerance_level (A-1)
-# ---------------------------------------------------------------------------
 
 
 class TestResolveDefaultToleranceLevel:
     @pytest.mark.asyncio()
     async def test_falls_back_to_chatconfig_dataclass_default(self) -> None:
-        """No admin-set default_tolerance_level -> the same 0.5 fallback
-        ChatConfig itself uses (ADR-0008 Decision 1/8)."""
-        bot_config_repo = _make_bot_config_repo()
-        assert await _resolve_default_tolerance_level(bot_config_repo) == 0.5
+        assert await _resolve_default_tolerance_level(_bot_config_repo()) == 0.5
 
     @pytest.mark.asyncio()
     async def test_uses_admin_set_default(self) -> None:
-        bot_config_repo = _make_bot_config_repo(tolerance_level=0.2)
-        assert await _resolve_default_tolerance_level(bot_config_repo) == 0.2
+        repo = _bot_config_repo(tolerance_level=0.2)
+        assert await _resolve_default_tolerance_level(repo) == 0.2
 
     @pytest.mark.asyncio()
     async def test_coerces_to_float(self) -> None:
-        """bot_config values round-trip through JSON -- an admin-entered
-        whole number could come back as an int; must still compare cleanly
-        against explicitness_score (float)."""
-        bot_config_repo = MagicMock()
-        bot_config_repo.get_defaults = AsyncMock(return_value={"tolerance_level": 1})
-        result = await _resolve_default_tolerance_level(bot_config_repo)
+        """bot_config values round-trip through JSON: a whole number may come back an int."""
+        repo = MagicMock()
+        repo.get_defaults = AsyncMock(return_value={"tolerance_level": 1})
+        result = await _resolve_default_tolerance_level(repo)
         assert result == 1.0
         assert isinstance(result, float)
 
 
 # ---------------------------------------------------------------------------
-# _build_detail_text — explicitness line, three states (A-1)
+# A reply to a sticker card corrects the description
 # ---------------------------------------------------------------------------
 
 
-class TestBuildDetailTextExplicitnessLine:
-    def test_scored_and_passes_shows_pass_verdict(self) -> None:
-        sticker = {**_SAMPLE_STICKER, "explicitness_score": 0.3}
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "Оценка откровенности" in text
-        assert "0.30" in text
-        assert "0.50" in text
-        assert "✅ пройдёт" in text
-
-    def test_scored_and_fails_shows_fail_verdict(self) -> None:
-        sticker = {**_SAMPLE_STICKER, "explicitness_score": 0.9}
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "❌ не пройдёт" in text
-
-    def test_analyzed_but_unscored_shows_not_scored(self) -> None:
-        """State 2: visual_description present, explicitness_score NULL
-        (e.g. legacy row pending ADR-0008 backfill, or vision omitted the
-        field) -- must say "не оценён", never fabricate a pass/fail."""
-        sticker = {**_SAMPLE_STICKER, "explicitness_score": None}
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "не оценён" in text
-        assert "✅" not in text
-        assert "❌" not in text
-
-    def test_not_analyzed_at_all_omits_explicitness_line(self) -> None:
-        """State 3: sticker never went through vision at all -- the ⏳
-        not-analyzed badge already covers this; no redundant explicitness
-        line (keeps the card from bloating per the source plan)."""
-        sticker = {
-            **_SAMPLE_STICKER,
-            "visual_description": None,
-            "explicitness_score": None,
-        }
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "Оценка откровенности" not in text
-        assert "⏳" in text
-
-    def test_missing_explicitness_score_key_treated_as_unscored(self) -> None:
-        """A sticker row from before this column existed (or a dict that
-        just doesn't carry the key) must not KeyError."""
-        sticker = {k: v for k, v in _SAMPLE_STICKER.items() if k != "explicitness_score"}
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "не оценён" in text
+def _admin_reply(
+    text: str = "better description",
+    reply_text: str | None = f"🆔 {FUID}",
+    reply_caption: str | None = None,
+) -> MagicMock:
+    msg = MagicMock()
+    msg.text = text
+    msg.chat.id = ADMIN
+    msg.from_user.id = ADMIN
+    msg.reply = AsyncMock()
+    msg.reply_to_message = _reply_target(text=reply_text, caption=reply_caption)
+    return msg
 
 
-# ---------------------------------------------------------------------------
-# handle_sticker_detail — explicitness line wired end-to-end (A-1)
-# ---------------------------------------------------------------------------
+async def _run_reply(
+    msg: MagicMock,
+    repo: MagicMock,
+    svc: MagicMock,
+    *,
+    lang: str = "ru",
+    bot: MagicMock | None = None,
+    thread: int | None = None,
+) -> None:
+    await handle_admin_sticker_reply(
+        msg,
+        repo,
+        svc,
+        _admin_repo(lang),
+        _bot_config_repo(),
+        bot or _bot(),
+        message_thread_id=thread,
+    )
 
 
-class TestHandleStickerDetailExplicitnessLine:
+class TestHandleAdminStickerReply:
     @pytest.mark.asyncio()
-    async def test_shows_explicitness_line_using_resolved_default(self) -> None:
-        cb = _make_callback("adm_stk_view:ru:AgADvh4AAlkbCFI")
-        sticker = {**_SAMPLE_STICKER, "explicitness_score": 0.3}
-        sticker_repo = _make_sticker_repo(sticker=sticker)
-        bot_config_repo = _make_bot_config_repo(tolerance_level=0.6)
+    async def test_the_remembered_card_wins_over_the_text(self) -> None:
+        repo = _sticker_repo()
+        repo.get_notification_by_reply.return_value = {"file_unique_id": FUID}
+        svc = _service()
+        msg = _admin_reply(reply_text="🆔 SomeOtherId")
 
-        await handle_sticker_detail(cb, sticker_repo, bot_config_repo)
+        await _run_reply(msg, repo, svc)
 
-        text = cb.message.answer.call_args[0][0]
-        assert "0.30" in text
-        assert "0.60" in text
-        assert "✅ пройдёт" in text
+        repo.get_notification_by_reply.assert_awaited_once_with(ADMIN, 100)
+        svc.merge_admin_description.assert_awaited_once_with(FUID, "better description")
+        text = msg.reply.call_args.args[0]
+        assert "✓ <b>Описание обновлено</b>" in text
+        assert "Updated desc" in text
+        assert msg.reply.call_args.kwargs == {"parse_mode": "HTML"}
+
+    @pytest.mark.asyncio()
+    async def test_text_fallback_when_no_card_is_remembered(self) -> None:
+        svc = _service()
+        await _run_reply(_admin_reply(reply_text="🆔 FallbackID123\nold"), _sticker_repo(), svc)
+        svc.merge_admin_description.assert_awaited_once_with("FallbackID123", "better description")
+
+    @pytest.mark.asyncio()
+    async def test_caption_fallback_for_a_collage(self) -> None:
+        svc = _service()
+        msg = _admin_reply(reply_text=None, reply_caption="🆔 CaptionID456")
+        await _run_reply(msg, _sticker_repo(), svc)
+        svc.merge_admin_description.assert_awaited_once_with("CaptionID456", "better description")
+
+    @pytest.mark.asyncio()
+    async def test_a_reply_to_anything_else_is_left_alone(self) -> None:
+        svc = _service()
+        msg = _admin_reply(reply_text="No ID here")
+        await _run_reply(msg, _sticker_repo(), svc)
+        svc.merge_admin_description.assert_not_awaited()
+        msg.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_blank_text_is_ignored(self) -> None:
+        svc = _service()
+        await _run_reply(_admin_reply(text="   "), _sticker_repo(), svc)
+        svc.merge_admin_description.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_merge_without_result_says_the_note_is_kept(self) -> None:
+        svc = _service()
+        svc.merge_admin_description.return_value = None
+        msg = _admin_reply()
+
+        await _run_reply(msg, _sticker_repo(), svc)
+
+        text = msg.reply.call_args.args[0]
+        assert "⚠️ <b>Описание не обновлено</b>" in text
+        assert "заметка сохранена" in text
+        assert "«🔁 Разобрать заново»" in text
+
+    @pytest.mark.asyncio()
+    async def test_merge_crash_says_the_note_is_kept(self) -> None:
+        svc = _service()
+        svc.merge_admin_description.side_effect = RuntimeError("boom")
+        msg = _admin_reply()
+
+        await _run_reply(msg, _sticker_repo(), svc)
+
+        assert "заметка сохранена" in msg.reply.call_args.args[0]
+
+    @pytest.mark.asyncio()
+    async def test_content_refusal_points_at_the_manual_score(self) -> None:
+        svc = _service()
+        svc.merge_admin_description.side_effect = ValueError("content_filter")
+        msg = _admin_reply()
+
+        await _run_reply(msg, _sticker_repo(), svc)
+
+        text = msg.reply.call_args.args[0]
+        assert "отказалась" in text
+        assert "🔞 Откровенность" in text
+
+    @pytest.mark.asyncio()
+    async def test_other_value_error_says_try_again(self) -> None:
+        svc = _service()
+        svc.merge_admin_description.side_effect = ValueError("something else")
+        msg = _admin_reply()
+
+        await _run_reply(msg, _sticker_repo(), svc)
+
+        assert "Не получилось обновить описание" in msg.reply.call_args.args[0]
+
+    @pytest.mark.asyncio()
+    async def test_the_new_description_is_escaped(self) -> None:
+        svc = _service()
+        svc.merge_admin_description.return_value = "<b>cat</b> & dog"
+        msg = _admin_reply()
+
+        await _run_reply(msg, _sticker_repo(), svc)
+
+        assert "&lt;b&gt;cat&lt;/b&gt; &amp; dog" in msg.reply.call_args.args[0]
+
+    @pytest.mark.asyncio()
+    async def test_answers_in_the_admin_language(self) -> None:
+        msg = _admin_reply()
+        await _run_reply(msg, _sticker_repo(), _service(), lang="en")
+        assert "Description updated" in msg.reply.call_args.args[0]
+
+
+class TestHandleAdminStickerReplyTypingIndicator:
+    """The merge is an LLM call: it runs under the shared typing indicator."""
+
+    @pytest.mark.asyncio()
+    async def test_wraps_merge_call(self) -> None:
+        bot = _bot()
+        msg = _admin_reply()
+        svc = _service()
+        with patch(f"{MOD}.typing_indicator") as indicator:
+            indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+            await _run_reply(msg, _sticker_repo(), svc, bot=bot)
+
+        indicator.assert_called_once_with(bot, ADMIN, None)
+        svc.merge_admin_description.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_forwards_message_thread_id(self) -> None:
+        bot = _bot()
+        with patch(f"{MOD}.typing_indicator") as indicator:
+            indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+            await _run_reply(_admin_reply(), _sticker_repo(), _service(), bot=bot, thread=777)
+
+        indicator.assert_called_once_with(bot, ADMIN, 777)
+
+    @pytest.mark.asyncio()
+    async def test_no_indicator_when_no_sticker_is_addressed(self) -> None:
+        with patch(f"{MOD}.typing_indicator") as indicator:
+            await _run_reply(_admin_reply(reply_text="No ID here"), _sticker_repo(), _service())
+        indicator.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# _build_detail_text — is_manual badge threading (A-4 / ADR-0009)
+# The pack list and one pack
 # ---------------------------------------------------------------------------
 
-
-class TestBuildDetailTextManualBadge:
-    def test_manual_flag_shows_badge(self) -> None:
-        sticker = {
-            **_SAMPLE_STICKER,
-            "explicitness_score": 0.3,
-            "explicitness_is_manual": True,
-        }
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "(вручную)" in text
-
-    def test_no_manual_flag_no_badge(self) -> None:
-        sticker = {
-            **_SAMPLE_STICKER,
-            "explicitness_score": 0.3,
-            "explicitness_is_manual": False,
-        }
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "вручную" not in text
-
-    def test_missing_manual_key_treated_as_automatic(self) -> None:
-        sticker = {k: v for k, v in _SAMPLE_STICKER.items() if k != "explicitness_is_manual"}
-        sticker["explicitness_score"] = 0.3
-        text = _build_detail_text(sticker, "fuid", "ru", tolerance_level=0.5)
-        assert "вручную" not in text
+_SETS = [
+    {
+        "set_name": PACK,
+        "set_title": "Test Pack",
+        "total_count": 5,
+        "learned_count": 4,
+        "analyzed_count": 3,
+    }
+]
 
 
-# ---------------------------------------------------------------------------
-# sticker_detail_keyboard — explicitness rows (A-4 / ADR-0009)
-# ---------------------------------------------------------------------------
+class TestHandleStickerSets:
+    @pytest.mark.asyncio()
+    async def test_lists_packs_with_the_analysed_count(self) -> None:
+        cb = _callback("adm_stk_sets:ru:0")
+        repo = _sticker_repo(sets=_SETS)
+
+        await handle_sticker_sets(cb, repo, _state())
+
+        text, buttons = _edit(cb)
+        assert "Паки стикеров" in text
+        assert buttons[0] == ("Test Pack (3 из 5)", f"adm_stk_pk:ru:{KEY}:0")
+        assert buttons[-1] == ("⬅️ Панель", "adm_menu:ru")
+        repo.get_all_sets_with_stats.assert_awaited_once_with(limit=4, offset=0)
+        cb.message.delete.assert_not_awaited()
+        cb.message.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_page_past_the_end_is_brought_back_in_range(self) -> None:
+        cb = _callback("adm_stk_sets:ru:9")
+        repo = _sticker_repo(sets=_SETS)
+
+        await handle_sticker_sets(cb, repo, _state())
+
+        repo.get_all_sets_with_stats.assert_awaited_once_with(limit=4, offset=0)
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("data", ["adm_stk_sets:ru", "adm_stk_sets:ru:x", "adm_stk_sets:"])
+    async def test_unparseable_payload_is_stale(self, stale: AsyncMock, data: str) -> None:
+        cb = _callback(data)
+        state = _state()
+
+        await handle_sticker_sets(cb, _sticker_repo(), state, foo="bar")
+
+        stale.assert_awaited_once()
+        assert stale.call_args.kwargs == {"data": {"foo": "bar"}, "state": state}
+        cb.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_disarms_an_open_score_prompt(self) -> None:
+        state = _state(current=AdminStates.awaiting_sticker_score.state)
+        await handle_sticker_sets(_callback("adm_stk_sets:ru:0"), _sticker_repo(), state)
+        state.clear.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_leaves_another_screens_prompt_alone(self) -> None:
+        state = _state(current="AdminStates:awaiting_tolerance")
+        await handle_sticker_sets(_callback("adm_stk_sets:ru:0"), _sticker_repo(), state)
+        state.clear.assert_not_awaited()
 
 
-class TestStickerDetailKeyboardExplicitness:
-    def test_preset_buttons_present(self) -> None:
-        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        for idx in range(len(_EXPLICITNESS_PRESETS)):
-            assert f"adm_stk_expset:ru:AgADvh4AAlkbCFI:{idx}" in callbacks
+class TestLeavingACard:
+    """A card opened from a pack takes its sticker with it; a reply card does not."""
 
-    def test_edit_button_present(self) -> None:
-        kb = sticker_detail_keyboard("AgADvh4AAlkbCFI", lang="ru", set_name="s")
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        assert "adm_stk_expedit:ru:AgADvh4AAlkbCFI" in callbacks
+    @pytest.mark.asyncio()
+    async def test_a_catalogue_card_removes_its_own_sticker(self) -> None:
+        cb = _callback("adm_stk_sets:ru:0")
+        repo = _sticker_repo(card_sticker_msg=199)
 
-    def test_reset_button_hidden_when_not_manual(self) -> None:
-        kb = sticker_detail_keyboard(
-            "AgADvh4AAlkbCFI", lang="ru", set_name="s", explicitness_is_manual=False
+        await handle_sticker_sets(cb, repo, _state())
+
+        repo.get_card_sticker_msg.assert_awaited_once_with(ADMIN, 200)
+        cb.bot.delete_message.assert_awaited_once_with(chat_id=ADMIN, message_id=199)
+        repo.release_card.assert_awaited_once_with(ADMIN, 200)
+
+    @pytest.mark.asyncio()
+    async def test_a_notification_card_keeps_the_sticker_it_replies_to(self) -> None:
+        cb = _callback("adm_stk_sets:ru:0", reply_to=MagicMock())
+        repo = _sticker_repo(card_sticker_msg=199)
+
+        await handle_sticker_sets(cb, repo, _state())
+
+        cb.bot.delete_message.assert_not_awaited()
+        repo.release_card.assert_awaited_once_with(ADMIN, 200)
+
+    @pytest.mark.asyncio()
+    async def test_a_message_that_is_no_card_deletes_nothing(self) -> None:
+        cb = _callback("adm_stk_sets:ru:0")
+        repo = _sticker_repo(card_sticker_msg=None)
+
+        await handle_sticker_sets(cb, repo, _state())
+
+        cb.bot.delete_message.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_record_failure_still_shows_the_list(self) -> None:
+        cb = _callback("adm_stk_sets:ru:0")
+        repo = _sticker_repo()
+        repo.get_card_sticker_msg.side_effect = RuntimeError("db")
+
+        await handle_sticker_sets(cb, repo, _state())
+
+        assert "Паки стикеров" in _edit(cb)[0]
+
+
+class TestHandleStickerPack:
+    @pytest.mark.asyncio()
+    async def test_opens_the_pack_by_key(self) -> None:
+        cb = _callback(f"adm_stk_pk:ru:{KEY}:0")
+        repo = _sticker_repo(stickers=[_row()])
+
+        await handle_sticker_pack(cb, repo, _state())
+
+        repo.get_set_by_key.assert_awaited_once_with(KEY)
+        repo.get_stickers_in_set.assert_awaited_once_with(PACK, limit=4, offset=0)
+        text, buttons = _edit(cb)
+        assert "<b>Test Pack</b> · 1 стикер" in text
+        assert buttons[0][1] == f"adm_stk_view:ru:{FUID}"
+        assert buttons[0][0].endswith("happy cat waving a paw · 5")
+        assert buttons[-1] == ("⬅️ Паки", "adm_stk_sets:ru:0")
+
+    @pytest.mark.asyncio()
+    async def test_a_pack_that_is_gone_says_so_on_the_pack_list(self) -> None:
+        cb = _callback(f"adm_stk_pk:ru:{KEY}:0")
+        repo = _sticker_repo(pack=None, sets=_SETS)
+
+        await handle_sticker_pack(cb, repo, _state())
+
+        text, _ = _edit(cb)
+        assert "Этого пака уже нет в списке." in text
+        assert "Паки стикеров" in text
+        assert "✓" not in text
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize(
+        "data",
+        [
+            "adm_stk_pk:ru:NOTAHEXKEY12:0",
+            "adm_stk_pk:ru:abc:0",
+            f"adm_stk_pk:ru:{KEY}:x",
+            f"adm_stk_pk:ru:{KEY}",
+        ],
+    )
+    async def test_unparseable_payload_is_stale(self, stale: AsyncMock, data: str) -> None:
+        repo = _sticker_repo()
+        await handle_sticker_pack(_callback(data), repo, _state())
+        stale.assert_awaited_once()
+        repo.get_set_by_key.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_button_from_before_keys_still_opens_the_pack(self) -> None:
+        cb = _callback(f"adm_stk_set:ru:{PACK}:0")
+        repo = _sticker_repo(stickers=[_row()])
+
+        await handle_sticker_set_legacy(cb, repo, _state())
+
+        repo.get_sticker_set.assert_awaited_once_with(PACK)
+        assert "<b>Test Pack</b>" in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_a_legacy_button_with_a_broken_page_is_stale(self, stale: AsyncMock) -> None:
+        await handle_sticker_set_legacy(
+            _callback(f"adm_stk_set:ru:{PACK}:x"), _sticker_repo(), _state()
         )
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        assert not any((c or "").startswith("adm_stk_expreset:") for c in callbacks)
-
-    def test_reset_button_shown_when_manual(self) -> None:
-        kb = sticker_detail_keyboard(
-            "AgADvh4AAlkbCFI", lang="ru", set_name="s", explicitness_is_manual=True
-        )
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        assert "adm_stk_expreset:ru:AgADvh4AAlkbCFI" in callbacks
-
-    def test_back_button_still_last_row(self) -> None:
-        """New explicitness rows must not push the back button out of its
-        always-last-row contract other handlers rely on (e.g. tests indexing
-        kb.inline_keyboard[-1])."""
-        kb = sticker_detail_keyboard(
-            "AgADvh4AAlkbCFI", lang="ru", set_name="test_set", explicitness_is_manual=True
-        )
-        back_btn = kb.inline_keyboard[-1][0]
-        assert back_btn.callback_data == "adm_stk_back:ru:test_set:0"
-
-
-class TestStickerExplicitnessCancelKeyboard:
-    def test_single_cancel_button_ru(self) -> None:
-        kb = sticker_explicitness_cancel_keyboard("AgADvh4AAlkbCFI", lang="ru")
-        assert len(kb.inline_keyboard) == 1
-        btn = kb.inline_keyboard[0][0]
-        assert "Отмена" in btn.text
-        assert btn.callback_data == "adm_stk_expcancel:ru:AgADvh4AAlkbCFI"
-
-    def test_single_cancel_button_en(self) -> None:
-        kb = sticker_explicitness_cancel_keyboard("AgADvh4AAlkbCFI", lang="en")
-        btn = kb.inline_keyboard[0][0]
-        assert "Cancel" in btn.text
+        stale.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
-# handle_sticker_explicitness_preset (A-4)
+# A sticker's card
 # ---------------------------------------------------------------------------
+
+
+class TestHandleStickerView:
+    @pytest.mark.asyncio()
+    async def test_the_list_gives_way_to_the_sticker_and_its_card(self) -> None:
+        cb = _callback(f"adm_stk_view:ru:{FUID}")
+        repo = _sticker_repo()
+
+        await handle_sticker_view(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        cb.answer.assert_awaited_once_with()
+        cb.message.delete.assert_awaited_once()
+        cb.message.answer_sticker.assert_awaited_once_with("CAACAgIAAxkB")
+        cb.message.edit_text.assert_not_awaited()
+        text, buttons = _new(cb.message.answer)
+        assert "<b>happy cat waving a paw</b>" in text
+        assert "Откровенность: 0.25 · пройдёт в чате с допуском 0.50" in text
+        assert buttons == CARD_BUTTONS
+        repo.save_notification.assert_awaited_once_with(
+            file_unique_id=FUID, admin_id=ADMIN, message_id=202, sticker_msg_id=201, chat_id=ADMIN
+        )
+
+    @pytest.mark.asyncio()
+    async def test_a_sticker_without_a_pack_goes_back_to_the_pack_list(self) -> None:
+        cb = _callback(f"adm_stk_view:ru:{FUID}")
+        repo = _sticker_repo(pack=None)
+
+        await handle_sticker_view(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        _, buttons = _new(cb.message.answer)
+        assert buttons[-1] == ("⬅️ Паки", "adm_stk_sets:ru:0")
+
+    @pytest.mark.asyncio()
+    async def test_a_sticker_that_is_gone_keeps_the_list_and_says_so(self) -> None:
+        cb = _callback(f"adm_stk_view:ru:{FUID}")
+        repo = _sticker_repo(missing=True)
+
+        await handle_sticker_view(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        cb.message.delete.assert_not_awaited()
+        cb.message.answer_sticker.assert_not_awaited()
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+        repo.save_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_sticker_telegram_refuses_still_gets_its_card(self) -> None:
+        cb = _callback(f"adm_stk_view:ru:{FUID}")
+        cb.message.answer_sticker.side_effect = TelegramBadRequest(
+            method=MagicMock(), message="wrong file identifier"
+        )
+        repo = _sticker_repo()
+
+        await handle_sticker_view(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        assert "happy cat" in _new(cb.message.answer)[0]
+        assert repo.save_notification.call_args.kwargs["sticker_msg_id"] == 0
+
+    @pytest.mark.asyncio()
+    async def test_unparseable_payload_is_stale(self, stale: AsyncMock) -> None:
+        await handle_sticker_view(
+            _callback("adm_stk_view:ru"),
+            _sticker_repo(),
+            _admin_repo(),
+            _bot_config_repo(),
+            _state(),
+        )
+        stale.assert_awaited_once()
+
+
+class TestHandleStickerCard:
+    @pytest.mark.asyncio()
+    async def test_back_to_the_card_in_the_same_message(self) -> None:
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+        repo = _sticker_repo()
+
+        await handle_sticker_card(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        text, buttons = _edit(cb)
+        assert "<b>happy cat waving a paw</b>" in text
+        assert buttons == CARD_BUTTONS
+        cb.message.answer.assert_not_awaited()
+        repo.save_notification.assert_awaited_once_with(
+            file_unique_id=FUID, admin_id=ADMIN, message_id=200, sticker_msg_id=0, chat_id=ADMIN
+        )
+
+    @pytest.mark.asyncio()
+    async def test_english(self) -> None:
+        cb = _callback(f"adm_stk_card:en:{FUID}")
+
+        await handle_sticker_card(cb, _sticker_repo(), _admin_repo(), _bot_config_repo(), _state())
+
+        text, buttons = _edit(cb)
+        assert "Explicitness: 0.25" in text
+        assert buttons[0] == ("🔁 Re-analyse", f"adm_stk_reanalyze:en:{FUID}")
+
+    @pytest.mark.asyncio()
+    async def test_detailed_mode_shows_the_technical_lines(self) -> None:
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+        admin_repo = _admin_repo(sticker="detailed")
+
+        await handle_sticker_card(cb, _sticker_repo(), admin_repo, _bot_config_repo(), _state())
+
+        assert f"🆔 <code>{FUID}</code>" in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_the_admin_default_tolerance_decides_the_verdict(self) -> None:
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+        repo = _bot_config_repo(tolerance_level=0.2)
+
+        await handle_sticker_card(cb, _sticker_repo(), _admin_repo(), repo, _state())
+
+        assert "0.25 · не пройдёт в чате с допуском 0.20" in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_an_unrated_sticker_says_the_bot_will_not_send_it(self) -> None:
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+        repo = _sticker_repo(_row(explicitness_score=None))
+
+        await handle_sticker_card(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        assert "не оценена · бот его не отправит" in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_gone(self) -> None:
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+        repo = _sticker_repo(missing=True)
+
+        await handle_sticker_card(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+        repo.save_notification.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Clear the analysis
+# ---------------------------------------------------------------------------
+
+
+class TestHandleClear:
+    @pytest.mark.asyncio()
+    async def test_asks_in_place(self) -> None:
+        cb = _callback(f"adm_stk_clr_ask:ru:{FUID}")
+
+        await handle_clear_ask(cb, _state())
+
+        text, buttons = _edit(cb)
+        assert "Очистить разбор?" in text
+        assert buttons == [
+            ("🧹 Очистить", f"adm_stk_clr:ru:{FUID}"),
+            ("⬅️ Не очищать", f"adm_stk_card:ru:{FUID}"),
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_keep_it_edits_the_card_back_without_resending(self) -> None:
+        """The way back from the question is the card, in the same message."""
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+
+        await handle_sticker_card(cb, _sticker_repo(), _admin_repo(), _bot_config_repo(), _state())
+
+        cb.message.delete.assert_not_awaited()
+        cb.message.answer.assert_not_awaited()
+        cb.message.answer_sticker.assert_not_awaited()
+        assert "<b>happy cat waving a paw</b>" in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_clears_and_says_so_on_the_card(self) -> None:
+        cb = _callback(f"adm_stk_clr:ru:{FUID}")
+        repo = _sticker_repo()
+
+        await handle_clear(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        repo.clear_analysis.assert_awaited_once_with(FUID)
+        text, _ = _edit(cb)
+        assert text.startswith("<i>✓ Разбор очищен</i>")
+        repo.save_notification.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_a_sticker_that_is_gone_is_not_cleared(self) -> None:
+        cb = _callback(f"adm_stk_clr:ru:{FUID}")
+        repo = _sticker_repo(missing=True)
+
+        await handle_clear(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        repo.clear_analysis.assert_not_awaited()
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_unparseable_payloads_are_stale(self, stale: AsyncMock) -> None:
+        await handle_clear_ask(_callback("adm_stk_clr_ask:ru"), _state())
+        await handle_clear(
+            _callback("adm_stk_clr:ru"),
+            _sticker_repo(),
+            _admin_repo(),
+            _bot_config_repo(),
+            _state(),
+        )
+        assert stale.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Explicitness
+# ---------------------------------------------------------------------------
+
+
+class TestHandleStickerScore:
+    @pytest.mark.asyncio()
+    async def test_the_score_screen(self) -> None:
+        cb = _callback(f"adm_stk_score:ru:{FUID}")
+
+        await handle_sticker_score(cb, _sticker_repo(), _admin_repo(), _bot_config_repo(), _state())
+
+        text, buttons = _edit(cb)
+        assert "Сейчас 0.25, посчитал бот." in text
+        assert _callbacks(buttons) == [
+            *(f"adm_stk_expset:ru:{FUID}:{i}" for i in range(len(PRESETS))),
+            f"adm_stk_expedit:ru:{FUID}",
+            f"adm_stk_expreset:ru:{FUID}",
+            f"adm_stk_card:ru:{FUID}",
+        ]
+        labels = [label for label, _ in buttons]
+        assert labels[1].endswith("• 0.25"), "the current value is marked"
+        assert labels[0] == "0.00"
+        assert labels[-2:] == ["🔁 Пересчитать оценку", "⬅️ Стикер"]
+
+    @pytest.mark.asyncio()
+    async def test_gone(self) -> None:
+        cb = _callback(f"adm_stk_score:ru:{FUID}")
+        await handle_sticker_score(
+            cb, _sticker_repo(missing=True), _admin_repo(), _bot_config_repo(), _state()
+        )
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
 
 
 class TestHandleStickerExplicitnessPreset:
     @pytest.mark.asyncio()
-    async def test_sets_preset_value_and_rerenders(self) -> None:
-        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:2")  # idx 2 -> 0.5
-        sticker_repo = _make_sticker_repo(
-            sticker={**_SAMPLE_STICKER, "explicitness_score": 0.5, "explicitness_is_manual": True}
+    async def test_one_tap_sets_the_value_and_the_card_says_so(self) -> None:
+        cb = _callback(f"adm_stk_expset:ru:{FUID}:3")
+        repo = _sticker_repo()
+        state = _state()
+
+        await handle_sticker_explicitness_preset(cb, repo, _admin_repo(), _bot_config_repo(), state)
+
+        state.clear.assert_awaited_once()
+        repo.set_manual_explicitness_score.assert_awaited_once_with(FUID, 0.75)
+        text, buttons = _edit(cb)
+        assert text.startswith("<i>✓ Откровенность 0.75</i>")
+        assert buttons == CARD_BUTTONS
+        cb.answer.assert_awaited_once_with()
+        repo.save_notification.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("tail", ["5", "x", "-1", ""])
+    async def test_an_index_outside_the_presets_is_stale(self, stale: AsyncMock, tail: str) -> None:
+        repo = _sticker_repo()
+        await handle_sticker_explicitness_preset(
+            _callback(f"adm_stk_expset:ru:{FUID}:{tail}"),
+            repo,
+            _admin_repo(),
+            _bot_config_repo(),
+            _state(),
         )
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo, _state())
-
-        sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.5)
-        cb.message.edit_text.assert_awaited_once()
-        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        assert "adm_stk_expreset:ru:AgADvh4AAlkbCFI" in callbacks
+        stale.assert_awaited_once()
+        repo.set_manual_explicitness_score.assert_not_awaited()
 
     @pytest.mark.asyncio()
-    async def test_invalid_preset_index_no_write(self) -> None:
-        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:99")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
+    async def test_gone(self) -> None:
+        cb = _callback(f"adm_stk_expset:ru:{FUID}:0")
+        repo = _sticker_repo()
+        repo.set_manual_explicitness_score.return_value = False
 
-        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo, _state())
+        await handle_sticker_explicitness_preset(
+            cb, repo, _admin_repo(), _bot_config_repo(), _state()
+        )
 
-        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized(self) -> None:
-        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:0", user_id=99999)
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_sticker_explicitness_preset(cb, sticker_repo, bot_config_repo, _state())
-
-        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# handle_sticker_explicitness_edit_prompt / _input / _cancel (A-4)
-# ---------------------------------------------------------------------------
-
-
-def _make_exp_state(data: dict[str, object] | None = None) -> MagicMock:
-    state = MagicMock()
-    state.set_state = AsyncMock()
-    state.update_data = AsyncMock()
-    state.get_data = AsyncMock(return_value=data or {})
-    state.clear = AsyncMock()
-    return state
-
-
-def _make_exp_message(text: str, user_id: int = 12345) -> MagicMock:
-    message = MagicMock()
-    message.text = text
-    message.from_user = MagicMock()
-    message.from_user.id = user_id
-    message.reply = AsyncMock()
-    message.answer = AsyncMock()
-    return message
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
 
 
 class TestHandleStickerExplicitnessEditPrompt:
     @pytest.mark.asyncio()
-    async def test_sets_state_and_prompts(self) -> None:
-        cb = _make_callback("adm_stk_expedit:ru:AgADvh4AAlkbCFI")
-        bot_config_repo = _make_bot_config_repo()
-        state = _make_exp_state()
+    async def test_the_prompt_replaces_the_score_screen(self) -> None:
+        cb = _callback(f"adm_stk_expedit:ru:{FUID}")
+        state = _state()
 
-        await handle_sticker_explicitness_edit_prompt(cb, bot_config_repo, state)
+        await handle_sticker_explicitness_edit_prompt(
+            cb, _sticker_repo(), _admin_repo(), _bot_config_repo(), state
+        )
 
         state.set_state.assert_awaited_once_with(AdminStates.awaiting_sticker_score)
-        state.update_data.assert_awaited_once_with(
-            exp_file_unique_id="AgADvh4AAlkbCFI", exp_lang="ru"
-        )
-        cb.message.answer.assert_awaited_once()
-        assert cb.message.answer.call_args.kwargs.get("reply_markup") is not None
+        assert state.update_data.await_args_list[0].kwargs == {
+            "exp_file_unique_id": FUID,
+            "exp_lang": "ru",
+        }
+        assert state.update_data.await_args_list[1].kwargs == {"exp_prompt_id": 200}
+        text, buttons = _edit(cb)
+        assert "Напишите число от 0.0 до 1.0." in text
+        assert buttons == [("✖️ Отмена", f"adm_stk_expcancel:ru:{FUID}")]
 
     @pytest.mark.asyncio()
-    async def test_not_authorized(self) -> None:
-        cb = _make_callback("adm_stk_expedit:ru:AgADvh4AAlkbCFI", user_id=99999)
-        bot_config_repo = _make_bot_config_repo("12345")
-        state = _make_exp_state()
+    async def test_gone_does_not_arm_the_prompt(self) -> None:
+        cb = _callback(f"adm_stk_expedit:ru:{FUID}")
+        state = _state()
 
-        await handle_sticker_explicitness_edit_prompt(cb, bot_config_repo, state)
+        await handle_sticker_explicitness_edit_prompt(
+            cb, _sticker_repo(missing=True), _admin_repo(), _bot_config_repo(), state
+        )
 
         state.set_state.assert_not_awaited()
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+
+
+def _typed(text: str, *, user_id: int = ADMIN) -> MagicMock:
+    """What the admin typed into the score prompt."""
+    msg = MagicMock()
+    msg.text = text
+    msg.from_user.id = user_id
+    msg.date = datetime(2026, 1, 1, tzinfo=UTC)
+    msg.chat = Chat(id=ADMIN, type="private")
+    msg.bot = MagicMock()
+    msg.answer = AsyncMock(return_value=_sent(301))
+    return msg
+
+
+_ARMED = {"exp_file_unique_id": FUID, "exp_lang": "ru", "exp_prompt_id": 250}
+
+
+@pytest.fixture()
+def strip():
+    """The ✖️ coming off the prompt the admin has just answered."""
+    with patch(f"{MOD}.safe_edit_reply_markup", new=AsyncMock()) as mock:
+        yield mock
 
 
 class TestHandleStickerExplicitnessInput:
     @pytest.mark.asyncio()
-    async def test_valid_value_writes_and_clears_state(self) -> None:
-        message = _make_exp_message("0.42")
-        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
-        sticker_repo = _make_sticker_repo(
-            sticker={**_SAMPLE_STICKER, "explicitness_score": 0.42, "explicitness_is_manual": True}
+    async def test_a_valid_value_is_saved_and_the_card_is_one_new_message(
+        self, strip: AsyncMock
+    ) -> None:
+        msg = _typed("0.42")
+        state = _state(data=dict(_ARMED))
+        repo = _sticker_repo()
+
+        await handle_sticker_explicitness_input(msg, state, repo, _admin_repo(), _bot_config_repo())
+
+        state.clear.assert_awaited_once()
+        repo.set_manual_explicitness_score.assert_awaited_once_with(FUID, 0.42)
+        msg.answer.assert_awaited_once()
+        text, buttons = _new(msg.answer)
+        assert text.startswith("<i>✓ Откровенность 0.42</i>")
+        assert buttons == CARD_BUTTONS
+        repo.save_notification.assert_awaited_once_with(
+            file_unique_id=FUID, admin_id=ADMIN, message_id=301, sticker_msg_id=0, chat_id=ADMIN
         )
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
-
-        state.clear.assert_awaited_once()
-        sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.42)
-        message.reply.assert_awaited_once()
-        message.answer.assert_awaited_once()
+        strip.assert_awaited_once()
+        assert strip.call_args.args[0].message_id == 250
+        assert strip.call_args.kwargs == {"reply_markup": None}
 
     @pytest.mark.asyncio()
-    async def test_comma_decimal_accepted(self) -> None:
-        """RU keyboards commonly produce a comma decimal separator -- same
-        posture as admin_chat_panel.py's tolerance input."""
-        message = _make_exp_message("0,7")
-        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
-
-        sticker_repo.set_manual_explicitness_score.assert_awaited_once_with("AgADvh4AAlkbCFI", 0.7)
+    async def test_comma_decimal_accepted(self, strip: AsyncMock) -> None:
+        repo = _sticker_repo()
+        await handle_sticker_explicitness_input(
+            _typed("0,7"), _state(data=dict(_ARMED)), repo, _admin_repo(), _bot_config_repo()
+        )
+        repo.set_manual_explicitness_score.assert_awaited_once_with(FUID, 0.7)
 
     @pytest.mark.asyncio()
-    async def test_out_of_range_reprompts_without_writing(self) -> None:
-        message = _make_exp_message("1.5")
-        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
+    @pytest.mark.parametrize("raw", ["abc", "1.5", "-0.1", ""])
+    async def test_an_invalid_value_asks_again_in_a_new_message(
+        self, strip: AsyncMock, raw: str
+    ) -> None:
+        msg = _typed(raw)
+        state = _state(data=dict(_ARMED))
+        repo = _sticker_repo()
 
-        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_input(msg, state, repo, _admin_repo(), _bot_config_repo())
 
         state.clear.assert_not_awaited()
-        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
-        assert message.reply.call_args.kwargs.get("reply_markup") is not None
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        text, buttons = _new(msg.answer)
+        assert "⚠️ Нужно число от 0.0 до 1.0" in text
+        assert buttons == [("✖️ Отмена", f"adm_stk_expcancel:ru:{FUID}")]
+        state.update_data.assert_awaited_once_with(exp_prompt_id=301)
+        assert strip.call_args.args[0].message_id == 250
 
     @pytest.mark.asyncio()
-    async def test_non_numeric_reprompts_without_writing(self) -> None:
-        message = _make_exp_message("not a number")
-        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
-
-        state.clear.assert_not_awaited()
-        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+    async def test_no_prompt_id_strips_nothing(self, strip: AsyncMock) -> None:
+        data = {"exp_file_unique_id": FUID, "exp_lang": "ru"}
+        await handle_sticker_explicitness_input(
+            _typed("0.3"), _state(data=data), _sticker_repo(), _admin_repo(), _bot_config_repo()
+        )
+        strip.assert_not_awaited()
 
     @pytest.mark.asyncio()
-    async def test_missing_fsm_data_clears_state_and_noops(self) -> None:
-        message = _make_exp_message("0.5")
-        state = _make_exp_state({})
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
+    async def test_a_prompt_already_bare_is_not_an_error(self, strip: AsyncMock) -> None:
+        strip.side_effect = TelegramBadRequest(method=MagicMock(), message="message not found")
+        msg = _typed("0.3")
 
-        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_input(
+            msg, _state(data=dict(_ARMED)), _sticker_repo(), _admin_repo(), _bot_config_repo()
+        )
+
+        msg.answer.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_missing_data_disarms_silently(self, strip: AsyncMock) -> None:
+        msg = _typed("0.3")
+        state = _state(data={})
+
+        await handle_sticker_explicitness_input(
+            msg, state, _sticker_repo(), _admin_repo(), _bot_config_repo()
+        )
 
         state.clear.assert_awaited_once()
-        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+        msg.answer.assert_not_awaited()
 
     @pytest.mark.asyncio()
-    async def test_not_authorized_clears_state_without_writing(self) -> None:
-        message = _make_exp_message("0.5", user_id=99999)
-        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo("12345")
+    async def test_not_an_admin_any_more(self, strip: AsyncMock) -> None:
+        msg = _typed("0.3", user_id=99999)
+        state = _state(data=dict(_ARMED))
+        repo = _sticker_repo()
 
-        await handle_sticker_explicitness_input(message, state, sticker_repo, bot_config_repo)
+        await handle_sticker_explicitness_input(msg, state, repo, _admin_repo(), _bot_config_repo())
 
         state.clear.assert_awaited_once()
-        sticker_repo.set_manual_explicitness_score.assert_not_awaited()
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        msg.answer.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_gone_after_a_valid_value(self, strip: AsyncMock) -> None:
+        msg = _typed("0.3")
+        repo = _sticker_repo()
+        repo.set_manual_explicitness_score.return_value = False
+
+        await handle_sticker_explicitness_input(
+            msg, _state(data=dict(_ARMED)), repo, _admin_repo(), _bot_config_repo()
+        )
+
+        assert "Этого стикера уже нет в базе." in _new(msg.answer)[0]
+        repo.save_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_gone_after_an_invalid_value_disarms(self, strip: AsyncMock) -> None:
+        msg = _typed("abc")
+        state = _state(data=dict(_ARMED))
+
+        await handle_sticker_explicitness_input(
+            msg, state, _sticker_repo(missing=True), _admin_repo(), _bot_config_repo()
+        )
+
+        state.clear.assert_awaited_once()
+        assert "Этого стикера уже нет в базе." in _new(msg.answer)[0]
 
 
 class TestHandleStickerExplicitnessCancel:
     @pytest.mark.asyncio()
-    async def test_clears_state_and_rerenders_detail(self) -> None:
-        cb = _make_callback("adm_stk_expcancel:ru:AgADvh4AAlkbCFI")
-        state = _make_exp_state({"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru"})
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo()
+    async def test_back_to_the_score_screen_in_place(self) -> None:
+        cb = _callback(f"adm_stk_expcancel:ru:{FUID}")
+        state = _state(current=AdminStates.awaiting_sticker_score.state)
 
-        await handle_sticker_explicitness_cancel(cb, state, sticker_repo, bot_config_repo)
-
-        state.clear.assert_awaited_once()
-        cb.message.edit_text.assert_awaited_once()
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized_does_not_clear(self) -> None:
-        cb = _make_callback("adm_stk_expcancel:ru:AgADvh4AAlkbCFI", user_id=99999)
-        state = _make_exp_state()
-        sticker_repo = _make_sticker_repo()
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_sticker_explicitness_cancel(cb, state, sticker_repo, bot_config_repo)
-
-        state.clear.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# handle_sticker_explicitness_reset (A-4 / ADR-0009 Decision 5)
-# ---------------------------------------------------------------------------
-
-
-class TestHandleStickerExplicitnessReset:
-    @pytest.mark.asyncio()
-    async def test_resets_and_rerenders_as_unscored(self) -> None:
-        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI")
-        reset_sticker = {
-            **_SAMPLE_STICKER,
-            "explicitness_score": None,
-            "explicitness_is_manual": False,
-        }
-        sticker_repo = _make_sticker_repo(sticker=reset_sticker)
-        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo, _state())
-
-        sticker_repo.reset_explicitness_to_auto.assert_awaited_once_with("AgADvh4AAlkbCFI")
-        cb.message.edit_text.assert_awaited_once()
-        kb = cb.message.edit_text.call_args.kwargs["reply_markup"]
-        callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-        # Reset button itself must disappear now that the sticker is no
-        # longer manually scored (nothing left to revert).
-        assert not any((c or "").startswith("adm_stk_expreset:") for c in callbacks)
-
-    @pytest.mark.asyncio()
-    async def test_not_authorized_does_not_reset(self) -> None:
-        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI", user_id=99999)
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo("12345")
-
-        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo, _state())
-
-        sticker_repo.reset_explicitness_to_auto.assert_not_awaited()
-
-    @pytest.mark.asyncio()
-    async def test_missing_sticker_id_shows_alert(self) -> None:
-        cb = _make_callback("adm_stk_expreset:ru:")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
-        bot_config_repo = _make_bot_config_repo()
-
-        await handle_sticker_explicitness_reset(cb, sticker_repo, bot_config_repo, _state())
-
-        sticker_repo.reset_explicitness_to_auto.assert_not_awaited()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-
-class TestExplicitnessFsmIsNotLeaked:
-    """Review finding, 2026-08-09: the preset and reset rows stay tappable on
-    the card above an open "введите число" prompt. If they leave
-    ``awaiting_sticker_score`` set, the admin's next plain DM message is eaten
-    by the score-input handler — which also outranks the description-reply
-    flow's ``StateFilter(None)``, so correcting a sticker description becomes
-    impossible until a valid float is typed.
-    """
-
-    @pytest.mark.asyncio
-    async def test_preset_clears_a_state_it_did_not_open(self) -> None:
-        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:2")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=True)
-        state = _state()
-
-        await handle_sticker_explicitness_preset(cb, sticker_repo, _make_bot_config_repo(), state)
-
-        state.clear.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_reset_clears_a_state_it_did_not_open(self) -> None:
-        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
-        state = _state()
-
-        await handle_sticker_explicitness_reset(cb, sticker_repo, _make_bot_config_repo(), state)
-
-        state.clear.assert_awaited_once()
-
-
-class TestExplicitnessMissingRow:
-    """A stale card names a sticker that is gone: report it, don't claim success."""
-
-    @pytest.mark.asyncio
-    async def test_preset_on_a_vanished_sticker_reports_instead_of_confirming(self) -> None:
-        cb = _make_callback("adm_stk_expset:ru:AgADvh4AAlkbCFI:2")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.set_manual_explicitness_score = AsyncMock(return_value=False)
-
-        await handle_sticker_explicitness_preset(
-            cb, sticker_repo, _make_bot_config_repo(), _state()
+        await handle_sticker_explicitness_cancel(
+            cb, _sticker_repo(), _admin_repo(), _bot_config_repo(), state
         )
 
-        answer = cb.answer.call_args
-        assert answer.kwargs.get("show_alert") is True
-        assert "не найден" in answer.args[0]
-        # and it must not claim a score was set
-        assert "0." not in answer.args[0]
+        state.clear.assert_awaited_once()
+        text, _ = _edit(cb)
+        assert "Сейчас 0.25, посчитал бот." in text
+        cb.message.answer.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_reset_on_a_vanished_sticker_reports_instead_of_confirming(self) -> None:
-        cb = _make_callback("adm_stk_expreset:ru:AgADvh4AAlkbCFI")
-        sticker_repo = _make_sticker_repo()
-        sticker_repo.reset_explicitness_to_auto = AsyncMock(return_value=False)
 
-        await handle_sticker_explicitness_reset(cb, sticker_repo, _make_bot_config_repo(), _state())
+class TestRescore:
+    """``🔁 Пересчитать оценку``: drop the manual value, analyse once more."""
 
-        answer = cb.answer.call_args
-        assert answer.kwargs.get("show_alert") is True
-        assert "не найден" in answer.args[0]
+    @pytest.mark.asyncio()
+    async def test_reset_then_one_reanalysis_under_the_placeholder(self) -> None:
+        cb = _callback(f"adm_stk_expreset:ru:{FUID}")
+        bot = MagicMock()
+        svc = _service()
+        repo = _sticker_repo()
+        state = _state()
+
+        await handle_sticker_explicitness_reset(
+            cb, bot, svc, repo, _admin_repo(), _bot_config_repo(), state
+        )
+
+        state.clear.assert_awaited_once()
+        repo.reset_explicitness_to_auto.assert_awaited_once_with(FUID)
+        svc.reanalyze.assert_awaited_once_with(bot, FUID)
+        cb.answer.assert_awaited_once_with()
+        placeholder, placeholder_buttons = _edit(cb, 0)
+        assert "⏳ <b>Разбираю стикер…</b>" in placeholder
+        assert placeholder_buttons == []
+        text, buttons = _edit(cb)
+        assert text.startswith("<i>✓ Оценка пересчитана</i>")
+        assert buttons == CARD_BUTTONS
+
+    @pytest.mark.asyncio()
+    async def test_gone_runs_no_analysis(self) -> None:
+        cb = _callback(f"adm_stk_expreset:ru:{FUID}")
+        svc = _service()
+        repo = _sticker_repo()
+        repo.reset_explicitness_to_auto.return_value = False
+
+        await handle_sticker_explicitness_reset(
+            cb, MagicMock(), svc, repo, _admin_repo(), _bot_config_repo(), _state()
+        )
+
+        svc.reanalyze.assert_not_awaited()
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+
+
+class TestHandleRunAnalysis:
+    @pytest.mark.asyncio()
+    async def test_success_brings_the_card_back_with_a_notice(self) -> None:
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+        bot = MagicMock()
+        svc = _service()
+        repo = _sticker_repo()
+
+        await handle_run_analysis(cb, bot, svc, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        svc.reanalyze.assert_awaited_once_with(bot, FUID)
+        assert "⏳" in _edit(cb, 0)[0]
+        text, buttons = _edit(cb)
+        assert text.startswith("<i>✓ Разбор обновлён</i>")
+        assert buttons == CARD_BUTTONS
+        repo.save_notification.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("reason", ["download", "vision", "content_filter", "empty"])
+    async def test_each_failure_says_why_with_retry_and_back(self, reason: str) -> None:
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+        svc = _service(reanalyze=ReanalyzeResult(ok=False, reason=reason))  # type: ignore[arg-type]
+        repo = _sticker_repo()
+
+        await handle_run_analysis(
+            cb, MagicMock(), svc, repo, _admin_repo(), _bot_config_repo(), _state()
+        )
+
+        text, buttons = _edit(cb)
+        assert "⚠️ <b>Не получилось разобрать стикер</b>" in text
+        assert ERROR_REASONS[reason]("ru") in text
+        assert "Заметки на месте." in text
+        expected = [("🔁 Повторить", f"adm_stk_reanalyze:ru:{FUID}")]
+        if reason == "content_filter":
+            expected.append(("🔞 Откровенность", f"adm_stk_score:ru:{FUID}"))
+        expected.append(("⬅️ Стикер", f"adm_stk_card:ru:{FUID}"))
+        assert buttons == expected
+        repo.save_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_gone_before_runs_nothing(self) -> None:
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+        svc = _service()
+
+        await handle_run_analysis(
+            cb,
+            MagicMock(),
+            svc,
+            _sticker_repo(missing=True),
+            _admin_repo(),
+            _bot_config_repo(),
+            _state(),
+        )
+
+        svc.reanalyze.assert_not_awaited()
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_gone_during_the_analysis(self) -> None:
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+        repo = _sticker_repo()
+        repo.get_by_file_unique_id.side_effect = [_row(), None]
+
+        await handle_run_analysis(
+            cb, MagicMock(), _service(), repo, _admin_repo(), _bot_config_repo(), _state()
+        )
+
+        assert "Этого стикера уже нет в базе." in _edit(cb)[0]
+        cb.answer.assert_awaited_once_with()
+
+    @pytest.mark.asyncio()
+    async def test_a_never_analysed_sticker_offers_analyse(self) -> None:
+        cb = _callback(f"adm_stk_card:ru:{FUID}")
+        repo = _sticker_repo(_row(visual_description=None, explicitness_score=None))
+
+        await handle_sticker_card(cb, repo, _admin_repo(), _bot_config_repo(), _state())
+
+        _, buttons = _edit(cb)
+        assert buttons[0] == ("🔁 Разобрать", f"adm_stk_reanalyze:ru:{FUID}")
+        assert ("🧹 Очистить", f"adm_stk_clr_ask:ru:{FUID}") not in buttons
+
+
+# ---------------------------------------------------------------------------
+# The admin sends a sticker straight to the bot
+# ---------------------------------------------------------------------------
+
+
+def _tg_sticker(fuid: str = FUID, *, set_name: str | None = PACK) -> MagicMock:
+    sticker = MagicMock()
+    sticker.file_unique_id = fuid
+    sticker.file_id = "CAACAgIAAxkB"
+    sticker.set_name = set_name
+    sticker.emoji = "😺"
+    sticker.is_animated = False
+    sticker.is_video = False
+    return sticker
+
+
+def _dm_sticker(sticker: MagicMock | None = None) -> MagicMock:
+    msg = MagicMock()
+    msg.sticker = sticker or _tg_sticker()
+    msg.chat.id = ADMIN
+    msg.from_user.id = ADMIN
+    msg.reply = AsyncMock(return_value=_sent(400))
+    return msg
+
+
+class TestHandleAdminStickerCheck:
+    @pytest.mark.asyncio()
+    async def test_a_known_sticker_gets_its_card_as_a_reply(self) -> None:
+        msg = _dm_sticker()
+        repo = _sticker_repo()
+
+        await handle_admin_sticker_check(msg, repo, _admin_repo(), _bot_config_repo())
+
+        text, buttons = _new(msg.reply)
+        assert "<b>happy cat waving a paw</b>" in text
+        assert buttons == CARD_BUTTONS
+        assert msg.reply.call_args.kwargs["parse_mode"] == "HTML"
+        repo.save_notification.assert_awaited_once_with(
+            file_unique_id=FUID, admin_id=ADMIN, message_id=400, sticker_msg_id=0, chat_id=ADMIN
+        )
+
+    @pytest.mark.asyncio()
+    async def test_an_unknown_sticker_gets_one_analyse_button(self) -> None:
+        msg = _dm_sticker()
+        repo = _sticker_repo(missing=True)
+
+        await handle_admin_sticker_check(msg, repo, _admin_repo(), _bot_config_repo())
+
+        text, buttons = _new(msg.reply)
+        assert "<b>Новый стикер</b>" in text
+        assert "Его ещё нет в базе." in text
+        assert buttons == [("🔍 Разобрать", f"adm_stk_dmchk:ru:{FUID}")]
+        repo.save_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_english(self) -> None:
+        msg = _dm_sticker()
+
+        await handle_admin_sticker_check(
+            msg, _sticker_repo(missing=True), _admin_repo("en"), _bot_config_repo()
+        )
+
+        text, buttons = _new(msg.reply)
+        assert "<b>New sticker</b>" in text
+        assert buttons == [("🔍 Analyse", f"adm_stk_dmchk:en:{FUID}")]
+
+
+def _dm_tap(
+    sticker: MagicMock | None = None, *, data: str = f"adm_stk_dmchk:ru:{FUID}"
+) -> MagicMock:
+    reply = MagicMock()
+    reply.sticker = sticker or _tg_sticker()
+    return _callback(data, reply_to=reply)
+
+
+async def _dm_analyze(
+    cb: MagicMock, svc: MagicMock, repo: MagicMock, *, bot: MagicMock | None = None
+) -> None:
+    await handle_admin_sticker_dm_analyze(
+        cb, bot or MagicMock(), svc, repo, _admin_repo(), _bot_config_repo(), _state()
+    )
+
+
+@pytest.fixture()
+def download():
+    with patch(f"{MOD}.download_telegram_file", new=AsyncMock(return_value=b"png")) as mock:
+        yield mock
+
+
+class TestHandleAdminStickerDmAnalyze:
+    @pytest.mark.asyncio()
+    async def test_a_different_sticker_under_the_button_is_refused(self) -> None:
+        cb = _dm_tap(_tg_sticker("someOtherID"))
+        svc = _service()
+
+        await _dm_analyze(cb, svc, _sticker_repo(missing=True))
+
+        cb.answer.assert_awaited_once_with(
+            "Стикер недоступен, пришлите его ещё раз", show_alert=True
+        )
+        svc.learn.assert_not_awaited()
+        cb.message.edit_text.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_no_sticker_under_the_button_is_refused(self) -> None:
+        cb = _callback(f"adm_stk_dmchk:ru:{FUID}", reply_to=None)
+        svc = _service()
+
+        await _dm_analyze(cb, svc, _sticker_repo(missing=True))
+
+        assert cb.answer.call_args.kwargs == {"show_alert": True}
+        svc.learn.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_new_sticker_is_learned_into_its_card(self, download: AsyncMock) -> None:
+        cb = _dm_tap()
+        svc = _service()
+        repo = _sticker_repo()
+        repo.get_by_file_unique_id.side_effect = [None, _row()]
+
+        await _dm_analyze(cb, svc, repo)
+
+        svc.learn.assert_awaited_once()
+        assert "⏳" in _edit(cb, 0)[0]
+        text, buttons = _edit(cb)
+        assert text.startswith("<i>✓ Стикер разобран</i>")
+        assert buttons == CARD_BUTTONS
+        repo.save_notification.assert_awaited_once_with(
+            file_unique_id=FUID, admin_id=ADMIN, message_id=200, sticker_msg_id=0, chat_id=ADMIN
+        )
+
+    @pytest.mark.asyncio()
+    async def test_download_failure_offers_retry_of_the_check(self, download: AsyncMock) -> None:
+        download.side_effect = TelegramFileError("boom")
+        cb = _dm_tap()
+        svc = _service()
+
+        await _dm_analyze(cb, svc, _sticker_repo(missing=True))
+
+        svc.learn.assert_not_awaited()
+        text, buttons = _edit(cb)
+        assert "Не получилось скачать стикер из Telegram." in text
+        assert "Заметки на месте." not in text
+        assert buttons == [("🔁 Повторить", f"adm_stk_dmchk:ru:{FUID}")]
+
+    @pytest.mark.asyncio()
+    async def test_a_content_refusal_offers_the_manual_score(self, download: AsyncMock) -> None:
+        cb = _dm_tap()
+        svc = _service(
+            learn=StickerLearningResult(
+                is_new=True,
+                file_unique_id=FUID,
+                analysis_failed=True,
+                failure_reason="content_filter",
+            )
+        )
+
+        await _dm_analyze(cb, svc, _sticker_repo(missing=True))
+
+        text, buttons = _edit(cb)
+        assert ERROR_REASONS["content_filter"]("ru") in text
+        assert buttons == [
+            ("🔁 Повторить", f"adm_stk_dmchk:ru:{FUID}"),
+            ("🔞 Откровенность", f"adm_stk_score:ru:{FUID}"),
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_a_row_missing_after_learning_is_an_error_not_a_crash(
+        self, download: AsyncMock
+    ) -> None:
+        cb = _dm_tap()
+
+        await _dm_analyze(cb, _service(), _sticker_repo(missing=True))
+
+        text, _ = _edit(cb)
+        assert ERROR_REASONS["empty"]("ru") in text
+
+    @pytest.mark.asyncio()
+    async def test_registers_an_unknown_pack(self, download: AsyncMock) -> None:
+        cb = _dm_tap()
+        repo = _sticker_repo(pack=None)
+        repo.get_by_file_unique_id.side_effect = [None, _row()]
+        bot = MagicMock()
+        tg_set = MagicMock()
+        tg_set.name = PACK
+        tg_set.title = "Test Pack"
+        tg_set.thumbnail = None
+        tg_set.stickers = [_tg_sticker(), _tg_sticker("second")]
+        bot.get_sticker_set = AsyncMock(return_value=tg_set)
+
+        await _dm_analyze(cb, _service(), repo, bot=bot)
+
+        bot.get_sticker_set.assert_awaited_once_with(PACK)
+        repo.upsert_sticker_set.assert_awaited_once_with(
+            set_name=PACK,
+            set_title="Test Pack",
+            total_count=2,
+            thumbnail_file_id=None,
+            is_animated=False,
+            is_video=False,
+        )
+
+    @pytest.mark.asyncio()
+    async def test_pack_registration_failure_still_shows_the_card(
+        self, download: AsyncMock
+    ) -> None:
+        cb = _dm_tap()
+        repo = _sticker_repo(pack=None)
+        repo.get_by_file_unique_id.side_effect = [None, _row()]
+        bot = MagicMock()
+        bot.get_sticker_set = AsyncMock(side_effect=RuntimeError("api"))
+
+        await _dm_analyze(cb, _service(), repo, bot=bot)
+
+        assert "Стикер разобран" in _edit(cb)[0]
+
+    @pytest.mark.asyncio()
+    async def test_an_already_analysed_sticker_just_shows_its_card(self) -> None:
+        cb = _dm_tap()
+        svc = _service()
+        repo = _sticker_repo()
+
+        await _dm_analyze(cb, svc, repo)
+
+        svc.learn.assert_not_awaited()
+        svc.reanalyze.assert_not_awaited()
+        assert _edit(cb)[1] == CARD_BUTTONS
+        repo.save_notification.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_retry_after_a_stored_failure_reanalyses(self) -> None:
+        cb = _dm_tap()
+        svc = _service(reanalyze=ReanalyzeResult(ok=False, reason="vision"))
+        repo = _sticker_repo(_row(visual_description=None, analysis_failed=True))
+
+        await _dm_analyze(cb, svc, repo)
+
+        svc.learn.assert_not_awaited()
+        svc.reanalyze.assert_awaited_once()
+        text, buttons = _edit(cb)
+        assert ERROR_REASONS["vision"]("ru") in text
+        assert buttons == [("🔁 Повторить", f"adm_stk_dmchk:ru:{FUID}")]
+
+    @pytest.mark.asyncio()
+    async def test_unparseable_payload_is_stale(self, stale: AsyncMock) -> None:
+        await _dm_analyze(_dm_tap(data="adm_stk_dmchk:ru"), _service(), _sticker_repo())
+        stale.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Every button fits Telegram's 64-byte callback_data, whatever the pack name
+# ---------------------------------------------------------------------------
+
+LONG_PACK = "p" * 64  # Telegram's own ceiling for a sticker set name
+LONG_FUID = "AgADvh4AAlkbCFIxyz12"
+
+
+def _long_screens(lang: str) -> list[Screen]:
+    facts = facts_from_row(
+        _row(file_unique_id=LONG_FUID, set_name=LONG_PACK),
+        pack={"set_name": LONG_PACK, "set_title": LONG_PACK},
+    )
+    return [
+        build_stk_sets(
+            lang,
+            SetsPage(
+                packs=(PackRow(key=pack_key(LONG_PACK), title=LONG_PACK, analyzed=1, total=2),),
+                total=9,
+                page=1,
+                pages=3,
+            ),
+        ),
+        build_stk_set(
+            lang,
+            PackPage(
+                key=pack_key(LONG_PACK),
+                title=LONG_PACK,
+                count=9,
+                stickers=(facts,),
+                page=1,
+                pages=3,
+            ),
+        ),
+        build_stk_card(lang, facts),
+        build_stk_score(lang, facts),
+        build_stk_score_in(lang, facts),
+        build_stk_clear_ask(lang, LONG_FUID),
+        build_stk_error(lang, LONG_FUID, "content_filter"),
+        build_stk_error(lang, LONG_FUID, "content_filter", dm=True),
+        build_stk_unknown(lang, LONG_FUID),
+    ]
+
+
+class TestCallbackBudget:
+    def test_the_pack_key_is_the_sql_formula(self) -> None:
+        """``left(md5(set_name), 12)`` in the repository must find what the button carries."""
+        expected = hashlib.md5(LONG_PACK.encode()).hexdigest()[:12]  # noqa: S324
+        assert pack_key(LONG_PACK) == expected
+
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    def test_every_button_fits_with_a_64_character_pack_name(self, lang: str) -> None:
+        for screen in _long_screens(lang):
+            for row in screen.rows:
+                for button in row:
+                    if button.callback is None:
+                        continue
+                    size = len(button.callback.encode())
+                    assert size <= 64, f"{screen.id}: {button.callback!r} is {size} bytes"
+
+    @pytest.mark.asyncio()
+    async def test_the_long_named_pack_button_opens_that_pack(self) -> None:
+        sets = build_stk_sets(
+            "ru",
+            SetsPage(
+                packs=(PackRow(key=pack_key(LONG_PACK), title=LONG_PACK, analyzed=1, total=2),),
+                total=1,
+                page=0,
+                pages=1,
+            ),
+        )
+        data = sets.rows[0][0].callback
+        assert data is not None
+        repo = _sticker_repo(pack={"set_name": LONG_PACK, "set_title": "Long"})
+
+        await handle_sticker_pack(_callback(data), repo, _state())
+
+        repo.get_set_by_key.assert_awaited_once_with(pack_key(LONG_PACK))
+        repo.get_stickers_in_set.assert_awaited_once_with(LONG_PACK, limit=4, offset=0)

@@ -456,52 +456,86 @@ where an admin inspects and corrects that.
 
 ### A5.1 Browse
 
-**🎨 Стикеры** lists sticker packs with a learned/total counter, ten per page. Opening a pack
-lists its stickers as `<emoji> <status> (<uses>x)`, where status is one of:
+**🎨 Стикеры** opens the pack list, four packs per page, most-learned first. Each row reads
+`<pack title> (N из M)`: N stickers of the pack are analysed, M is the pack's size in
+Telegram. Opening a pack lists its stickers, most used first, as
+`<emoji> <short description> · <uses>`; a sticker never analysed says *Ещё не разобран*, a
+failed one *Ошибка разбора*. **⬅️ Паки** goes back to the list.
 
-- `✅` the description (it shows the text itself),
-- `⏳ Не выполнен / Not analyzed` — never analysed,
-- `⚠️ Ошибка / Failed` — analysis was attempted and failed.
+Pack buttons carry a 12-character key derived from the pack name instead of the name itself
+(a pack name may be 64 characters, more than a button can carry). Buttons sent before the
+change still open their pack.
 
 ### A5.2 Sticker card
 
-Tapping a sticker sends the sticker itself followed by a card with the description, emotion,
-character, suggested contexts, usage counters (total and bot-initiated), format flags and any
-admin notes. Navigating away deletes both messages, so the DM does not accumulate orphaned
-stickers.
+Tapping a sticker replaces the list with the sticker itself and, under it, its card:
 
-Two actions:
+- a title — the character, or the first clause of the description — then the full description;
+- emotion, character, when it fits, how often it was used (and how often by the bot);
+- the explicitness line: `Откровенность: 0.30 · пройдёт в чате с допуском 0.50` (or
+  *не пройдёт*), measured against the global default tolerance; `(вручную)` when an admin set it;
+  *не оценена · бот его не отправит* when there is no score at all;
+- admin notes; with *detailed* sticker notifications also tags, emoji, embedding and the id.
 
-- **🔄 Запустить заново / Run analysis** — re-runs vision now. The card first collapses to
-  "⏳ Анализирую…" with the buttons hidden (so a second tap cannot start a second run), then
-  becomes either the updated description or a named failure — download error, API error,
-  content blocked, empty response — with a Retry button.
-- **🧹 Очистить анализ / Clear analysis** — after a confirmation, wipes the vision-generated
-  fields (description, emotion, character, contexts). **Admin notes and usage counters are
-  kept.** The card re-renders as `⏳ not analyzed` so it is obvious what state the sticker is
-  now in.
+Buttons: **🔁 Разобрать заново** | **🧹 Очистить**, **🔞 Откровенность**, and a back button
+named after the pack (**⬅️ Паки** for a sticker whose pack is not registered). A sticker that
+was never analysed shows only **🔁 Разобрать**. Leaving a card opened from a pack takes its
+sticker message with it, so the DM does not collect orphaned stickers.
+
+- **🔁 Разобрать заново** re-runs vision now. The card turns into "⏳ Разбираю стикер…"
+  with no buttons, so a second tap cannot start a second run, then comes back with
+  "✓ Разбор обновлён" — or an error that says why: the download failed, the model did not
+  answer, the model refused because of the content, or the answer was empty. The error offers
+  **🔁 Повторить** and **⬅️ Стикер**; a content refusal also offers **🔞 Откровенность**,
+  because the score can still be set by hand.
+- **🧹 Очистить** asks first, in the same message. **⬅️ Не очищать** returns to the card;
+  confirming wipes the vision-generated fields (description, emotion, character, contexts)
+  and shows the card with "✓ Разбор очищен". **Admin notes and usage counters are kept.**
+- **🔞 Откровенность** opens the score screen: the current value and who set it, one-tap
+  values `0.00 0.25 0.50 0.75 1.00` (the current one marked `•`), **✏️ Своё число**,
+  **🔁 Пересчитать оценку** and **⬅️ Стикер**. A tap sets the value and returns to the card
+  with "✓ Откровенность 0.75". *Своё число* asks for a number from 0.0 to 1.0 (a comma works
+  too); the answer arrives as the card in a new message and the prompt loses its
+  **✖️ Отмена**, so no stale cancel is left behind; a wrong number asks again.
+  *Пересчитать оценку* drops a hand-set value and runs one fresh analysis — a sticker with no
+  score is one the bot never sends, so the reset alone would silence it.
+
+A sticker deleted meanwhile is not an error: the pack list opens with
+"Этого стикера уже нет в базе." A pack that is gone does the same with its own line.
 
 ### A5.3 Checking a sticker by sending it
 
 An admin can just send a sticker into the DM. If it is already in the catalogue, the bot
-replies with the same card as above. If it is not, the bot says so and offers a single
-**🔍 Проанализировать / Analyze** button — analysis is always an explicit, visible action here,
-never a silent background learn. (The catalogue's automatic learning path deliberately does
-not run for an admin's own DM.)
+replies to it with the same card as above. If it is not, the bot says so and offers a single
+**🔍 Разобрать** button — analysis is always an explicit, visible action here, never a silent
+background learn. (The catalogue's automatic learning path deliberately does not run for an
+admin's own DM.) The result replaces the button's message: the card with "✓ Стикер разобран",
+or the same per-reason error with **🔁 Повторить**. If the sticker the button belongs to is no
+longer there, the bot asks to send it again.
 
 If the analysis succeeds, the sticker's pack is registered too, so it shows up in the pack
 browser like any automatically learned sticker.
 
 ### A5.4 Correcting a description by replying
 
-Every sticker card and every "new sticker" notification ends with an invitation to reply.
-A text reply to such a message is fed, together with the existing description, to the AI,
-which merges the two into one description. Failure modes are surfaced rather than swallowed:
-if the content filter blocks the text, the bot says so and asks for a rephrase; if the merge
-fails for another reason, the note is stored and the bot suggests re-running the analysis.
+Every sticker card and every new-sticker notification ends with an invitation to reply.
+A text reply to such a message — or to the sticker the bot sent with it — is fed, together with the
+existing description, to the AI, which merges the two into one description. The bot answers
+with "✓ Описание обновлено" and the new text, or "⚠️ Описание не обновлено" and the reason:
+the merge failed and the note was saved (re-run the analysis to use it), the model refused
+because of the content (the score can be set by hand), or something else failed (try again).
 
-Note that replying to *anything else* in the admin DM does nothing — the reply is consumed
-by this handler and quietly dropped when no sticker can be identified.
+Once a card has turned into a list, a reply to that message is no longer a correction.
+Replying to *anything else* in the admin DM does nothing — the reply is consumed by this
+handler and quietly dropped when no sticker can be identified.
+
+### A5.5 The new-sticker notification
+
+With sticker notifications on, every sticker learned in a chat arrives as the sticker plus a
+card replying to it: "Новый стикер:" with the description, the pack and the explicitness line,
+and the same **🔁 Разобрать | 🧹 Очистить**, **🔞 Откровенность** buttons as a catalogue card.
+It has no back button — it is not part of the panel's tree. Its buttons work exactly like the
+card's, and navigating from it into the catalogue leaves the sticker it replies to in place.
 
 ---
 

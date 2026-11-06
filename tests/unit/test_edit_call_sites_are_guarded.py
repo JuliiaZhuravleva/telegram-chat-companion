@@ -66,18 +66,6 @@ DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
         "Message object to hand safe_edit_reply_markup); a message too old or already "
         "gone must not stop the value from being saved, so TelegramBadRequest is suppressed",
     ),
-    ("admin_sticker.py", "handle_run_analysis"): (
-        2,
-        "swallows ANY TelegramBadRequest and continues — the progress edit is cosmetic "
-        "and must never abort the analysis (ADR-0003 lifecycle)",
-    ),
-    ("admin_sticker.py", "handle_admin_sticker_dm_analyze"): (
-        3,
-        "same edit-in-place lifecycle as handle_run_analysis; the progress edit failing "
-        "must not abort the analysis",
-    ),
-    ("admin_sticker.py", "handle_clear_ask"): (1, "contextlib.suppress already in place"),
-    ("admin_sticker.py", "handle_clear"): (1, "contextlib.suppress already in place"),
     ("callbacks.py", "handle_summary_callback"): (
         1,
         "broad except that logs; summary refresh is best-effort",

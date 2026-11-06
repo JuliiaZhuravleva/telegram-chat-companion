@@ -543,19 +543,29 @@ class StickerRepository:
         limit: int = 20,
         offset: int = 0,
     ) -> list[asyncpg.Record]:
-        """Get all sticker sets with learned sticker counts."""
+        """Get all sticker sets with learned and analysed sticker counts.
+
+        ``analyzed_count`` counts rows with a description and no failure flag —
+        the same test as ``StickerFacts.analyzed``. The ``set_name`` tie-break
+        keeps pages stable: without it two packs with equal counts may swap
+        between page 1 and page 2 and one of them never shows.
+        """
         return await self._pool.fetch(  # type: ignore[no-any-return]
             """
             SELECT
                 ss.set_name, ss.set_title, ss.total_count,
                 ss.is_animated, ss.is_video, ss.updated_at,
                 COUNT(sk.id) AS learned_count,
+                COUNT(sk.id) FILTER (
+                    WHERE sk.visual_description IS NOT NULL
+                      AND NOT COALESCE(sk.analysis_failed, false)
+                ) AS analyzed_count,
                 COUNT(sk.description_embedding) AS with_embedding
             FROM sticker_sets ss
             LEFT JOIN sticker_knowledge sk ON sk.set_name = ss.set_name
             GROUP BY ss.set_name, ss.set_title, ss.total_count,
                      ss.is_animated, ss.is_video, ss.updated_at
-            ORDER BY learned_count DESC
+            ORDER BY learned_count DESC, ss.set_name
             LIMIT $1 OFFSET $2
             """,
             limit,
@@ -582,7 +592,7 @@ class StickerRepository:
                    is_animated, is_video, analysis_failed
             FROM sticker_knowledge
             WHERE set_name = $1
-            ORDER BY total_uses DESC
+            ORDER BY total_uses DESC, file_unique_id
             LIMIT $2 OFFSET $3
             """,
             set_name,
@@ -609,13 +619,31 @@ class StickerRepository:
         sticker_msg_id: int,
         chat_id: int,
     ) -> int:
-        """Save admin sticker notification for reply tracking."""
+        """Remember that ``message_id`` in ``chat_id`` is a card about this sticker.
+
+        A card is re-rendered in place many times (score, clear, re-analyse), and
+        every render records it again; a row that already ties this message to
+        this sticker is returned instead of duplicated. ``sticker_msg_id`` is the
+        sticker message the card belongs under, or 0 when there is none of ours
+        (an admin's own sticker, a card edited in place).
+        """
         row = await self._pool.fetchrow(
             """
-            INSERT INTO admin_sticker_notifications
-                (file_unique_id, admin_id, message_id, sticker_msg_id, chat_id)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id
+            WITH existing AS (
+                SELECT id FROM admin_sticker_notifications
+                WHERE chat_id = $5 AND message_id = $3 AND file_unique_id = $1
+                ORDER BY id DESC
+                LIMIT 1
+            ), inserted AS (
+                INSERT INTO admin_sticker_notifications
+                    (file_unique_id, admin_id, message_id, sticker_msg_id, chat_id)
+                SELECT $1, $2, $3, $4, $5
+                WHERE NOT EXISTS (SELECT 1 FROM existing)
+                RETURNING id
+            )
+            SELECT id FROM existing
+            UNION ALL
+            SELECT id FROM inserted
             """,
             file_unique_id,
             admin_id,
@@ -626,34 +654,53 @@ class StickerRepository:
         assert row is not None
         return int(row["id"])
 
-    async def get_latest_sticker_msg(
-        self,
-        admin_id: int,
-        chat_id: int,
-    ) -> int | None:
-        """Get the most recent sticker_msg_id for an admin in a chat."""
+    async def get_card_sticker_msg(self, chat_id: int, message_id: int) -> int | None:
+        """The sticker message sent together with the card ``message_id``, if any.
+
+        Scoped to that one card: a lookup by "the admin's latest sticker" would
+        also find the sticker of a new-sticker notification that arrived while
+        the admin was browsing, and delete it.
+        """
         val = await self._pool.fetchval(
             """
             SELECT sticker_msg_id FROM admin_sticker_notifications
-            WHERE admin_id = $1 AND chat_id = $2 AND sticker_msg_id > 0
-            ORDER BY created_at DESC
+            WHERE chat_id = $1 AND message_id = $2 AND sticker_msg_id > 0
+            ORDER BY id DESC
             LIMIT 1
             """,
-            admin_id,
             chat_id,
+            message_id,
         )
         return int(val) if val else None
+
+    async def release_card(self, chat_id: int, message_id: int) -> None:
+        """Forget that ``message_id`` is a sticker card: it now shows a list.
+
+        Without this a text reply to the pack list that used to be a card
+        would be taken as a description correction for that sticker.
+        """
+        await self._pool.execute(
+            """
+            UPDATE admin_sticker_notifications
+            SET message_id = NULL
+            WHERE chat_id = $1 AND message_id = $2
+            """,
+            chat_id,
+            message_id,
+        )
 
     async def get_notification_by_reply(
         self,
         chat_id: int,
         reply_to_message_id: int,
     ) -> asyncpg.Record | None:
-        """Look up notification by the reply message ID in admin's DM."""
+        """The newest card (or its sticker message) that ``reply_to_message_id`` is."""
         return await self._pool.fetchrow(
             """
             SELECT * FROM admin_sticker_notifications
             WHERE chat_id = $1 AND (message_id = $2 OR sticker_msg_id = $2)
+            ORDER BY id DESC
+            LIMIT 1
             """,
             chat_id,
             reply_to_message_id,
@@ -698,6 +745,23 @@ class StickerRepository:
         return await self._pool.fetchrow(
             "SELECT * FROM sticker_sets WHERE set_name = $1",
             set_name,
+        )
+
+    async def get_set_by_key(self, key: str) -> asyncpg.Record | None:
+        """A registered pack by its 12-hex key, ``left(md5(set_name), 12)``.
+
+        Buttons carry the key because a pack name can push a payload past
+        Telegram's 64 bytes. A sequential scan over a table of a few hundred
+        packs; no index, no migration.
+        """
+        return await self._pool.fetchrow(
+            """
+            SELECT * FROM sticker_sets
+            WHERE left(md5(set_name), 12) = $1
+            ORDER BY set_name
+            LIMIT 1
+            """,
+            key,
         )
 
     async def get_stale_sets(

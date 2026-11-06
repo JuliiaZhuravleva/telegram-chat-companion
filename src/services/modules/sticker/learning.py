@@ -7,7 +7,6 @@ Supports static, animated (.tgs), and video (.webm) stickers.
 from __future__ import annotations
 
 import asyncio
-import html as html_lib
 import json
 import re
 from typing import Any, Literal
@@ -26,7 +25,6 @@ from src.services.modules.sticker.models import (
     StickerSearchResult,
 )
 from src.services.modules.sticker.renderer import RenderedSticker, render_tgs, render_webm
-from src.services.modules.sticker.tolerance import format_explicitness_line
 from src.utils.background import fire_and_forget
 
 logger = structlog.get_logger(__name__)
@@ -619,12 +617,18 @@ class StickerLearningService:
         notification_mode: str = "on",
         collage_png: bytes | None = None,
         tolerance_level: float = 0.5,
+        lang: str = "ru",
     ) -> None:
         """Send new sticker notification to all admins.
 
+        The text is the same sticker card the admin panel shows (``card.sticker``),
+        with its buttons, sent as a reply to the sticker itself and remembered so
+        that a reply to it edits the description.
+
         Args:
-            notification_mode: "off" (skip), "on" (sticker + text),
-                               "detailed" (sticker + collage + text).
+            notification_mode: "off" (skip), "on" (sticker + card),
+                               "detailed" (sticker + collage + card with the
+                               technical lines).
             collage_png: PNG bytes of the analysis collage (for detailed mode).
             tolerance_level: The originating chat's resolved
                 ``ChatConfig.tolerance_level`` («уровень приличия», ADR-0008
@@ -634,64 +638,54 @@ class StickerLearningService:
                 compare against a *real* chat's ceiling instead of the
                 global default. Defaults to the ``ChatConfig`` dataclass
                 fallback (``0.5``) only for callers that don't have one.
+            lang: The admin language (``AdminRepository.get_admin_language``).
         """
         if notification_mode == "off":
             return
         if not admin_ids or result.analysis_failed:
             return
 
-        description_parts = [f"🆔 <code>{sticker.file_unique_id}</code>"]
-        if result.visual_description:
-            description_parts.append(
-                f"<b>Описание:</b> {html_lib.escape(result.visual_description)}"
-            )
-        if result.emotion:
-            description_parts.append(f"<b>Эмоция:</b> {html_lib.escape(result.emotion)}")
-        if result.character_or_meme:
-            description_parts.append(
-                f"<b>Персонаж:</b> {html_lib.escape(result.character_or_meme)}"
-            )
-        if sticker.set_name:
-            description_parts.append(f"<b>Пак:</b> {html_lib.escape(sticker.set_name)}")
-        # A-1: same explicitness line as every other DM sticker card, only
-        # once there's a description at all (see admin_sticker.py's
-        # _build_detail_text for why — an un-analyzed sticker never reaches
-        # here anyway, this function already returned above on
-        # analysis_failed, so this mirrors that same not-analyzed-yet gate).
-        if result.visual_description:
-            description_parts.append(
-                format_explicitness_line(
-                    result.explicitness_score,
-                    tolerance_level,
-                    "ru",
-                    is_manual=result.explicitness_is_manual,
-                )
-            )
+        # Imported here, not at module level: importing the screen layer loads
+        # this module in turn (through src.bot's helpers), so a top-level
+        # import would be circular.
+        from src.bot.screens.i18n import lang_of
+        from src.bot.screens.render import render_text, to_markup
+        from src.bot.screens.stickers import build_card_sticker, facts_from_row
 
-        # In detailed mode, enrich with RAG data from DB
-        if notification_mode == "detailed":
-            record = await self._repo.get_by_file_unique_id(
-                sticker.file_unique_id,
+        record: dict[str, Any] | None = None
+        pack: dict[str, Any] | None = None
+        try:
+            row = await self._repo.get_by_file_unique_id(sticker.file_unique_id)
+            record = dict(row) if row else None
+            if sticker.set_name:
+                pack_row = await self._repo.get_sticker_set(sticker.set_name)
+                pack = dict(pack_row) if pack_row else None
+        except Exception:
+            logger.warning(
+                "notify_admins: catalogue read failed, card built from the result",
+                file_unique_id=sticker.file_unique_id,
+                exc_info=True,
             )
-            if record:
-                contexts = record.get("suggested_contexts")
-                if contexts:
-                    ctx_str = ", ".join(html_lib.escape(c) for c in contexts[:5])
-                    description_parts.append(f"<b>Контексты:</b> {ctx_str}")
-                tags = record.get("style_tags")
-                if tags:
-                    tag_str = ", ".join(html_lib.escape(t) for t in tags)
-                    description_parts.append(f"<b>Теги:</b> {tag_str}")
-                emoji = record.get("emoji")
-                if emoji:
-                    description_parts.append(f"<b>Эмодзи:</b> {emoji}")
-                has_embedding = record.get("description_embedding") is not None
-                description_parts.append(f"<b>Эмбеддинг:</b> {'✅' if has_embedding else '❌'}")
-
-        description_parts.append(
-            "\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>"
+        if record is None:
+            record = {
+                "file_unique_id": sticker.file_unique_id,
+                "emoji": sticker.emoji,
+                "visual_description": result.visual_description,
+                "emotion": result.emotion,
+                "character_or_meme": result.character_or_meme,
+                "explicitness_score": result.explicitness_score,
+                "explicitness_is_manual": result.explicitness_is_manual,
+                "set_name": sticker.set_name,
+            }
+        facts = facts_from_row(
+            record,
+            tolerance=tolerance_level,
+            detailed=notification_mode == "detailed",
+            pack=pack,
         )
-        text = "\n".join(description_parts)
+        card = build_card_sticker(lang_of(lang), facts)
+        text = render_text(card)
+        markup = to_markup(card)
 
         for admin_id in admin_ids:
             try:
@@ -711,6 +705,7 @@ class StickerLearningService:
                     admin_id,
                     text,
                     parse_mode="HTML",
+                    reply_markup=markup,
                     reply_to_message_id=sticker_msg.message_id,
                 )
                 await self._repo.save_notification(

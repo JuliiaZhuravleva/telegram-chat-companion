@@ -57,7 +57,7 @@ change to that test too.
 Consequences that are easy to break:
 
 - `admin_sticker` precedes `media`, which is why an admin's DM sticker reaches the catalogue
-  check ([admin_sticker.py:633](../src/bot/handlers/admin_sticker.py#L633)) instead of
+  check ([admin_sticker.py:899](../src/bot/handlers/admin_sticker.py#L899)) instead of
   `media.py`'s silent auto-learn.
 - `admin_chat_panel` precedes `commands`, which is why the tolerance FSM handler carries
   `~F.text.startswith("/")` — without it the open state would swallow every admin command
@@ -138,10 +138,12 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `adm_kb_org_list:` / `adm_kb_org_pick:` | `lang:chat_id:page` / `lang:chat_id:user_id` | participant list / add the tapped one |
 | `adm_kb_org_add:` / `adm_kb_org_x:` | `lang:chat_id` | add prompt (new message, reply keyboard) / leave it from the failure answer |
 | `adm_react:` / `adm_react_menu:` / `adm_react_toggle:` | `lang:page` / `lang:chat_id` / `lang:chat_id:field` | reactions picker / menu / toggle |
-| `adm_stk_sets:` / `adm_stk_set:` / `adm_stk_view:` | `lang:page` / `lang:set_name:page` / `lang:file_unique_id` | packs / pack / sticker card |
-| `adm_stk_back:` | `lang:set_name:page` | leave card, delete sticker message |
+| `adm_stk_sets:` / `adm_stk_pk:` / `adm_stk_view:` | `lang:page` / `lang:pack_key:page` / `lang:file_unique_id` | packs / pack by its 12-hex key / sticker + card as new messages |
+| `adm_stk_set:` | `lang:set_name:page` | legacy pack button: still parsed, no longer emitted |
+| `adm_stk_card:` / `adm_stk_score:` | `lang:file_unique_id` | card in place / explicitness screen |
 | `adm_stk_reanalyze:` / `adm_stk_clr_ask:` / `adm_stk_clr:` | `lang:file_unique_id` | re-analyse / confirm clear / clear |
-| `adm_stk_dmchk:` | `lang:file_unique_id` | analyse a DM-checked sticker |
+| `adm_stk_expset:` / `adm_stk_expedit:` / `adm_stk_expcancel:` / `adm_stk_expreset:` | `lang:file_unique_id:preset_index` / `lang:file_unique_id` | one-tap score / typed-score prompt / cancel it / re-score |
+| `adm_stk_dmchk:` | `lang:file_unique_id` | analyse a DM-checked sticker, and its retry |
 | `adm_rules:` | `lang:page` | rules chat list |
 | `ar_list:` / `ar_view:` / `ar_tog:` / `ar_del_ask:` / `ar_del:` / `ar_add:` / `ar_type:` / `ar_cancel:` | see [rules.py](../src/bot/handlers/rules.py) module docstring | rules CRUD (`ar_cancel:` leaves the config prompt) |
 | `noop` | — | inert buttons (section headers, page counters, status badges) |
@@ -155,6 +157,7 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `awaiting_setting_value` | `adm_pnl_tol:` | `admin_chat_panel.handle_chat_panel_tolerance_input` | `adm_pnl_tolcancel:` button, `/cancel`, or a typed `/command` (filtered out — but see the caption caveat in §F.2) |
 | `awaiting_kb_organizer` | `adm_kb_org_add:` (data: `kb_chat_id`, `kb_lang`; the prompt is a **new** message carrying a one-time reply keyboard with a `request_users` button, `request_id=REQUEST_IDS.ORG_PICK`) | `admin_kb.handle_kb_organizer_shared` (the `users_shared` service message, filtered on that `request_id` — a pick from another picker never reaches it — and matched in **any** state, registered **before** the reader, which would otherwise take a pick for an empty message and answer «not found»; without this state it writes nothing and answers stale), then `admin_kb.handle_kb_organizer_add_reply` for a forward or `@username` (clears state on entry, **before** the authority check; a failed lookup re-arms it and answers `org.fail`) | the `✖️ Отмена` keyboard label, `adm_kb_org_x:`, a pick from the participant list, `adm_kb_orgs:`, `/cancel`, or a typed `/command`; the `🔍 Найти в Telegram` label arriving as *text* means the client cannot open the picker — answered with the fallback, state kept; a forwarded message whose text starts with `/` or equals a label is still an organizer add, not a command. Every exit through `admin_kb` clears the state, sends `ReplyKeyboardRemove` on a line of its own and then the organizer list as a new message (a message cannot carry both keyboards). `adm_kb_org_x:` tapped while some *other* dialog is open shows the list and leaves that dialog alone |
 | `awaiting_rule_config` | `ar_type:` | `rules.handle_rule_config_input` (`IsAdmin`-gated since TD-049) | `ar_cancel:` button, `/cancel`, any `/command` incl. in a caption, or navigating back to any rules screen |
+| `awaiting_sticker_score` | `adm_stk_expedit:` (data: `exp_file_unique_id`, `exp_lang`, `exp_prompt_id`; the prompt is the score screen edited in place) | `admin_sticker.handle_sticker_explicitness_input` (admin re-checked in the body; a valid number clears the state and sends the card as a new message, an invalid one re-prompts in a new message and moves `exp_prompt_id`; either way the answered prompt loses its keyboard) | `adm_stk_expcancel:` button, `/cancel`, a typed `/command`, or any other `adm_stk_*` button — they clear this state only, never another screen's |
 | `awaiting_sticker_edit`, `awaiting_sticker` | — | — | declared, currently unused |
 | `awaiting_rule_words`, `awaiting_rule_text`, `awaiting_rule_react` | — | — | declared for the button-driven rule builder (A3); unused until it lands |
 
@@ -485,8 +488,13 @@ vestigial).
   that constructs `t.me/c/...`, `t.me/{username}` and `tg://user?id=` links; it returns `None`
   for chats that cannot be linked (old-style groups), and callers fall back to plain text
   plus a `noop` button.
-- **The sticker card deletes messages as it navigates** (previous sticker message via a DB
-  lookup, then the card itself) to avoid orphaned stickers accumulating in the DM. Failures
+- **A sticker card takes only its own sticker with it.** `adm_stk_view:` deletes the list,
+  sends the sticker and then the card, and records both ids in
+  `admin_sticker_notifications`. Leaving that card looks the sticker up by the card's own
+  message id (`get_card_sticker_msg`), deletes it only when the card is not a reply (a
+  notification or a DM check replies to a sticker the admin keeps), then releases the record
+  (`release_card`) so a reply to what is now a list is not a correction. A lookup by "the
+  admin's latest sticker" would delete a notification that arrived while browsing. Failures
   are suppressed — a message the admin already deleted must not break navigation.
 - **`handle_admin_sticker_reply` consumes every text reply in an admin DM** (filters:
   `F.reply_to_message, F.text, private, IsAdmin, StateFilter(None)`). When it cannot resolve
@@ -782,10 +790,33 @@ are in `keyboards/kb.py`, outside the panel. The prompt's state is described in 
 
 ## A5 — Stickers
 
-Files: [src/bot/handlers/admin_sticker.py](../src/bot/handlers/admin_sticker.py),
-[src/bot/keyboards/admin_sticker.py](../src/bot/keyboards/admin_sticker.py). Its two traps —
-it runs before `media` (§F.2), and its reply handler consumes every text reply in an admin
-DM (§F.8) — are shared-machinery facts and stay there.
+Files: [src/bot/handlers/admin_sticker.py](../src/bot/handlers/admin_sticker.py) (handlers),
+[src/bot/screens/stickers.py](../src/bot/screens/stickers.py) (pure builders for `stk.*` and
+`card.sticker`, samples in `screens/samples/stickers.py`),
+[src/database/repositories/stickers.py](../src/database/repositories/stickers.py). Its two
+traps — it runs before `media` (§F.2), and its reply handler consumes every text reply in an
+admin DM (§F.8) — are shared-machinery facts and stay there.
+
+- **Packs are addressed by key, not name.** A set name may be 64 bytes, which cannot fit a
+  payload; buttons carry `pack_key(set_name)` = the first 12 hex digits of its md5, and
+  `get_set_by_key` matches `left(md5(set_name), 12)` — a sequential scan, no index, no
+  migration. The two halves of that formula are pinned to each other by an integration test.
+  `adm_stk_set:` (the name form) is still parsed for buttons already in chats.
+- **One card renderer.** `build_stk_card` serves view, clear, score, re-analysis, the DM
+  check and the DM analysis; `build_card_sticker` is the new-sticker notification sent by
+  `StickerLearningService.notify_admins`, with the same action rows and no back. Every path
+  that leaves a card on screen calls `save_notification`, which is idempotent per
+  (chat, message, sticker), so a reply to any card resolves.
+- **Gone is not stale.** A sticker or pack deleted meanwhile renders the pack list with
+  `GONE_STICKER` / `GONE_PACK`; only an unparseable payload goes to `show_stale`.
+  `adm_stk_back:` is retired, and an old one gets the stale answer.
+- **Re-score is reset plus one re-analysis.** A NULL score means the bot never sends the
+  sticker, so `reset_explicitness_to_auto` alone would silence it until something else
+  re-analysed it.
+- **Analysis errors carry their reason** (`download`, `vision`, `content_filter`, `empty`)
+  from `ReanalyzeResult.reason` / `StickerLearningResult.failure_reason` to `build_stk_error`.
+  The DM variant retries through `adm_stk_dmchk:`; once a row exists it re-analyses rather
+  than learning again.
 
 ---
 
