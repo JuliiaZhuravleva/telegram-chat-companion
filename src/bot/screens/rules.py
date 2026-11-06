@@ -1,0 +1,949 @@
+"""Rules screens: one chat's rule list, a rule's card, the button builder, and the
+admin card a fired rule sends.
+
+Pure builders: each takes plain values and returns a `Screen`. The handlers in
+``src/bot/handlers/rules.py`` read the database and call these; the samples in
+``samples/rules.py`` call them with invented values. Nothing here touches
+Telegram or the database, so the rule executor can import this module lazily.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from html import escape
+from typing import Any, Final
+
+from src.bot.custom_emoji import fence
+from src.bot.screens.i18n import Tr, plural_ru
+from src.bot.screens.lint import budget, label_width_px
+from src.bot.screens.model import Button, Screen
+from src.bot.screens.render import back, cancel, pager
+from src.bot.screens.routes import cb
+
+PER_PAGE: Final = 3
+"""Rules per list page: three rows of rules keep the list to six rows with its pager."""
+
+WHO_PER_PAGE: Final = 4
+"""People per picker page: four names, the pager and Cancel are six rows."""
+
+FLOOD_CHOICES: Final = (5, 10, 20)
+FLOOD_SUGGESTED: Final = 10
+SPAM_CHOICES: Final = (10, 20, 40)
+SPAM_SUGGESTED: Final = 20
+REACTIONS: Final = ("👀", "🤡", "💩", "👍", "😁")
+WARN_PRESETS: Final = (
+    Tr("Давайте без спама", "Let's skip the spam"),
+    Tr("Давайте потише", "Let's keep it down"),
+)
+
+MAX_WORDS: Final = 20
+MAX_WORD_CHARS: Final = 64
+MAX_TEXT_CHARS: Final = 4096
+"""A warning or reply is one Telegram message, and the rule sends it as plain text."""
+
+_JSON_SHOWN_CHARS: Final = 3000
+_EXCERPT_CHARS: Final = 100
+_CAUGHT_CHARS: Final = 200
+
+KINDS: Final = {
+    "k": "keyword_trigger",
+    "u": "user_specific",
+    "f": "sticker_flood",
+    "s": "spam_detect",
+}
+"""Builder kind token → rule type. One letter keeps the builder's callbacks short."""
+
+ACTIONS: Final = {
+    "n": "notify_admin",
+    "w": "warn_user",
+    "c": "custom_response",
+    "r": "set_reaction",
+}
+"""Builder action token → rule action."""
+
+MODES: Final = {
+    "highest_weight": Tr("одно правило с наибольшим весом", "one rule, highest weight"),
+    "weighted_random": Tr("одно случайное правило, по весу", "one random rule, by weight"),
+}
+"""Rules modes other than ``all``. Only these change what a rule's weight means."""
+
+WARN_FALLBACK: Final = Tr(
+    "⚠️ Сработало автоматическое правило чата.",
+    "⚠️ An automated chat rule was triggered.",
+)
+"""What ``warn_user`` posts when the rule has no text of its own."""
+
+_TITLE: Final = Tr("Правила", "Rules")
+_ADD: Final = Tr("➕ Добавить", "➕ Add")
+_ON: Final = Tr("работает", "on")
+_PAUSED: Final = Tr("на паузе", "paused")
+_COMMON: Final = Tr("общее", "default")
+_NEW: Final = Tr("Новое правило:", "New rule:")
+_ELLIPSIS: Final = "…"
+
+
+# ---------------------------------------------------------------------------
+# Values the screens read
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ChatRules:
+    """A chat's rule settings as the screens show them."""
+
+    enabled: bool
+    common: bool
+    """The value is inherited (``chat_settings.rules_enabled`` is NULL): label ``· общее``."""
+    mode: str = "all"
+
+
+@dataclass(frozen=True)
+class RuleView:
+    """One ``custom_rules`` row, with its config parsed."""
+
+    id: int
+    chat_id: int
+    rule_type: str
+    config: Mapping[str, Any] = field(default_factory=dict)
+    enabled: bool = True
+    weight: int = 1
+    mandatory: bool = False
+    trigger_count: int = 0
+
+
+def parse_config(raw: object) -> dict[str, Any]:
+    """A rule's config as a dict: asyncpg hands JSONB back as a string."""
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return {}
+        return value if isinstance(value, dict) else {}
+    return {}
+
+
+def rule_view(row: Mapping[str, Any]) -> RuleView:
+    return RuleView(
+        id=int(row["id"]),
+        chat_id=int(row.get("chat_id") or 0),
+        rule_type=str(row.get("rule_type") or ""),
+        config=parse_config(row.get("config")),
+        enabled=bool(row.get("enabled", True)),
+        weight=int(row.get("weight") or 1),
+        mandatory=bool(row.get("mandatory", False)),
+        trigger_count=int(row.get("trigger_count") or 0),
+    )
+
+
+_TYPE_NAMES: Final = {
+    "keyword_trigger": Tr("Ключевые слова", "Keywords"),
+    "user_specific": Tr("Сообщения одного человека", "One person's messages"),
+    "sticker_flood": Tr("Много стикеров", "Many stickers"),
+    "spam_detect": Tr("Много сообщений", "Many messages"),
+}
+
+
+def rule_name(rule: RuleView, lang: str) -> str:
+    """The name a rule is shown by: its own, else its words, else its type."""
+    name = rule.config.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    words = _str_list(rule.config.get("keywords"))
+    if rule.rule_type == "keyword_trigger" and words:
+        return ", ".join(words)
+    kind = _TYPE_NAMES.get(rule.rule_type)
+    return kind(lang) if kind else f"#{rule.id}"
+
+
+_ESTIMATE_SLACK: Final = 1.12
+"""How much wider a browser draws a label than ``label_width_px`` says.
+
+The estimator reads lowercase Cyrillic about 9% narrow: a list row it put at
+341 px of the 342 px budget rendered at 370 px and was cut by the client. So a
+label cut here is cut to the budget shrunk by this factor, not to the budget.
+"""
+
+
+def _room(n: int) -> float:
+    """Estimated width a cut label may take when its row holds ``n`` buttons."""
+    return budget(n) / _ESTIMATE_SLACK
+
+
+def fit(text: str, width: float) -> str:
+    """``text`` cut with ``…`` so its rendered width stays within ``width``."""
+    if label_width_px(text) <= width:
+        return text
+    while text and label_width_px(text + _ELLIPSIS) > width:
+        text = text[:-1]
+    return text.rstrip() + _ELLIPSIS
+
+
+def chat_id_text(chat_id: int) -> str:
+    """The id an admin can match against ``t.me/c/…``: without the ``-100``."""
+    raw = str(chat_id)
+    return raw[4:] if raw.startswith("-100") else raw.lstrip("-")
+
+
+def _str_list(value: object) -> list[str]:
+    return [str(v) for v in value] if isinstance(value, list) else []
+
+
+def _int(value: object, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else default
+
+
+# ---------------------------------------------------------------------------
+# rules: the list
+# ---------------------------------------------------------------------------
+
+
+def master_label(chat: ChatRules, lang: str) -> str:
+    label = (
+        Tr("✅ Все правила включены", "✅ All rules on")(lang)
+        if chat.enabled
+        else Tr("⚪ Правила выключены", "⚪ Rules off")(lang)
+    )
+    return f"{label} · {_COMMON(lang)}" if chat.common else label
+
+
+def _row_parts(rule: RuleView, chat: ChatRules, lang: str) -> tuple[str, str, str]:
+    if rule.enabled:
+        head, status = "📏 ", f" · {_ON(lang)}" if chat.enabled else ""
+    else:
+        head, status = "⏸ ", f" · {_PAUSED(lang)}"
+    extra = ""
+    if chat.mode in MODES:
+        extra = (
+            f" · {Tr('обязательное', 'required')(lang)}"
+            if rule.mandatory
+            else f" · {Tr('вес', 'weight')(lang)} {rule.weight}"
+        )
+    tail = status + extra
+    room = _room(1) - label_width_px(head + tail)
+    return head, fit(rule_name(rule, lang), room), tail
+
+
+def row_name(rule: RuleView, chat: ChatRules, lang: str) -> str:
+    """The rule's name as its row in the list shows it: cut to leave room for the state."""
+    return _row_parts(rule, chat, lang)[1]
+
+
+def _row_label(rule: RuleView, chat: ChatRules, lang: str) -> str:
+    return "".join(_row_parts(rule, chat, lang))
+
+
+def rules_screen(
+    lang: str,
+    *,
+    chat_id: int,
+    title: str,
+    chat: ChatRules,
+    rules: Sequence[RuleView],
+    page: int = 0,
+    pages: int = 1,
+    notice: str | None = None,
+    notice_raw: str | None = None,
+) -> Screen:
+    """``rules``: one chat's rules, three a page, with the switch for all of them."""
+    if rules or page:
+        hint = (
+            Tr(
+                "Нажмите правило, чтобы открыть. Верхняя кнопка ставит на паузу все сразу.",
+                "Tap a rule to open it. The top button pauses all of them at once.",
+            )
+            if chat.enabled
+            else Tr(
+                "Нажмите правило, чтобы открыть. Верхняя кнопка включает все сразу.",
+                "Tap a rule to open it. The top button turns all of them on at once.",
+            )
+        )(lang)
+    else:
+        hint = Tr("Правил пока нет.", "No rules yet.")(lang)
+    lines = [f"📏 <b>{_TITLE(lang)}</b> · {escape(title)}", "", hint]
+    if chat.mode in MODES:
+        lines.append(f"{Tr('Режим', 'Mode')(lang)}: {MODES[chat.mode](lang)}")
+
+    rows: list[tuple[Button, ...]] = [
+        (Button(master_label(chat, lang), cb("ar_all:", lang, chat_id)),)
+    ]
+    rows.extend(
+        (Button(_row_label(rule, chat, lang), cb("ar_view:", lang, rule.id, chat_id)),)
+        for rule in rules
+    )
+    nav = pager(page, pages, lambda p: cb("ar_list:", lang, chat_id, p))
+    if nav is not None:
+        rows.append(nav)
+    rows.append(
+        (
+            Button(_ADD(lang), cb("ar_add:", lang, chat_id)),
+            back("chat", cb("adm_pnl_menu:", lang, chat_id), lang),
+        )
+    )
+    return Screen(
+        id="rules", text="\n".join(lines), rows=tuple(rows), notice=notice, notice_raw=notice_raw
+    )
+
+
+GONE_NOTICE: Final = Tr("<i>Этого правила уже нет.</i>", "<i>This rule is gone.</i>")
+"""The line ``rule.gone`` puts over the list (trusted HTML, no ✓: nothing was done)."""
+
+
+def gone_screen(
+    lang: str,
+    *,
+    chat_id: int,
+    title: str,
+    chat: ChatRules,
+    rules: Sequence[RuleView],
+    page: int = 0,
+    pages: int = 1,
+) -> Screen:
+    """``rule.gone``: the rule a button pointed at was deleted meanwhile; its chat's list."""
+    screen = rules_screen(
+        lang,
+        chat_id=chat_id,
+        title=title,
+        chat=chat,
+        rules=rules,
+        page=page,
+        pages=pages,
+        notice_raw=GONE_NOTICE(lang),
+    )
+    return replace(screen, id="rule.gone")
+
+
+# ---------------------------------------------------------------------------
+# rule: one rule's card
+# ---------------------------------------------------------------------------
+
+
+def _quote(text: str, limit: int = _CAUGHT_CHARS) -> str:
+    text = text if len(text) <= limit else text[: limit - 1] + _ELLIPSIS
+    return f"«{escape(text)}»"
+
+
+def catches(rule: RuleView, lang: str) -> str:
+    """What sets a rule off, in words."""
+    cfg = rule.config
+    if rule.rule_type == "keyword_trigger":
+        words = ", ".join(_str_list(cfg.get("keywords")))
+        how = {
+            "exact": Tr("только слово, без текста", "the word alone"),
+            "regex": Tr("регулярное выражение", "regular expression"),
+        }.get(
+            str(cfg.get("match_type", "contains")),
+            Tr("слово внутри сообщения", "a word inside a message"),
+        )
+        return f"{_quote(words)} — {how(lang)}"
+    if rule.rule_type == "user_specific":
+        conditions = cfg.get("conditions")
+        conditions = conditions if isinstance(conditions, Mapping) else {}
+        if conditions.get("any_message"):
+            return Tr("все сообщения одного человека", "every message from one person")(lang)
+        words = ", ".join(_str_list(conditions.get("keywords")))
+        return Tr("слова одного человека: {w}", "one person's words: {w}")(lang).format(
+            w=_quote(words)
+        )
+    if rule.rule_type == "sticker_flood":
+        n = _int(cfg.get("max_stickers_per_interval"), 10)
+        return _per_window(
+            lang,
+            n,
+            _int(cfg.get("interval_seconds"), 60),
+            Tr(
+                f"{n} {plural_ru(n, 'стикер', 'стикера', 'стикеров')} в чате",
+                f"{n} stickers in the chat",
+            ),
+        )
+    if rule.rule_type == "spam_detect":
+        n = _int(cfg.get("max_messages"), 20)
+        text = _per_window(
+            lang,
+            n,
+            _int(cfg.get("time_window_seconds"), 60),
+            Tr(
+                f"{n} {plural_ru(n, 'сообщение', 'сообщения', 'сообщений')} одного человека",
+                f"{n} messages from one person",
+            ),
+        )
+        chars = _int(cfg.get("max_chars_per_message"), 4000)
+        if chars > 0:
+            text += Tr(" или сообщение от {c} символов", " or a message of {c} characters or more")(
+                lang
+            ).format(c=chars)
+        return text
+    return escape(rule.rule_type)
+
+
+def _per_window(lang: str, _n: int, seconds: int, what: Tr) -> str:
+    if seconds == 60:
+        return f"{what(lang)} {Tr('за минуту', 'a minute')(lang)}"
+    return f"{what(lang)} {Tr('за {s} с', 'in {s} s')(lang).format(s=seconds)}"
+
+
+def does(rule: RuleView, lang: str) -> str:
+    """What a rule does when it fires, in words."""
+    cfg = rule.config
+    action = str(cfg.get("action", "notify_admin"))
+    if action == "notify_admin":
+        return Tr("пишет админу", "messages the admin")(lang)
+    if action == "warn_user":
+        text = cfg.get("warning_message")
+        if not isinstance(text, str) or not text:
+            return Tr(
+                "предупреждает автора стандартным текстом", "warns the author with the default text"
+            )(lang)
+        return f"{Tr('предупреждает автора', 'warns the author')(lang)}: {_quote(text)}"
+    if action == "custom_response":
+        text = cfg.get("response_template")
+        said = _quote(text) if isinstance(text, str) and text else "—"
+        return f"{Tr('отвечает текстом', 'replies with text')(lang)}: {said}"
+    if action == "set_reaction":
+        emoji = cfg.get("emoji")
+        return f"{Tr('ставит реакцию', 'reacts with')(lang)} {escape(str(emoji or '—'))}"
+    return Tr("ничего: неизвестное действие {a}", "nothing: unknown action {a}")(lang).format(
+        a=f"<code>{escape(action)}</code>"
+    )
+
+
+def _fired(n: int, lang: str) -> str:
+    if n <= 0:
+        return Tr("Ещё не срабатывало", "Not fired yet")(lang)
+    if lang == "en":
+        return f"Fired: {n} {'time' if n == 1 else 'times'}"
+    return f"Сработало: {n} {plural_ru(n, 'раз', 'раза', 'раз')}"
+
+
+def config_json(config: Mapping[str, Any]) -> str:
+    """The stored config, pretty-printed and escaped for ``<pre>``, cut to fit a message."""
+    raw = json.dumps(dict(config), ensure_ascii=False, indent=2, default=str)
+    if len(raw) > _JSON_SHOWN_CHARS:
+        raw = raw[: _JSON_SHOWN_CHARS - 1] + _ELLIPSIS
+    return escape(raw)
+
+
+def rule_screen(
+    lang: str,
+    rule: RuleView,
+    *,
+    chat: ChatRules,
+    show_json: bool = False,
+    notice: str | None = None,
+) -> Screen:
+    """``rule``: one rule in words, with pause, delete and its raw JSON behind a button."""
+    if not rule.enabled:
+        status = _PAUSED(lang)
+    elif chat.enabled:
+        status = _ON(lang)
+    else:
+        status = Tr("не работает", "not firing")(lang)
+    lines = [
+        f"📏 <b>{escape(rule_name(rule, lang))}</b> · {status}",
+        "",
+        f"{Tr('Ловит', 'Catches')(lang)}: {catches(rule, lang)}",
+        f"{Tr('Делает', 'Does')(lang)}: {does(rule, lang)}",
+        _fired(rule.trigger_count, lang),
+    ]
+    if chat.mode in MODES:
+        required = Tr("да", "yes")(lang) if rule.mandatory else Tr("нет", "no")(lang)
+        lines.append(
+            f"{Tr('Вес', 'Weight')(lang)}: {rule.weight} · "
+            f"{Tr('обязательное', 'required')(lang)}: {required}"
+        )
+    if not chat.enabled:
+        lines += [
+            "",
+            Tr(
+                "Правила этого чата выключены, поэтому оно не сработает.",
+                "Rules are off in this chat, so it will not fire.",
+            )(lang),
+        ]
+    if show_json:
+        lines += ["", f"<pre>{config_json(rule.config)}</pre>"]
+
+    rows: list[tuple[Button, ...]] = []
+    if not chat.enabled:
+        rows.append((Button(master_label(chat, lang), cb("ar_all:", lang, rule.chat_id, rule.id)),))
+    toggle = (Tr("⏸ На паузу", "⏸ Pause") if rule.enabled else Tr("▶ Возобновить", "▶ Resume"))(
+        lang
+    )
+    rows.append(
+        (
+            Button(toggle, cb("ar_tog:", lang, rule.id, rule.chat_id, 0)),
+            Button(
+                Tr("🗑 Удалить", "🗑 Delete")(lang), cb("ar_del_ask:", lang, rule.id, rule.chat_id)
+            ),
+        )
+    )
+    rows.append(
+        (
+            Button(
+                Tr("🧩 Скрыть JSON", "🧩 Hide JSON")(lang)
+                if show_json
+                else Tr("🧩 JSON", "🧩 JSON")(lang),
+                cb("ar_view:", lang, rule.id, rule.chat_id, *(() if show_json else ("j",))),
+            ),
+        )
+    )
+    rows.append((back("rules", cb("ar_list:", lang, rule.chat_id, 0), lang),))
+    return Screen(id="rule", text="\n".join(lines), rows=tuple(rows), notice=notice)
+
+
+def delete_ask_screen(lang: str, rule: RuleView) -> Screen:
+    """``rule.del_ask``: the one confirmation in the area — deleting cannot be undone."""
+    return Screen(
+        id="rule.del_ask",
+        text=(
+            f"🗑 <b>{Tr('Удалить правило?', 'Delete the rule?')(lang)}</b>\n\n"
+            f"{escape(rule_name(rule, lang))}\n"
+            f"{Tr('Вернуть будет нельзя.', 'It cannot be brought back.')(lang)}"
+        ),
+        rows=(
+            (
+                Button(
+                    Tr("🗑 Удалить", "🗑 Delete")(lang), cb("ar_del:", lang, rule.id, rule.chat_id)
+                ),
+                back("rule", cb("ar_view:", lang, rule.id, rule.chat_id), lang),
+            ),
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# The builder: rule.type → … → rule
+# ---------------------------------------------------------------------------
+
+
+def _list_cb(lang: str, chat_id: int) -> str:
+    return cb("ar_list:", lang, chat_id, 0)
+
+
+def type_screen(lang: str, chat_id: int) -> Screen:
+    """``rule.type``: what the new rule reacts to."""
+
+    def kind(label: Tr, token: str) -> Button:
+        return Button(label(lang), cb("ar_b_type:", lang, chat_id, token))
+
+    return Screen(
+        id="rule.type",
+        text=(
+            f"➕ <b>{Tr('Новое правило', 'New rule')(lang)}</b>\n\n"
+            f"{Tr('На что оно срабатывает?', 'What sets it off?')(lang)}"
+        ),
+        rows=(
+            (kind(Tr("🔑 Ключевые слова", "🔑 Keywords"), "k"),),
+            (kind(Tr("👤 Сообщения одного человека", "👤 One person's messages"), "u"),),
+            (
+                kind(Tr("🎭 Много стикеров", "🎭 Many stickers"), "f"),
+                kind(Tr("🛡 Много сообщений", "🛡 Many messages"), "s"),
+            ),
+            (
+                Button(
+                    Tr("🧩 Настроить в JSON", "🧩 Set up in JSON")(lang),
+                    cb("ar_cfg:", lang, chat_id),
+                ),
+            ),
+            (back("rules", _list_cb(lang, chat_id), lang),),
+        ),
+    )
+
+
+def _new_title(glyph: str, what: str, lang: str) -> str:
+    return f"{glyph} <b>{_NEW(lang)}</b> {escape(what)}"
+
+
+def words_screen(lang: str, chat_id: int) -> Screen:
+    """``rule.words``: the words, typed."""
+    return Screen(
+        id="rule.words",
+        text=(
+            f"{_new_title('🔑', Tr('ключевые слова', 'keywords')(lang), lang)}\n\n"
+            + Tr(
+                "Напишите слова через запятую. До {n} слов.",
+                "Type the words, separated by commas. Up to {n} words.",
+            )(lang).format(n=MAX_WORDS)
+        ),
+        rows=((cancel(_list_cb(lang, chat_id), lang),),),
+    )
+
+
+def match_screen(lang: str, chat_id: int, words: Sequence[str]) -> Screen:
+    """``rule.match``: a word anywhere in a message, or the message being just the word."""
+    first = words[0] if words else ""
+    example = Tr(
+        "Слово внутри: «тут {w} и ещё текст»\nТолько слово: «{w}»",
+        "Word inside: “there is {w} and more text”\nWord alone: “{w}”",
+    )(lang).format(w=escape(first))
+    return Screen(
+        id="rule.match",
+        text=(
+            f"{_new_title('🔑', ', '.join(words), lang)}\n\n"
+            f"{Tr('Когда срабатывать? Хватит любого из слов.', 'When should it fire? Any one of the words is enough.')(lang)}"
+            f"\n\n{example}"
+        ),
+        rows=(
+            (
+                Button(
+                    Tr("Слово внутри сообщения", "Word inside a message")(lang),
+                    cb("ar_b_match:", lang, chat_id, "c"),
+                ),
+            ),
+            (
+                Button(
+                    Tr("Только слово, без текста", "The word alone")(lang),
+                    cb("ar_b_match:", lang, chat_id, "e"),
+                ),
+            ),
+            (cancel(_list_cb(lang, chat_id), lang),),
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class Person:
+    user_id: int
+    first_name: str | None = None
+    username: str | None = None
+
+    @property
+    def display(self) -> str:
+        """``Имя @ник``, or whichever of them exists, or the id."""
+        parts = [p for p in (self.first_name, f"@{self.username}" if self.username else None) if p]
+        return " ".join(parts) if parts else str(self.user_id)
+
+
+def who_screen(
+    lang: str, chat_id: int, people: Sequence[Person], *, page: int = 0, pages: int = 1
+) -> Screen:
+    """``rule.who``: whose messages, picked from the chat's most active people."""
+    hint = (
+        Tr("Чьи? Нажмите имя.", "Whose? Tap a name.")
+        if people
+        else Tr("В этом чате пока никто не писал.", "Nobody has written in this chat yet.")
+    )(lang)
+    rows: list[tuple[Button, ...]] = [
+        (
+            Button(
+                fence(fit(person.display, _room(1))),
+                cb("ar_b_who:", lang, chat_id, person.user_id),
+            ),
+        )
+        for person in people
+    ]
+    nav = pager(page, pages, lambda p: cb("ar_b_type:", lang, chat_id, "u", p))
+    if nav is not None:
+        rows.append(nav)
+    rows.append((cancel(_list_cb(lang, chat_id), lang),))
+    return Screen(
+        id="rule.who",
+        text=f"{_new_title('👤', Tr('сообщения одного человека', 'one person’s messages')(lang), lang)}\n\n{hint}",
+        rows=tuple(rows),
+    )
+
+
+def count_screen(lang: str, chat_id: int, kind: str) -> Screen:
+    """``rule.flood`` / ``rule.spam``: how many in a minute is too many."""
+    if kind == "f":
+        screen_id, glyph = "rule.flood", "🎭"
+        what = Tr("много стикеров", "many stickers")
+        question = Tr(
+            "Сколько стикеров в чате за минуту уже слишком?",
+            "How many stickers in the chat in a minute is too many?",
+        )
+        choices, suggested = FLOOD_CHOICES, FLOOD_SUGGESTED
+    else:
+        screen_id, glyph = "rule.spam", "🛡"
+        what = Tr("много сообщений", "many messages")
+        question = Tr(
+            "Сколько сообщений от одного человека за минуту уже слишком?",
+            "How many messages from one person in a minute is too many?",
+        )
+        choices, suggested = SPAM_CHOICES, SPAM_SUGGESTED
+    return Screen(
+        id=screen_id,
+        text=f"{_new_title(glyph, what(lang), lang)}\n\n{question(lang)}",
+        rows=(
+            tuple(
+                Button(f"• {n}" if n == suggested else str(n), cb("ar_b_n:", lang, chat_id, n))
+                for n in choices
+            ),
+            (cancel(_list_cb(lang, chat_id), lang),),
+        ),
+    )
+
+
+def action_screen(lang: str, chat_id: int, name: str) -> Screen:
+    """``rule.action``: what the rule does. Messaging the admin needs nothing more."""
+
+    def act(label: Tr, token: str) -> tuple[Button, ...]:
+        return (Button(label(lang), cb("ar_b_act:", lang, chat_id, token)),)
+
+    return Screen(
+        id="rule.action",
+        text=(
+            f"{_new_title('📏', name, lang)}\n\n"
+            + Tr(
+                "Что сделать, когда сработает? Выберите одно. «Написать админу» сразу сохранит правило.",
+                "What should happen when it fires? Pick one. “Message the admin” saves the rule at once.",
+            )(lang)
+        ),
+        rows=(
+            act(Tr("🔔 Написать админу", "🔔 Message the admin"), "n"),
+            act(Tr("⚠️ Предупредить автора", "⚠️ Warn the author"), "w"),
+            act(Tr("💬 Ответить своим текстом", "💬 Reply with my text"), "c"),
+            act(Tr("😀 Поставить реакцию", "😀 Add a reaction"), "r"),
+            (cancel(_list_cb(lang, chat_id), lang),),
+        ),
+    )
+
+
+def text_screen(lang: str, chat_id: int, name: str, *, action: str) -> Screen:
+    """``rule.text``: the warning (typed or a ready one) or the reply (typed)."""
+    title = _new_title("📏", name, lang)
+    if action == "warn_user":
+        body = Tr(
+            "Напишите текст сообщением или нажмите готовый. Правило сразу сохранится.",
+            "Type the text as a message or tap a ready one. The rule is saved at once.",
+        )(lang)
+        rows: list[tuple[Button, ...]] = [
+            (Button(preset(lang), cb("ar_b_txt:", lang, chat_id, i)),)
+            for i, preset in enumerate(WARN_PRESETS)
+        ]
+    else:
+        body = Tr(
+            "Напишите текст ответа сообщением. Правило сразу сохранится.\n"
+            "В текст подставятся: <code>{first_name}</code> — имя автора, "
+            "<code>{username}</code> — его ник, <code>{rule_name}</code> — название правила.",
+            "Type the reply as a message. The rule is saved at once.\n"
+            "These are filled in: <code>{first_name}</code> — the author's name, "
+            "<code>{username}</code> — their username, <code>{rule_name}</code> — the rule's name.",
+        )(lang)
+        rows = []
+    rows.append((cancel(_list_cb(lang, chat_id), lang),))
+    return Screen(id="rule.text", text=f"{title}\n\n{body}", rows=tuple(rows))
+
+
+def react_screen(lang: str, chat_id: int, name: str) -> Screen:
+    """``rule.react``: five common reactions, or any other one typed."""
+    buttons = [Button(emoji, cb("ar_b_rx:", lang, chat_id, i)) for i, emoji in enumerate(REACTIONS)]
+    other = Button(
+        Tr("✏️ Другая", "✏️ Other")(lang),
+        cb("ar_b_act:", lang, chat_id, "ri"),
+        goes_to="rule.react_in",
+    )
+    return Screen(
+        id="rule.react",
+        text=f"{_new_title('😀', name, lang)}\n\n{Tr('Какую реакцию ставить?', 'Which reaction?')(lang)}",
+        rows=(
+            tuple(buttons[:3]),
+            (*buttons[3:], other),
+            (cancel(_list_cb(lang, chat_id), lang),),
+        ),
+    )
+
+
+def react_in_screen(lang: str, chat_id: int, name: str) -> Screen:
+    """``rule.react_in``: one emoji, typed; only Telegram's reaction set is accepted."""
+    return Screen(
+        id="rule.react_in",
+        text=(
+            f"{_new_title('😀', name, lang)}\n\n"
+            + Tr(
+                "Пришлите эмодзи. Подойдёт только то, что Telegram разрешает как реакцию.",
+                "Send an emoji. Only what Telegram allows as a reaction will do.",
+            )(lang)
+        ),
+        rows=(
+            (
+                Button(
+                    Tr("✖️ Отмена", "✖️ Cancel")(lang),
+                    cb("ar_b_act:", lang, chat_id, "r"),
+                    kind="cancel",
+                    goes_to="rule.react",
+                ),
+            ),
+        ),
+    )
+
+
+_CFG_EXAMPLE: Final = Tr(
+    '{"name": "spam-words", "keywords": ["реклама", "купи"], "match_type": "contains", '
+    '"action": "warn_user", "warning_message": "Давайте без спама"}',
+    '{"name": "spam-words", "keywords": ["ad", "buy"], "match_type": "contains", '
+    '"action": "warn_user", "warning_message": "Let\'s skip the spam"}',
+)
+
+
+def cfg_screen(lang: str, chat_id: int, rule_type: str | None = None) -> Screen:
+    """``rule.cfg``: the whole rule as JSON, for what the buttons do not cover.
+
+    Cancel goes back to the type step, which also ends the prompt: a refused answer
+    keeps the prompt armed, so leaving it must not depend on sending valid JSON.
+    """
+    kind = (
+        Tr("Тип: <code>{t}</code>.", "Type: <code>{t}</code>.")(lang).format(t=escape(rule_type))
+        if rule_type
+        else Tr(
+            "Тип — в поле <code>type</code>: {types}; без него — ключевые слова.",
+            "The type goes in <code>type</code>: {types}; without it, keywords.",
+        )(lang).format(types=", ".join(f"<code>{t}</code>" for t in KINDS.values()))
+    )
+    actions = Tr("Действия: {a}.", "Actions: {a}.")(lang).format(
+        a=", ".join(f"<code>{a}</code>" for a in ACTIONS.values())
+    )
+    return Screen(
+        id="rule.cfg",
+        text=(
+            f"🧩 <b>{Tr('Правило в JSON', 'Rule in JSON')(lang)}</b>\n\n"
+            + Tr(
+                "Для того, чего нет в кнопках: регулярные выражения, исключения, вес. Пример:",
+                "For what the buttons do not cover: regular expressions, exclusions, weight. Example:",
+            )(lang)
+            + f"\n<code>{escape(_CFG_EXAMPLE(lang))}</code>\n\n{kind}\n{actions}"
+        ),
+        rows=(
+            (
+                Button(
+                    Tr("✖️ Отмена", "✖️ Cancel")(lang),
+                    cb("ar_add:", lang, chat_id),
+                    kind="cancel",
+                ),
+            ),
+        ),
+    )
+
+
+CFG_NOT_JSON: Final = Tr("Невалидный JSON. Попробуйте ещё раз.", "Invalid JSON. Please try again.")
+CFG_BAD_TYPE: Final = Tr(
+    "Неизвестный тип <code>{t}</code>. Доступные: {valid}. Попробуйте ещё раз.",
+    "Unknown type <code>{t}</code>. Available: {valid}. Please try again.",
+)
+CFG_BAD_ACTION: Final = Tr(
+    "Неизвестное действие <code>{action}</code>. Доступные: {valid}.",
+    "Unknown action <code>{action}</code>. Available: {valid}.",
+)
+CFG_BAD_EMOJI: Final = Tr(
+    "Для <code>set_reaction</code> поле <code>emoji</code> должно быть "
+    "одним из стандартных эмодзи-реакций Telegram (например 💊, 🔥, 🤡). "
+    "Попробуйте ещё раз.",
+    "For <code>set_reaction</code>, <code>emoji</code> must be one of "
+    "Telegram's standard reaction emoji (e.g. 💊, 🔥, 🤡). "
+    "Please try again.",
+)
+WORDS_NONE: Final = Tr(
+    "Слов не нашлось. Напишите их через запятую.", "No words found. Type them separated by commas."
+)
+WORDS_TOO_MANY: Final = Tr(
+    "Слов больше {n}. Оставьте до {n} и отправьте ещё раз.",
+    "More than {n} words. Keep up to {n} and send again.",
+)
+WORDS_TOO_LONG: Final = Tr(
+    "Слово длиннее {n} символов: {w}. Попробуйте ещё раз.",
+    "A word is longer than {n} characters: {w}. Please try again.",
+)
+TEXT_TOO_LONG: Final = Tr(
+    "Текст длиннее {n} символов. Сократите и отправьте ещё раз.",
+    "The text is longer than {n} characters. Shorten it and send again.",
+)
+TEXT_EMPTY: Final = Tr(
+    "Нужен текст. Напишите его сообщением.", "Text is needed. Type it as a message."
+)
+EMOJI_BAD: Final = Tr(
+    "Такую реакцию Telegram не разрешает. Пришлите другой эмодзи.",
+    "Telegram does not allow that reaction. Send another emoji.",
+)
+
+
+def error_screen(screen_id: str, text: str, cancel_cb: str, lang: str) -> Screen:
+    """A typed answer that cannot be used: the reason, and the way out.
+
+    Starts with a letter, not a glyph: it is an error, not a screen. The prompt
+    stays armed, so the next message is a new try.
+    """
+    return Screen(id=screen_id, text=text, rows=((cancel(cancel_cb, lang),),))
+
+
+# ---------------------------------------------------------------------------
+# What a fired rule sends
+# ---------------------------------------------------------------------------
+
+
+def _match_line(detail: str, lang: str) -> str | None:
+    kind, _, rest = detail.partition(":")
+    if kind in ("contains", "exact", "regex"):
+        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(rest)}"
+    if kind == "user":
+        _, _, keyword = rest.partition(",kw:")
+        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(keyword)}" if keyword else None
+    if kind == "stickers":
+        count, _, limit = rest.partition("/")
+        return Tr("Стикеров: {n}, порог {m}", "Stickers: {n}, limit {m}")(lang).format(
+            n=escape(count), m=escape(limit)
+        )
+    if kind == "spam":
+        what, _, numbers = rest.partition("=")
+        count, _, limit = numbers.partition("/")
+        label = (
+            Tr("Длина сообщения: {n}, порог {m}", "Message length: {n}, limit {m}")
+            if what == "chars"
+            else Tr("Сообщений: {n}, порог {m}", "Messages: {n}, limit {m}")
+        )
+        return label(lang).format(n=escape(count), m=escape(limit))
+    return escape(detail) if detail else None
+
+
+def rule_card(
+    lang: str,
+    *,
+    rule_id: int,
+    chat_id: int,
+    name: str,
+    chat_title: str | None,
+    first_name: str | None,
+    username: str | None,
+    match_detail: str,
+    excerpt: str,
+) -> Screen:
+    """``card.rule``: sent to each admin when a ``notify_admin`` rule fires.
+
+    Its button opens the rule as a new message (``n``): the card stays as the
+    record of what fired, instead of being edited into the rule's screen.
+    """
+    where = f"<code>{chat_id_text(chat_id)}</code>"
+    lines = [
+        f"📏 <b>{Tr('Сработало правило:', 'Rule fired:')(lang)}</b> {escape(name)}",
+        "",
+        f"{Tr('Чат', 'Chat')(lang)}: {escape(chat_title) + ' ' if chat_title else ''}{where}",
+    ]
+    who = " ".join(
+        p for p in (escape(first_name or ""), f"@{escape(username)}" if username else "") if p
+    )
+    if who:
+        lines.append(f"👤 {who}")
+    match = _match_line(match_detail, lang)
+    if match:
+        lines.append(match)
+    if excerpt:
+        cut = excerpt if len(excerpt) <= _EXCERPT_CHARS else excerpt[:_EXCERPT_CHARS] + _ELLIPSIS
+        lines.append(f"💬 {escape(cut)}")
+    return Screen(
+        id="card.rule",
+        text="\n".join(lines),
+        rows=(
+            (
+                Button(
+                    Tr("📏 Открыть правило", "📏 Open the rule")(lang),
+                    cb("ar_view:", lang, rule_id, chat_id, "n"),
+                ),
+            ),
+        ),
+    )
+
+
+def warn_screen(lang: str) -> Screen:
+    """``rules.warn``: the default warning, posted in the chat as plain text."""
+    return Screen(id="rules.warn", text=WARN_FALLBACK(lang))
