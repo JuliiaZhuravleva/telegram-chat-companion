@@ -158,7 +158,7 @@ ROUTES: Final[dict[str, Route]] = {
     "adm_nstk:": Route("notif", "kept"),
     "adm_ntog:": Route("notif", "kept", toggle=True),
     "adm_lang:": Route("lang", "kept"),
-    "adm_lang_set:": Route("lang", "kept"),
+    "adm_lang_set:": Route("settings", "kept"),
     # ── group-side and /kb (outside the admin DM; owned by entry & cards) ──
     "help_summary:": Route("summary.result", "kept"),
     "help_close:": Route("удаляет сообщение", "kept"),

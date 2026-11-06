@@ -105,7 +105,7 @@ class TestHandleCosts:
         cb = _make_callback("adm_costs:ru:24h")
         repo = _make_response_log_repo()
 
-        await handle_costs(cb, repo, is_admin=True)
+        await handle_costs(cb, repo)
 
         repo.get_total_cost.assert_awaited_once()
         text = cb.message.edit_text.call_args.args[0]
@@ -117,7 +117,7 @@ class TestHandleCosts:
         cb = _make_callback("adm_costs:ru:24h")
         repo = _make_response_log_repo()
 
-        await handle_costs(cb, repo, is_admin=True)
+        await handle_costs(cb, repo)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "Расходы" in text
@@ -128,10 +128,10 @@ class TestHandleCosts:
         cb = _make_callback("adm_costs:en:24h")
         repo = _make_response_log_repo()
 
-        await handle_costs(cb, repo, is_admin=True)
+        await handle_costs(cb, repo)
 
         text = cb.message.edit_text.call_args.args[0]
-        assert "AI Costs" in text
+        assert "<b>Costs</b>" in text
         assert "Total" in text
 
     @pytest.mark.asyncio
@@ -140,29 +140,81 @@ class TestHandleCosts:
             cb = _make_callback(f"adm_costs:en:{period}")
             repo = _make_response_log_repo()
 
-            await handle_costs(cb, repo, is_admin=True)
+            await handle_costs(cb, repo)
 
             cb.message.edit_text.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_blocks_non_admin(self):
-        cb = _make_callback("adm_costs:ru:24h")
+    async def test_unknown_period_is_stale(self):
+        """A period the panel does not offer comes from an old button: hub + notice."""
+        cb = _make_callback("adm_costs:ru:30d")
         repo = _make_response_log_repo()
 
-        await handle_costs(cb, repo, is_admin=False)
+        with patch("src.bot.handlers.admin.show_stale", new=AsyncMock()) as stale:
+            await handle_costs(cb, repo)
 
+        stale.assert_awaited_once()
         repo.get_total_cost.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_does_not_match_verify_prefix(self):
-        """adm_costs_verify should NOT be handled by handle_costs."""
-        cb = _make_callback("adm_costs_verify:ru:24h")
+    async def test_missing_period_means_24h(self):
+        cb = _make_callback("adm_costs:ru")
         repo = _make_response_log_repo()
 
-        await handle_costs(cb, repo, is_admin=True)
+        await handle_costs(cb, repo)
 
-        # Should return early without querying
-        repo.get_total_cost.assert_not_awaited()
+        from datetime import timedelta
+
+        assert repo.get_total_cost.call_args.args[0] == timedelta(hours=24)
+
+
+class TestCostsFilters:
+    """Who may press and where is decided by the filters, not the handler body."""
+
+    @staticmethod
+    def _filters(kind: str, func: object) -> list:
+        from src.bot.handlers.admin import router
+
+        for handler in router.observers[kind].handlers:
+            if handler.callback is func:
+                return handler.filters or []
+        raise AssertionError(f"{func} is not registered on the admin router")
+
+    @staticmethod
+    def _private_only(filters: list) -> bool:
+        from types import SimpleNamespace
+
+        def probe(chat_type: str) -> SimpleNamespace:
+            chat = SimpleNamespace(type=chat_type)
+            return SimpleNamespace(data="", text="", chat=chat, message=SimpleNamespace(chat=chat))
+
+        return any(
+            f.magic is not None and f.callback(probe("private")) and not f.callback(probe("group"))
+            for f in filters
+        )
+
+    @pytest.mark.parametrize("func", [handle_costs, handle_costs_verify])
+    def test_buttons_need_admin_and_private_chat(self, func):
+        from src.bot.filters.admin import IsAdmin
+
+        filters = self._filters("callback_query", func)
+        assert any(isinstance(f.callback, IsAdmin) for f in filters)
+        assert self._private_only(filters)
+
+    def test_command_needs_admin_and_private_chat(self):
+        from src.bot.filters.admin import IsAdmin
+
+        filters = self._filters("message", handle_costs_command)
+        assert any(isinstance(f.callback, IsAdmin) for f in filters)
+        assert self._private_only(filters)
+
+    def test_verify_payload_reaches_verify_not_costs(self):
+        """``adm_costs:`` must not swallow ``adm_costs_verify:`` (the colon disambiguates)."""
+        from src.bot.handlers import router as main_router
+        from src.bot.screens.lint import first_handler
+
+        assert first_handler(main_router, "adm_costs_verify:ru:24h") == "admin.handle_costs_verify"
+        assert first_handler(main_router, "adm_costs:ru:24h") == "admin.handle_costs"
 
 
 # ---------------------------------------------------------------------------
@@ -199,9 +251,9 @@ class TestVerifyCooldown:
             MockClient.return_value = instance
 
             first = _make_callback("adm_costs_verify:en:24h", user_id=777)
-            await handle_costs_verify(first, repo, settings, is_admin=True)
+            await handle_costs_verify(first, repo, settings)
             second = _make_callback("adm_costs_verify:en:24h", user_id=777)
-            await handle_costs_verify(second, repo, settings, is_admin=True)
+            await handle_costs_verify(second, repo, settings)
 
         assert MockClient.call_count == 1
         # Rejected press leaves the screen alone and explains itself in a toast.
@@ -224,10 +276,10 @@ class TestVerifyCooldown:
             MockClient.return_value = instance
 
             await handle_costs_verify(
-                _make_callback("adm_costs_verify:en:24h", user_id=1), repo, settings, is_admin=True
+                _make_callback("adm_costs_verify:en:24h", user_id=1), repo, settings
             )
             await handle_costs_verify(
-                _make_callback("adm_costs_verify:en:24h", user_id=2), repo, settings, is_admin=True
+                _make_callback("adm_costs_verify:en:24h", user_id=2), repo, settings
             )
 
         assert MockClient.call_count == 2
@@ -252,11 +304,11 @@ class TestVerifyCooldown:
             MockClient.return_value = instance
 
             await handle_costs_verify(
-                _make_callback("adm_costs_verify:en:24h", user_id=9), repo, settings, is_admin=True
+                _make_callback("adm_costs_verify:en:24h", user_id=9), repo, settings
             )
             _last_verify[9] = _time.monotonic() - (_VERIFY_COOLDOWN_SECONDS + 1)
             await handle_costs_verify(
-                _make_callback("adm_costs_verify:en:24h", user_id=9), repo, settings, is_admin=True
+                _make_callback("adm_costs_verify:en:24h", user_id=9), repo, settings
             )
 
         assert MockClient.call_count == 2
@@ -305,10 +357,10 @@ class TestVerifyCooldown:
             MockClient.return_value = instance
 
             await handle_costs_verify(
-                _make_callback("adm_costs_verify:ru:24h", user_id=55), repo, settings, is_admin=True
+                _make_callback("adm_costs_verify:ru:24h", user_id=55), repo, settings
             )
             second = _make_callback("adm_costs_verify:ru:24h", user_id=55)
-            await handle_costs_verify(second, repo, settings, is_admin=True)
+            await handle_costs_verify(second, repo, settings)
 
         assert "подождите" in second.answer.call_args.args[0].lower()
 
@@ -333,7 +385,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "$0.0200" in text  # OpenAI reported
@@ -346,7 +398,7 @@ class TestHandleCostsVerify:
         settings = _make_settings(openai_admin_api_key="")
 
         with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         MockClient.assert_not_called()
         text = cb.message.edit_text.call_args.args[0]
@@ -361,7 +413,7 @@ class TestHandleCostsVerify:
         settings = _make_settings(openai_project_id="")
 
         with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         MockClient.assert_not_called()
         text = cb.message.edit_text.call_args.args[0]
@@ -374,7 +426,7 @@ class TestHandleCostsVerify:
         repo = _make_response_log_repo()
         settings = _make_settings(openai_admin_api_key="", openai_project_id="")
 
-        await handle_costs_verify(cb, repo, settings, is_admin=True)
+        await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "OPENAI_ADMIN_API_KEY" in text
@@ -386,7 +438,7 @@ class TestHandleCostsVerify:
         repo = _make_response_log_repo()
         settings = _make_settings(openai_admin_api_key="")
 
-        await handle_costs_verify(cb, repo, settings, is_admin=True)
+        await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "не хватает" in text.lower()
@@ -403,7 +455,7 @@ class TestHandleCostsVerify:
         settings = _make_settings(openai_api_key="sk-proj-test", openai_admin_api_key="")
 
         with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         MockClient.assert_not_called()
         text = cb.message.edit_text.call_args.args[0]
@@ -429,7 +481,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         MockClient.assert_called_once_with("sk-admin-billing")
         assert instance.get_costs.call_args.kwargs["project_id"] == "proj_bot"
@@ -454,7 +506,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "Scoped to project" in text
@@ -481,7 +533,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "could not be confirmed" in text
@@ -516,13 +568,13 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)  # must not raise
+            await handle_costs_verify(cb, repo, settings)  # must not raise
 
         cb.message.edit_text.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_other_bad_request_still_propagates(self):
-        """Only the not-modified case is swallowed; real errors must surface."""
+    async def test_other_bad_request_sends_a_new_message(self):
+        """Only "not modified" is a no-op; any other refused edit still shows the result."""
         from aiogram.exceptions import TelegramBadRequest
 
         from src.services.ai.billing import OpenAICostReport
@@ -530,9 +582,10 @@ class TestHandleCostsVerify:
         cb = _make_callback("adm_costs_verify:en:24h")
         cb.message.edit_text = AsyncMock(
             side_effect=TelegramBadRequest(
-                method=MagicMock(), message="Bad Request: can't parse entities"
+                method=MagicMock(), message="Bad Request: message can't be edited"
             )
         )
+        cb.message.answer = AsyncMock()
         repo = _make_response_log_repo()
         settings = _make_settings()
 
@@ -544,8 +597,10 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            with pytest.raises(TelegramBadRequest):
-                await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
+
+        cb.message.answer.assert_awaited_once()
+        assert "$0.0200" in cb.message.answer.call_args.args[0]
 
     @pytest.mark.asyncio
     async def test_project_filter_ignored_is_localised(self):
@@ -568,7 +623,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "фильтр не применился" in text
@@ -595,7 +650,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "403" in text
@@ -622,7 +677,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         text = cb.message.edit_text.call_args.args[0]
         assert "HTTP 500" in text
@@ -663,7 +718,7 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         used_interval = repo.get_cost_by_provider.call_args.args[0]
         assert used_interval > timedelta(hours=35)
@@ -690,18 +745,24 @@ class TestHandleCostsVerify:
             instance.close = AsyncMock()
             MockClient.return_value = instance
 
-            await handle_costs_verify(cb, repo, settings, is_admin=True)
+            await handle_costs_verify(cb, repo, settings)
 
         assert repo.get_cost_by_provider.call_args.args[0] == timedelta(days=7)
 
     @pytest.mark.asyncio
-    async def test_blocks_non_admin(self):
-        cb = _make_callback("adm_costs_verify:ru:24h")
+    async def test_unknown_period_is_stale_and_calls_nobody(self):
+        cb = _make_callback("adm_costs_verify:ru:30d")
         repo = _make_response_log_repo()
         settings = _make_settings()
 
-        await handle_costs_verify(cb, repo, settings, is_admin=False)
+        with (
+            patch("src.services.ai.billing.OpenAIBillingClient") as MockClient,
+            patch("src.bot.handlers.admin.show_stale", new=AsyncMock()) as stale,
+        ):
+            await handle_costs_verify(cb, repo, settings)
 
+        stale.assert_awaited_once()
+        MockClient.assert_not_called()
         repo.get_cost_by_provider.assert_not_awaited()
 
 
@@ -761,7 +822,7 @@ class TestHandleCostsCommand:
 
         msg.answer.assert_awaited_once()
         text = msg.answer.call_args.args[0]
-        assert "AI Costs" in text
+        assert "<b>Costs</b>" in text
         assert "Total" in text
         assert "$0.0150" in text
 
@@ -779,19 +840,6 @@ class TestHandleCostsCommand:
         assert call_kwargs.get("reply_markup") is not None
 
     @pytest.mark.asyncio
-    async def test_ignores_group_chat(self):
-        """Handler silently returns if invoked outside a DM."""
-        msg = _make_message_for_costs(chat_type="group")
-        repo = _make_response_log_repo()
-        admin_repo = _make_admin_repo_for_costs()
-        bot_config_repo = AsyncMock()
-
-        await handle_costs_command(msg, repo, admin_repo, bot_config_repo)
-
-        msg.answer.assert_not_awaited()
-        repo.get_total_cost.assert_not_awaited()
-
-    @pytest.mark.asyncio
     async def test_empty_model_list_shows_only_total(self):
         """No rows in response_log → only total line, no by-model section."""
         msg = _make_message_for_costs()
@@ -805,7 +853,7 @@ class TestHandleCostsCommand:
 
         msg.answer.assert_awaited_once()
         text = msg.answer.call_args.args[0]
-        assert "By model" not in text
+        assert "gpt-5-nano" not in text
         assert "$0.0000" in text
 
     @pytest.mark.asyncio

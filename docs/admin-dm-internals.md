@@ -102,10 +102,10 @@ Pattern: `adm_{action}:{lang}:{param...}`, language embedded so screens are stat
 Telegram's 64-byte limit is why settings fields are addressed by a ≤4-char `code`
 (`settings_fields.py`) rather than by column name.
 
-Prefixes **must** be matched with the trailing colon (`F.data.startswith("adm_wl:")`),
-otherwise `adm_wl` also matches `adm_wl_chats`. Two handlers additionally re-check
-`parts[0]` because their prefix is a strict prefix of a sibling (`adm_lang` vs
-`adm_lang_set`, `adm_costs` vs `adm_costs_verify`).
+Prefixes **must** be matched with the trailing colon (`F.data.startswith("adm_wl_rm:")`),
+otherwise `adm_wl_rm` also matches `adm_wl_rm_ask`. With the colon, a prefix that is a
+strict prefix of a sibling (`adm_lang` / `adm_lang_set`, `adm_costs` / `adm_costs_verify`,
+`adm_defs` / `adm_defs_sec`) needs no second check of `parts[0]`.
 
 The table below is the reader's map. The registry is `ROUTES` in
 [src/bot/screens/routes.py](../src/bot/screens/routes.py) (§F.6): every prefix a handler
@@ -113,26 +113,26 @@ filters on must be in it, which `test_routes.py` checks against the source.
 
 | Prefix | Params | Handler |
 |---|---|---|
-| `adm_menu:` | `lang` | main menu |
-| `adm_lang:` / `adm_lang_set:` | `lang` / `lang:new_lang` | language screen / write |
+| `adm_menu:` | `lang` | the hub |
+| `adm_lang:` / `adm_lang_set:` | `lang` / `lang:new_lang` | language screen / save, then general settings in the new language |
 | `adm_close:` | `lang` | delete panel message |
-| `adm_wl:` | `lang` | whitelist menu |
-| `adm_wl_chats:` | `lang:page` | whitelisted chats |
-| `adm_wl_rm_ask:` / `adm_wl_rm:` | `lang:chat_id:page` | confirm / set `enabled=false` |
-| `adm_wl_pending:` | `lang:page` | pending list |
+| `adm_wl:` / `adm_wl_chats:` | — | **retired** (the old whitelist submenu and its chat list); answered by the stale catch-all |
+| `adm_wl_rm_ask:` / `adm_wl_rm:` | `lang:chat_id:page` | confirm / set `enabled=false`, then the chat list at `page` |
+| `adm_wl_pending:` | `lang:page` | requests, one per page |
 | `adm_wl_apr:` / `adm_wl_rej:` | `lang:attempt_id:page` | approve / reject from list |
 | `adm_approve:` / `adm_reject:` | `lang:attempt_id` | approve / reject from the notification card (`access_card.py`); byte-compatible forever |
-| `adm_wl_rejected:` | `lang:page` | rejected list |
+| `adm_wl_rejected:` | `lang:page` | rejected chats, one per page |
 | `adm_wl_restore:` | `lang:attempt_id:page` | back to `pending` |
 | `adm_wl_del_ask:` / `adm_wl_del:` | `lang:attempt_id:page` | confirm / hard delete |
 | `adm_stats:` | `lang:period` | statistics (`1h`/`24h`/`7d`) |
 | `adm_costs:` / `adm_costs_verify:` | `lang:period` | costs / OpenAI cross-check |
-| `adm_health:` | `lang` | run check + render |
+| `adm_health:` | `lang[:now]` | last recorded check; `now` (🔁 Обновить) runs one first |
+| `adm_settings:` | `lang` | general settings |
 | `adm_notif:` / `adm_nstk:` / `adm_ntog:` | `lang` / `lang` / `lang:type` | notifications menu / sticker cycle / bool toggle |
 | `adm_pnl:` / `adm_pnl_menu:` | `lang:page` / `lang:chat_id` | chat picker / chat panel |
 | `adm_pnl_tgl:` | `lang:chat_id:code` | generic bool toggle |
 | `adm_pnl_tol:` / `adm_pnl_tolcancel:` | `lang:chat_id` | tolerance prompt / cancel |
-| `adm_defs:` / `adm_defs_tgl:` | `lang` / `lang:code` | global settings / toggle |
+| `adm_defs:` / `adm_defs_sec:` / `adm_defs_tgl:` | `lang:0` / `lang:section` / `lang:code` | the seven sections for all chats / one section / toggle, then that section again |
 | `adm_kb:` / `adm_kb_menu:` / `adm_kb_toggle:` | — | retired: the KB picker and menu are gone, the switch lives in the chat's memory section |
 | `adm_kb_orgs:` / `adm_kb_org_rm:` / `adm_kb_org_undo:` | `lang:chat_id:page` / `lang:chat_id:user_id` / `lang:chat_id:user_id:position` | organizer list / remove at once / put back at `position` |
 | `adm_kb_org_list:` / `adm_kb_org_pick:` | `lang:chat_id:page` / `lang:chat_id:user_id` | participant list / add the tapped one |
@@ -536,20 +536,84 @@ before the generic `message`/`media` routers if it consumes a plain message.
 
 ## A1 — Hub, requests, status, settings
 
-Files: [src/bot/screens/hub.py](../src/bot/screens/hub.py) (the hub and `show_hub`),
-[src/bot/handlers/admin.py](../src/bot/handlers/admin.py) (whitelist, statistics, costs,
-health, notifications, language),
-[src/bot/handlers/admin_defaults.py](../src/bot/handlers/admin_defaults.py) (global settings,
-which renders from the registry in §A2.1).
+| File | Owns |
+|---|---|
+| [src/bot/screens/hub.py](../src/bot/screens/hub.py) | `hub` (`build_hub`, `show_hub`, `sample_hub`), `requests`, `rejected`, `rejected.forget_ask`, `chat.off_ask` |
+| [src/bot/screens/status.py](../src/bot/screens/status.py) | `status` / `status.bad`, `stats`, `costs`, `costs.verify` / `.missing` / `.error`; `verdict()` (the hub's status line), `PERIODS`, `INTERVALS` |
+| [src/bot/screens/settings.py](../src/bot/screens/settings.py) | `settings`, `notif`, `lang`, `defs`, `defs.section`; `SECTION_TOGGLES` (which field codes each section switches) |
+| [src/bot/handlers/admin.py](../src/bot/handlers/admin.py) | `/admin`, `/settings`, `/costs` and every callback above except `adm_defs*` |
+| [src/bot/handlers/admin_defaults.py](../src/bot/handlers/admin_defaults.py) | `adm_defs:`, `adm_defs_sec:`, `adm_defs_tgl:` |
+| [src/bot/screens/samples/hub.py](../src/bot/screens/samples/hub.py) | One sample per state that changes a screen's rows or id |
 
-`handle_admin_command` and `handle_menu` draw the hub through `show_hub`. `handle_language_set`
-still draws it through `admin._MENU_TITLE` + `main_menu_keyboard`, so the hub exists in two
-places until this area folds the language screen into `show_hub`;
-`TestHubToday` in `test_admin_handler.py` pins the two to the same look meanwhile. `hub.py` also declares
-`sample_hub(lang)` and `SAMPLE_HUB_EXEMPT`, which the stale sample draws (§F.6); a redesigned
-hub replaces both there.
-`AdminRepository.count_attempts(status)` counts what the pending / rejected pages list (same
-predicate), for a count on an entry button.
+The area has no keyboard module any more: `keyboards/admin.py` and `keyboards/admin_defaults.py`
+are gone, and their buttons are the rows of the screens above. The whitelist submenu
+(`adm_wl:`), its chat list (`adm_wl_chats:`, `_render_wl_chats`, `chats_list_keyboard`) went
+with them; the chat list is A2's `show_chats`, and old buttons for the two retired prefixes
+are answered by the stale catch-all (`routes.py` marks them `retired`).
+
+**Guards are filters.** Every callback is registered through `admin._on(prefix)` (prefix +
+`F.message.chat.type == "private"` + `IsAdmin()`) or `admin_defaults._GUARDS`, and each command
+carries `F.chat.type == "private"` + `IsAdmin()`. Nothing in a handler body checks who taps
+or where, so a stranger's tap or a tap in a group falls through to `stale`, which says why.
+`TestFilters` in `test_admin_handler.py` and `TestRegistration` in
+`test_admin_defaults_handler.py` assert the registration rather than calling a handler as a
+stranger.
+
+**A payload that does not parse is stale.** Missing or non-integer ids, a period outside
+`PERIODS`, a section outside `SECTIONS`, a field code that is not a non-legacy yes/no, a
+notification type other than `unauthorized`, a language other than `ru`/`en` — each goes to
+`show_stale(callback, lang, data=kwargs)` and writes nothing. An object that is *gone* is not
+stale: a request already handled redraws the requests with `ALREADY_HANDLED`, a rejection
+already forgotten redraws the rejected chats with `NOT_FOUND`.
+
+**The hub never runs a check.** `show_hub` resolves `AdminRepository` and
+`ResponseLogRepository` from `data` and reads `get_latest_health_check()`,
+`get_total_cost(24 h)` and `count_attempts("pending")`. Any failure there (no container, a
+database error) logs `hub_status_unavailable` and draws the hub without its status line — it
+is also the stale fallback's screen and must not fail itself. `HealthChecker.run_check_now()`
+is called from one place, `adm_health:{lang}:now`, after `callback.answer()` (a check takes
+seconds); if it raises, `health_refresh_failed` is logged and the last recorded row is shown.
+Check times are rendered in `DISPLAY_TZ`.
+
+**One per page.** `admin._one(fetch, page)` asks the repository for one row; a page past the
+end of a list that has shrunk is clamped to the last row by a second query.
+`AdminRepository.count_attempts(status)` uses the same predicate as the page queries.
+
+**Approve enables before it renders.** `adm_wl_apr:` calls `access_card.approve_attempt`, which
+enables the chat and resolves every waiting attempt for it, then `_invalidate` (defensive —
+the service is request-scoped, TD-046), then `admin_chat_panel.show_chat(..., notice=…)`, which
+reads the chat's values fresh and so already shows it connected. `adm_wl_rej:` calls
+`reject_attempt` and shows the next request, or `show_chats` once `count_attempts("pending")`
+is zero. `adm_approve:` / `adm_reject:` on the access card are A6's and untouched.
+
+**Turning a chat off** (`adm_wl_rm:`) is `chat_settings_repo.set_field(chat_id, "enabled",
+False)`, `_invalidate`, then `show_chats(callback, lang, page, notice=…)` — the page travels in
+the payload from the chat list.
+
+**Language has one hub path.** `adm_lang_set:` saves and draws `settings` in the new language;
+the hub is drawn only by `show_hub`.
+
+**Notifications.** `_PANEL_TOGGLES = {"unauthorized"}`: the jailbreak, blacklist and AI-fallback
+switches are no longer drawn, keep their stored values, and an `adm_ntog:` naming one is stale.
+The sticker cycle (`adm_nstk:`) is `next_sticker_mode` over off → on → detailed.
+
+**Defaults.** `adm_defs_tgl:` flips `default_{key}` in `bot_config`, calls
+`ChatConfigService.invalidate_all()` (the shared global layer — never `invalidate(chat_id)`),
+and redraws the field's section (`SECTION_OF`) with a toast. Keep
+`handle_defaults_toggle(callback, bot_config_repo, chat_config_service, **kwargs)` callable
+positionally with no `data`: `tests/integration/test_admin_defaults_toggle.py` does exactly
+that, and a stale payload there must still answer (`show_stale` without a container draws the
+hub without its line).
+
+**OpenAI cross-check.** `_verify_on_cooldown` is per admin, 10 s, on the monotonic clock, and
+bounded to 100 entries; the cooldown toast is the whole answer and leaves the screen as it was.
+Both `OPENAI_ADMIN_API_KEY` and `OPENAI_PROJECT_ID` are checked before any request
+(`costs.missing` names the absent ones). Our own figure is re-measured over the span OpenAI's
+buckets actually cover, and `costs.verify` prints that window.
+
+Tests: `test_admin_handler.py` (handlers), `test_admin_keyboards.py` (the builders' payloads,
+each ≤ 64 bytes at the widest invented ids), `test_admin_defaults_handler.py`,
+`test_costs_handler.py` (cooldown, the env names, the measured window).
 
 ---
 
