@@ -72,10 +72,6 @@ DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
     ),
     ("admin_sticker.py", "handle_clear_ask"): (1, "contextlib.suppress already in place"),
     ("admin_sticker.py", "handle_clear"): (1, "contextlib.suppress already in place"),
-    ("callbacks.py", "handle_summary_callback"): (
-        1,
-        "broad except that logs; summary refresh is best-effort",
-    ),
     ("progress.py", "finish"): (
         1,
         "turns the progress placeholder INTO the result, and must know whether that "

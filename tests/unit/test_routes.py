@@ -133,6 +133,8 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_lang_set:": (LANG, LANG),
     "help_summary:": (UID, 500),
     "help_close:": (UID,),
+    "help_dm:": (LANG, "start"),
+    "help_callme:": (LANG, "acc"),
     "kb_view:": (LANG, PAGE),
     "kb_undo:": (INT4, UID),
 }
@@ -294,7 +296,6 @@ def test_the_retired_write_ratchet_says_no():
 
 _INVALID_RE = re.compile(r"""answer\(\s*["']Invalid (?:data|type|preset|chat ID)["']""")
 INVALID_ALERTS_TODAY = {
-    "handlers/access_card.py": 2,
     "handlers/admin.py": 10,
     "handlers/admin_chat_panel.py": 7,
     "handlers/admin_defaults.py": 1,

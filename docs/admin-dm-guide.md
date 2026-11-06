@@ -429,19 +429,60 @@ by this handler and quietly dropped when no sticker can be identified.
 
 ## A6 — Entry and cards
 
-### A6.1 The access-request card
+Everything here happens outside the panel: what a person meets on `/start` and `/help`, the
+group-side commands, and the cards the bot sends admins unprompted. Every screen follows the
+chat's language; every card follows the admins' panel language (🌐 Language, §A1.5).
+
+### A6.1 `/start`, `/help` and the way into the panel
+
+| Where, who | What they get |
+|---|---|
+| DM, anyone | 🤖 **Чат-компаньон** — one paragraph on what the bot does, **➕ Добавить в свой чат** (Telegram's own "pick a group" link) and **📖 Что я умею** |
+| DM, bot admin | 🤖 header, "the panel opens with the button or /admin", **🛠 Панель** and **📖 Что я умею** |
+| DM, bot admin, link `t.me/<bot>?start=admin` | Opens the panel's main menu directly. For anyone else that link is a plain `/start` |
+| DM, a stranger whose DM is not approved | **Nothing**, deliberately unchanged: the whitelist gate stops the update before any command runs, records an attempt and sends the admins an access card (§A6.3, same 30-minute cooldown). The stranger gets no reply |
+| Group, `/start` | The group help below — `/start` means nothing different in a group |
+| Group, `/help` | 🤖 header, how to call the bot (one of the chat's trigger words, in the chat's script, or a reply), then **only the features this chat has on**: voice/video-note transcription, memory, summaries, `/kb`, `/callme`. Buttons **📋 Саммари 100 / 500** (only when the chat saves messages) and **✖️ Закрыть**; they belong to whoever asked |
+| DM, `/help` or 📖 | 📖 **Что я умею** with **⬅️ Старт** back to the greeting |
+
+**📋 Саммари** posts a *new* summary under the help; the help itself stays, so it can be pressed
+again. A button whose data can no longer be read answers with a short toast in the chat's
+language ("Эта кнопка устарела…") — these buttons are in front of ordinary members, so they
+never show the panel's stale screen.
+
+**`/admin` or `/settings` in a group**, sent by a bot admin, answers with one line —
+"Панель открывается в личке" — and a **🛠 Открыть панель** link that opens the DM on the panel.
+It needs the panel's own `/admin` handler to be limited to DMs, which is part of the panel's
+change (§A1); until both are in, the panel's handler takes the command first and stays silent
+in groups.
+
+### A6.2 The command menu
+
+| Who | Menu |
+|---|---|
+| Group chats | `/help`, `/summary`, `/kb`, `/callme` |
+| Private chats | `/start`, `/help` |
+| A bot admin's DM | `/start`, `/help`, `/kb`, `/admin`, `/cancel` |
+
+`/settings`, `/costs`, `/summary500` and `/remember` still work and are not advertised. The menu
+lives on Telegram's side and is pushed at startup, so **a change here reaches every user on the
+next deploy**.
+
+### A6.3 The access-request card
 
 A chat reaches the panel in one of two ways, and both produce the same card with
-**✅ Одобрить / ❌ Отклонить**.
+**👍 Одобрить / ❌ Отклонить**.
 
 **Someone writes** in a chat the bot has not been approved for. The bot stays silent, records
-an attempt (chat, user, first 200 characters of the message) and DMs every admin.
+an attempt (chat, user, first 200 characters of the message) and DMs every admin a card headed
+🙏 **Новый чат просит доступ**, quoting the first 100 characters.
 
-**The bot is added to a group** (since TD-025). Previously this queued nothing and notified
-nobody — the group was invisible here until a human happened to post in it, while the server
-log claimed it was "awaiting whitelist approval". Now the membership update itself files the
-request, and the card is headed **➕ Bot added to a new chat** rather than *Unauthorized
-access*, because there is no message to go looking for.
+**The bot is added to a group.** The membership update itself files the request, and the card
+is headed ➕ **Бота добавили в новый чат**, because there is no message to go looking for. The
+group also gets one line from the bot — "Привет! Я начну работать, когда админ бота одобрит этот
+чат." — in the chat's language, so the person who added it is not left wondering. That line is
+not sent to channels, to a chat that was rejected before, or while the 30-minute card cooldown
+for that chat is running.
 
 Three things deliberately do NOT produce a card: a promotion inside a chat the bot is already
 in (member → administrator is not a new chat); re-adding the bot to a chat that is still
@@ -453,14 +494,30 @@ Re-adding the bot to a chat that was approved and then removed DOES file a fresh
 removal disabled the chat, and re-consent is intentional — otherwise anyone able to add the
 bot could re-enable a chat with no admin in the loop.
 
-To avoid flooding, at most one notification per chat every **30 minutes**, shared across both
-paths — so "added, then someone posted" is one card, not two. The cooldown is in memory, so a
-restart clears it and a chat can end up with two pending rows; approving either one clears
-them all.
+To avoid flooding, at most one card per chat every **30 minutes**, shared across both paths —
+so "added, then someone posted" is one card, not two. The cooldown is in memory, so a restart
+clears it and a chat can end up with two pending rows; approving either one clears them all.
 
-An approve/reject taken from a *notification card* behaves identically to the same action in
-the panel; the card's buttons are then replaced by a status badge, so a second admin tapping
-the stale card gets "Запрос уже обработан / Request already handled" instead of a double
-action.
+**After a tap** the card stays readable and gets a status line on top — ✓ *Одобрено*, or
+✓ *Отклонено* with what that means — and one button that leads on: **⚙️ Настройки чата** for
+the approved chat, **🚫 Отклонённые** for the rejected list. A card older than 48 hours keeps its
+text and only has its buttons swapped. A second tap, or a tap on a card whose request was already
+resolved from the panel, shows the state the request is actually in with a "Запрос уже решён"
+toast — never a second action. The lists the request lands in, and what approving or rejecting
+changes, are in §A1.2.
 
-The lists the request lands in, and what approving or rejecting changes, are in §A1.2.
+### A6.4 Health and spend cards
+
+**Health.** When the scheduled check finds a problem, **every bot admin** gets a card:
+🔥 **Сбой бота** (something critical) or ⚠️ **Перебои в работе бота**, with the time in UTC, one
+line per problem — the provider's error and a 💡 hint under it when there is one — and the
+message and fallback counts. **📊 Состояние** opens the health screen (§A1.3). An unchanged
+problem is repeated as a reminder ("…всё ещё идут") at most every 6 hours, and when it clears
+for good the admins get 💚 **Бот снова здоров** naming what stopped failing. The card's frame is
+in the panel language; the problem lines are the checker's own wording, which is English today.
+
+**Spend.** When the day's AI spend passes the daily limit (`bot_config.daily_spend_limit_usd`;
+no limit set means no card), every bot admin gets
+💰 **Дневной лимит расходов превышен** — how much, against what limit, and that the bot keeps
+answering — with **💰 Расходы** for the 24-hour view. **Once per UTC day**, however many replies
+follow. Nothing about spend is posted into group chats any more.

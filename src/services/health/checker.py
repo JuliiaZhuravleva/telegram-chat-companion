@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import html as html_lib
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 import structlog
@@ -20,6 +19,10 @@ from src.services.health.diagnosis import hint_for
 from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
 from src.utils import parse_admin_ids
 from src.utils.telegram_text import split_html
+
+if TYPE_CHECKING:
+    from src.bot.screens.i18n import Lang
+    from src.bot.screens.model import Screen
 
 logger = structlog.get_logger(__name__)
 
@@ -89,6 +92,13 @@ def _fingerprint_of_rows(rows: list[dict[str, Any]]) -> set[str]:
         identity = str(row.get("key") or row.get("message", ""))
         fingerprints.add(f"{severity}:{identity}")
     return fingerprints
+
+
+def _admin_lang(config: dict[str, Any]) -> Lang:
+    """The admins' panel language from the loaded ``admin_settings``; Russian if unreadable."""
+    from src.bot.screens.cards import admin_lang
+
+    return admin_lang(config.get("admin_settings"))
 
 
 def _format_since(since: datetime) -> str:
@@ -213,6 +223,7 @@ class HealthChecker:
             "health_alert_reminder_seconds",
             "health_recovery_confirm_checks",
             "admin_ids",
+            "admin_settings",
         ):
             val = await repo.get(key)
             if val is not None:
@@ -399,13 +410,16 @@ class HealthChecker:
         # reminder. An unrecorded send is the safe direction -- it can repeat;
         # an unsent record cannot be recovered from.
         delivered = False
+        lang = _admin_lang(config)
         if decision == "recovered":
-            delivered = await self._send_alert(result, config, text=self._format_recovery(cleared))
+            delivered = await self._send_alert(
+                result, config, card=self._recovery_card(cleared, lang=lang)
+            )
         elif decision is not None:
             delivered = await self._send_alert(
                 result,
                 config,
-                text=self._format_alert(result, reminder=decision == "reminder"),
+                card=self._alert_card(result, lang=lang, reminder=decision == "reminder"),
             )
 
         result.alert_sent = delivered
@@ -555,14 +569,15 @@ class HealthChecker:
         result: HealthCheckResult,
         config: dict[str, Any],
         *,
-        text: str | None = None,
+        card: Screen | None = None,
     ) -> bool:
-        """Send alert to first admin via Telegram. True when it went out.
+        """Send the card to every bot admin. True when at least one admin got all of it.
 
         The return value is what `alert_sent` is recorded from: this channel
         can fail (flood control, a network blip) exactly when it is most
         needed, and a de-duplicator told "delivered" by a failed send goes
-        quiet for hours about a live problem.
+        quiet for hours about a live problem. One admin is enough to count as
+        told; an admin who blocked the bot must not hold the others hostage.
         """
         admin_ids = parse_admin_ids(config.get("admin_ids", ""))
         if not admin_ids:
@@ -572,92 +587,101 @@ class HealthChecker:
             logger.error("Health alert not sent: no admin_ids configured")
             return False
 
-        first_admin = admin_ids[0]
-        body = text if text is not None else self._format_alert(result)
+        if card is None:
+            card = self._alert_card(result, lang=_admin_lang(config))
 
-        try:
-            # Through `split_html`, because this message now carries a
-            # provider's error text, which is external and unbounded. A body
-            # over the limit is not a truncated alert -- it is NO alert, and
-            # the one time that matters is while something is already broken.
-            for piece in split_html(body):
-                await self._bot.send_message(
-                    first_admin,
-                    piece,
-                    parse_mode="HTML",
+        # Imported here: the screen package imports render, and render
+        # imports the reply path, which imports services.
+        from src.bot.screens.render import render_text, to_markup
+
+        # Through `split_html`, because this message carries a provider's
+        # error text, which is external and unbounded. A body over the limit
+        # is not a truncated alert -- it is NO alert, and the one time that
+        # matters is while something is already broken. The button goes on
+        # the last piece, under the text it refers to.
+        pieces = split_html(render_text(card))
+        markup = to_markup(card)
+        delivered = False
+        for admin_id in admin_ids:
+            try:
+                for index, piece in enumerate(pieces):
+                    last = index == len(pieces) - 1
+                    await self._bot.send_message(
+                        admin_id,
+                        piece,
+                        parse_mode="HTML",
+                        reply_markup=markup if last else None,
+                    )
+            except Exception as exc:
+                # The likeliest cause (rate limit under load) is exactly when
+                # the alert is most needed; the next admin is still tried.
+                logger.warning(
+                    "Failed to send health alert",
+                    admin_id=admin_id,
+                    error_type=type(exc).__name__,
                 )
-        except Exception as exc:
-            # The one that matters most: this is the channel that reports the bot
-            # is unhealthy, and the likeliest cause of it failing (rate limit
-            # under load) is exactly when the alert is most needed.
-            logger.warning(
-                "Failed to send health alert",
-                admin_id=first_admin,
-                error_type=type(exc).__name__,
-            )
-            return False
-        return True
+                continue
+            delivered = True
+        return delivered
 
     # ------------------------------------------------------------------
     # Formatting
     # ------------------------------------------------------------------
+    #
+    # The card frame (title, counts, the 📊 button) is in the admin's
+    # language. The issue lines are what `_run_check` and `diagnosis` wrote,
+    # unchanged: the de-duplication fingerprint falls back to an issue's
+    # message when it has no key, so rewording a message here would make
+    # every such issue look new once after the deploy.
 
     @staticmethod
-    def _format_recovery(cleared: list[str]) -> str:
-        """Format the all-clear, naming what stopped failing."""
-        lines = [
-            "\u2705 <b>Bot Health Recovered</b>",
-            f"<b>Time:</b> {datetime.now(UTC).strftime('%Y-%m-%d %H:%M UTC')}",
-        ]
-        if cleared:
-            lines.append("")
-            lines.append("<b>Cleared:</b>")
-            lines.extend(f"  \u2714\ufe0f {html_lib.escape(item)}" for item in cleared)
-        return "\n".join(lines)
+    def _recovery_card(cleared: list[str], *, lang: Lang = "ru") -> Screen:
+        """The all-clear, naming what stopped failing."""
+        from src.bot.screens import cards
+
+        return cards.recovered_card(lang, at=datetime.now(UTC), cleared=cleared)
 
     @staticmethod
-    def _format_alert(result: HealthCheckResult, *, reminder: bool = False) -> str:
-        """Format HTML alert message for Telegram."""
-        status_emoji = {
-            HealthStatus.CRITICAL: "\U0001f6a8",
-            HealthStatus.WARNING: "\u26a0\ufe0f",
-            HealthStatus.HEALTHY: "\u2705",
-        }
-        emoji = status_emoji.get(result.status, "\u2753")
-        title = "Bot Health Alert" + (
-            " \u2014 \u043d\u0430\u043f\u043e\u043c\u0438\u043d\u0430\u043d\u0438\u0435"
-            if reminder
-            else ""
-        )
+    def _alert_card(
+        result: HealthCheckResult, *, lang: Lang = "ru", reminder: bool = False
+    ) -> Screen:
+        """The health card: what is wrong, since when, and the 💡 line."""
+        from src.bot.screens import cards
 
-        lines = [
-            f"{emoji} <b>{title}</b>",
-            f"<b>Status:</b> {result.status.value.upper()}",
-            f"<b>Time:</b> {result.checked_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        issues = [
+            cards.IssueLine(
+                critical=issue.severity == HealthStatus.CRITICAL,
+                message=issue.message,
+                detail=issue.detail,
+                hint=issue.hint,
+            )
+            for issue in result.issues
         ]
-
-        if result.issues:
-            lines.append("")
-            lines.append("<b>Issues:</b>")
-            for issue in result.issues:
-                icon = "\U0001f525" if issue.severity == HealthStatus.CRITICAL else "\u26a0\ufe0f"
-                lines.append(f"  {icon} {html_lib.escape(issue.message)}")
-                if issue.detail:
-                    # Escaped but NOT wrapped in <code>: Telegram drops link
-                    # entities inside code spans, and a billing URL that is not
-                    # clickable is the detail this whole change exists to
-                    # deliver. A bare URL in plain text is auto-linked.
-                    lines.append(f"     {html_lib.escape(issue.detail)}")
-                if issue.hint:
-                    lines.append(f"     \U0001f4a1 {html_lib.escape(issue.hint)}")
-
-        lines.append("")
-        lines.append(
-            f"<i>Messages (30m): {result.messages_30m}"
-            f" | Fallbacks (15m): {result.fallbacks_15m}</i>",
+        return cards.health_card(
+            lang,
+            at=result.checked_at,
+            critical=result.status == HealthStatus.CRITICAL,
+            issues=issues,
+            messages_30m=result.messages_30m,
+            fallbacks_15m=result.fallbacks_15m,
+            reminder=reminder,
         )
 
-        return "\n".join(lines)
+    @classmethod
+    def _format_recovery(cls, cleared: list[str], *, lang: Lang = "ru") -> str:
+        """The all-clear as the HTML text that is sent."""
+        from src.bot.screens.render import render_text
+
+        return render_text(cls._recovery_card(cleared, lang=lang))
+
+    @classmethod
+    def _format_alert(
+        cls, result: HealthCheckResult, *, reminder: bool = False, lang: Lang = "ru"
+    ) -> str:
+        """The health card as the HTML text that is sent."""
+        from src.bot.screens.render import render_text
+
+        return render_text(cls._alert_card(result, lang=lang, reminder=reminder))
 
     # ------------------------------------------------------------------
     # Docker healthcheck file

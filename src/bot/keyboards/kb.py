@@ -2,13 +2,17 @@
 
 ``kb_undo:`` sits under a ``/remember`` confirmation in a group chat;
 ``kb_view:`` pages the public ``/kb`` view. Neither is an admin-panel prefix,
-so neither belongs to the panel's knowledge-base screens. Moved here unchanged
-from ``keyboards/admin_kb.py``.
+so neither belongs to the panel's knowledge-base screens. The ``/kb`` view
+itself is a screen (``screens.entry.kb_group`` / ``kb_dm``); its pager row is
+built there, and ``kb_view_keyboard`` only renders that same row as markup.
 """
 
 from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+from src.bot.screens.entry import kb_pager
+from src.bot.screens.i18n import lang_of
 
 
 def kb_undo_keyboard(lang: str, *, fact_id: int, owner_id: int) -> InlineKeyboardMarkup:
@@ -38,12 +42,16 @@ def kb_undo_keyboard(lang: str, *, fact_id: int, owner_id: int) -> InlineKeyboar
     )
 
 
-def kb_view_keyboard(lang: str, *, page: int, total_pages: int) -> InlineKeyboardMarkup:
-    """Pagination-only footer for the public ``/kb`` view (DM, not admin-namespaced)."""
-    nav: list[InlineKeyboardButton] = []
-    if page > 0:
-        nav.append(InlineKeyboardButton(text="◀️", callback_data=f"kb_view:{lang}:{page - 1}"))
-    nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="▶️", callback_data=f"kb_view:{lang}:{page + 1}"))
-    return InlineKeyboardMarkup(inline_keyboard=[nav])
+def kb_view_keyboard(lang: str, *, page: int, total_pages: int) -> InlineKeyboardMarkup | None:
+    """The ``/kb`` pager as markup — the row ``entry.kb_group``/``kb_dm`` draw — or None.
+
+    ``◀ · 2/3 · ▶`` wraps around; the middle button is the shared no-op.
+    """
+    row = kb_pager(lang_of(lang), page, total_pages)
+    if row is None:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=b.label, callback_data=b.callback) for b in row]
+        ]
+    )

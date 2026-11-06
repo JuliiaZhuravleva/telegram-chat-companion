@@ -31,6 +31,17 @@ def _make_chat_config(*, save_messages: bool, language: str = "ru") -> MagicMock
     return cfg
 
 
+def _placeholder() -> MagicMock:
+    """The "⏳" message ProgressNotice posts and later edits into the summary."""
+    placeholder = MagicMock(spec=Message)
+    placeholder.edit_text = AsyncMock()
+    placeholder.delete = AsyncMock()
+    placeholder.chat = MagicMock()
+    placeholder.chat.id = -100123
+    placeholder.message_id = 501
+    return placeholder
+
+
 def _make_callback(*, user_id: int = OWNER_ID, count: int = 100) -> MagicMock:
     callback = MagicMock()
     callback.data = f"help_summary:{OWNER_ID}:{count}"
@@ -43,7 +54,8 @@ def _make_callback(*, user_id: int = OWNER_ID, count: int = 100) -> MagicMock:
     # be set explicitly. The handler keys its record of appended continuation
     # messages on it, and a bare spec'd mock raises AttributeError instead.
     callback.message.message_id = 500
-    callback.message.answer = AsyncMock()
+    callback.message.answer = AsyncMock(return_value=_placeholder())
+    callback.message.reply_to_message = None
     callback.answer = AsyncMock()
     return callback
 
@@ -139,133 +151,95 @@ async def test_non_owner_is_refused_before_the_toggle_is_consulted() -> None:
     assert "не для вас" in callback.answer.call_args[0][0]
 
 
-# ── Multi-part refreshes ──────────────────────────────────────────────
+# ── A press posts a NEW summary ───────────────────────────────────────
+#
+# The button sits on /help (or under a /summary refusal). It used to edit that
+# message into the summary and track the continuation parts it appended so a
+# later refresh could delete them; a new message per press needs none of that,
+# and the four tests of the tracking went with it.
 
 
-def _refreshable_callback(sent_ids, deleted: list[int]) -> MagicMock:
-    """A summary button whose anchor records its edits, sends and deletions."""
-    callback = _make_callback()
-    msg = callback.message
-    msg.edit_text = AsyncMock()
-    msg.answer = AsyncMock(side_effect=lambda *_a, **_kw: MagicMock(message_id=next(sent_ids)))
-    msg.bot = MagicMock()
-    msg.bot.delete_message = AsyncMock(side_effect=lambda _chat, mid: deleted.append(mid))
-    return callback
-
-
-def _summary_service(text: str) -> MagicMock:
+def _summary_service(text: str | None) -> MagicMock:
     service = MagicMock()
     service.generate = AsyncMock(return_value=text)
     return service
 
 
-_LONG_SUMMARY = "пункт обсуждения " * 900  # comfortably over 4096 units
+@pytest.mark.asyncio
+async def test_a_press_posts_a_new_message_and_leaves_the_help_alone() -> None:
+    callback = _make_callback(count=500)
+    callback.message.edit_text = AsyncMock()
+    service = _summary_service("<b>Кратко</b>")
+
+    await handle_summary_callback(callback, _make_chat_config(save_messages=True), service)
+
+    callback.message.edit_text.assert_not_awaited()
+    placeholder = callback.message.answer.return_value
+    placeholder.edit_text.assert_awaited()
+    assert placeholder.edit_text.await_args.args[0] == "<b>Кратко</b>"
+    assert service.generate.await_args.kwargs["count"] == 500
 
 
 @pytest.mark.asyncio
-async def test_the_keyboard_stays_on_the_anchor_of_a_multi_part_summary() -> None:
-    """A continuation that fails to send must not leave the summary buttonless.
+async def test_the_count_is_clamped_to_the_command_range() -> None:
+    callback = _make_callback(count=5)
+    service = _summary_service("<b>x</b>")
 
-    The keyboard used to ride on the LAST part, and the anchor's own keyboard
-    was cleared to make room for it — so a single failed `answer` (flood
-    control, a network blip; FloodControlMiddleware absorbs only <=30s waits, and only three of them) left
-    the chat with a summary carrying no refresh, no count switch and no close.
-    """
-    from src.bot.handlers.callbacks import _CONTINUATIONS
+    await handle_summary_callback(callback, _make_chat_config(save_messages=True), service)
 
-    _CONTINUATIONS.clear()
-    deleted: list[int] = []
-    callback = _refreshable_callback(iter([601, 602, 603]), deleted)
-    callback.message.answer = AsyncMock(side_effect=RuntimeError("flood"))
+    assert service.generate.await_args.kwargs["count"] == 20
+
+
+@pytest.mark.asyncio
+async def test_a_failed_summary_says_so_in_the_placeholder() -> None:
+    callback = _make_callback()
 
     await handle_summary_callback(
-        callback, _make_chat_config(save_messages=True), _summary_service(_LONG_SUMMARY)
+        callback, _make_chat_config(save_messages=True), _summary_service(None)
     )
 
-    assert callback.message.edit_text.await_args.kwargs["reply_markup"] is not None
+    placeholder = callback.message.answer.return_value
+    texts = [c.args[0] for c in placeholder.edit_text.await_args_list]
+    assert any("Не удалось" in t for t in texts), texts
+
+
+@pytest.mark.parametrize("data", ["help_summary:abc:100", "help_summary:111", "help_close:x"])
+@pytest.mark.asyncio
+async def test_an_unreadable_payload_is_an_old_button_in_the_chat_language(data: str) -> None:
+    callback = _make_callback()
+    callback.data = data
+    service = _summary_service("<b>x</b>")
+    cfg = _make_chat_config(save_messages=True, language="en")
+
+    if data.startswith("help_close:"):
+        await handle_close_callback(callback, cfg)
+    else:
+        await handle_summary_callback(callback, cfg, service)
+
+    service.generate.assert_not_awaited()
+    text = callback.answer.await_args.args[0]
+    assert "out of date" in text
+    assert "Invalid" not in text
 
 
 @pytest.mark.asyncio
-async def test_a_second_refresh_removes_what_the_first_appended() -> None:
-    """Otherwise every press strands another orphaned tail above the new summary.
+async def test_close_deletes_the_help_message() -> None:
+    callback = _make_callback()
+    callback.data = f"help_close:{OWNER_ID}"
+    callback.message.delete = AsyncMock()
 
-    The anchor is edited in place, so a refresh cannot overwrite the parts the
-    previous one posted below it. Driving the handler twice used to leave
-    [old p1][old p2][new p1][new p2] with the reader's eye landing on stale
-    text; only the ids we remember can be cleaned up.
-    """
-    from src.bot.handlers.callbacks import _CONTINUATIONS
+    await handle_close_callback(callback, _make_chat_config(save_messages=True))
 
-    _CONTINUATIONS.clear()
-    sent_ids = iter(range(601, 620))
-    cfg = _make_chat_config(save_messages=True)
-
-    deleted_first: list[int] = []
-    first = _refreshable_callback(sent_ids, deleted_first)
-    await handle_summary_callback(first, cfg, _summary_service(_LONG_SUMMARY))
-    appended = [c.args[0] for c in first.message.answer.await_args_list]
-    assert appended, "this fixture must produce a multi-part summary"
-    assert deleted_first == [], "nothing existed to clean up on the first refresh"
-
-    deleted_second: list[int] = []
-    second = _refreshable_callback(sent_ids, deleted_second)
-    await handle_summary_callback(second, cfg, _summary_service(_LONG_SUMMARY))
-
-    assert deleted_second == [601 + i for i in range(len(appended))], (
-        "the second refresh must delete exactly what the first appended"
-    )
+    callback.message.delete.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_a_summary_that_shrinks_to_one_message_leaves_no_tail() -> None:
-    """The regression the tracking exists for, in its most visible form."""
-    from src.bot.handlers.callbacks import _CONTINUATIONS
+async def test_close_by_someone_else_is_refused() -> None:
+    callback = _make_callback(user_id=999)
+    callback.data = f"help_close:{OWNER_ID}"
+    callback.message.delete = AsyncMock()
 
-    _CONTINUATIONS.clear()
-    sent_ids = iter(range(601, 620))
-    cfg = _make_chat_config(save_messages=True)
+    await handle_close_callback(callback, _make_chat_config(save_messages=True))
 
-    long_call = _refreshable_callback(sent_ids, [])
-    await handle_summary_callback(long_call, cfg, _summary_service(_LONG_SUMMARY))
-
-    deleted: list[int] = []
-    short_call = _refreshable_callback(sent_ids, deleted)
-    await handle_summary_callback(short_call, cfg, _summary_service("<b>Кратко</b>"))
-
-    assert deleted, "the old continuations must go when the new summary fits in one message"
-    short_call.message.answer.assert_not_awaited()
-    assert not _CONTINUATIONS, "nothing left to track once the summary is one message"
-
-
-@pytest.mark.asyncio
-async def test_closing_a_multi_part_summary_removes_its_tail_too() -> None:
-    """Only the anchor carries the Close button.
-
-    Deleting it alone left the continuation messages in the chat with nothing
-    that could ever remove them — and stranded the tracking entry, pointing at
-    a message that no longer exists, so even a later refresh could not clean it
-    up. In a group that is permanent litter nobody can clear.
-    """
-    from src.bot.handlers.callbacks import _CONTINUATIONS
-
-    _CONTINUATIONS.clear()
-    sent_ids = iter(range(601, 620))
-    cfg = _make_chat_config(save_messages=True)
-
-    posted = _refreshable_callback(sent_ids, [])
-    await handle_summary_callback(posted, cfg, _summary_service(_LONG_SUMMARY))
-    appended = len(posted.message.answer.await_args_list)
-    assert appended > 0, "this fixture must produce a multi-part summary"
-
-    deleted: list[int] = []
-    closing = _refreshable_callback(iter(range(700, 710)), deleted)
-    closing.data = f"help_close:{OWNER_ID}"
-    closing.message.delete = AsyncMock()
-
-    await handle_close_callback(closing, cfg)
-
-    assert deleted == [601 + i for i in range(appended)], (
-        "the continuations must be deleted along with the anchor"
-    )
-    closing.message.delete.assert_awaited_once()
-    assert not _CONTINUATIONS
+    callback.message.delete.assert_not_awaited()
+    assert "не для вас" in callback.answer.await_args.args[0]

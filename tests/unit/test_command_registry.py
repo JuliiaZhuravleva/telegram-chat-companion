@@ -82,15 +82,24 @@ EXPECTED_SCOPES: dict[str, set[str]] = {
     "start": {"private", "admin"},
     "help": {"groups", "private", "admin"},
     "summary": {"groups"},
-    "summary500": {"groups"},  # E-2 shortcut: /summary 500 as its own command
-    "kb": {"groups", "private", "admin"},
+    "summary500": set(),  # still answers; the count is typed into /summary
+    "kb": {"groups", "admin"},  # an ordinary person's DM menu is start + help
     "remember": set(),  # deliberately hidden — see the spec's hidden_reason
     "callme": {"groups"},  # TD-150: naming yourself is open to every member
-    "cancel": {"admin"},  # TD-049: the escape from any FSM prompt
     "admin": {"admin"},
-    "settings": {"admin"},
-    "costs": {"admin"},
-    "panel": {"admin"},  # D-1 shortcut: open a chat's panel by link/title
+    "cancel": {"admin"},  # TD-049: the escape from any FSM prompt; stays in the menu
+    "settings": set(),  # reached from the panel; still answers
+    "costs": set(),  # reached from the panel and the spend card; still answers
+    "panel": set(),  # typed shortcut to one chat; still answers
+}
+
+
+# What each menu shows, in order: the menus are what every user sees after a
+# deploy, so their exact content and order are pinned, not only the scope map.
+EXPECTED_MENUS: dict[CommandScope, list[str]] = {
+    CommandScope.GROUPS: ["help", "summary", "kb", "callme"],
+    CommandScope.PRIVATE: ["start", "help"],
+    CommandScope.ADMIN: ["start", "help", "kb", "admin", "cancel"],
 }
 
 
@@ -130,6 +139,19 @@ def test_scope_map_matches_expectation() -> None:
     """Snapshot: which command shows up where."""
     actual = {spec.command: {scope.value for scope in spec.scopes} for spec in COMMANDS}
     assert actual == EXPECTED_SCOPES
+
+
+@pytest.mark.parametrize("scope", list(CommandScope), ids=lambda s: s.value)
+def test_each_menu_lists_exactly_these_commands_in_this_order(scope: CommandScope) -> None:
+    assert [spec.command for spec in specs_for_scope(scope)] == EXPECTED_MENUS[scope]
+
+
+def test_menu_descriptions_fit_without_truncation() -> None:
+    """Telegram cuts a long description in the "/" list; the old /callme one was cut."""
+    for scope in CommandScope:
+        for spec in specs_for_scope(scope):
+            for lang in SUPPORTED_LANGUAGES:
+                assert len(spec.description_for(lang)) <= 32, (spec.command, lang)
 
 
 def test_discovery_finds_the_known_handlers() -> None:

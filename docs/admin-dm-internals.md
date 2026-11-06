@@ -646,12 +646,36 @@ DM (§F.8) — are shared-machinery facts and stay there.
 
 ## A6 — Entry and cards
 
+Files: [src/bot/handlers/commands.py](../src/bot/handlers/commands.py) (`/start`, `/help`,
+`/summary`, `/kb`, `/remember`, `/callme`, the group `/admin` hint),
+[src/bot/handlers/callbacks.py](../src/bot/handlers/callbacks.py) (`help_summary:`,
+`help_close:`, `help_dm:`, `help_callme:`),
+[src/bot/handlers/chat_events.py](../src/bot/handlers/chat_events.py) (`my_chat_member`),
+[src/bot/handlers/access_card.py](../src/bot/handlers/access_card.py),
+[src/bot/access_requests.py](../src/bot/access_requests.py). The screens are built in
+[src/bot/screens/entry.py](../src/bot/screens/entry.py) (people) and
+[src/bot/screens/cards.py](../src/bot/screens/cards.py) (cards to admins), with samples in
+`screens/samples/entry.py`. `keyboards/help.py` and `keyboards/access_card.py` are gone; the
+only keyboard module left here is `keyboards/kb.py`, which renders the `/kb` pager row that
+`entry.kb_pager` builds.
+
 ### A6.1 Command menus
 
 What Telegram offers as autocomplete is *not* derived from the handlers at runtime — it is pushed
 state living on Telegram's side, declared by `COMMANDS` in
 [src/bot/command_registry.py](../src/bot/command_registry.py) and rendered by
 [src/bot/commands.py](../src/bot/commands.py).
+
+| Scope | Commands |
+|---|---|
+| `GROUPS` (`BotCommandScopeAllGroupChats`) | help, summary, kb, callme |
+| `PRIVATE` (`BotCommandScopeAllPrivateChats`) | start, help |
+| `ADMIN` (`BotCommandScopeChat` per bot admin) | start, help, kb, admin, cancel |
+
+`settings`, `costs`, `panel`, `summary500` and `remember` have handlers and empty scopes.
+`tests/unit/test_command_registry.py::EXPECTED_SCOPES` pins this table exactly. **Every change
+to it is pushed to every user on the next deploy** — the startup sync rewrites all three
+language variants of every scope — so it is a release decision, not a refactor.
 
 - **Scopes**: `BotCommandScopeAllGroupChats`, `BotCommandScopeAllPrivateChats`, and one
   `BotCommandScopeChat` per bot admin. Each is pushed three times — `ru`, `en`, and once with **no**
@@ -671,21 +695,82 @@ state living on Telegram's side, declared by `COMMANDS` in
   `bot_config.command_sync_last_alert`, and that key is cleared on a clean run so a recurrence
   alerts again. `notify_command_drift()` is therefore called on both the clean and the drifted path.
 
-### A6.2 Notification plumbing
+### A6.2 Entry handlers
+
+- **`/start admin` is registered before plain `/start`.** aiogram stops at the first handler
+  whose filters match, and `CommandStart()` matches `/start admin` too. `handle_start_panel`
+  carries `CommandStart(deep_link=True, magic=F.args == entry.PANEL_DEEP_LINK)`,
+  `F.chat.type == "private"` and `IsAdmin()`; a non-admin with the same link falls through to
+  `handle_start`, which draws `start.member`. The admin path calls `screens.hub.show_hub`.
+- **A stranger's `/start` never reaches these handlers** while their DM is not enabled:
+  `AccessControlMiddleware` stops the update, files the attempt and the admins get the access
+  card; the stranger gets no reply. This is the behaviour the redesign kept on purpose.
+- **The group `/admin` hint depends on the panel's router.** `handle_admin_in_group` is
+  `Command("admin", "settings")` + group/supergroup + `IsAdmin()` in the `commands` router,
+  which is included after `admin`. The panel's own `/admin` handler has no chat-type filter
+  today, so it consumes the group update and returns; the hint becomes reachable once that
+  handler gets its private-chat filter (§A1). `tests/unit/test_commands_entry.py` pins both the
+  hint's filters and the router order, so it holds as soon as both changes are in.
+- **Public buttons answer an unreadable payload with a toast, not `show_stale`.**
+  `help_summary:`, `help_close:`, `help_dm:` and `help_callme:` sit in front of ordinary
+  members; the stale screen is the admin panel. They log `public_button_unreadable` and answer
+  `_OLD_BUTTON` in the chat's language. `kb_view:` with a bad page shows page 0.
+  `adm_approve:` / `adm_reject:` are admin buttons and *do* call `show_stale`.
+- **`help_summary:` posts a new message** through `ProgressNotice` and `split_html`; it no longer
+  edits the help into a summary, so the old continuation tracking (`_CONTINUATIONS`) and
+  `summary_keyboard` are gone with their tests.
+- **`/summary` with an unreadable or too large count** (`/summary abc`, `/summary 5000`) answers
+  `summary.invalid` and calls no model; a count under 20 keeps its one-line "too few" reply.
+
+### A6.3 The greeting when the bot is added
+
+`handle_my_chat_member` posts `entry.group_added` into the chat after
+`AccessRequestService.submit` when all of these hold: the update is a join, the chat is
+whitelistable and not already enabled (so a request was actually filed), the chat type is
+`group` or `supergroup` (never a channel), and `submit`'s `suppressed` is neither
+`"cooldown"` nor `"rejected"`. The language is the chat row's `language`. A failed send is
+logged as `group_added_greeting_failed` and swallowed — the card to the admins is the part
+that matters, and it has already gone out.
+
+### A6.4 Notification plumbing
 
 | Notification | Sender | Recipients | Gate |
 |---|---|---|---|
-| Unauthorized | `AbuseNotificationService.notify_unauthorized`, called from `AccessRequestService.submit` (middleware and `my_chat_member`) | all admins | `admin_settings.notifications.unauthorized` + 30-min per-chat in-memory cooldown + no prior rejection |
+| Access card | `AccessRequestService.submit` builds `cards.access_card` in the admin language; `AbuseNotificationService.notify_unauthorized(text=…, reply_markup=…)` delivers | all admins | `admin_settings.notifications.unauthorized` + 30-min per-chat in-memory cooldown + no prior rejection |
 | Jailbreak / Blacklist / AI fallback | `AbuseNotificationService` | all admins | matching `admin_settings` key |
 | New sticker | `StickerLearningService.notify_admins`, called from `media.py` | all admins | `admin_settings.notifications.sticker` ∈ {on, detailed}; skipped when `analysis_failed` or the sticker was already known |
-| Health alert | `HealthChecker._send_alert` | **first admin only** | not switchable |
+| Health alert | `HealthChecker._send_alert` | **all admins** | not switchable; de-duplicated by fingerprint |
+| Spend card | `SpendLimitService.notify_admins_if_exceeded`, from `reply_flow.finish_reply` | all admins | over `daily_spend_limit_usd`; once per UTC day |
 
-The unauthorized card is sent by `access_requests.py`, for an unknown chat's message (via the
-middleware) and for the bot being added to a group (via `my_chat_member`). Its Approve/Reject
-buttons are built by `access_keyboard(lang, attempt_id)` in `keyboards/access_card.py` and
-handled in `handlers/access_card.py` — the same `approve_attempt` / `reject_attempt` helpers
-back both the card and the panel list, and both return `None` when the attempt is no longer
-`pending`, which is what produces the "already handled" alert.
+`AbuseNotificationService` never imports the screen layer: the caller hands it finished text
+and markup. Services that build a card themselves (`spend_limit`, `health/checker`) import
+`screens.cards` and `screens.render` **inside the sending function**, because
+`screens.render` imports `reply_flow`, which imports the services — a module-level import
+closes the cycle.
+
+**Access card.** `handlers/access_card.py` resolves the tap with `approve_attempt` /
+`reject_attempt` (shared with the panel's request list; both return `None` when the attempt is
+no longer `pending`) and redraws the card as `card.access.ok` / `card.access.no`. Whether the
+card was the "added" kind is read from its own heading (`cards.is_added_card`), because the
+attempt row does not record it. A card older than `TEXT_EDIT_WINDOW` (48 h) keeps its text and
+gets only the new markup. A double tap redraws to the real state with the "already resolved"
+toast; when nothing changed, `show` swallows Telegram's "message is not modified".
+
+**Spend card.** `bot_config.spend_card_sent_day` holds the UTC date of the last card (a plain
+KV row, no migration). The day is **claimed before sending**, under a process-wide
+`asyncio.Lock`, so concurrent replies past the limit produce one card, and a send that fails is
+not retried that day — a retry on every reply is exactly how the health alert once sent 37
+messages in a day. Per-admin failures are logged (`spend_card_send_failed`); the check runs
+after `post_send` has written the reply's own cost row. Nothing is posted into the group.
+
+**Health card.** `_send_alert` renders `cards.health_card` / `cards.recovered_card` in the
+language from `admin_settings` (now part of `_load_config`), splits the text with `split_html`
+and puts the 📊 button on the last piece. It returns True when at least one admin got every
+piece, and `alert_sent` is recorded from that. The issue lines are passed through unchanged
+from `_run_check` / `diagnosis`: the fingerprint falls back to an issue's **message** when it
+has no `key`, so rewording a message makes that issue look new once after the deploy. This
+change rewords only the frame (title, counts, button), not any issue message, so it causes no
+extra alert; a future change to issue wording will cause exactly one per open keyless issue.
 
 The sticker notification sends the sticker first, then the description as a reply to it, and
 records the pair in `admin_sticker_notifications` so a later text reply resolves to the right

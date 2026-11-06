@@ -1360,7 +1360,8 @@ class TestHandleKbView:
         text = msg.answer.call_args[0][0]
         assert "&lt;b&gt;жирный&lt;/b&gt;" in text
         assert "&amp;" in text
-        assert "<b>" not in text
+        # The title is bold on purpose; the fact's own tag must not be.
+        assert "<b>жирный" not in text
 
     @pytest.mark.asyncio
     async def test_group_renders_the_deadline(self) -> None:
@@ -1615,7 +1616,10 @@ class TestHandleKbViewPage:
         text = callback.message.edit_text.call_args[0][0]
         assert "факт номер 8" in text
         assert "факт номер 0" not in text
-        assert "2/2" in text
+        # The page number lives on the pager's middle button, not in the text.
+        markup = callback.message.edit_text.call_args.kwargs["reply_markup"]
+        assert [b.text for b in markup.inline_keyboard[0]] == ["◀", "2/2", "▶"]
+        assert "2/2" not in text
         # The generated identity must not surface on a paginated page either.
         assert "m1008" not in text
 

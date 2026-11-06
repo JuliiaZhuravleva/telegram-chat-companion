@@ -193,3 +193,116 @@ class TestUnknownStatus:
         repo.set_field.assert_not_awaited()
         repo.ensure_exists.assert_not_awaited()
         config_service.invalidate.assert_not_called()
+
+
+class TestGreetingOnJoin:
+    """The one line a group hears when the bot joins it before any approval."""
+
+    @staticmethod
+    def _bot() -> MagicMock:
+        bot = MagicMock()
+        bot.send_message = AsyncMock()
+        return bot
+
+    @staticmethod
+    def _access(suppressed: str | None = None) -> AsyncMock:
+        service = AsyncMock()
+        service.submit = AsyncMock(
+            return_value=SubmitResult(attempt_id=None if suppressed else 7, suppressed=suppressed)
+        )
+        return service
+
+    @pytest.mark.parametrize("chat_type", ["group", "supergroup"])
+    @pytest.mark.asyncio
+    async def test_a_new_group_hears_that_it_waits_for_approval(self, chat_type: str) -> None:
+        repo, config_service = _make_repos()
+        bot = self._bot()
+
+        await handle_my_chat_member(
+            _make_member_update("member", chat_type=chat_type),
+            repo,
+            config_service,
+            self._access(),
+            bot,
+        )
+
+        bot.send_message.assert_awaited_once()
+        chat_id, text = bot.send_message.await_args.args
+        assert chat_id == -1001
+        assert "одобрит этот чат" in text
+        assert bot.send_message.await_args.kwargs["parse_mode"] == "HTML"
+
+    @pytest.mark.asyncio
+    async def test_the_line_is_in_the_chat_language(self) -> None:
+        repo, config_service = _make_repos()
+        repo.ensure_exists = AsyncMock(
+            return_value={"chat_id": -1001, "enabled": False, "language": "en"}
+        )
+        bot = self._bot()
+
+        await handle_my_chat_member(
+            _make_member_update("member"), repo, config_service, self._access(), bot
+        )
+
+        assert "approves this chat" in bot.send_message.await_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_a_channel_hears_nothing(self) -> None:
+        """A channel post goes to every subscriber; the request is still filed."""
+        repo, config_service = _make_repos()
+        bot = self._bot()
+        access = self._access()
+
+        await handle_my_chat_member(
+            _make_member_update("administrator", chat_type="channel"),
+            repo,
+            config_service,
+            access,
+            bot,
+        )
+
+        access.submit.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+
+    @pytest.mark.parametrize("suppressed", ["rejected", "cooldown"])
+    @pytest.mark.asyncio
+    async def test_a_rejected_or_cooling_chat_hears_nothing(self, suppressed: str) -> None:
+        repo, config_service = _make_repos()
+        bot = self._bot()
+
+        await handle_my_chat_member(
+            _make_member_update("member"), repo, config_service, self._access(suppressed), bot
+        )
+
+        bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_an_approved_chat_or_a_promotion_hears_nothing(self) -> None:
+        repo, config_service = _make_repos(enabled=True)
+        bot = self._bot()
+        await handle_my_chat_member(
+            _make_member_update("member"), repo, config_service, self._access(), bot
+        )
+
+        repo, config_service = _make_repos()
+        await handle_my_chat_member(
+            _make_member_update("administrator", old_status="member"),
+            repo,
+            config_service,
+            self._access(),
+            bot,
+        )
+
+        bot.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_failed_send_is_swallowed(self) -> None:
+        repo, config_service = _make_repos()
+        bot = self._bot()
+        bot.send_message = AsyncMock(side_effect=RuntimeError("not enough rights"))
+
+        await handle_my_chat_member(
+            _make_member_update("member"), repo, config_service, self._access(), bot
+        )
+
+        bot.send_message.assert_awaited_once()

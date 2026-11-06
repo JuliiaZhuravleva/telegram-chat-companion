@@ -162,7 +162,11 @@ ROUTES: Final[dict[str, Route]] = {
     # ── group-side and /kb (outside the admin DM; owned by entry & cards) ──
     "help_summary:": Route("summary.result", "kept"),
     "help_close:": Route("удаляет сообщение", "kept"),
-    "kb_view:": Route("kb.group", "kept"),
+    "help_dm:": Route(lambda p: "start.member" if p[2:3] == ["start"] else "help.dm", "new"),
+    "help_callme:": Route(
+        lambda p: "callme.set_account" if p[2:3] == ["acc"] else "callme.usage", "new"
+    ),
+    "kb_view:": Route("self", "kept"),
     "kb_undo:": Route("убирает факт", "kept"),
     # ── retired: handlers go, old buttons fall to the stale catch-all ──
     "adm_wl:": Route("hub", "retired"),

@@ -95,14 +95,21 @@ COMMANDS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         command="summary500",
-        # Same scope story as /summary: groups only, with a DM handler that
-        # exists solely to avoid a silent no-op.
-        scopes=frozenset({CommandScope.GROUPS}),
+        # Still answers, no longer advertised: the count is typed into
+        # /summary itself (and offered as a button on /help and on a
+        # mistyped /summary), so a second menu line for one number was noise.
+        scopes=frozenset(),
         description={"ru": "Саммари по 500 сообщениям", "en": "Summary of 500 messages"},
+        hidden_reason=(
+            "A shortcut for /summary 500. The menu lists one summary command; the "
+            "count goes into it, and /help offers 100 and 500 as buttons."
+        ),
     ),
     CommandSpec(
         command="kb",
-        scopes=frozenset({CommandScope.GROUPS, CommandScope.PRIVATE, CommandScope.ADMIN}),
+        # Not in the ordinary private menu: a DM's knowledge base is the
+        # admin's own notes, and an ordinary person's DM menu is start + help.
+        scopes=frozenset({CommandScope.GROUPS, CommandScope.ADMIN}),
         description={"ru": "База знаний чата", "en": "Chat knowledge base"},
     ),
     CommandSpec(
@@ -124,10 +131,9 @@ COMMANDS: tuple[CommandSpec, ...] = (
     CommandSpec(
         command="callme",
         scopes=frozenset({CommandScope.GROUPS}),
-        description={
-            "ru": "Как боту вас звать: /callme Костя",
-            "en": "Set the name the bot calls you: /callme Kostya",
-        },
+        # Short on purpose: Telegram cuts a long description in the "/" list,
+        # and the usage example lives in the /callme reply instead.
+        description={"ru": "Как мне вас называть", "en": "What to call you"},
         # Deliberately NOT admin_only. The common path -- naming yourself --
         # is open to every member, and the audit reads admin_only as "every
         # handler for this command carries an IsAdmin filter", which would be
@@ -142,6 +148,12 @@ COMMANDS: tuple[CommandSpec, ...] = (
         # gets a conversational non-answer instead of an explanation.
     ),
     CommandSpec(
+        command="admin",
+        scopes=frozenset({CommandScope.ADMIN}),
+        description={"ru": "Панель администратора", "en": "Admin panel"},
+        admin_only=True,
+    ),
+    CommandSpec(
         command="cancel",
         # ADMIN only: every FSM prompt in this bot lives in the admin DM, so
         # this is discoverable exactly where it is needed and invisible to
@@ -153,31 +165,37 @@ COMMANDS: tuple[CommandSpec, ...] = (
         # reaches it, and the filter would only narrow the promise).
     ),
     CommandSpec(
-        command="admin",
-        scopes=frozenset({CommandScope.ADMIN}),
-        description={"ru": "Панель администратора", "en": "Admin panel"},
-        admin_only=True,
-    ),
-    CommandSpec(
         command="settings",
-        scopes=frozenset({CommandScope.ADMIN}),
+        scopes=frozenset(),
         description={"ru": "Настройки бота", "en": "Bot settings"},
         admin_only=True,
+        hidden_reason=(
+            "Reached from the panel (⚙️ Общие настройки). The admin menu keeps the "
+            "commands used daily; /settings still answers for whoever types it."
+        ),
     ),
     CommandSpec(
         command="costs",
-        scopes=frozenset({CommandScope.ADMIN}),
+        scopes=frozenset(),
         description={"ru": "Расходы на AI за 24ч", "en": "AI cost summary (24h)"},
         admin_only=True,
+        hidden_reason=(
+            "Reached from the panel (💰 Расходы) and from the spend card. The admin "
+            "menu keeps the commands used daily; /costs still answers."
+        ),
     ),
     CommandSpec(
         command="panel",
-        scopes=frozenset({CommandScope.ADMIN}),
+        scopes=frozenset(),
         description={
             "ru": "Настройки чата по ссылке/названию",
             "en": "Chat settings by link/title",
         },
         admin_only=True,
+        hidden_reason=(
+            "A typed shortcut to one chat's settings; the panel's chat list is the "
+            "everyday way in. /panel still answers."
+        ),
     ),
 )
 

@@ -15,8 +15,8 @@ returns `(None, None, None)` for anything that is not a `Message` or a
 with no chat title and no user — the documented silent no-op, one layer down.
 
 Lives under `src/bot/` and not `src/services/` on purpose: it builds the
-approve/reject keyboard, and no module under `src/services/` imports from
-`src/bot/` today. Putting it there would be the first inversion of that arrow.
+card (``screens/cards.py``) in the admin's language, and a service importing
+the screen layer would invert the arrow. The notifier only delivers the text.
 
 **`NotifyCooldown` is `Scope.APP` and that is the entire point.** The cooldown
 was per-instance state on the single middleware object; two callers each
@@ -31,8 +31,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
+from aiogram.types import InlineKeyboardMarkup
 
-from src.bot.keyboards.access_card import access_keyboard
+from src.bot.screens import cards
+from src.bot.screens.i18n import Lang, lang_of
+from src.bot.screens.render import render_text, to_markup
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.services.abuse.notifications import AbuseNotificationService
@@ -159,7 +162,7 @@ class AccessRequestService:
 
             # Two separate failures, deliberately not one try. The row and the
             # keyboard fail independently: `log_unauthorized` can succeed and
-            # `get_admin_language` / `access_keyboard` still raise, and sharing
+            # `get_admin_language` / `cards.access_card` still raise, and sharing
             # one except made that case report `attempt_id` set, `suppressed`
             # None — the happy path — while logging "failed to log to the DB"
             # (false) and sending the admin a card with no Approve/Reject
@@ -179,11 +182,26 @@ class AccessRequestService:
             except Exception:
                 logger.warning("Failed to log the access request to the DB", exc_info=True)
 
-            keyboard = None
+            who = cards.Applicant(
+                chat_id=request.chat_id,
+                chat_title=request.chat_title,
+                chat_type=request.chat_type,
+                chat_username=request.chat_username,
+                user_id=request.user_id,
+                user_first_name=request.user_first_name,
+                user_last_name=request.user_last_name,
+                user_username=request.user_username,
+                message_text=request.message_text,
+                added=request.reason == "added",
+            )
+            lang: Lang = "ru"
+            keyboard: InlineKeyboardMarkup | None = None
             if attempt_id is not None:
                 try:
-                    lang = await self._admin_repo.get_admin_language(self._bot_config_repo)
-                    keyboard = access_keyboard(lang, attempt_id)
+                    lang = lang_of(await self._admin_repo.get_admin_language(self._bot_config_repo))
+                    markup = to_markup(cards.access_card(lang, who, attempt_id=attempt_id))
+                    if isinstance(markup, InlineKeyboardMarkup):
+                        keyboard = markup
                 except Exception:
                     logger.warning(
                         "Access request queued but its approve/reject keyboard could not "
@@ -195,15 +213,7 @@ class AccessRequestService:
 
             notified = await self._notifier.notify_unauthorized(
                 chat_id=request.chat_id,
-                chat_title=request.chat_title,
-                chat_type=request.chat_type,
-                chat_username=request.chat_username,
-                user_id=request.user_id,
-                user_first_name=request.user_first_name,
-                user_last_name=request.user_last_name,
-                user_username=request.user_username,
-                message_text=request.message_text,
-                reason=request.reason,
+                text=render_text(cards.access_card(lang, who, attempt_id=None)),
                 bot=bot,
                 reply_markup=keyboard,
             )

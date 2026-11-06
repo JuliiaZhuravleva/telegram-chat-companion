@@ -141,11 +141,25 @@ class TestFormatAlert:
 
         text = HealthChecker._format_alert(result)
 
-        assert "CRITICAL" in text
-        assert "Bot Health Alert" in text
-        assert "Database connectivity failed" in text
-        assert "fallback" in text.lower()
-        assert "Messages (30m): 12" in text
+        assert text.startswith("🔥 <b>Сбой бота</b> · 15:30 UTC")
+        assert "🔥 Database connectivity failed" in text
+        assert "⚠️ AI fallback activated" in text
+        assert "За 30 минут сообщений: 12, запасной ИИ за 15 минут: 3" in text
+
+    def test_the_frame_is_in_the_admin_language(self):
+        """The issue lines stay as the checker wrote them: they feed the fingerprint."""
+        result = HealthCheckResult(
+            status=HealthStatus.CRITICAL,
+            checked_at=datetime(2026, 2, 10, 15, 30, tzinfo=UTC),
+            messages_30m=12,
+            issues=[HealthIssue(severity=HealthStatus.CRITICAL, message="Database down")],
+        )
+
+        text = HealthChecker._format_alert(result, lang="en")
+
+        assert text.startswith("🔥 <b>The bot is failing</b>")
+        assert "Messages in 30 min: 12" in text
+        assert "Database down" in text
 
     def test_warning_alert_format(self):
         result = HealthCheckResult(
@@ -162,7 +176,7 @@ class TestFormatAlert:
 
         text = HealthChecker._format_alert(result)
 
-        assert "WARNING" in text
+        assert text.startswith("⚠️ <b>Перебои в работе бота</b>")
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +259,9 @@ class TestPersistResult:
 
 class TestSendAlert:
     @pytest.mark.asyncio
-    async def test_sends_to_first_admin_only(self, checker, bot):
-        """Only the first admin in the list should receive the alert."""
-        config = {"admin_ids": "111,222,333"}
+    async def test_sends_to_every_admin(self, checker, bot):
+        """Every bot admin gets the card, with the status button under it."""
+        config = {"admin_ids": "111,222,333", "admin_settings": {"lang": "en"}}
         result = HealthCheckResult(
             status=HealthStatus.WARNING,
             issues=[
@@ -255,11 +269,36 @@ class TestSendAlert:
             ],
         )
 
-        await checker._send_alert(result, config)
+        assert await checker._send_alert(result, config) is True
 
-        bot.send_message.assert_awaited_once()
-        call_args = bot.send_message.call_args
-        assert call_args[0][0] == 111  # first admin
+        assert [c.args[0] for c in bot.send_message.await_args_list] == [111, 222, 333]
+        markup = bot.send_message.await_args.kwargs["reply_markup"]
+        assert [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row] == [
+            ("📊 Status", "adm_health:en")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_one_admin_failing_does_not_silence_the_others(self, checker, bot):
+        config = {"admin_ids": "111,222"}
+        bot.send_message.side_effect = [RuntimeError("blocked"), None]
+        result = HealthCheckResult(
+            status=HealthStatus.WARNING,
+            issues=[HealthIssue(severity=HealthStatus.WARNING, message="test")],
+        )
+
+        assert await checker._send_alert(result, config) is True
+        assert [c.args[0] for c in bot.send_message.await_args_list] == [111, 222]
+
+    @pytest.mark.asyncio
+    async def test_nobody_reached_is_not_delivered(self, checker, bot):
+        config = {"admin_ids": "111,222"}
+        bot.send_message.side_effect = RuntimeError("flood control")
+        result = HealthCheckResult(
+            status=HealthStatus.WARNING,
+            issues=[HealthIssue(severity=HealthStatus.WARNING, message="test")],
+        )
+
+        assert await checker._send_alert(result, config) is False
 
     @pytest.mark.asyncio
     async def test_handles_empty_admin_ids(self, checker, bot):
@@ -287,8 +326,7 @@ class TestSendAlert:
 
         await checker._send_alert(result, config)
 
-        bot.send_message.assert_awaited_once()
-        assert bot.send_message.call_args[0][0] == 111
+        assert [c.args[0] for c in bot.send_message.await_args_list] == [111, 222]
 
 
 # ---------------------------------------------------------------------------
