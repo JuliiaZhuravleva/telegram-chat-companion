@@ -13,10 +13,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message
 
 from src.bot.handlers.admin_chat_panel import show_chat, show_chats
 from src.bot.screens import deps
+from src.bot.states.admin import AdminStates
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -128,3 +132,51 @@ async def test_show_chat_for_a_chat_without_settings_shows_the_list() -> None:
 
     admin_repo.get_enabled_chats_page_by_activity.assert_awaited()
     assert "Этого чата нет в настройках" in message.answer.await_args.args[0]
+
+
+async def _number_prompt() -> FSMContext:
+    state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+    await state.set_state(AdminStates.awaiting_setting_value)
+    await state.update_data(tol_chat_id=CHAT_ID, tol_lang="ru")
+    return state
+
+
+async def test_show_chats_closes_an_open_number_prompt() -> None:
+    """Another area landing the admin on the list is leaving the prompt too."""
+    state = await _number_prompt()
+    message = MagicMock(spec=Message)
+    message.answer = AsyncMock()
+
+    await show_chats(
+        message,
+        "ru",
+        data={**_data(AdminRepository=_admin_repo([], 0)), deps.SCREEN_STATE: state},
+    )
+
+    assert await state.get_state() is None
+
+
+async def test_show_chat_closes_an_open_number_prompt() -> None:
+    state = await _number_prompt()
+    settings = MagicMock(spec=ChatSettingsRepository)
+    settings.get = AsyncMock(return_value=None)
+    message = MagicMock(spec=Message)
+    message.answer = AsyncMock()
+
+    await show_chat(
+        message,
+        "ru",
+        CHAT_ID,
+        data={
+            **_data(
+                ChatSettingsRepository=settings,
+                BotConfigRepository=MagicMock(spec=BotConfigRepository),
+                ChatConfigService=MagicMock(spec=ChatConfigService),
+                RulesRepository=MagicMock(spec=RulesRepository),
+                AdminRepository=_admin_repo([], 0),
+            ),
+            deps.SCREEN_STATE: state,
+        },
+    )
+
+    assert await state.get_state() is None

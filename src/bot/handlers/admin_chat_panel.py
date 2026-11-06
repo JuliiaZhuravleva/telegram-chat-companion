@@ -18,7 +18,9 @@ Handles:
 - ``adm_pnl_tol:`` / ``adm_pnl_tolset:`` / ``adm_pnl_tolcancel:`` — sticker
   explicitness: five presets that save on a tap, and «Своё число», which asks
   for a number (``AdminStates.awaiting_setting_value``). Reject-not-clamp: a
-  number outside 0..1 asks again (ADR-0008 Decision 10).
+  number outside 0..1 asks again (ADR-0008 Decision 10). Any other panel tap,
+  and the `show_chat` / `show_chats` entries, close that prompt
+  (`_close_number_prompt`), so text typed later is not read as a value.
 - ``adm_pnl_sp:`` / ``adm_pnl_spok:`` / ``adm_pnl_spre:`` / ``adm_pnl_spx:`` —
   the per-chat instruction (``system_prompt``) editor: show the current one in
   an expandable quote, take a new one as text (a paste Telegram splits into
@@ -60,7 +62,7 @@ from src.bot.keyboards.admin_chat_panel import (
 )
 from src.bot.screens import chat as screens
 from src.bot.screens.chat import ChatView, config_values
-from src.bot.screens.deps import resolve
+from src.bot.screens.deps import resolve, state_of
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Screen
 from src.bot.screens.render import page_slice, show
@@ -88,6 +90,7 @@ _NO_ROW = {
     "ru": "Чат не найден в настройках — настройка не изменена.",
     "en": "Chat not found in settings — nothing was changed.",
 }
+"""The instruction editor's alert; every other screen shows the list with `_CHAT_GONE`."""
 _CHAT_GONE: Final = Tr(
     "<i>Этого чата нет в настройках, ничего не изменилось. Вот подключённые чаты.</i>",
     "<i>This chat is not in the settings and nothing changed. Here are the connected chats.</i>",
@@ -219,6 +222,18 @@ def _with_notice(
     return dataclasses.replace(screen, notice=notice, notice_raw=notice_raw)
 
 
+async def _close_number_prompt(state: FSMContext | None) -> None:
+    """Going anywhere else in the panel closes the tolerance number prompt.
+
+    ``tol.in`` is edited in place, so the admin can leave it by a button on any
+    older panel message; left armed, the state would read their next text as a
+    tolerance value. Only this prompt's state is cleared: the instruction
+    editor keeps a draft that a «Save» has to confirm anyway.
+    """
+    if state is not None and await state.get_state() == AdminStates.awaiting_setting_value.state:
+        await state.clear()
+
+
 # ── Stable entries (other areas call these; signatures are shared) ─────────
 
 
@@ -264,6 +279,7 @@ async def show_chat(
     chat_config_service = await resolve(data, ChatConfigService)
     rules_repo = await resolve(data, RulesRepository)
     admin_repo = await resolve(data, AdminRepository)
+    await _close_number_prompt(state_of(data))
     return await _show_chat(
         target,
         _get_lang(lang),
@@ -313,6 +329,7 @@ async def show_chats(
 ) -> Message | None:
     """Show the list of connected chats, the same way the ``adm_pnl:`` button does."""
     admin_repo = await resolve(data, AdminRepository)
+    await _close_number_prompt(state_of(data))
     return await _show_chats(target, _get_lang(lang), page, admin_repo, notice=notice)
 
 
@@ -342,6 +359,7 @@ async def handle_chat_panel_picker(
     """The chat list, page ``adm_pnl:{lang}:{page}`` (no page: the first)."""
     if not await _guard(callback, bot_config_repo):
         return
+    await _close_number_prompt(state_of(kwargs))
     parts = (callback.data or "").split(":")
     lang = _lang_of(callback)
     try:
@@ -365,6 +383,7 @@ async def handle_chat_panel_menu(
     """One chat's root screen."""
     if not await _guard(callback, bot_config_repo):
         return
+    await _close_number_prompt(state_of(kwargs))
     lang, chat_id = _parse_lang_chat(callback)
     if chat_id is None:
         await show_stale(callback, lang, data=kwargs)
@@ -393,6 +412,7 @@ async def handle_chat_panel_group(
     """One section of a chat: ``adm_pnl_grp:{lang}:{chat_id}:{section}``."""
     if not await _guard(callback, bot_config_repo):
         return
+    await _close_number_prompt(state_of(kwargs))
     lang, chat_id = _parse_lang_chat(callback)
     parts = (callback.data or "").split(":")
     section = section_of_token(parts[3]) if len(parts) > 3 else None
@@ -436,6 +456,7 @@ async def handle_chat_panel_toggle(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
     **kwargs: Any,
 ) -> None:
     """Flip one bool setting: ``adm_pnl_tgl:{lang}:{chat_id}:{code}``.
@@ -443,10 +464,12 @@ async def handle_chat_panel_toggle(
     The negation happens inside the UPDATE (``toggle_bool_field``), so a
     double-tap cannot collapse two flips into one; the effective value only
     supplies the starting point for a NULL ("inherited") column. Re-renders
-    the field's own section with a ``✓`` line naming what changed.
+    the field's own section with a ``✓`` line naming what changed. A chat with
+    no settings row shows the list with `_CHAT_GONE`, as every panel screen does.
     """
     if not await _guard(callback, bot_config_repo):
         return
+    await _close_number_prompt(state_of(kwargs))
     lang, chat_id = _parse_lang_chat(callback)
     parts = (callback.data or "").split(":")
     field = field_by_code(parts[3]) if len(parts) > 3 else None
@@ -459,7 +482,7 @@ async def handle_chat_panel_toggle(
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
         logger.warning("Toggle for a chat with no chat_settings row", chat_id=chat_id)
-        await callback.answer(_NO_ROW[lang], show_alert=True)
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
         return
 
     parent = _HIDDEN_WHILE_OFF.get(field.code)
@@ -475,7 +498,7 @@ async def handle_chat_panel_toggle(
     new_value = await chat_settings_repo.toggle_bool_field(chat_id, field.key, effective)
     if new_value is None:
         logger.warning("Toggle affected no chat_settings row", chat_id=chat_id, field=field.key)
-        await callback.answer(_NO_ROW[lang], show_alert=True)
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
         return
     chat_config_service.invalidate(chat_id)
 
@@ -491,7 +514,7 @@ async def handle_chat_panel_toggle(
         chat_id, chat_settings_repo, bot_config_repo, chat_config_service, bot_is_admin=admin_live
     )
     if fresh is None:  # the row went away between the write and the read
-        await callback.answer(_NO_ROW[lang], show_alert=True)
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
         return
     if field.code == "rx" and new_value and fresh.bot_is_admin is False:
         screen = _with_notice(screens.build_reactions(fresh, lang), notice=notice)
@@ -537,6 +560,7 @@ async def handle_chat_panel_tolerance_prompt(
         await state.update_data(tol_chat_id=chat_id, tol_lang=lang, tol_prompt_id=prompt_id)
         await show(callback, screens.build_tolerance_input(view, lang))
         return
+    await _close_number_prompt(state)
     await show(callback, screens.build_tolerance_prompt(view, lang))
 
 
@@ -547,6 +571,7 @@ async def handle_chat_panel_tolerance_set(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
     **kwargs: Any,
 ) -> None:
     """A preset: ``adm_pnl_tolset:{lang}:{chat_id}:{value}`` saves at once, back to stickers."""
@@ -561,8 +586,16 @@ async def handle_chat_panel_tolerance_set(
     if chat_id is None or not 0.0 <= value <= 1.0:
         await show_stale(callback, lang, data=kwargs, state=state)
         return
+    await _close_number_prompt(state)
     await _save_tolerance(
-        callback, lang, chat_id, value, chat_settings_repo, bot_config_repo, chat_config_service
+        callback,
+        lang,
+        chat_id,
+        value,
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        admin_repo,
     )
 
 
@@ -574,8 +607,13 @@ async def _save_tolerance(
     chat_settings_repo: ChatSettingsRepository,
     bot_config_repo: BotConfigRepository,
     chat_config_service: ChatConfigService,
+    admin_repo: AdminRepository,
 ) -> None:
-    """Write ``tolerance_level`` and show the stickers section with the new value on top."""
+    """Write ``tolerance_level`` and show the stickers section with the new value on top.
+
+    A write that matched no row shows the chat list with `_CHAT_GONE`, like
+    every other panel screen whose chat has gone.
+    """
     written = await chat_settings_repo.set_field(chat_id, "tolerance_level", value)
     chat_config_service.invalidate(chat_id)
     view = (
@@ -585,10 +623,7 @@ async def _save_tolerance(
     )
     if view is None:
         logger.warning("Tolerance write affected no chat_settings row", chat_id=chat_id)
-        if isinstance(target, Message):
-            await target.answer(_NO_ROW[lang])
-        else:
-            await target.answer(_NO_ROW[lang], show_alert=True)
+        await _show_chats(target, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
         return
     notice = screens.TOLERANCE_SET(lang).format(value=screens.tolerance_label(value, lang))
     await show(target, _with_notice(screens.build_stickers(view, lang), notice=notice))
@@ -619,6 +654,7 @@ async def handle_chat_panel_tolerance_input(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
 ) -> None:
     """Take a typed ``tolerance_level``: one new message either way.
 
@@ -651,7 +687,7 @@ async def handle_chat_panel_tolerance_input(
         view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
         if view is None:
             await state.clear()
-            await message.answer(_NO_ROW[lang])
+            await _show_chats(message, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
             return
         sent = await show(message, screens.build_tolerance_input(view, lang, invalid=True))
         await state.update_data(tol_prompt_id=sent.message_id if sent is not None else None)
@@ -659,7 +695,14 @@ async def handle_chat_panel_tolerance_input(
 
     await state.clear()
     await _save_tolerance(
-        message, lang, chat_id, value, chat_settings_repo, bot_config_repo, chat_config_service
+        message,
+        lang,
+        chat_id,
+        value,
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        admin_repo,
     )
 
 
@@ -1167,6 +1210,7 @@ async def handle_chat_panel_shortcut(
     bot_config_repo: FromDishka[BotConfigRepository],
     chat_config_service: FromDishka[ChatConfigService],
     rules_repo: FromDishka[RulesRepository],
+    **kwargs: Any,
 ) -> None:
     """Open a chat by link, id or part of its title, as a new message.
 
@@ -1177,6 +1221,7 @@ async def handle_chat_panel_shortcut(
     show a short list instead of guessing; when there are more than fit, the
     screen says so and offers the full list.
     """
+    await _close_number_prompt(state_of(kwargs))
     lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
     parts = (message.text or "").split(maxsplit=1)
     query = parts[1].strip() if len(parts) > 1 else ""

@@ -613,8 +613,8 @@ resolution paths exist and must stay consistent:
 Toggles always flip the **effective** value, never the raw column, so a chat that is on via
 the global default turns off on the first tap. `toggle_bool_field` performs the negation
 inside the `UPDATE` (`NOT COALESCE(col, $effective)`), which closes the double-tap race, and
-returns `None` when no row matched — the handler answers that with an alert rather than a
-success notice. Every write re-reads the chat (`_load_view`) before drawing, so the notice
+returns `None` when no row matched — the handler then shows the chat list with `_CHAT_GONE`
+rather than a success notice. Every write re-reads the chat (`_load_view`) before drawing, so the notice
 and the switch never show a value from before the write.
 
 #### Cache invalidation
@@ -662,12 +662,26 @@ the same commit. Tracked as TD-046.
   `test_edit_call_sites_are_guarded.py`), so only the newest prompt can act. A rejected value
   sends one new prompt and records its id; an accepted one clears the state and sends the
   stickers section as one new message.
+- **Leaving the number prompt closes it** (`_close_number_prompt`). `tol.in` is edited in
+  place, so older panel messages keep live buttons, and the state used to outlive the screen
+  and read the admin's next text as a value. The list, a chat, a section, a switch, the presets
+  screen, a preset, `/panel` and the `show_chat` / `show_chats` entries all call it first. It
+  clears `awaiting_setting_value` only: the instruction editor's `awaiting_system_prompt`
+  keeps its draft, which a «Save» confirms anyway. A button of another area does not pass
+  through here and leaves the prompt open.
 - **Unparsable payloads** — a non-integer chat id or page, an unknown section or code, a
   non-bool code on the toggle, a preset outside 0..1 — go to `show_stale`. The two cancel
   handlers (`adm_pnl_tolcancel:`, `adm_pnl_spx:`) clear their own state first, so the way out
   never depends on the payload.
-- **A chat with no settings row** shows the list with `_CHAT_GONE` above it; a toggle or a
-  preset on such a chat keeps the `_NO_ROW` alert, since nothing was written.
+- **A chat with no settings row** shows the list with `_CHAT_GONE` above it, whichever way it
+  was reached: opening the chat or a section, a switch, the presets, a preset, a typed value
+  (`_save_tolerance`), or the number prompt about to ask again. Nothing is written. Only the
+  instruction editor (`adm_pnl_sp*:`) still answers `_NO_ROW` as an alert.
+- **`· общее` on the knowledge base is a footnote line** (`_KB_COMMON_ON` / `_KB_COMMON_OFF`),
+  not the button's suffix (`_toggle(..., marked=False)`). The button shares its row with
+  `👥 Организаторы · N`; «⚪ База знаний · общее» estimates at about 152 px against the 150 px
+  that `fit_label`'s margin leaves half a row, and the rendered dump cut it. The line is still
+  driven by `shows_common`, and the name stays «База знаний» everywhere.
 - **`show_chat(target, lang, chat_id, *, notice=None, data)`** resolves five dependencies from
   `data` (`ChatSettingsRepository`, `BotConfigRepository`, `ChatConfigService`,
   `RulesRepository`, `AdminRepository`); **`show_chats(target, lang, page=0, *, notice=None,

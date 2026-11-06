@@ -16,6 +16,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import EditMessageReplyMarkup
 from aiogram.types import Message
 from magic_filter import MagicFilter
@@ -42,7 +46,6 @@ CHAT_ID = -1001234567890  # invented
 PROMPT_ID = 42
 MODULE = "src.bot.handlers.admin_chat_panel"
 ROW: dict[str, Any] = {"chat_title": "Тестовый чат", "chat_type": "supergroup"}
-NO_ROW = "Чат не найден в настройках — настройка не изменена."
 CHAT_GONE = "Этого чата нет в настройках"
 
 pytestmark = pytest.mark.asyncio
@@ -464,7 +467,7 @@ class TestSections:
         reactions = _callback(f"adm_pnl_grp:ru:{CHAT_ID}:reactions")
         await _open_section(reactions, row, bot_config_repo=defaults, service=stale_cache)
 
-        assert any(label.startswith("✅ Знания") for label in _labels(memory))
+        assert "✅ База знаний" in _labels(memory)
         assert "✅ Реакции в чате" in _labels(reactions)
         assert any(label.startswith("⚪ Запоминать реакции") for label in _labels(reactions))
 
@@ -485,11 +488,17 @@ async def _toggle(
     *,
     bot_config_repo: MagicMock | None = None,
     service: MagicMock | None = None,
+    admin_repo: MagicMock | None = None,
     **kwargs: Any,
 ) -> MagicMock:
     service = service or _service()
     await handle_chat_panel_toggle(
-        callback, repo, bot_config_repo or _bot_config_repo(), service, **kwargs
+        callback,
+        repo,
+        bot_config_repo or _bot_config_repo(),
+        service,
+        admin_repo or _admin_repo(),
+        **kwargs,
     )
     return service
 
@@ -560,14 +569,21 @@ class TestSwitches:
         repo.toggle_bool_field.assert_awaited_once_with(CHAT_ID, key, True)
         service.invalidate.assert_called_once_with(CHAT_ID)
 
-    async def test_a_chat_without_settings_gets_an_alert_and_no_write(self) -> None:
+    async def test_a_chat_without_settings_falls_back_to_the_list_and_writes_nothing(
+        self,
+    ) -> None:
+        """The same landing as opening a section of a chat that has gone: the
+        list with a line saying so, not a popup over a screen that is wrong."""
         repo = _chat_settings_repo(None)
         callback = _callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
 
         await _toggle(callback, repo)
 
-        callback.answer.assert_awaited_once_with(NO_ROW, show_alert=True)
         repo.toggle_bool_field.assert_not_awaited()
+        text, _ = _edited(callback)
+        assert CHAT_GONE in text
+        assert "🗂 <b>Чаты</b>" in text
+        assert callback.answer.await_args.kwargs.get("show_alert") is not True
 
     async def test_a_write_that_matched_no_row_claims_nothing(self) -> None:
         repo = _chat_settings_repo(ROW, toggled=None)
@@ -575,9 +591,11 @@ class TestSwitches:
 
         service = await _toggle(callback, repo)
 
-        callback.answer.assert_awaited_once_with(NO_ROW, show_alert=True)
         service.invalidate.assert_not_called()
-        callback.message.edit_text.assert_not_awaited()
+        text, _ = _edited(callback)
+        assert CHAT_GONE in text
+        assert "✓" not in text
+        assert callback.answer.await_args.kwargs.get("show_alert") is not True
 
     @pytest.mark.parametrize(
         "data",
@@ -794,7 +812,9 @@ class TestTolerancePreset:
         service = _service()
         callback = _callback(f"adm_pnl_tolset:ru:{CHAT_ID}:{raw}")
 
-        await handle_chat_panel_tolerance_set(callback, _state(), repo, _bot_config_repo(), service)
+        await handle_chat_panel_tolerance_set(
+            callback, _state(), repo, _bot_config_repo(), service, _admin_repo()
+        )
 
         repo.set_field.assert_awaited_once_with(CHAT_ID, "tolerance_level", value)
         service.invalidate.assert_called_once_with(CHAT_ID)
@@ -808,7 +828,7 @@ class TestTolerancePreset:
         data = f"adm_pnl_tolset:ru:{CHAT_ID}:{raw}" if raw else f"adm_pnl_tolset:ru:{CHAT_ID}"
 
         await handle_chat_panel_tolerance_set(
-            _callback(data), _state(), repo, _bot_config_repo(), _service()
+            _callback(data), _state(), repo, _bot_config_repo(), _service(), _admin_repo()
         )
 
         stale.assert_awaited_once()
@@ -823,10 +843,13 @@ class TestTolerancePreset:
             _chat_settings_repo(ROW, written=False),
             _bot_config_repo(),
             _service(),
+            _admin_repo(),
         )
 
-        callback.answer.assert_awaited_once_with(NO_ROW, show_alert=True)
-        callback.message.edit_text.assert_not_awaited()
+        text, _ = _edited(callback)
+        assert CHAT_GONE in text
+        assert "✓" not in text
+        assert callback.answer.await_args.kwargs.get("show_alert") is not True
 
 
 ARMED = {"tol_chat_id": CHAT_ID, "tol_lang": "ru", "tol_prompt_id": PROMPT_ID}
@@ -837,7 +860,9 @@ async def _type(
 ) -> tuple[MagicMock, MagicMock]:
     repo = repo or _chat_settings_repo(ROW)
     service = _service()
-    await handle_chat_panel_tolerance_input(message, state, repo, _bot_config_repo(), service)
+    await handle_chat_panel_tolerance_input(
+        message, state, repo, _bot_config_repo(), service, _admin_repo()
+    )
     return repo, service
 
 
@@ -918,6 +943,26 @@ class TestToleranceInput:
         state.clear.assert_awaited_once()
         repo.set_field.assert_not_awaited()
 
+    async def test_a_chat_gone_before_asking_again_shows_the_list(self) -> None:
+        message = _message("not a number")
+        state = _state(ARMED)
+
+        await _type(message, state, _chat_settings_repo(None))
+
+        state.clear.assert_awaited_once()
+        text, _ = _sent(message)
+        assert CHAT_GONE in text
+        assert "🗂 <b>Чаты</b>" in text
+
+    async def test_a_number_for_a_chat_gone_shows_the_list(self) -> None:
+        message = _message("0.8")
+
+        await _type(message, _state(ARMED), _chat_settings_repo(ROW, written=False))
+
+        text, _ = _sent(message)
+        assert CHAT_GONE in text
+        assert "✓" not in text
+
 
 async def _cancel(callback: MagicMock, state: MagicMock) -> None:
     await handle_chat_panel_tolerance_cancel(
@@ -970,6 +1015,7 @@ async def _panel(
     row: dict[str, Any] | None = None,
     matches: list[dict[str, Any]] | None = None,
     bot: MagicMock | None = None,
+    **kwargs: Any,
 ) -> MagicMock:
     admin_repo = _admin_repo()
     admin_repo.find_enabled_chats_by_title = AsyncMock(return_value=matches or [])
@@ -981,6 +1027,7 @@ async def _panel(
         _bot_config_repo(),
         _service(),
         _rules_repo(),
+        **kwargs,
     )
     return admin_repo
 
@@ -1113,3 +1160,119 @@ class TestPanelCommand:
 
         assert chat_type_filters_accept(private) is True
         assert chat_type_filters_accept(group) is False
+
+
+# ── leaving the number prompt ─────────────────────────────────────────────
+
+
+async def _armed(current: State) -> FSMContext:
+    """A real FSM context, so `state_of` recognises it in ``**kwargs``."""
+    state = FSMContext(
+        storage=MemoryStorage(), key=StorageKey(bot_id=BOT_ID, chat_id=ADMIN_ID, user_id=ADMIN_ID)
+    )
+    await state.set_state(current)
+    await state.update_data(ARMED)
+    return state
+
+
+async def _go_to_list(state: FSMContext) -> None:
+    await handle_chat_panel_picker(
+        _callback("adm_pnl:ru:0"), _admin_repo(), _bot_config_repo(), screen_state=state
+    )
+
+
+async def _go_to_chat(state: FSMContext) -> None:
+    await handle_chat_panel_menu(
+        _callback(f"adm_pnl_menu:ru:{CHAT_ID}"),
+        _chat_settings_repo(ROW),
+        _bot_config_repo(),
+        _service(),
+        _rules_repo(),
+        _admin_repo(),
+        screen_state=state,
+    )
+
+
+async def _go_to_section(state: FSMContext) -> None:
+    await _open_section(_callback(f"adm_pnl_grp:ru:{CHAT_ID}:memory"), screen_state=state)
+
+
+async def _flip_a_switch(state: FSMContext) -> None:
+    await _toggle(_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag"), _chat_settings_repo(ROW), state=state)
+
+
+async def _go_to_presets(state: FSMContext) -> None:
+    await handle_chat_panel_tolerance_prompt(
+        _callback(f"adm_pnl_tol:ru:{CHAT_ID}"),
+        state,
+        _chat_settings_repo(ROW),
+        _bot_config_repo(),
+        _service(),
+        _admin_repo(),
+    )
+
+
+async def _pick_a_preset(state: FSMContext) -> None:
+    await handle_chat_panel_tolerance_set(
+        _callback(f"adm_pnl_tolset:ru:{CHAT_ID}:0.5"),
+        state,
+        _chat_settings_repo(ROW),
+        _bot_config_repo(),
+        _service(),
+        _admin_repo(),
+    )
+
+
+async def _send_panel(state: FSMContext) -> None:
+    await _panel(_message("/panel"), state=state)
+
+
+_NAVIGATION = {
+    "the chat list": _go_to_list,
+    "a chat": _go_to_chat,
+    "a section": _go_to_section,
+    "a switch": _flip_a_switch,
+    "the presets": _go_to_presets,
+    "a preset": _pick_a_preset,
+    "/panel": _send_panel,
+}
+
+
+class TestLeavingTheNumberPromptClosesIt:
+    """``tol.in`` is edited in place, so any older panel message still has
+    live buttons. Left armed, the state would read whatever the admin types
+    next — a chat's name, a word for /remember — as a tolerance value."""
+
+    @pytest.mark.parametrize("go", _NAVIGATION.values(), ids=_NAVIGATION.keys())
+    async def test_the_number_prompt_is_closed(self, go: Any) -> None:
+        state = await _armed(AdminStates.awaiting_setting_value)
+
+        await go(state)
+
+        assert await state.get_state() is None
+        assert await state.get_data() == {}
+
+    @pytest.mark.parametrize("go", _NAVIGATION.values(), ids=_NAVIGATION.keys())
+    async def test_the_instruction_draft_is_left_alone(self, go: Any) -> None:
+        """The instruction editor's draft waits for its own «Save»; leaving
+        it is not this prompt's business."""
+        state = await _armed(AdminStates.awaiting_system_prompt)
+
+        await go(state)
+
+        assert await state.get_state() == AdminStates.awaiting_system_prompt.state
+
+    async def test_asking_for_a_number_still_arms_it(self) -> None:
+        state = await _armed(AdminStates.awaiting_setting_value)
+        await state.clear()
+
+        await handle_chat_panel_tolerance_prompt(
+            _callback(f"adm_pnl_tol:ru:{CHAT_ID}:in"),
+            state,
+            _chat_settings_repo(ROW),
+            _bot_config_repo(),
+            _service(),
+            _admin_repo(),
+        )
+
+        assert await state.get_state() == AdminStates.awaiting_setting_value.state

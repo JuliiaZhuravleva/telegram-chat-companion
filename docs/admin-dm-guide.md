@@ -292,7 +292,7 @@ back button goes to the chat list.
 | 😀 Реакции | reactions in the chat, keep people's reactions | whether the bot is a chat admin (§A2.2) |
 | 👋 Сообщество | community mode and its five parts, advice | — |
 
-- **A switch flips in place and says what changed** (`✓ Включено: Знания` above the
+- **A switch flips in place and says what changed** (`✓ Включено: База знаний` above the
   section). It flips what the chat *currently behaves like* (the merged value) and writes
   that as the chat's own value, so a chat inheriting "on" turns off on the first tap. The
   flip happens inside the database write, so a double tap is two changes, never one lost.
@@ -303,9 +303,12 @@ back button goes to the chat list.
 - **`· общее`** (`· all`) marks a value the chat takes from the global settings. Only the 21
   options whose per-chat column can be empty can show it. The other 13 are older columns that
   always hold a value of their own, so they can never honestly claim to inherit, and for the
-  same reason they are absent from the global screen.
+  same reason they are absent from the global screen. The knowledge base says it in the
+  section's footnote instead (`База знаний включена в общих настройках.`): its button shares
+  a row with `👥 Организаторы · N`, and the marker does not fit half a phone row.
 - **A chat that has no settings row** (it left, or was never connected) opens the chat list
-  instead, with a line saying nothing changed.
+  instead, with a line saying nothing changed. A switch or an explicitness value tapped or
+  typed for such a chat lands there too; nothing is written.
 
 `/panel` is the shortcut to one chat: `/panel` with a `t.me/c/…` link, an `@username`, a
 numeric id or part of the title. One match opens the chat; several show up to four of them
@@ -336,7 +339,9 @@ section with a notice, and `✏️ Своё число`, which asks for a number
 (a comma works as the decimal point). An out-of-range or non-numeric value is *rejected and
 asked again* in one new message, never clamped. Commands still work while the question is
 open, and it carries `✖️ Отмена` — the way out, since an invalid value keeps it open. Only the
-newest question keeps its buttons.
+newest question keeps its buttons. Going anywhere else in the panel — a button on an older
+message, `/panel`, or another screen opening a chat — closes the question too, so a later
+message is not taken for a value.
 
 ### A2.4 👋 Community
 

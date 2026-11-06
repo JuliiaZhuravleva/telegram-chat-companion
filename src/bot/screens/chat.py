@@ -12,6 +12,9 @@ screen's decision.
 
 ``· общее`` next to a toggle is driven by `sections.shows_common` and nothing
 else — a legacy column always holds the chat's own value, so it never says it.
+One placement differs: the knowledge base shares its row with the organizers
+button, and «База знаний · общее» does not fit half a phone row, so the memory
+section says the inherited value in its footnote instead of on the button.
 """
 
 from __future__ import annotations
@@ -81,7 +84,7 @@ LABELS: Final[dict[str, Tr]] = {
     "sm": Tr("Сохранять сообщения", "Save messages"),
     "ch": Tr("Искать по архиву чата", "Search the chat archive"),
     "rag": Tr("Помнить свои диалоги", "Remember its conversations"),
-    "kb": Tr("Знания", "Knowledge base"),
+    "kb": Tr("База знаний", "Knowledge base"),
     "tv": Tr("Голосовые", "Voice"),
     "tn": Tr("Кружочки", "Video notes"),
     "tx": Tr("Сворачивать расшифровки", "Collapse transcripts"),
@@ -211,8 +214,16 @@ _NO_ARCHIVE = Tr(
 )
 _ORGANIZERS = Tr("👥 Организаторы · {n}", "👥 Organizers · {n}")
 _KB_LINE = Tr(
-    "Знания — факты о чате, которые админы и организаторы записывают через /remember.",
-    "Knowledge base: facts about the chat that admins and organizers save with /remember.",
+    "База знаний — факты о чате, которые админы бота и организаторы записывают через /remember.",
+    "Knowledge base: facts about the chat that the bot's admins and organizers save with /remember.",
+)
+_KB_COMMON_ON = Tr(
+    "База знаний включена в общих настройках.",
+    "The knowledge base is on in the settings for all chats.",
+)
+_KB_COMMON_OFF = Tr(
+    "База знаний выключена в общих настройках.",
+    "The knowledge base is off in the settings for all chats.",
 )
 
 _STICKER_CHANCE = Tr("Отвечает стикером: в {pct} % случаев", "Answers with a sticker: {pct} %")
@@ -330,10 +341,12 @@ def _marker(view: ChatView, code: str, lang: str) -> str:
     return COMMON(lang) if shows_common(FIELDS_BY_CODE[code], view.row) else ""
 
 
-def _toggle(view: ChatView, code: str, lang: str) -> Button:
+def _toggle(view: ChatView, code: str, lang: str, *, marked: bool = True) -> Button:
+    """A switch; ``marked=False`` leaves ``· общее`` to the screen's text."""
     mark = "✅" if view.on(code) else "⚪"
+    common = _marker(view, code, lang) if marked else ""
     return Button(
-        f"{mark} {LABELS[code](lang)}{_marker(view, code, lang)}",
+        f"{mark} {LABELS[code](lang)}{common}",
         cb("adm_pnl_tgl:", lang, view.chat_id, code),
     )
 
@@ -571,21 +584,27 @@ def build_behavior(view: ChatView, lang: str) -> Screen:
 
 
 def build_memory(view: ChatView, lang: str) -> Screen:
-    codes = ("sm", "ch", "rag", "kb")
+    """The knowledge base's ``· общее`` is a footnote line: see the module docstring."""
+    codes = ("sm", "ch", "rag")
     no_archive = None if view.on("sm") else _NO_ARCHIVE(lang)
+    kb_common = (
+        [(_KB_COMMON_ON if view.on("kb") else _KB_COMMON_OFF)(lang)]
+        if _marker(view, "kb", lang)
+        else []
+    )
     return Screen(
         id="memory",
         text=_text(
             _header("memory", view, lang),
             "\n".join(line for line in (TAP_TOGGLES(lang), _KB_LINE(lang), no_archive) if line),
-            _notes(view, codes, lang),
+            _notes(view, codes, lang, *kb_common),
         ),
         rows=(
             (_toggle(view, "sm", lang),),
             (_toggle(view, "ch", lang),),
             (_toggle(view, "rag", lang),),
             (
-                _toggle(view, "kb", lang),
+                _toggle(view, "kb", lang, marked=False),
                 Button(
                     _ORGANIZERS(lang).format(n=view.organizers),
                     cb("adm_kb_orgs:", lang, view.chat_id, 0),
