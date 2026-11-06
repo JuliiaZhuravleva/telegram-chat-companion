@@ -5,10 +5,10 @@ rows for the chat list), so the samples and the rules test draw the same
 screens the handlers send, without a database. The handlers in
 ``handlers/admin_chat_panel.py`` read the repositories and call these.
 
-Which setting lives in which section is ``sections.SECTION_OF``. The labels
-here are the panel's own words and deliberately not ``FieldSpec.label``: the
-defaults screen still reads those, and renaming a field there is not this
-screen's decision.
+Which setting lives in which section is ``sections.SECTION_OF``. `LABELS` and
+`COMMUNITY_LINES` are the one set of names a setting has: the screen of
+defaults for all chats (``screens/settings.py``) reads them too, so a switch is
+called the same on both (tested). ``FieldSpec.label`` is not shown on either.
 
 ``· общее`` next to a toggle is driven by `sections.shows_common` and nothing
 else — a legacy column always holds the chat's own value, so it never says it.
@@ -103,7 +103,9 @@ LABELS: Final[dict[str, Tr]] = {
     "aw": Tr("Советы", "Advice"),
     "re": Tr("Правила", "Rules"),
 }
-"""Toggle labels, by field code. Every bool code a section shows is here."""
+"""Toggle labels, by field code: every bool code a section shows, here and on the
+defaults screen. Short, because a phone fits about 17 characters on a full-width
+button and about 8 on a third."""
 
 COMMON = Tr(" · общее", " · all")
 COMMON_NOTE = Tr(
@@ -264,7 +266,7 @@ _ADMIN_NO = Tr(
     "⚠️ The bot is not a chat admin: Telegram does not show it reactions.",
 )
 
-_COMMUNITY_LINES: Final[tuple[tuple[str, Tr], ...]] = (
+COMMUNITY_LINES: Final[tuple[tuple[str, Tr], ...]] = (  # what each short label does
     (
         "gf",
         Tr(
@@ -282,7 +284,7 @@ _COMMUNITY_OFF = Tr(
     "Режим выключен: бот не здоровается и не прощается.",
     "The mode is off: the bot neither greets nor says goodbye.",
 )
-_ADVICE_LINE = _COMMUNITY_LINES[-1][1]
+_ADVICE_LINE = COMMUNITY_LINES[-1][1]
 
 COMMUNITY_SUBTOGGLES: Final = frozenset({"gf", "wb", "fp", "fd", "rj"})
 """Shown, and written, only while community mode is on. ``aw`` is not one of
@@ -580,6 +582,123 @@ def build_behavior(view: ChatView, lang: str) -> Screen:
     )
 
 
+# ── the instruction editor ────────────────────────────────────────────────
+#
+# Four prompts of one input: the current instruction, the preview of a new
+# one, a refused part, and a cleared draft. They show the admin's own text
+# verbatim, so the handler sends them through ``split_html`` and keeps every
+# piece's id (a newer preview deletes the older ones): it delivers
+# `render_text` and `to_markup` itself rather than through `show`, which
+# returns the last piece only.
+
+SP_MAX_CHARS: Final = 12000
+_SP_CURRENT_TITLE = Tr("📝 <b>Инструкция для чата</b>", "📝 <b>Chat instruction</b>")
+_SP_NONE = Tr(
+    "<i>Своей инструкции у чата нет.</i>", "<i>This chat has no instruction of its own.</i>"
+)
+_SP_ASK = Tr(
+    "Пришлите новую инструкцию сообщением — она заменит эту. Или нажмите «Отмена».",
+    "Send the new instruction as a message — it replaces this one. Or tap «Cancel».",
+)
+_SP_NEW_TITLE = Tr("📝 <b>Новая инструкция</b>", "📝 <b>New instruction</b>")
+_SP_LENGTH = Tr("{n} симв.", "{n} chars")
+_SP_CONFIRM = Tr(
+    "Сохраняем? Если это ещё не всё — пришлите продолжение, оно допишется в конец.",
+    "Save it? If there is more, send the rest — it is appended at the end.",
+)
+_SP_TOO_LONG = Tr(
+    "Слишком длинно: вышло бы {n} симв., можно до {max}. "
+    "Эта часть не вошла, поэтому черновик неполный и сохранить его нельзя. "
+    "Нажмите «Заново» и пришлите текст покороче.",
+    "Too long: that would make {n} chars, the limit is {max}. "
+    "This part did not fit, so the draft is incomplete and cannot be saved. "
+    "Tap «Start over» and send a shorter text.",
+)
+_SP_INCOMPLETE = Tr(
+    "Черновик неполный: часть текста не влезла. Нажмите «Заново».",
+    "The draft is incomplete: part of the text did not fit. Tap «Start over».",
+)
+SP_INCOMPLETE: Final = _SP_INCOMPLETE
+"""Also the alert of a Save tapped on such a draft's older preview."""
+_SP_CLEARED = Tr(
+    "Черновик очищен. Пришлите инструкцию сообщением.",
+    "Draft cleared. Send the instruction as a message.",
+)
+_SP_SAVE = Tr("✅ Сохранить", "✅ Save")
+_SP_REDO = Tr("🔄 Заново", "🔄 Start over")
+
+
+def _sp_cancel(chat_id: int, lang: str) -> Button:
+    return cancel(cb("adm_pnl_spx:", lang, chat_id), lang)
+
+
+def _sp_redo_row(chat_id: int, rev: int, lang: str) -> tuple[Button, ...]:
+    return (
+        Button(_SP_REDO(lang), cb("adm_pnl_spre:", lang, chat_id, rev)),
+        _sp_cancel(chat_id, lang),
+    )
+
+
+def build_sp_prompt(chat_id: int, title: str | None, current: str, lang: str) -> Screen:
+    """``sp.prompt`` — the chat's instruction as it is, and the ask for a new one."""
+    label = fence(escape(title)) if title else str(chat_id)
+    text = current.strip()
+    body = f"<blockquote expandable>{escape(text)}</blockquote>" if text else _SP_NONE(lang)
+    return Screen(
+        id="sp.prompt",
+        text=_text(
+            f"{_SP_CURRENT_TITLE(lang)}\n{label} <code>{chat_id}</code>", body, _SP_ASK(lang)
+        ),
+        rows=((_sp_cancel(chat_id, lang),),),
+    )
+
+
+def build_sp_preview(chat_id: int, draft: str, rev: int, lang: str) -> Screen:
+    """``sp.preview`` — the whole draft so far, under Save / «Start over» / Cancel.
+
+    ``rev`` is the draft version it shows (the id of the last message added
+    to it). Save and «Start over» carry it, so a button under an older preview
+    -- or one from an earlier editing session -- cannot act on a draft it does
+    not show. Their prefixes differ from ``adm_pnl_sp:`` at the character
+    after ``sp``, so ``startswith("adm_pnl_sp:")`` cannot swallow them.
+    """
+    title = f"{_SP_NEW_TITLE(lang)} · {_SP_LENGTH(lang).format(n=len(draft))}"
+    return Screen(
+        id="sp.preview",
+        text=_text(
+            f"{title}\n<blockquote expandable>{escape(draft)}</blockquote>", _SP_CONFIRM(lang)
+        ),
+        rows=(
+            (Button(_SP_SAVE(lang), cb("adm_pnl_spok:", lang, chat_id, rev), style="success"),),
+            _sp_redo_row(chat_id, rev, lang),
+        ),
+    )
+
+
+def build_sp_refused(chat_id: int, rev: int, lang: str, *, length: int | None = None) -> Screen:
+    """``sp.refused`` — a part that did not fit (``length``: the draft it would
+    have made), or any part after one: the draft is incomplete, so no Save."""
+    text = (
+        _SP_TOO_LONG(lang).format(n=length, max=SP_MAX_CHARS)
+        if length is not None
+        else _SP_INCOMPLETE(lang)
+    )
+    return Screen(
+        id="sp.refused",
+        text=_text(_SP_NEW_TITLE(lang), text),
+        rows=(_sp_redo_row(chat_id, rev, lang),),
+    )
+
+
+def build_sp_redo(chat_id: int, lang: str) -> Screen:
+    """``sp.redo`` — the draft is gone and the input waits again."""
+    return Screen(
+        id="sp.redo",
+        text=_text(_SP_NEW_TITLE(lang), _SP_CLEARED(lang)),
+        rows=((_sp_cancel(chat_id, lang),),),
+    )
+
+
 # ── memory ────────────────────────────────────────────────────────────────
 
 
@@ -729,7 +848,7 @@ def build_reactions(view: ChatView, lang: str) -> Screen:
 def build_community(view: ChatView, lang: str) -> Screen:
     if view.on("cm"):
         codes: tuple[str, ...] = ("cm", "gf", "wb", "fp", "fd", "rj", "aw")
-        body = "\n".join(line(lang) for _, line in _COMMUNITY_LINES)
+        body = "\n".join(line(lang) for _, line in COMMUNITY_LINES)
         rows: tuple[tuple[Button, ...], ...] = (
             (_toggle(view, "cm", lang),),
             (_toggle(view, "gf", lang), _toggle(view, "wb", lang)),

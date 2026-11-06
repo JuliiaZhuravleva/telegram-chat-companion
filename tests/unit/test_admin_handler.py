@@ -656,6 +656,9 @@ class TestRejected:
         await handle_wl_restore(cb, admin_repo)
 
         admin_repo.update_attempt_status.assert_not_awaited()
+        text = _edited(cb)[0]
+        assert text.startswith("<i>✓ Заявку уже разобрали</i>"), text
+        assert "Заявка возвращена" not in text
 
     @pytest.mark.asyncio
     async def test_restore_of_a_gone_record_says_so(self):

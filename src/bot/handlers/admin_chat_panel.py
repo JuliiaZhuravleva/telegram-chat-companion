@@ -42,7 +42,6 @@ import dataclasses
 from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import suppress
-from html import escape
 from typing import Any, Final
 
 import structlog
@@ -50,27 +49,22 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
 from src.bot.handlers.rules import show_rules
-from src.bot.keyboards.admin_chat_panel import (
-    system_prompt_cancel_keyboard,
-    system_prompt_confirm_keyboard,
-)
 from src.bot.screens import chat as screens
 from src.bot.screens.chat import ChatView, config_values
 from src.bot.screens.deps import resolve, state_of
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Screen
-from src.bot.screens.render import page_slice, show
+from src.bot.screens.render import page_slice, render_text, show, to_markup
 from src.bot.screens.sections import SECTION_OF, Section, section_of_token
 from src.bot.screens.stale import show_stale
 from src.bot.settings_fields import FieldType, field_by_code
 from src.bot.states.admin import AdminStates
-from src.bot.utils import check_admin_direct, is_bot_chat_admin, safe_edit_text
+from src.bot.utils import check_admin_direct, is_bot_chat_admin
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -86,11 +80,6 @@ logger = structlog.get_logger(__name__)
 router = Router(name="admin_chat_panel")
 
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
-_NO_ROW = {
-    "ru": "Чат не найден в настройках — настройка не изменена.",
-    "en": "Chat not found in settings — nothing was changed.",
-}
-"""The instruction editor's alert; every other screen shows the list with `_CHAT_GONE`."""
 _CHAT_GONE: Final = Tr(
     "<i>Этого чата нет в настройках, ничего не изменилось. Вот подключённые чаты.</i>",
     "<i>This chat is not in the settings and nothing changed. Here are the connected chats.</i>",
@@ -738,47 +727,9 @@ async def handle_chat_panel_tolerance_cancel(
 
 # ── The instruction (system_prompt) editor
 
-_SP_MAX_CHARS = 12000
-_SP_CURRENT_TITLE = {"ru": "📝 <b>Инструкция для чата</b>", "en": "📝 <b>Chat instruction</b>"}
-_SP_NONE = {
-    "ru": "<i>Своей инструкции у чата нет.</i>",
-    "en": "<i>This chat has no instruction of its own.</i>",
-}
-_SP_ASK = {
-    "ru": "Пришли новую инструкцию сообщением — она заменит эту. Или нажми «Отмена».",
-    "en": "Send the new instruction as a message — it replaces this one. Or tap «Cancel».",
-}
-_SP_PREVIEW_TITLE = {
-    "ru": "📝 <b>Новая инструкция</b> · {n} симв.",
-    "en": "📝 <b>New instruction</b> · {n} chars",
-}
-_SP_CONFIRM = {
-    "ru": "Сохраняем? Если это ещё не всё — пришли продолжение, оно допишется в конец.",
-    "en": "Save it? If there is more, send the rest — it is appended at the end.",
-}
-_SP_TOO_LONG = {
-    "ru": (
-        "Слишком длинно: вышло бы {n} симв., можно до {max}. "
-        "Эта часть не вошла, поэтому черновик неполный и сохранить его нельзя. "
-        "Нажми «Заново» и пришли текст покороче."
-    ),
-    "en": (
-        "Too long: that would make {n} chars, the limit is {max}. "
-        "This part did not fit, so the draft is incomplete and cannot be saved. "
-        "Tap «Start over» and send a shorter text."
-    ),
-}
-_SP_INCOMPLETE = {
-    "ru": "Черновик неполный: часть текста не влезла. Нажми «Заново».",
-    "en": "The draft is incomplete: part of the text did not fit. Tap «Start over».",
-}
 _SP_OUTDATED = {
-    "ru": "Это старое превью — черновик с тех пор изменился. Нажми кнопку под последним.",
+    "ru": "Это старое превью — черновик с тех пор изменился. Нажмите кнопку под последним.",
     "en": "This preview is outdated — the draft has changed since. Use the latest one.",
-}
-_SP_REDO_TEXT = {
-    "ru": "📝 <b>Новая инструкция</b>\n\nЧерновик очищен. Пришли инструкцию сообщением.",
-    "en": "📝 <b>New instruction</b>\n\nDraft cleared. Send the instruction as a message.",
 }
 _SP_SAVED = {
     "ru": "<i>✓ Инструкция сохранена · {n} симв.</i>",
@@ -815,15 +766,16 @@ def _sp_draft(parts: list[list[Any]]) -> str:
     return "\n".join(str(text) for _, text in sorted(parts, key=lambda p: int(p[0])))
 
 
-async def _send_split(
-    target: Message, html: str, reply_markup: InlineKeyboardMarkup
-) -> list[Message]:
-    """Send ``html`` as as many messages as Telegram needs; buttons on the last.
+async def _send_split(target: Message, screen: Screen) -> list[Message]:
+    """Send ``screen`` as as many messages as Telegram needs; buttons on the last.
 
     A prompt is verbatim user text and may exceed 4096 on its own, so it goes
     through ``split_html`` (CLAUDE.md: a rejected send is no message at all).
+    Not `show`: it returns the last piece only, and a newer preview has to
+    delete every piece of the older ones.
     """
-    pieces = split_html(html)
+    pieces = split_html(render_text(screen))
+    reply_markup = to_markup(screen)
     sent: list[Message] = []
     for i, piece in enumerate(pieces):
         last = i == len(pieces) - 1
@@ -859,6 +811,14 @@ async def _sp_draft_for(state: FSMContext, chat_id: int) -> tuple[dict[str, Any]
     return data, _sp_draft(list(data.get("sp_parts") or []))
 
 
+async def _show_chat_gone(
+    callback: CallbackQuery, lang: str, data: Mapping[str, Any], *, answered: bool
+) -> None:
+    """The chat list under `_CHAT_GONE`: the editor's chat has no settings row."""
+    admin_repo = await resolve(data, AdminRepository)
+    await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang), answered=answered)
+
+
 async def _show_behavior_with_notice(
     callback: CallbackQuery,
     notice: str,
@@ -877,11 +837,7 @@ async def _show_behavior_with_notice(
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
         logger.warning("Instruction editor for a chat with no chat_settings row", chat_id=chat_id)
-        try:
-            admin_repo = await resolve(data or {}, AdminRepository)
-        except LookupError:
-            return
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang), answered=True)
+        await _show_chat_gone(callback, lang, data or {}, answered=True)
         return
     screen = dataclasses.replace(screens.build_behavior(view, lang), notice_raw=notice)
     await show(callback, screen, answered=True)
@@ -905,7 +861,7 @@ async def handle_chat_panel_sp_prompt(
 
     row = await chat_settings_repo.get(chat_id)
     if row is None:
-        await callback.answer(_NO_ROW[lang], show_alert=True)
+        await _show_chat_gone(callback, lang, kwargs, answered=False)
         return
 
     await state.set_state(AdminStates.awaiting_system_prompt)
@@ -920,12 +876,11 @@ async def handle_chat_panel_sp_prompt(
     await callback.answer()
 
     title = row.get("chat_title")
-    label = fence(escape(str(title))) if title else str(chat_id)
-    current = str(row.get("system_prompt") or "").strip()
-    body = f"<blockquote expandable>{escape(current)}</blockquote>" if current else _SP_NONE[lang]
-    html = f"{_SP_CURRENT_TITLE[lang]}\n{label} <code>{chat_id}</code>\n\n{body}\n\n{_SP_ASK[lang]}"
+    screen = screens.build_sp_prompt(
+        chat_id, str(title) if title else None, str(row.get("system_prompt") or ""), lang
+    )
     if isinstance(callback.message, Message):
-        await _send_split(callback.message, html, system_prompt_cancel_keyboard(lang, chat_id))
+        await _send_split(callback.message, screen)
 
 
 @router.message(
@@ -964,10 +919,8 @@ async def handle_chat_panel_sp_input(
         if data.get("sp_overflow"):
             # A part was already refused: anything added now would sit after a
             # hole, and a preview of it would look complete.
-            await message.reply(
-                _SP_INCOMPLETE[lang],
-                reply_markup=system_prompt_confirm_keyboard(lang, chat_id, rev, can_save=False),
-            )
+            refused = screens.build_sp_refused(chat_id, rev, lang)
+            await message.reply(render_text(refused), reply_markup=to_markup(refused))
             return
 
         # Telegram turns **bold** and backticks into entities and drops the markers;
@@ -975,15 +928,13 @@ async def handle_chat_panel_sp_input(
         text = entities_to_markdown(message.text or "", message.entities)
         parts = [*list(data.get("sp_parts") or []), [message.message_id, text]]
         draft = _sp_draft(parts)
-        if len(draft) > _SP_MAX_CHARS:
+        if len(draft) > screens.SP_MAX_CHARS:
             # Refusing this part alone would let a later, shorter part in and
             # save a prompt with its middle missing. The whole draft is
             # incomplete from here on, so Save goes away until «Start over».
             await state.update_data(sp_overflow=True)
-            await message.reply(
-                _SP_TOO_LONG[lang].format(n=len(draft), max=_SP_MAX_CHARS),
-                reply_markup=system_prompt_confirm_keyboard(lang, chat_id, rev, can_save=False),
-            )
+            refused = screens.build_sp_refused(chat_id, rev, lang, length=len(draft))
+            await message.reply(render_text(refused), reply_markup=to_markup(refused))
             return
 
         # The previous preview showed a shorter draft; its «Save» would now
@@ -994,12 +945,8 @@ async def handle_chat_panel_sp_input(
             except Exception:
                 logger.debug("sp_preview_delete_failed", message_id=old_id)
 
-        html = (
-            f"{_SP_PREVIEW_TITLE[lang].format(n=len(draft))}\n"
-            f"<blockquote expandable>{escape(draft)}</blockquote>\n\n{_SP_CONFIRM[lang]}"
-        )
         rev = message.message_id
-        sent = await _send_split(message, html, system_prompt_confirm_keyboard(lang, chat_id, rev))
+        sent = await _send_split(message, screens.build_sp_preview(chat_id, draft, rev, lang))
         await state.update_data(
             sp_parts=parts, sp_previews=[m.message_id for m in sent], sp_rev=rev
         )
@@ -1026,7 +973,7 @@ async def handle_chat_panel_sp_save(
     async with _sp_locks[user_id]:
         found = await _sp_draft_for(state, chat_id)
         if found is not None and found[0].get("sp_overflow"):
-            await callback.answer(_SP_INCOMPLETE[lang], show_alert=True)
+            await callback.answer(screens.SP_INCOMPLETE(lang), show_alert=True)
             return
         if found is not None and _parse_rev(callback) != found[0].get("sp_rev"):
             await callback.answer(_SP_OUTDATED[lang], show_alert=True)
@@ -1048,8 +995,11 @@ async def handle_chat_panel_sp_save(
 
         written = await chat_settings_repo.set_field(chat_id, "system_prompt", draft)
         if not written:
+            # The chat left the settings while the admin was typing: the draft
+            # has nowhere to go, so the input closes too.
             logger.warning("System prompt write affected no chat_settings row", chat_id=chat_id)
-            await callback.answer(_NO_ROW[lang], show_alert=True)
+            await state.clear()
+            await _show_chat_gone(callback, lang, kwargs, answered=False)
             return
         chat_config_service.invalidate(chat_id)
         await state.clear()
@@ -1115,14 +1065,7 @@ async def handle_chat_panel_sp_redo(
                 logger.debug("sp_preview_delete_failed", message_id=old_id)
         await state.update_data(sp_parts=[], sp_previews=[], sp_rev=0, sp_overflow=False)
 
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await safe_edit_text(
-            callback.message,
-            _SP_REDO_TEXT[lang],
-            reply_markup=system_prompt_cancel_keyboard(lang, chat_id),
-            parse_mode="HTML",
-        )
+    await show(callback, screens.build_sp_redo(chat_id, lang))
 
 
 @router.callback_query(F.data.startswith("adm_pnl_spx:"))

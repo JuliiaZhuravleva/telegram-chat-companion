@@ -683,6 +683,37 @@ class TestHandleCostsVerify:
         assert "HTTP 500" in text
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("failing", ["get_costs", "close"])
+    async def test_a_client_that_raises_shows_the_error_screen(self, failing: str):
+        """The query is answered before the call, so a raise must not end in silence."""
+        from structlog.testing import capture_logs
+
+        cb = _make_callback("adm_costs_verify:ru:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(return_value=MagicMock(error=None))
+            instance.close = AsyncMock()
+            getattr(instance, failing).side_effect = RuntimeError("boom")
+            MockClient.return_value = instance
+
+            with capture_logs() as logs:
+                await handle_costs_verify(cb, repo, settings)
+
+        instance.close.assert_awaited_once()
+        cb.answer.assert_awaited_once_with()
+        text = cb.message.edit_text.call_args.args[0]
+        assert "Unexpected error: RuntimeError" in text
+        markup = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert callbacks[0] == "adm_costs_verify:ru:24h", "the error screen offers a retry"
+        repo.get_cost_by_provider.assert_not_awaited()
+        failed = [e for e in logs if e["event"] == "costs_verify_failed"]
+        assert len(failed) == 1 and failed[0]["exc_info"] is True
+
+    @pytest.mark.asyncio
     async def test_compares_over_window_openai_actually_returned(self):
         """Our own figure must span the buckets OpenAI sent, not the button.
 

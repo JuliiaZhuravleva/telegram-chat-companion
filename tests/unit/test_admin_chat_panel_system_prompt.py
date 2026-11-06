@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import re
 from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -18,7 +19,6 @@ from magic_filter import MagicFilter
 
 from src.bot.custom_emoji import FENCE
 from src.bot.handlers.admin_chat_panel import (
-    _SP_MAX_CHARS,
     handle_chat_panel_sp_cancel,
     handle_chat_panel_sp_input,
     handle_chat_panel_sp_prompt,
@@ -26,11 +26,12 @@ from src.bot.handlers.admin_chat_panel import (
     handle_chat_panel_sp_save,
     router,
 )
-from src.bot.keyboards.admin_chat_panel import (
-    system_prompt_cancel_keyboard,
-    system_prompt_confirm_keyboard,
-)
+from src.bot.screens import deps
+from src.bot.screens.chat import SP_MAX_CHARS as _SP_MAX_CHARS
+from src.bot.screens.chat import build_sp_preview, build_sp_prompt, build_sp_refused
+from src.bot.screens.render import to_markup
 from src.bot.states.admin import AdminStates
+from src.database.repositories.admin import AdminRepository
 from src.models.chat_config import ChatConfig
 from src.utils.telegram_text import parsed_length
 
@@ -103,6 +104,37 @@ def _config_service() -> MagicMock:
     service.get_config = AsyncMock(return_value=replace(ChatConfig(chat_id=CHAT_ID)))
     service.invalidate = MagicMock()
     return service
+
+
+def _admin_data() -> tuple[dict[str, Any], MagicMock]:
+    """The handler's ``**kwargs`` with a container that holds the chat list's repository."""
+    admin_repo = MagicMock(spec=AdminRepository)
+    admin_repo.count_attempts = AsyncMock(return_value=0)
+    admin_repo.get_enabled_chats_page_by_activity = AsyncMock(
+        return_value=([{"chat_id": -100200301, "chat_title": "Второй чат", "msg_count": 3}], 1)
+    )
+    container = MagicMock()
+    container.get = AsyncMock(
+        side_effect=lambda dependency: {AdminRepository: admin_repo}[dependency]
+    )
+    return {deps.SCREEN_CONTAINER: container}, admin_repo
+
+
+_CHAT_GONE_RU = "<i>Этого чата нет в настройках, ничего не изменилось. Вот подключённые чаты.</i>"
+
+
+def _assert_chat_list_under_chat_gone(callback: MagicMock, admin_repo: MagicMock) -> None:
+    """What every panel screen shows for a chat without a settings row."""
+    admin_repo.get_enabled_chats_page_by_activity.assert_awaited()
+    text = callback.message.edit_text.await_args.args[0]
+    assert text.startswith(_CHAT_GONE_RU + "\n\n"), text
+    datas = [
+        b.callback_data
+        for row in callback.message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+        for b in row
+    ]
+    assert "adm_pnl_menu:ru:-100200301" in datas
+    assert all(c.kwargs.get("show_alert") is not True for c in callback.answer.await_args_list)
 
 
 _next_id = iter(range(5000, 10_000))
@@ -230,16 +262,18 @@ class TestOpenEditor:
         callback.message.answer.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_unknown_chat_is_refused_without_entering_the_state(self) -> None:
+    async def test_unknown_chat_shows_the_chat_list_without_entering_the_state(self) -> None:
         callback = _callback(f"adm_pnl_sp:ru:{CHAT_ID}")
         state = FakeState()
+        data, admin_repo = _admin_data()
 
         await handle_chat_panel_sp_prompt(
-            callback, state, _chat_settings_repo(None), _bot_config_repo()
+            callback, state, _chat_settings_repo(None), _bot_config_repo(), **data
         )
 
         assert state.state is None
-        assert callback.answer.call_args.kwargs.get("show_alert") is True
+        callback.message.answer.assert_not_awaited()
+        _assert_chat_list_under_chat_gone(callback, admin_repo)
 
 
 # ── typing the new prompt ───────────────────────────────────────────────────
@@ -502,12 +536,15 @@ class TestSave:
         repo = _chat_settings_repo({"chat_title": "Чат"}, written=False)
         service = _config_service()
         callback = _callback(f"adm_pnl_spok:ru:{CHAT_ID}:{REV}")
+        data, admin_repo = _admin_data()
 
-        await handle_chat_panel_sp_save(callback, state, repo, _bot_config_repo(), service)
+        await handle_chat_panel_sp_save(callback, state, repo, _bot_config_repo(), service, **data)
 
         service.invalidate.assert_not_called()
-        assert callback.answer.call_args.kwargs.get("show_alert") is True
-        callback.message.edit_text.assert_not_awaited()
+        # The draft has nowhere to go: the input closes rather than eat the next message.
+        assert state.state is None
+        _assert_chat_list_under_chat_gone(callback, admin_repo)
+        assert "сохранена" not in callback.message.edit_text.await_args.args[0]
 
     @pytest.mark.asyncio
     async def test_non_admin_cannot_save(self) -> None:
@@ -686,8 +723,8 @@ class TestDraftVersion:
 class TestSystemPromptKeyboards:
     def test_system_prompt_keyboards_carry_distinct_prefixes(self) -> None:
         """``startswith("adm_pnl_sp:")`` must not also catch save/redo/cancel."""
-        cancel = system_prompt_cancel_keyboard("ru", CHAT_ID)
-        confirm = system_prompt_confirm_keyboard("ru", CHAT_ID, 2147483647)
+        cancel = to_markup(build_sp_prompt(CHAT_ID, "Чат", "", "ru"))
+        confirm = to_markup(build_sp_preview(CHAT_ID, "текст", 2147483647, "ru"))
         datas = [b.callback_data for kb in (cancel, confirm) for r in kb.inline_keyboard for b in r]
         assert sorted(datas) == sorted(
             [
@@ -700,7 +737,50 @@ class TestSystemPromptKeyboards:
         assert not any(d.startswith("adm_pnl_sp:") for d in datas)
         assert all(len(d.encode()) <= 64 for d in datas)
 
-    def test_incomplete_draft_keyboard_has_no_save(self) -> None:
-        kb = system_prompt_confirm_keyboard("ru", CHAT_ID, 5, can_save=False)
+    @pytest.mark.parametrize("length", [None, 12345])
+    def test_incomplete_draft_keyboard_has_no_save(self, length: int | None) -> None:
+        kb = to_markup(build_sp_refused(CHAT_ID, 5, "ru", length=length))
         datas = [b.callback_data for r in kb.inline_keyboard for b in r]
         assert datas == [f"adm_pnl_spre:ru:{CHAT_ID}:5", f"adm_pnl_spx:ru:{CHAT_ID}"]
+
+    def test_the_exit_is_the_panel_wide_cancel(self) -> None:
+        """One name per thing: the editor's way out reads like every other prompt's."""
+        for screen in (
+            build_sp_prompt(CHAT_ID, None, "", "ru"),
+            build_sp_preview(CHAT_ID, "текст", 5, "ru"),
+            build_sp_refused(CHAT_ID, 5, "ru"),
+        ):
+            cancels = [b for row in screen.rows for b in row if b.kind == "cancel"]
+            assert [b.label for b in cancels] == ["✖️ Отмена"], screen.id
+
+
+class TestEditorCopy:
+    """The editor's own words address the admin as «вы», like the rest of the panel."""
+
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    def test_every_editor_screen_passes_the_screen_rules(self, lang: str) -> None:
+        from src.bot.screens.lint import check_screen
+        from src.bot.screens.registry import load_all
+
+        editor = [s for i, v in load_all().items() if i.startswith("sp.") for s in v]
+        assert {s.screen_id for s in editor} == {"sp.prompt", "sp.preview", "sp.refused", "sp.redo"}
+        found = {
+            (s.screen_id, s.title): check_screen(s.build(lang), sample=s, lang=lang) for s in editor
+        }
+        assert all(not v for v in found.values()), found
+
+    def test_handler_alerts_use_the_polite_form(self) -> None:
+        from src.bot.handlers import admin_chat_panel as handler
+        from src.bot.screens.lint import SINGULAR_IMPERATIVES, THOU_WORDS
+
+        words = re.compile(
+            r"(?<!\w)(?:" + "|".join((*THOU_WORDS, *SINGULAR_IMPERATIVES)) + r")(?!\w)",
+            re.IGNORECASE,
+        )
+        copy = [
+            v["ru"]
+            for name, v in vars(handler).items()
+            if name.startswith("_SP_") and isinstance(v, dict) and "ru" in v
+        ]
+        assert copy, "no editor copy found: the control would pass vacuously"
+        assert [c for c in copy if words.search(c)] == []

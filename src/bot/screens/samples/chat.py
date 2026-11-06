@@ -262,6 +262,44 @@ def tolerance_invalid(lang: Lang) -> Screen:
     return screens.build_tolerance_input(_view(), lang, invalid=True)
 
 
+# The editor shows the admin's instruction verbatim: user data, exempt from R8.
+_SP_DATA: Final = (fake.CHAT_TITLE, PROMPT)
+_SP_REV: Final = 2147483647
+"""The widest draft version a button carries: a Telegram message id."""
+
+
+@sample("sp.prompt", section=_SECTION, title="Своя инструкция", nav="prompt", user_data=_SP_DATA)
+def sp_prompt_own(lang: Lang) -> Screen:
+    return screens.build_sp_prompt(fake.CHAT_ID, fake.CHAT_TITLE, PROMPT, lang)
+
+
+@sample("sp.prompt", section=_SECTION, title="Инструкции нет", nav="prompt", user_data=_TITLES)
+def sp_prompt_none(lang: Lang) -> Screen:
+    return screens.build_sp_prompt(fake.CHAT_ID, fake.CHAT_TITLE, "", lang)
+
+
+@sample("sp.preview", section=_SECTION, title="Новая инструкция", nav="prompt", user_data=_SP_DATA)
+def sp_preview(lang: Lang) -> Screen:
+    return screens.build_sp_preview(fake.CHAT_ID, PROMPT, _SP_REV, lang)
+
+
+@sample("sp.refused", section=_SECTION, title="Слишком длинно", nav="prompt")
+def sp_too_long(lang: Lang) -> Screen:
+    return screens.build_sp_refused(
+        fake.CHAT_ID, _SP_REV, lang, length=screens.SP_MAX_CHARS + len(PROMPT)
+    )
+
+
+@sample("sp.refused", section=_SECTION, title="Черновик неполный", nav="prompt")
+def sp_incomplete(lang: Lang) -> Screen:
+    return screens.build_sp_refused(fake.CHAT_ID, _SP_REV, lang)
+
+
+@sample("sp.redo", section=_SECTION, title="Черновик очищен", nav="prompt")
+def sp_redo(lang: Lang) -> Screen:
+    return screens.build_sp_redo(fake.CHAT_ID, lang)
+
+
 @sample("reactions", section=_SECTION, title="Выключены", nav="panel", user_data=_TITLES)
 def reactions_off(lang: Lang) -> Screen:
     return screens.build_reactions(_view(), lang)
