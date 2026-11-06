@@ -1123,7 +1123,9 @@ async def test_sticker_handler_learns_animated():
     sticker_service.learn.assert_awaited_once()
 
 
-async def _notify_about_new_sticker(*, tolerance_level: float, admin_lang: str) -> AsyncMock:
+async def _notify_about_new_sticker(
+    *, tolerance_level: float, admin_lang: str | Exception
+) -> AsyncMock:
     """Run a never-seen sticker through the chat handler; return ``notify_admins``."""
     from src.bot.handlers.media import handle_sticker_message
     from src.services.modules.sticker.models import StickerLearningResult
@@ -1161,7 +1163,10 @@ async def _notify_about_new_sticker(*, tolerance_level: float, admin_lang: str) 
     message_repo.get_recent = AsyncMock(return_value=[])
 
     admin_repo = MagicMock()
-    admin_repo.get_admin_language = AsyncMock(return_value=admin_lang)
+    if isinstance(admin_lang, Exception):
+        admin_repo.get_admin_language = AsyncMock(side_effect=admin_lang)
+    else:
+        admin_repo.get_admin_language = AsyncMock(return_value=admin_lang)
     admin_repo.get_notification_settings = AsyncMock(
         return_value={
             "sticker": "on",
@@ -1216,6 +1221,15 @@ async def test_sticker_handler_notify_admins_in_the_admins_language(admin_lang: 
 
     notify.assert_awaited_once()
     assert notify.call_args.kwargs["lang"] == admin_lang
+
+
+@pytest.mark.asyncio
+async def test_sticker_handler_notifies_in_the_default_when_the_language_is_unreadable():
+    """A failed read of the admin language costs the language, not the card."""
+    notify = await _notify_about_new_sticker(tolerance_level=0.5, admin_lang=RuntimeError("db"))
+
+    notify.assert_awaited_once()
+    assert notify.call_args.kwargs["lang"] == "ru"
 
 
 @pytest.mark.asyncio

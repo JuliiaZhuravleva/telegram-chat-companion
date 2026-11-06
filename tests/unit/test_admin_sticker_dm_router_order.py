@@ -572,3 +572,34 @@ class TestAdminDmStickerYieldsToAnOpenPrompt:
         assert "Сюда нужно число текстом" in msg.answer.call_args.args[0]
         assert await state.get_state() == state_name
         assert (await state.get_data())["exp_prompt_id"] == 7
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize(("caption", "answered"), [("/help", False), (None, True)])
+    async def test_a_command_in_a_caption_is_not_taken_for_a_score(
+        self, caption: str | None, answered: bool
+    ) -> None:
+        """A photo captioned ``/help`` in the score prompt goes on to the commands.
+
+        The caption-less photo is the control: the same scaffolding does reach
+        the score handler, so the first case's silence is the guard's doing.
+        """
+        msg, data = _make_router_message(is_admin=True, sticker_known=True)
+        msg.sticker = None
+        msg.photo = [MagicMock()]
+        msg.caption = caption
+        msg.bot = None
+        msg.answer = AsyncMock(return_value=MagicMock(message_id=7))
+        state_name = AdminStates.awaiting_sticker_score.state
+        assert state_name is not None
+        state = await _open_prompt(
+            state_name,
+            {"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru", "exp_prompt_id": 6},
+        )
+
+        result = await admin_sticker_router.propagate_event(
+            "message", msg, raw_state=state_name, state=state, **data
+        )
+
+        assert (result is not UNHANDLED) is answered
+        assert msg.answer.await_count == (1 if answered else 0)
+        assert await state.get_state() == state_name

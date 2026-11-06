@@ -748,7 +748,16 @@ async def handle_sticker_message(
                     admin_ids = parse_admin_ids(admin_ids_raw)
                     if admin_ids:
                         # The card is the admins' screen: their language, not the chat's.
-                        lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
+                        # An unreadable setting costs the language, not the card.
+                        try:
+                            raw_lang = await admin_repo.get_admin_language(bot_config_repo)
+                        except Exception:
+                            logger.warning(
+                                "admin language unreadable, new-sticker card in default",
+                                exc_info=True,
+                            )
+                            raw_lang = None
+                        lang = lang_of(raw_lang)
                         await sticker_service.notify_admins(
                             bot,
                             sticker,

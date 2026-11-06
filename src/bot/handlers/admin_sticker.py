@@ -822,6 +822,7 @@ async def _analyse_into_card(
     *,
     notice: str,
     dm: bool = False,
+    rescore: bool = False,
     prior_score: tuple[float, bool] | None = None,
 ) -> None:
     """Run one re-analysis behind the ⏳ placeholder, then the card or the error.
@@ -830,8 +831,11 @@ async def _analyse_into_card(
     unexpected exception is an error screen too — the placeholder has no
     buttons, so leaving it would strand the admin.
 
-    ``prior_score`` (value, set by hand): a re-score that had already dropped
-    this score. On failure it is put back, and the error screen says whether
+    ``rescore``: this analysis is the second half of a re-score, so the error
+    screen's Retry repeats the re-score, not a bare re-analysis.
+
+    ``prior_score`` (value, set by hand): the score that re-score had already
+    dropped. On failure it is put back, and the error screen says whether
     that worked.
     """
     await show(callback, build_stk_analyzing(lang), answered=True)
@@ -852,7 +856,9 @@ async def _analyse_into_card(
                 kept = score
             else:
                 lost = True
-        error = build_stk_error(lang, fuid, reason, dm=dm, score_kept=kept, score_lost=lost)
+        error = build_stk_error(
+            lang, fuid, reason, dm=dm, score_kept=kept, score_lost=lost, retry_rescore=rescore
+        )
         await show(callback, error, answered=True)
         return
     facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
@@ -921,7 +927,8 @@ async def handle_sticker_explicitness_reset(
 
     If that analysis fails, the score it replaced is put back: the reset alone
     would leave the sticker unscored, i.e. never sent, behind an error screen
-    that says nothing about it.
+    that says nothing about it. That screen's Retry comes back here: a plain
+    re-analysis would keep a score that was put back as set by hand.
 
     Drops the score prompt for the same reason the preset buttons do: this row
     stays tappable on a score screen elsewhere in the chat. Only that state.
@@ -953,6 +960,7 @@ async def handle_sticker_explicitness_reset(
         admin_repo,
         bot_config_repo,
         notice=NOTICE_RESCORED(lang),
+        rescore=True,
         prior_score=prior,
     )
 

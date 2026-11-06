@@ -341,12 +341,12 @@ def error_internal(lang: Lang) -> Screen:
 
 @sample("stk.error", section=_S, title="Пересчёт не удался: оценка прежняя", nav="panel")
 def error_rescore_kept(lang: Lang) -> Screen:
-    return build_stk_error(lang, fake.FUID, "vision", score_kept=0.25)
+    return build_stk_error(lang, fake.FUID, "vision", score_kept=0.25, retry_rescore=True)
 
 
 @sample("stk.error", section=_S, title="Пересчёт не удался: оценка сброшена", nav="panel")
 def error_rescore_lost(lang: Lang) -> Screen:
-    return build_stk_error(lang, fake.FUID, "internal", score_lost=True)
+    return build_stk_error(lang, fake.FUID, "internal", score_lost=True, retry_rescore=True)
 
 
 @sample("stk.error", section=_S, title="Ошибка в личке", nav="card")

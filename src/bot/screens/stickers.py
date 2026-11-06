@@ -638,6 +638,7 @@ def build_stk_error(
     dm: bool = False,
     score_kept: float | None = None,
     score_lost: bool = False,
+    retry_rescore: bool = False,
 ) -> Screen:
     """Analysis failed: why, Retry, and for a content refusal the way to score by hand.
 
@@ -647,6 +648,10 @@ def build_stk_error(
     ``score_kept`` / ``score_lost``: the failed analysis was a re-score, which
     had already dropped the score — it was put back (and is this value), or
     putting it back failed too and the sticker is now unscored.
+
+    ``retry_rescore``: the failed analysis was a re-score, so Retry repeats the
+    re-score (``adm_stk_expreset:``). A plain re-analysis would not do: it
+    never overwrites a score set by hand, and the one put back may be one.
     """
     copy = ERROR_REASONS.get(reason or "empty", ERROR_REASONS["empty"])
     body = copy(lang) if dm else f"{copy(lang)} {_ERROR_NOTES_KEPT(lang)}"
@@ -654,7 +659,12 @@ def build_stk_error(
         body += f" {_ERROR_SCORE_LOST(lang)}"
     elif score_kept is not None:
         body += f" {_ERROR_SCORE_KEPT(lang).format(v=_score(score_kept))}"
-    retry = cb("adm_stk_dmchk:", lang, fuid) if dm else cb("adm_stk_reanalyze:", lang, fuid)
+    if dm:
+        retry = cb("adm_stk_dmchk:", lang, fuid)
+    elif retry_rescore:
+        retry = cb("adm_stk_expreset:", lang, fuid)
+    else:
+        retry = cb("adm_stk_reanalyze:", lang, fuid)
     rows: list[tuple[Button, ...]] = [(Button(_RETRY(lang), retry),)]
     if reason == "content_filter" or score_lost:
         rows.append((Button(_SCORE_BTN(lang), cb("adm_stk_score:", lang, fuid)),))

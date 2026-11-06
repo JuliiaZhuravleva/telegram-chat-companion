@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Chat, InlineKeyboardMarkup, Message
 
@@ -38,6 +39,7 @@ from src.bot.handlers.admin_sticker import (
     handle_sticker_sets,
     handle_sticker_view,
 )
+from src.bot.handlers.admin_sticker import router as admin_sticker_router
 from src.bot.screens.model import Screen
 from src.bot.screens.stickers import (
     ERROR_REASONS,
@@ -1670,6 +1672,12 @@ class TestAnalysisCrash:
 # ---------------------------------------------------------------------------
 
 
+_RESCORE_AND_BACK: Buttons = [
+    ("🔁 Повторить", f"adm_stk_expreset:ru:{FUID}"),
+    ("⬅️ Стикер", f"adm_stk_card:ru:{FUID}"),
+]
+
+
 async def _rescore(repo: MagicMock, svc: MagicMock) -> MagicMock:
     cb = _callback(f"adm_stk_expreset:ru:{FUID}")
     await handle_sticker_explicitness_reset(
@@ -1692,7 +1700,8 @@ class TestFailedRescoreKeepsTheScore:
         text, buttons = _edit(cb)
         assert ERROR_REASONS["vision"]("ru") in text
         assert "Оценка осталась прежней: 0.80." in text
-        assert buttons == _RETRY_AND_BACK
+        # Retry repeats the re-score: a bare re-analysis keeps a manual score.
+        assert buttons == _RESCORE_AND_BACK
 
     @pytest.mark.asyncio()
     async def test_an_automatic_score_is_put_back_as_automatic(self) -> None:
@@ -1704,9 +1713,10 @@ class TestFailedRescoreKeepsTheScore:
 
         repo.update_explicitness_score.assert_awaited_once_with(FUID, 0.25)
         repo.set_manual_explicitness_score.assert_not_awaited()
-        text, _ = _edit(cb)
+        text, buttons = _edit(cb)
         assert ERROR_REASONS["internal"]("ru") in text
         assert "Оценка осталась прежней: 0.25." in text
+        assert buttons == _RESCORE_AND_BACK
 
     @pytest.mark.asyncio()
     async def test_when_putting_it_back_fails_the_screen_says_it_is_gone(self) -> None:
@@ -1720,7 +1730,7 @@ class TestFailedRescoreKeepsTheScore:
         assert "Оценка сброшена, и пока её нет, бот этот стикер не отправит." in text
         assert "осталась прежней" not in text
         assert buttons == [
-            ("🔁 Повторить", f"adm_stk_reanalyze:ru:{FUID}"),
+            ("🔁 Повторить", f"adm_stk_expreset:ru:{FUID}"),
             ("🔞 Откровенность", f"adm_stk_score:ru:{FUID}"),
             ("⬅️ Стикер", f"adm_stk_card:ru:{FUID}"),
         ]
@@ -1747,7 +1757,41 @@ class TestFailedRescoreKeepsTheScore:
         repo.set_manual_explicitness_score.assert_not_awaited()
         text, buttons = _edit(cb)
         assert "Оценка" not in text.split("</b>", 1)[1]
-        assert buttons == _RETRY_AND_BACK
+        assert buttons == _RESCORE_AND_BACK
+
+    @pytest.mark.asyncio()
+    async def test_retry_on_a_kept_manual_score_re_scores_it(self) -> None:
+        """Tapping Retry, through the real router: the manual score is reset again.
+
+        A re-analysis would not touch it — ``save_sticker`` keeps a score set by
+        hand — so a Retry routed there would say "updated" and change nothing.
+        """
+        failed = await _rescore(
+            _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=True)),
+            _service(reanalyze=ReanalyzeResult(ok=False, reason="vision")),
+        )
+        retry = _edit(failed)[1][0][1]
+        assert retry is not None
+        tap = _callback(retry, message_id=failed.message.message_id)
+        repo = _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=True))
+
+        result = await admin_sticker_router.propagate_event(
+            "callback_query",
+            tap,
+            is_admin=True,
+            bot=MagicMock(),
+            sticker_service=_service(),
+            sticker_repo=repo,
+            admin_repo=_admin_repo(),
+            bot_config_repo=_bot_config_repo(),
+            state=_state(),
+            raw_state=None,
+            event_from_user=tap.from_user,
+        )
+
+        assert result is not UNHANDLED
+        repo.reset_explicitness_to_auto.assert_awaited_once_with(FUID)
+        assert _edit(tap)[0].startswith("<i>✓ Оценка пересчитана</i>")
 
     @pytest.mark.asyncio()
     async def test_a_successful_rescore_writes_nothing_back(self) -> None:
