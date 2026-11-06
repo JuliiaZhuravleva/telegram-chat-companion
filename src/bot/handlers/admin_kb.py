@@ -13,12 +13,19 @@ Callbacks (all ``adm_kb_*``, the chat id in the payload):
 - ``adm_kb_org_add:`` — the add prompt: a new message with Telegram's person
   search under the input (``request_users``), which also reads a forwarded
   message or a typed ``@username``.
-- ``adm_kb_org_x:`` — leave the prompt from its failure answer.
 
 The prompt is the one place with a reply keyboard, and every way out of it —
-an add, ``✖️ Отмена``, the inline cancel, the list's back button — clears the
-FSM state, sends ``ReplyKeyboardRemove`` on a short line of its own and then
-the organizer list as a new message. A failed lookup keeps the prompt open.
+an add, ``✖️ Отмена``, the list's back button — clears the FSM state, sends
+``ReplyKeyboardRemove`` on a short line of its own and then the organizer list
+as a new message. A failed lookup keeps the prompt open.
+
+Names. Telegram's person picker offers anyone, so an organizer is often not
+in the group, and ``getChatMember`` then answers with an error instead of a
+name. Every add path therefore stores the name it was given
+(``kb_organizer_names``, migration 038), and the list names a person from, in
+order: Telegram now, that stored name, the latest name in the chat's history,
+and only then «участник <id>». When Telegram says the person is not in the
+group, the name carries `` · не в чате``.
 """
 
 from __future__ import annotations
@@ -26,17 +33,19 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from html import escape as html_escape
-from typing import Any
+from typing import Any, NamedTuple
 
+import asyncpg
 import structlog
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
+    ChatMemberRestricted,
     Message,
     MessageOriginHiddenUser,
     MessageOriginUser,
@@ -54,11 +63,12 @@ from src.bot.screens.render import page_slice, show
 from src.bot.screens.routes import parse
 from src.bot.screens.stale import NO_ACCESS, show_stale
 from src.bot.states.admin import AdminStates
-from src.bot.utils import check_admin_direct, resolve_display_name
+from src.bot.utils import check_admin_direct
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
+from src.database.repositories.organizer_names import OrganizerNameRepository
 from src.utils import parse_user_id_list
 
 logger = structlog.get_logger(__name__)
@@ -183,29 +193,53 @@ def _short_name(username: str | None, first_name: str | None, user_id: int, lang
     return first_name or orgs.MEMBER(lang).format(id=user_id)
 
 
-async def _left_the_chat(bot: Bot | None, chat_id: int, user_id: int) -> bool:
-    """True only when Telegram SAYS the person is not in the chat.
+# What Telegram answers `getChatMember` for someone who is not in the group, as
+# reported for organizers added from the picker: the person never joined, or the
+# bot cannot see them as a participant. "user not found" (the bot has never met
+# the id) is NOT here: it says nothing about membership.
+_NOT_A_MEMBER = re.compile(r"member not found|PARTICIPANT_ID_INVALID", re.IGNORECASE)
 
-    Telegram's picker offers anyone — contacts, recent chats, global search —
-    so the pick can be someone who never was in this chat. That is worth a
-    line in the answer, not a refusal: the organizer list is an authority
-    list, and someone about to be invited may be on it on purpose. Any API
-    failure answers False: an unverifiable membership is not reported as
-    absence.
+
+class _Name(NamedTuple):
+    label: str
+    absent: bool = False
+    """Telegram says the person is not in the group (left, removed, never joined)."""
+
+
+def _store(pool: asyncpg.Pool | None) -> OrganizerNameRepository | None:
+    """The organizer-name store, or None outside the Dishka wrapper (a direct test call)."""
+    return OrganizerNameRepository(pool) if pool is not None else None
+
+
+async def _live(bot: Bot | None, chat_id: int, user_id: int) -> tuple[str | None, bool]:
+    """``(name, absent)`` from one ``getChatMember``: what Telegram says about the person now.
+
+    The pick can be someone who never was in this chat, which is worth a mark,
+    not a refusal: the organizer list is an authority list, and someone about to
+    be invited may be on it on purpose. Only an answer that SAYS "not a member"
+    marks the person; any other failure is unverifiable, has no name and no mark.
     """
     if bot is None:
-        return False
+        return None, False
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-    except TelegramAPIError as exc:
+    except TelegramBadRequest as exc:
+        if _NOT_A_MEMBER.search(exc.message or ""):
+            return None, True
         logger.warning(
-            "Organizer pick: membership check failed",
-            chat_id=chat_id,
-            user_id=user_id,
-            error=str(exc),
+            "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
         )
-        return False
-    return member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
+        return None, False
+    except Exception as exc:  # the list renders whatever the lookup does
+        logger.warning(
+            "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
+        )
+        return None, False
+    user = member.user
+    absent = member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED) or (
+        isinstance(member, ChatMemberRestricted) and not member.is_member
+    )
+    return orgs.display_name(user.username, user.first_name, user.last_name), absent
 
 
 async def _names(
@@ -213,18 +247,26 @@ async def _names(
     chat_id: int,
     user_ids: Iterable[int],
     lang: str,
-    known: dict[int, str] | None = None,
-) -> dict[int, str]:
-    """Display names for ``user_ids``, looked up concurrently; ``known`` ones are not."""
-    known = known or {}
+    store: OrganizerNameRepository | None,
+    known: Mapping[int, _Name] | None = None,
+    fallback: Mapping[int, str] | None = None,
+) -> dict[int, _Name]:
+    """Names for ``user_ids``: Telegram (concurrently), then the store for those it
+    did not name, then ``fallback``, then «участник <id>». ``known`` ones are not
+    looked up again."""
+    known = dict(known or {})
     wanted = [uid for uid in dict.fromkeys(user_ids) if uid not in known]
-    found = await asyncio.gather(
-        *(
-            resolve_display_name(bot, chat_id, uid, orgs.MEMBER(lang).format(id=uid))
-            for uid in wanted
-        )
-    )
-    return {**known, **dict(zip(wanted, found, strict=True))}
+    live = await asyncio.gather(*(_live(bot, chat_id, uid) for uid in wanted))
+    unnamed = [uid for uid, (name, _) in zip(wanted, live, strict=True) if name is None]
+    stored = await store.names(chat_id, unnamed) if store is not None and unnamed else {}
+    for uid, (name, absent) in zip(wanted, live, strict=True):
+        if name is None and uid in stored:
+            row = stored[uid]
+            name = orgs.display_name(row.username, row.first_name, row.last_name)
+        if name is None:
+            name = (fallback or {}).get(uid) or orgs.MEMBER(lang).format(id=uid)
+        known[uid] = _Name(name, absent)
+    return known
 
 
 async def _orgs_view(
@@ -233,25 +275,27 @@ async def _orgs_view(
     chat_id: int,
     title: str | None,
     ids: list[int],
+    store: OrganizerNameRepository | None,
     *,
     page: int = 0,
     notice: str | None = None,
     undo: tuple[int, int] | None = None,
-    known: dict[int, str] | None = None,
+    known: Mapping[int, _Name] | None = None,
 ) -> Screen:
     """The organizer list on ``page`` (clamped); names only for the people shown."""
     page, pages, offset = page_slice(len(ids), page, orgs.ORGS_PER_PAGE)
     shown = ids[offset : offset + orgs.ORGS_PER_PAGE]
-    names = await _names(bot, chat_id, shown, lang, known)
+    names = await _names(bot, chat_id, shown, lang, store, known)
     return orgs.orgs_screen(
         lang,
         chat_id,
         title,
-        [(uid, names[uid]) for uid in shown],
+        [(uid, names[uid].label) for uid in shown],
         page=page,
         pages=pages,
         notice=notice,
         undo=undo,
+        absent={uid for uid in shown if names[uid].absent},
     )
 
 
@@ -340,6 +384,10 @@ async def handle_kb_organizers(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     state: FSMContext,
+    # The organizer-name store's pool. Dishka injects it; None only where a
+    # handler is called without the Dishka wrapper (unit tests), and then the
+    # list names people from Telegram alone.
+    pool: FromDishka[asyncpg.Pool] = None,
     **kwargs: Any,
 ) -> None:
     """Show a page of the chat's organizers.
@@ -359,7 +407,7 @@ async def handle_kb_organizers(
     page = _optional_int(callback.data, 3) or 0
 
     ids, title = await _load(chat_settings_repo, chat_id)
-    screen = await _orgs_view(callback.bot, lang, chat_id, title, ids, page=page)
+    screen = await _orgs_view(callback.bot, lang, chat_id, title, ids, _store(pool), page=page)
     if await _in_prompt(state):
         await _leave_prompt(callback, state, _ADD_CANCELLED[lang], screen)
         return
@@ -371,6 +419,7 @@ async def handle_kb_organizer_remove(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    pool: FromDishka[asyncpg.Pool] = None,  # None outside Dishka: see handle_kb_organizers
     **kwargs: Any,
 ) -> None:
     """Remove an organizer at once and offer ``↩️ Вернуть`` (undo over confirm).
@@ -386,11 +435,12 @@ async def handle_kb_organizer_remove(
         await show_stale(callback, lang, data=kwargs)
         return
     chat_id, user_id = fields
+    store = _store(pool)
 
     ids, title = await _load(chat_settings_repo, chat_id)
     if user_id not in ids:
         # Already gone (a second tap, another admin): show the list as it is.
-        screen = await _orgs_view(callback.bot, lang, chat_id, title, ids)
+        screen = await _orgs_view(callback.bot, lang, chat_id, title, ids, store)
         await show(callback, screen)
         return
     position = ids.index(user_id)
@@ -398,15 +448,17 @@ async def handle_kb_organizer_remove(
     await _save(chat_settings_repo, chat_id, ids)
     logger.info("Organizer removed", chat_id=chat_id, user_id=user_id)
 
-    removed = await _names(callback.bot, chat_id, [user_id], lang)
+    # The stored name stays behind on purpose: ↩️ Вернуть brings it back.
+    removed = await _names(callback.bot, chat_id, [user_id], lang, store)
     screen = await _orgs_view(
         callback.bot,
         lang,
         chat_id,
         title,
         ids,
+        store,
         page=orgs.page_of(position),
-        notice=orgs.REMOVED(lang).format(n=removed[user_id]),
+        notice=orgs.REMOVED(lang).format(n=removed[user_id].label),
         undo=(user_id, position),
     )
     await show(callback, screen)
@@ -417,6 +469,7 @@ async def handle_kb_organizer_undo(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    pool: FromDishka[asyncpg.Pool] = None,  # None outside Dishka: see handle_kb_organizers
     **kwargs: Any,
 ) -> None:
     """Put a just-removed organizer back at the position they had."""
@@ -438,15 +491,17 @@ async def handle_kb_organizer_undo(
         await _save(chat_settings_repo, chat_id, ids)
         logger.info("Organizer restored", chat_id=chat_id, user_id=user_id)
 
-    names = await _names(callback.bot, chat_id, [user_id], lang)
+    store = _store(pool)
+    names = await _names(callback.bot, chat_id, [user_id], lang, store)
     screen = await _orgs_view(
         callback.bot,
         lang,
         chat_id,
         title,
         ids,
+        store,
         page=orgs.page_of(position),
-        notice=orgs.RESTORED(lang).format(n=names[user_id]),
+        notice=orgs.RESTORED(lang).format(n=names[user_id].label),
         known=names,
     )
     await show(callback, screen)
@@ -504,6 +559,7 @@ async def handle_kb_organizer_pick(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     state: FSMContext,
+    pool: FromDishka[asyncpg.Pool] = None,  # None outside Dishka: see handle_kb_organizers
     **kwargs: Any,
 ) -> None:
     """Add the tapped participant. A tap on someone already on the list only says so.
@@ -526,15 +582,21 @@ async def handle_kb_organizer_pick(
         return
     logger.info("Organizer added from the participant list", chat_id=chat_id, user_id=user_id)
 
-    names = await _names(callback.bot, chat_id, [user_id], lang)
-    notice = orgs.ADDED(lang).format(n=names[user_id])
+    store = _store(pool)
+    if store is not None:
+        # The list's name came from the chat's history: keep it with the organizer.
+        await store.remember_seen(chat_id, user_id)
+    names = await _names(callback.bot, chat_id, [user_id], lang, store)
+    notice = orgs.ADDED(lang).format(n=names[user_id].label)
     page = orgs.page_of(ids.index(user_id))
     if await _in_prompt(state):
-        screen = await _orgs_view(callback.bot, lang, chat_id, title, ids, page=page, known=names)
+        screen = await _orgs_view(
+            callback.bot, lang, chat_id, title, ids, store, page=page, known=names
+        )
         await _leave_prompt(callback, state, f"✓ {html_escape(notice)}.", screen)
         return
     screen = await _orgs_view(
-        callback.bot, lang, chat_id, title, ids, page=page, notice=notice, known=names
+        callback.bot, lang, chat_id, title, ids, store, page=page, notice=notice, known=names
     )
     await show(callback, screen)
 
@@ -572,54 +634,41 @@ async def handle_kb_organizer_add_prompt(
     await show(callback, orgs.org_add_screen(lang, title, chat_id))
 
 
-@router.callback_query(F.data.startswith("adm_kb_org_x:"))
-async def handle_kb_organizer_add_cancel(
-    callback: CallbackQuery,
-    chat_settings_repo: FromDishka[ChatSettingsRepository],
-    bot_config_repo: FromDishka[BotConfigRepository],
-    state: FSMContext,
-    **kwargs: Any,
-) -> None:
-    """``✖️ Отмена`` on the prompt's failure answer: the same exit as the reply button."""
-    if not await _admin_tap(callback, bot_config_repo):
-        return
-    lang = _lang_of_payload(callback.data)
-    head = _ints(callback.data, 1)
-    if head is None:
-        await show_stale(callback, lang, data=kwargs, state=state)
-        return
-    (chat_id,) = head
-
-    ids, title = await _load(chat_settings_repo, chat_id)
-    screen = await _orgs_view(callback.bot, lang, chat_id, title, ids)
-    current = await state.get_state()
-    if current not in (None, AdminStates.awaiting_kb_organizer.state):
-        # An old answer tapped while another dialog is open: that dialog is
-        # not this button's to end, so only the list is shown.
-        await show(callback, screen)
-        return
-    await _leave_prompt(callback, state, _ADD_CANCELLED[lang], screen)
-
-
 async def _added(
     message: Message,
     state: FSMContext,
     chat_settings_repo: ChatSettingsRepository,
+    store: OrganizerNameRepository | None,
     lang: str,
     chat_id: int,
     user_id: int,
     *,
     label: str,
     short_name: str,
-    check_membership: bool = False,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    username: str | None = None,
 ) -> None:
-    """Write the organizer and answer from the prompt: the line, then the list."""
+    """Write the organizer, keep the name this add path was given, and answer from
+    the prompt: the line, then the list.
+
+    Telegram is asked once about the new organizer; the same answer names them in
+    the list and says whether to warn that they are not in the chat.
+    """
     added, ids, title = await _add_organizer(chat_settings_repo, chat_id, user_id)
+    if store is not None:
+        # Before the list is drawn, and also on a repeat add: the newest name wins.
+        await store.remember(
+            chat_id, user_id, first_name=first_name, last_name=last_name, username=username
+        )
+    names = await _names(
+        message.bot, chat_id, [user_id], lang, store, fallback={user_id: short_name}
+    )
     template = orgs.ADDED if added else orgs.ALREADY
     line = f"✓ {html_escape(template(lang).format(n=label))}."
     if added:
         logger.info("Organizer added from the prompt", chat_id=chat_id, user_id=user_id)
-        if check_membership and await _left_the_chat(message.bot, chat_id, user_id):
+        if names[user_id].absent:
             line = f"{line}\n{_PICK_NOT_IN_CHAT[lang]}"
     screen = await _orgs_view(
         message.bot,
@@ -627,8 +676,9 @@ async def _added(
         chat_id,
         title,
         ids,
+        store,
         page=orgs.page_of(ids.index(user_id)),
-        known={user_id: short_name},
+        known=names,
     )
     await _leave_prompt(message, state, line, screen)
 
@@ -644,6 +694,7 @@ async def handle_kb_organizer_shared(
     bot_config_repo: FromDishka[BotConfigRepository],
     admin_repo: FromDishka[AdminRepository],
     state: FSMContext,
+    pool: FromDishka[asyncpg.Pool] = None,  # None outside Dishka: see handle_kb_organizers
 ) -> None:
     """The admin picked a person with «🔍 Найти в Telegram» (``request_users``).
 
@@ -683,12 +734,15 @@ async def handle_kb_organizer_shared(
         message,
         state,
         chat_settings_repo,
+        _store(pool),
         lang,
         chat_id,
         person.user_id,
         label=_shared_user_label(person),
         short_name=_short_name(person.username, person.first_name, person.user_id, lang),
-        check_membership=True,
+        first_name=person.first_name,
+        last_name=person.last_name,
+        username=person.username,
     )
 
 
@@ -701,19 +755,29 @@ async def handle_kb_organizer_shared(
 async def handle_kb_organizer_cancel_label(
     message: Message,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
     state: FSMContext,
+    pool: FromDishka[asyncpg.Pool] = None,  # None outside Dishka: see handle_kb_organizers
 ) -> None:
     """«✖️ Отмена» under the prompt. A label is user text, so it is routed
-    before the reader below, which would look it up as a username."""
+    before the reader below, which would look it up as a username.
+
+    The way back shows the organizer list, names included, so it asks the
+    same question every panel tap does: is this still a bot admin? Someone
+    removed from the admins while the prompt was open gets the prompt closed
+    and its keyboard taken away, and no list.
+    """
     data = await state.get_data()
     lang = _get_lang(data.get("kb_lang"))
     chat_id = data.get("kb_chat_id")
-    if not isinstance(chat_id, int):
+    if not isinstance(chat_id, int) or not await check_admin_direct(
+        bot_config_repo, message.from_user.id if message.from_user else None
+    ):
         await state.clear()
         await message.answer(_ADD_CANCELLED[lang], reply_markup=ReplyKeyboardRemove())
         return
     ids, title = await _load(chat_settings_repo, chat_id)
-    screen = await _orgs_view(message.bot, lang, chat_id, title, ids)
+    screen = await _orgs_view(message.bot, lang, chat_id, title, ids, _store(pool))
     await _leave_prompt(message, state, _ADD_CANCELLED[lang], screen)
 
 
@@ -753,6 +817,7 @@ async def handle_kb_organizer_add_reply(
     bot_config_repo: FromDishka[BotConfigRepository],
     message_repo: FromDishka[MessageRepository],
     state: FSMContext,
+    pool: FromDishka[asyncpg.Pool] = None,  # None outside Dishka: see handle_kb_organizers
 ) -> None:
     """Resolve a forwarded message or a plain `@username` into a new organizer.
 
@@ -805,8 +870,9 @@ async def handle_kb_organizer_add_reply(
         sender = origin.sender_user
         name = _short_name(sender.username, sender.first_name, sender.id, lang)
         await _added(
-            message, state, chat_settings_repo, lang, chat_id, sender.id,
+            message, state, chat_settings_repo, _store(pool), lang, chat_id, sender.id,
             label=name, short_name=name,
+            first_name=sender.first_name, last_name=sender.last_name, username=sender.username,
         )  # fmt: skip
         return
 
@@ -821,6 +887,7 @@ async def handle_kb_organizer_add_reply(
         return
     name = f"@{username}"
     await _added(
-        message, state, chat_settings_repo, lang, chat_id, int(found["user_id"]),
+        message, state, chat_settings_repo, _store(pool), lang, chat_id, int(found["user_id"]),
         label=name, short_name=name,
+        first_name=found.get("first_name"), username=username,
     )  # fmt: skip

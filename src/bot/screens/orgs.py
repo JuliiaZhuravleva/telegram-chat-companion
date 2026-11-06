@@ -4,14 +4,16 @@ Four screens, built as plain data (``handlers/admin_kb.py`` sends them):
 
 * ``orgs`` — the organizers of one chat. A tap on ``✖️ {name}`` removes that
   person at once and offers ``↩️ Вернуть`` on the result (undo over confirm).
+  Someone Telegram says is not in the group carries `` · не в чате``.
 * ``org.list`` — the chat's participants by activity; a tap adds. Current
   organizers carry ``✓`` and a tap on them only says so.
 * ``org.add`` — a NEW message with a reply keyboard: Telegram's own person
   search (``request_users``) and ``✖️ Отмена``. The admin may also forward a
   message or type an ``@username``.
 * ``org.fail`` — the answer when a forward or an ``@username`` names nobody
-  the bot can add. The prompt stays open; the inline row offers the
-  participant list or a way out.
+  the bot can add. The prompt stays open: its ``✖️ Отмена`` is still on the
+  reply keyboard under the input, so the inline row offers only the
+  participant list. A second, inline ``✖️ Отмена`` showed two of them.
 
 Every name on a button comes from Telegram and is clipped to the phone row
 (`clip`), never to a character count: twelve Cyrillic capitals and twelve
@@ -28,7 +30,7 @@ from src.bot.custom_emoji import fence
 from src.bot.screens.i18n import Tr
 from src.bot.screens.lint import budget, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
-from src.bot.screens.render import CANCEL, back, cancel, pager
+from src.bot.screens.render import CANCEL, back, pager
 from src.bot.screens.routes import REQUEST_IDS, cb
 
 ORGS_PER_PAGE: Final = 3
@@ -110,7 +112,9 @@ RESTORED: Final = Tr("{n} снова организатор", "{n} is an organiz
 ALREADY: Final = Tr("{n} уже организатор", "{n} is already an organizer")
 ALREADY_TOAST: Final = Tr("Уже организатор", "Already an organizer")
 MEMBER: Final = Tr("участник {id}", "member {id}")
-"""A name Telegram would not give (the person left, the lookup failed)."""
+"""The id, when no name was ever known: not from Telegram, not stored, not in the chat's history."""
+NOT_IN_CHAT: Final = Tr(" · не в чате", " · not in chat")
+"""Appended to an organizer's name when Telegram says the person is not in the group."""
 
 # Buttons
 ADD: Final = Tr("➕ Добавить", "➕ Add")
@@ -141,6 +145,29 @@ def clip(label: str, max_px: float) -> str:
 def chat_label(title: str | None, cid: int) -> str:
     """The chat's title as HTML, or its id when the bot never learned the title."""
     return html.escape(title) if title else str(cid)
+
+
+def display_name(username: object, first_name: object, last_name: object = None) -> str | None:
+    """``@nick``, else ``First Last``; None when Telegram gave no part of a name.
+
+    Only text counts as a part: whatever else arrives (a test double, a None)
+    is no name rather than its ``repr``.
+    """
+
+    def part(value: object) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    if nick := part(username):
+        return f"@{nick}"
+    return " ".join(p for p in (part(first_name), part(last_name)) if p) or None
+
+
+def organizer_label(name: str, lang: str, *, absent: bool = False) -> str:
+    """``✖️ {name}`` clipped to the row, with `` · не в чате`` kept whole after the clip."""
+    if not absent:
+        return clip(f"✖️ {name}", NAME_PX)
+    mark = NOT_IN_CHAT(lang)
+    return clip(f"✖️ {name}", NAME_PX - label_width_px(mark)) + mark
 
 
 def candidate_name(first_name: object, username: object, uid: int) -> str:
@@ -174,15 +201,22 @@ def orgs_screen(
     pages: int = 1,
     notice: str | None = None,
     undo: tuple[int, int] | None = None,
+    absent: Collection[int] = (),
 ) -> Screen:
     """The organizers of one chat, one page of them (``people`` is that page).
 
     ``undo`` is ``(user_id, position)`` of the person just removed: the
-    ``↩️ Вернуть`` button puts them back where they were.
+    ``↩️ Вернуть`` button puts them back where they were. ``absent`` are the
+    ids Telegram says are not in the group: still organizers, marked.
     """
     body = ORGS_BODY(lang) if people else ORGS_EMPTY(lang)
     rows: list[tuple[Button, ...]] = [
-        (Button(clip(f"✖️ {name}", NAME_PX), cb("adm_kb_org_rm:", lang, cid, uid)),)
+        (
+            Button(
+                organizer_label(name, lang, absent=uid in absent),
+                cb("adm_kb_org_rm:", lang, cid, uid),
+            ),
+        )
         for uid, name in people
     ]
     arrows = pager(page, pages, lambda p: cb("adm_kb_orgs:", lang, cid, p))
@@ -264,14 +298,14 @@ def org_add_screen(lang: str, title: str | None = None, cid: int | None = None) 
 
 
 def org_fail_screen(lang: str, cid: int, title: str | None, reason: Reason) -> Screen:
-    """Nobody to add from that forward or ``@username``; the prompt stays open."""
+    """Nobody to add from that forward or ``@username``; the prompt stays open.
+
+    No inline ``✖️ Отмена``: the prompt's own is still on the reply keyboard
+    under the input, and a message cannot take that keyboard away and carry
+    inline buttons at once, so the one way out stays the one already there.
+    """
     return Screen(
         id="org.fail",
         text=f"{_title(NEW_TITLE, lang, title, cid)}\n\n{FAIL[reason](lang)}",
-        rows=(
-            (
-                Button(FROM_MEMBERS(lang), cb("adm_kb_org_list:", lang, cid, 0)),
-                cancel(cb("adm_kb_org_x:", lang, cid), lang),
-            ),
-        ),
+        rows=((Button(FROM_MEMBERS(lang), cb("adm_kb_org_list:", lang, cid, 0)),),),
     )

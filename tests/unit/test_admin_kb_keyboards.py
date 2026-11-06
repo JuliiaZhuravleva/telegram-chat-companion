@@ -168,6 +168,23 @@ class TestOrgsScreen:
         assert label.startswith("✖️ Ж") and label.endswith("…")
         assert label_width_px(label) <= orgs.NAME_PX
 
+    def test_someone_not_in_the_chat_is_marked(self) -> None:
+        screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE, absent={222})
+
+        assert _rows(screen)[:2] == [
+            [("✖️ Аня", f"adm_kb_org_rm:ru:{CHAT_ID}:111")],
+            [("✖️ Борис · не в чате", f"adm_kb_org_rm:ru:{CHAT_ID}:222")],
+        ]
+        english = orgs.orgs_screen("en", CHAT_ID, "Chat", PEOPLE, absent={222})
+        assert _labels(english)[1] == "✖️ Борис · not in chat"
+
+    def test_a_long_name_is_clipped_and_the_mark_survives(self) -> None:
+        screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", [(1, "Ж" * 60)], absent={1})
+
+        label = _labels(screen)[0]
+        assert label.startswith("✖️ Ж") and label.endswith("… · не в чате")
+        assert label_width_px(label) <= orgs.NAME_PX
+
     def test_the_title_is_escaped_and_a_missing_one_is_the_chat_id(self) -> None:
         assert (
             "&lt;i&gt;x&lt;/i&gt; &amp; y"
@@ -183,6 +200,26 @@ class TestOrgsScreen:
         assert screen.text.startswith("👥 <b>Organizers</b> · Chat")
         assert _labels(screen)[-3:] == ["↩️ Undo", "➕ Add", "⬅️ Memory"]
         assert all(":en:" in cb for cb in _callbacks(screen))
+
+
+class TestDisplayName:
+    """The name a live member or a stored row gives the organizer list."""
+
+    @pytest.mark.parametrize(
+        ("parts", "expected"),
+        [
+            (("anya", "Аня", "Ким"), "@anya"),
+            ((None, "Аня", "Ким"), "Аня Ким"),
+            ((None, "Аня", None), "Аня"),
+            ((None, None, "Ким"), "Ким"),
+            (("  ", " Аня ", ""), "Аня"),
+            ((None, None, None), None),
+            ((object(), object(), None), None),
+        ],
+        ids=["nick", "full", "first", "last", "blank_parts", "nothing", "not_text"],
+    )
+    def test_nick_else_the_name(self, parts: tuple[object, ...], expected: str | None) -> None:
+        assert orgs.display_name(*parts) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -321,16 +358,13 @@ class TestKbOrgAddPromptKeyboard:
 
 class TestOrgFailScreen:
     @pytest.mark.parametrize("reason", ["not_found", "hidden", "elsewhere", "channel"])
-    def test_one_row_members_or_cancel(self, reason: orgs.Reason) -> None:
+    def test_one_row_the_members_only(self, reason: orgs.Reason) -> None:
+        """No inline «✖️ Отмена»: the prompt's own is still on the reply keyboard
+        under the input, and both at once read as two different cancels."""
         screen = orgs.org_fail_screen("ru", CHAT_ID, "Чат", reason)
 
         assert screen.id == "org.fail"
-        assert _rows(screen) == [
-            [
-                ("👥 Из участников", f"adm_kb_org_list:ru:{CHAT_ID}:0"),
-                ("✖️ Отмена", f"adm_kb_org_x:ru:{CHAT_ID}"),
-            ]
-        ]
+        assert _rows(screen) == [[("👥 Из участников", f"adm_kb_org_list:ru:{CHAT_ID}:0")]]
         assert screen.text == f"👥 <b>Новый организатор</b> · Чат\n\n{orgs.FAIL[reason]('ru')}"
 
     def test_every_reason_says_something_different(self) -> None:

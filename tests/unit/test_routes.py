@@ -104,7 +104,6 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_kb_org_list:": (LANG, CID, PAGE),
     "adm_kb_org_pick:": (LANG, CID, UID),
     "adm_kb_org_add:": (LANG, CID),
-    "adm_kb_org_x:": (LANG, CID),
     "adm_stk_sets:": (LANG, PAGE),
     "adm_stk_pk:": (LANG, PACK_REF, PAGE),
     "adm_stk_view:": (LANG, FUID),
