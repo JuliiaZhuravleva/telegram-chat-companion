@@ -1279,7 +1279,7 @@ class TestDuplicateDetection:
 
 
 # ---------------------------------------------------------------------------
-# notify_admins — explicitness line + tolerance_level threading (A-1)
+# notify_admins — the shared sticker card, its buttons, its record
 # ---------------------------------------------------------------------------
 
 
@@ -1291,47 +1291,228 @@ def _make_notify_bot() -> MagicMock:
     desc_msg = MagicMock()
     desc_msg.message_id = 2
     bot.send_message = AsyncMock(return_value=desc_msg)
+    bot.send_photo = AsyncMock()
     return bot
+
+
+def _notify_result(**overrides) -> StickerLearningResult:
+    fields = {
+        "is_new": True,
+        "file_unique_id": "unique-123",
+        "visual_description": "a cat",
+        "explicitness_score": 0.3,
+    }
+    fields.update(overrides)
+    return StickerLearningResult(**fields)
+
+
+def _wire_notify_repo(sticker_service, *, record=None, pack=None) -> None:
+    repo = sticker_service._repo
+    repo.save_notification = AsyncMock(return_value=1)
+    repo.get_by_file_unique_id = AsyncMock(return_value=record)
+    repo.get_sticker_set = AsyncMock(return_value=pack)
+
+
+def _sent(bot: MagicMock) -> tuple[str, list[str], list[str]]:
+    """Text, button labels and callbacks of the card the admin received."""
+    call = bot.send_message.call_args
+    markup = call.kwargs["reply_markup"]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    return call.args[1], [b.text for b in buttons], [b.callback_data for b in buttons]
+
+
+class TestNotifyAdminsCard:
+    @pytest.mark.asyncio
+    async def test_card_is_a_reply_to_the_sticker_with_the_card_buttons(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(), [111], tolerance_level=0.5
+        )
+
+        bot.send_sticker.assert_awaited_once_with(111, "file-123")
+        call = bot.send_message.call_args
+        assert call.kwargs["reply_to_message_id"] == 1
+        assert call.kwargs["parse_mode"] == "HTML"
+        text, labels, callbacks = _sent(bot)
+        assert "Новый стикер:" in text and "a cat" in text
+        assert labels == ["🔁 Разобрать заново", "🧹 Очистить", "🔞 Откровенность"]
+        assert callbacks == [
+            "adm_stk_reanalyze:ru:unique-123",
+            "adm_stk_clr_ask:ru:unique-123",
+            "adm_stk_score:ru:unique-123",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_every_notification_is_remembered_for_the_reply_shortcut(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(bot, _make_sticker(), _notify_result(), [111, 222])
+
+        calls = sticker_service._repo.save_notification.await_args_list
+        assert [c.kwargs["admin_id"] for c in calls] == [111, 222]
+        assert calls[0].kwargs == {
+            "file_unique_id": "unique-123",
+            "admin_id": 111,
+            "message_id": 2,
+            "sticker_msg_id": 1,
+            "chat_id": 111,
+        }
+
+    @pytest.mark.asyncio
+    async def test_english_admin_language(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(), [111], lang="en"
+        )
+
+        text, labels, callbacks = _sent(bot)
+        assert "New sticker:" in text
+        assert "Новый" not in text
+        assert labels[0] == "🔁 Re-analyse"
+        assert callbacks[0] == "adm_stk_reanalyze:en:unique-123"
+
+    @pytest.mark.asyncio
+    async def test_the_card_reads_the_catalogue_row_and_the_pack_title(self, sticker_service):
+        """The stored row wins over the in-memory result: it is what a reply
+        to this card will edit, and the pack row gives the human title."""
+        _wire_notify_repo(
+            sticker_service,
+            record={
+                "file_unique_id": "unique-123",
+                "visual_description": "a stored cat",
+                "emotion": "joy",
+                "explicitness_score": 0.3,
+                "set_name": "test_set",
+            },
+            pack={"set_name": "test_set", "set_title": "Cats & Co"},
+        )
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(bot, _make_sticker(), _notify_result(), [111])
+
+        text, _, _ = _sent(bot)
+        assert "a stored cat" in text
+        assert "Пак: Cats &amp; Co" in text
+        sticker_service._repo.get_sticker_set.assert_awaited_once_with("test_set")
+
+    @pytest.mark.asyncio
+    async def test_a_catalogue_read_failure_still_notifies(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        sticker_service._repo.get_by_file_unique_id = AsyncMock(side_effect=RuntimeError("db"))
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(bot, _make_sticker(), _notify_result(), [111])
+
+        text, _, _ = _sent(bot)
+        assert "a cat" in text
+
+    @pytest.mark.asyncio
+    async def test_detailed_mode_adds_collage_and_technical_lines(self, sticker_service):
+        _wire_notify_repo(
+            sticker_service,
+            record={
+                "file_unique_id": "unique-123",
+                "visual_description": "a cat",
+                "style_tags": ["cute"],
+                "emoji": "😀",
+                "description_embedding": [0.1],
+                "explicitness_score": 0.3,
+            },
+        )
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(
+            bot,
+            _make_sticker(),
+            _notify_result(),
+            [111],
+            notification_mode="detailed",
+            collage_png=b"png",
+        )
+
+        bot.send_photo.assert_awaited_once()
+        text, _, _ = _sent(bot)
+        assert "Теги: cute" in text
+        assert "Эмбеддинг: ✅" in text
+        assert "🆔 <code>unique-123</code>" in text
+
+    @pytest.mark.asyncio
+    async def test_plain_mode_has_no_technical_lines(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(bot, _make_sticker(), _notify_result(), [111])
+
+        bot.send_photo.assert_not_awaited()
+        text, _, _ = _sent(bot)
+        assert "🆔" not in text
+
+    @pytest.mark.asyncio
+    async def test_off_and_failed_analysis_send_nothing(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(), [111], notification_mode="off"
+        )
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(analysis_failed=True), [111]
+        )
+
+        bot.send_sticker.assert_not_awaited()
+        bot.send_message.assert_not_awaited()
 
 
 class TestNotifyAdminsExplicitnessLine:
     @pytest.mark.asyncio
     async def test_scored_result_shows_pass_verdict_against_chat_tolerance(self, sticker_service):
-        sticker_service._repo.save_notification = AsyncMock()
+        _wire_notify_repo(sticker_service)
         bot = _make_notify_bot()
-        sticker = _make_sticker()
-        result = StickerLearningResult(
-            is_new=True,
-            file_unique_id="unique-123",
-            visual_description="a cat",
-            explicitness_score=0.3,
+
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(), [111], tolerance_level=0.5
         )
 
-        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
-
-        text = bot.send_message.call_args.args[1]
-        assert "0.30" in text
-        assert "0.50" in text
-        assert "✅ пройдёт" in text
+        text, _, _ = _sent(bot)
+        assert "Откровенность: 0.30 · пройдёт в чате с допуском 0.50" in text
 
     @pytest.mark.asyncio
-    async def test_unscored_result_shows_not_scored_never_a_verdict(self, sticker_service):
-        sticker_service._repo.save_notification = AsyncMock()
+    async def test_score_above_the_chat_ceiling_is_blocked(self, sticker_service):
+        _wire_notify_repo(sticker_service)
         bot = _make_notify_bot()
-        sticker = _make_sticker()
-        result = StickerLearningResult(
-            is_new=True,
-            file_unique_id="unique-123",
-            visual_description="a cat",
-            explicitness_score=None,
+
+        await sticker_service.notify_admins(
+            bot,
+            _make_sticker(),
+            _notify_result(explicitness_score=0.9),
+            [111],
+            tolerance_level=0.5,
         )
 
-        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=1.0)
+        text, _, _ = _sent(bot)
+        assert "Откровенность: 0.90 · не пройдёт в чате с допуском 0.50" in text
 
-        text = bot.send_message.call_args.args[1]
-        assert "не оценён" in text
-        assert "✅" not in text
-        assert "❌" not in text
+    @pytest.mark.asyncio
+    async def test_unscored_result_says_the_bot_will_not_send_it(self, sticker_service):
+        _wire_notify_repo(sticker_service)
+        bot = _make_notify_bot()
+
+        await sticker_service.notify_admins(
+            bot,
+            _make_sticker(),
+            _notify_result(explicitness_score=None),
+            [111],
+            tolerance_level=1.0,
+        )
+
+        text, _, _ = _sent(bot)
+        assert "не оценена · бот его не отправит" in text
+        assert "пройдёт" not in text
 
     @pytest.mark.asyncio
     async def test_uses_the_default_tolerance_level_kwarg_when_caller_omits_it(
@@ -1340,21 +1521,15 @@ class TestNotifyAdminsExplicitnessLine:
         """media.py always threads the real chat's tolerance_level, but the
         function-level default (ChatConfig's own 0.5 fallback) must still
         produce a sane, non-crashing verdict for any other caller."""
-        sticker_service._repo.save_notification = AsyncMock()
+        _wire_notify_repo(sticker_service)
         bot = _make_notify_bot()
-        sticker = _make_sticker()
-        result = StickerLearningResult(
-            is_new=True,
-            file_unique_id="unique-123",
-            visual_description="a cat",
-            explicitness_score=0.4,
+
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(explicitness_score=0.4), [111]
         )
 
-        await sticker_service.notify_admins(bot, sticker, result, [111])
-
-        text = bot.send_message.call_args.args[1]
-        assert "0.50" in text
-        assert "✅ пройдёт" in text
+        text, _, _ = _sent(bot)
+        assert "0.40 · пройдёт в чате с допуском 0.50" in text
 
     @pytest.mark.asyncio
     async def test_manual_score_shows_manual_badge(self, sticker_service):
@@ -1362,57 +1537,28 @@ class TestNotifyAdminsExplicitnessLine:
         can inherit a manual score+flag from its canonical row, so the
         (вручную) badge can legitimately appear on its very first
         notification -- threaded via StickerLearningResult.explicitness_is_manual."""
-        sticker_service._repo.save_notification = AsyncMock()
+        _wire_notify_repo(sticker_service)
         bot = _make_notify_bot()
-        sticker = _make_sticker()
-        result = StickerLearningResult(
-            is_new=True,
-            file_unique_id="unique-123",
-            visual_description="a cat",
-            explicitness_score=0.3,
-            explicitness_is_manual=True,
+
+        await sticker_service.notify_admins(
+            bot,
+            _make_sticker(),
+            _notify_result(explicitness_is_manual=True),
+            [111],
+            tolerance_level=0.5,
         )
 
-        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
-
-        text = bot.send_message.call_args.args[1]
+        text, _, _ = _sent(bot)
         assert "(вручную)" in text
 
     @pytest.mark.asyncio
     async def test_automatic_score_shows_no_manual_badge(self, sticker_service):
-        sticker_service._repo.save_notification = AsyncMock()
+        _wire_notify_repo(sticker_service)
         bot = _make_notify_bot()
-        sticker = _make_sticker()
-        result = StickerLearningResult(
-            is_new=True,
-            file_unique_id="unique-123",
-            visual_description="a cat",
-            explicitness_score=0.3,
-            explicitness_is_manual=False,
+
+        await sticker_service.notify_admins(
+            bot, _make_sticker(), _notify_result(), [111], tolerance_level=0.5
         )
 
-        await sticker_service.notify_admins(bot, sticker, result, [111], tolerance_level=0.5)
-
-        text = bot.send_message.call_args.args[1]
+        text, _, _ = _sent(bot)
         assert "вручную" not in text
-
-    @pytest.mark.asyncio
-    async def test_no_description_omits_explicitness_line(self, sticker_service):
-        """Defensive gate mirroring admin_sticker.py's own: no visual
-        description at all -> no explicitness line, even if a score
-        somehow came back (shouldn't happen per ADR-0008 Decision 4, but
-        must not render a misleading line if it does)."""
-        sticker_service._repo.save_notification = AsyncMock()
-        bot = _make_notify_bot()
-        sticker = _make_sticker()
-        result = StickerLearningResult(
-            is_new=True,
-            file_unique_id="unique-123",
-            visual_description=None,
-            explicitness_score=0.4,
-        )
-
-        await sticker_service.notify_admins(bot, sticker, result, [111])
-
-        text = bot.send_message.call_args.args[1]
-        assert "Оценка откровенности" not in text

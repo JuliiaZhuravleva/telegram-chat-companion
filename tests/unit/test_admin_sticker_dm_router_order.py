@@ -108,9 +108,11 @@ def _make_router_message(
         return_value=dict(_SAMPLE_STICKER_ROW) if sticker_known else None
     )
     sticker_repo.get_sticker_set = AsyncMock(return_value={"set_name": "test_set"})
+    sticker_repo.save_notification = AsyncMock(return_value=1)
 
     admin_repo = MagicMock()
     admin_repo.get_admin_language = AsyncMock(return_value="ru")
+    admin_repo.get_notification_settings = AsyncMock(return_value={"sticker": "on"})
 
     bot_config_repo = MagicMock()
     bot_config_repo.get = AsyncMock(return_value="555")
@@ -332,10 +334,15 @@ def _make_text_reply_message(
     knowledge_repo = MagicMock()
     knowledge_repo.get_active_facts = AsyncMock(return_value=[])
 
+    # The reply handler answers in the admin language.
+    admin_repo = MagicMock()
+    admin_repo.get_admin_language = AsyncMock(return_value="ru")
+
     data: dict[str, object] = {
         "is_admin": is_admin,
         "sticker_repo": sticker_repo,
         "sticker_service": sticker_service,
+        "admin_repo": admin_repo,
         "bot_config_repo": bot_config_repo,
         "knowledge_repo": knowledge_repo,
         "chat_config": chat_config,
