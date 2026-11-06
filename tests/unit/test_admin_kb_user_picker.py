@@ -21,6 +21,7 @@ from aiogram.methods import GetChatMember
 from aiogram.types import (
     ChatMemberLeft,
     ChatMemberMember,
+    InlineKeyboardMarkup,
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
@@ -38,6 +39,8 @@ from tests.unit.test_fsm_escape import ADMIN_ID, _FakeState, _make_message, _pro
 GROUP_ID = -100123  # obviously fake
 PICKED_ID = 7001
 NOT_FOUND = "Не нашёл такого участника"
+ORGS_HEAD = "👥 <b>Организаторы</b>"
+CANCELLED = "Добавление организатора отменено."
 
 
 def _with_pick(
@@ -116,10 +119,14 @@ class TestAPickAddsTheOrganizer:
 
         assert _written_ids(data) == [PICKED_ID]
         sends = _sends(bot)
-        assert len(sends) == 1
+        assert len(sends) == 2, "the line that removes the keyboard, then the organizer list"
         assert NOT_FOUND not in sends[0].text  # type: ignore[attr-defined]
-        assert sends[0].text == "✅ Аня Ким (@anya) добавлен(а) в организаторы."  # type: ignore[attr-defined]
+        assert sends[0].text == "✓ Аня Ким (@anya) теперь организатор."  # type: ignore[attr-defined]
         assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
+        assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
+        assert isinstance(sends[1].reply_markup, InlineKeyboardMarkup)  # type: ignore[attr-defined]
+        labels = [b.text for row in sends[1].reply_markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+        assert "✖️ @anya" in labels, labels
         assert await state.get_state() is None
 
     async def test_someone_outside_the_chat_is_added_with_a_warning(self) -> None:
@@ -158,7 +165,10 @@ class TestAPickAddsTheOrganizer:
         await _propagate(_with_pick(msg), data, state)
 
         assert _written_ids(data) is None
-        assert "добавлен(а)" in _sends(bot)[0].text  # type: ignore[attr-defined]
+        sends = _sends(bot)
+        assert sends[0].text == "✓ Аня Ким (@anya) уже организатор."  # type: ignore[attr-defined]
+        assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
+        assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
 
 
 @pytest.mark.usefixtures("admin")
@@ -177,13 +187,18 @@ class TestAStalePickWritesNothing:
         assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
 
     async def test_with_a_foreign_request_id(self) -> None:
+        """Another person picker's answer is not this handler's: it neither
+        writes an organizer nor answers for the other picker. The prompt this
+        admin has open stays open."""
         msg, data, bot = _make_message()
         state = await _parked_in_prompt()
 
         await _propagate(_with_pick(msg, request_id=ORG_PICK_REQUEST_ID + 1), data, state)
 
         assert _written_ids(data) is None
-        assert _sends(bot)[0].text.startswith("Этот выбор уже закрыт")  # type: ignore[attr-defined]
+        assert not any(s.text.startswith("Этот выбор уже закрыт") for s in _sends(bot))  # type: ignore[attr-defined]
+        assert not any(NOT_FOUND in s.text for s in _sends(bot))  # type: ignore[attr-defined]
+        assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
 
 
 async def test_a_non_admin_pick_does_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,8 +223,11 @@ class TestTheLabels:
         assert _written_ids(data) is None
         assert await state.get_state() is None
         sends = _sends(bot)
-        assert [s.text for s in sends] == ["Добавление организатора отменено."]  # type: ignore[attr-defined]
+        assert len(sends) == 2, "the line that removes the keyboard, then the organizer list"
+        assert sends[0].text == CANCELLED  # type: ignore[attr-defined]
         assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
+        assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
+        assert isinstance(sends[1].reply_markup, InlineKeyboardMarkup)  # type: ignore[attr-defined]
 
     async def test_the_picker_label_as_text_keeps_the_prompt_open(self) -> None:
         """Only a client that cannot show the picker sends its label as text."""
@@ -364,7 +382,7 @@ class TestDrawnIconsDoNotBreakTheLabels:
 
         assert _written_ids(data) is None
         assert await state.get_state() is None
-        assert [s.text for s in _sends(bot)] == ["Добавление организатора отменено."]  # type: ignore[attr-defined]
+        assert _sends(bot)[0].text == CANCELLED  # type: ignore[attr-defined]
 
     @pytest.mark.usefixtures("admin")
     async def test_the_iconed_picker_label_still_gets_the_fallback(self) -> None:
