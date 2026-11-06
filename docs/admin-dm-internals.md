@@ -546,59 +546,76 @@ predicate), for a count on an entry button.
 
 ## A2 — Chats and chat sections
 
-Files: [src/bot/handlers/admin_chat_panel.py](../src/bot/handlers/admin_chat_panel.py)
-(`show_chat`, `show_chats`, the per-chat panel and the tolerance prompt),
-[src/bot/handlers/admin_reactions.py](../src/bot/handlers/admin_reactions.py),
-[src/bot/screens/sections.py](../src/bot/screens/sections.py) (which panel section each
-setting code is shown in — the UI's grouping, deliberately separate from
-`settings_fields.FieldGroup`, which the defaults screen and the toggles still read).
+Files:
+
+| File | Holds |
+|---|---|
+| [src/bot/handlers/admin_chat_panel.py](../src/bot/handlers/admin_chat_panel.py) | `show_chat`, `show_chats`, every `adm_pnl*:` handler, the tolerance prompt, the instruction editor, `/panel` |
+| [src/bot/screens/chat.py](../src/bot/screens/chat.py) | Pure builders over a `ChatView`: the chat list, `/panel` results, one chat's root, its six sections, the tolerance screens; the copy and the toggle labels |
+| [src/bot/screens/samples/chat.py](../src/bot/screens/samples/chat.py) | One sample per state that changes a screen's rows or labels |
+| [src/bot/screens/sections.py](../src/bot/screens/sections.py) | Which section each setting code is shown in (`SECTION_OF`), the old group tokens (`LEGACY_GROUPS`), the `· общее` rule (`shows_common`) |
+| [src/bot/keyboards/admin_chat_panel.py](../src/bot/keyboards/admin_chat_panel.py) | The instruction editor's two keyboards; `chat_panel_root_keyboard`, a shim kept only until the KB area stops importing it |
+| [src/bot/handlers/admin_reactions.py](../src/bot/handlers/admin_reactions.py) | An empty router, kept while `handlers/__init__.py` includes it |
+| [src/bot/settings_fields.py](../src/bot/settings_fields.py) | The field registry (§A2.1) |
 
 ### A2.1 Settings-field registry
 
-`settings_fields.py` is the single source of truth for grouping, labels, `callback_data`
-codes, value types and the legacy split. Both the chat panel and the defaults screen render
-from it.
+`settings_fields.py` is the single source of truth for `callback_data` codes, value types and
+the legacy split. The defaults screen renders its grouping and labels from it; the chat panel
+takes its grouping from `sections.SECTION_OF` and its labels from `screens.chat.LABELS`, so
+the panel's wording can change without moving the defaults screen.
 
-- **26 fields** = 27 mergeable `ChatConfig` fields (`_CHAT_CONFIG_FIELDS`) − `enabled`.
-  `kb_organizer_ids` is excluded from the registry too, but it was never in the merge to
-  begin with — it is written straight through `ChatSettingsRepository`.
+- **34 fields** = the mergeable `ChatConfig` fields (`_CHAT_CONFIG_FIELDS`) − `enabled`.
+  `kb_organizer_ids` is excluded too, but it was never in the merge to begin with — it is
+  written straight through `ChatSettingsRepository`.
 - **13 legacy** (migration 001 columns that still carry a SQL `DEFAULT`): `ensure_exists()`
   materialises a value on first contact, permanently shadowing `bot_config.default_*`.
-  Therefore they never show the inherited marker and never appear on the global screen.
-- **13 non-legacy** (nullable, no `DEFAULT`) — NULL honestly means "inherited".
-- Only `FieldType.BOOL` fields get a toggle; the rest render read-only, except
-  `tolerance_level`, which has a dedicated FSM editor (ADR-0008 Decision 10). A generic
-  non-BOOL editor is the deferred F-1 work item.
+  Therefore they never show `· общее` and never appear on the global screen.
+- **21 non-legacy** (nullable, no `DEFAULT`) — NULL honestly means "inherited", and only these
+  show `· общее` (`sections.shows_common`: `not field.legacy and row[key] is None`).
+- Only `FieldType.BOOL` fields get a toggle. `tolerance_level` has its own presets and FSM
+  prompt (ADR-0008 Decision 10), `system_prompt` its own editor; every other non-bool value is
+  shown read-only.
 
 Every count on this page is prose about a number the code computes (`len(CHAT_SETTINGS_FIELDS)`,
 `len(new_fields())`), so treat the code as authoritative and fix the prose when it drifts. It has
-drifted twice: the docstrings that said "11 new fields" predated `tolerance_level`, and the 25/12
-figures predated `chunks_enabled` (S5b). `tests/unit/test_settings_fields.py` pins the numbers —
-if a count here disagrees with that file, that file is right.
+drifted three times: "11 new fields" predated `tolerance_level`, 25/12 predated `chunks_enabled`
+(S5b), and 26/13 predated the seven community fields. `tests/unit/test_settings_fields.py` pins
+the numbers — if a count here disagrees with that file, that file is right.
 
-Three fields are **link-only** on the chat panel: `kb_enabled`, `reactions_enabled`,
-`reactions_history_enabled`. `handle_chat_panel_toggle` explicitly refuses them
-(`_LINK_ONLY_KEYS`) so their write path stays in the KB/Reactions handlers and is not
-duplicated. On the *defaults* screen they are ordinary toggles — there is no global KB or
-Reactions sub-panel to link to.
+**Superseded: the link-only fields (ADR-0010 Decision 3, ADR-0006 Decision 2).** Until the
+redesign, `kb_enabled`, `reactions_enabled` and `reactions_history_enabled` were link rows on
+the chat panel and `handle_chat_panel_toggle` refused them (`_LINK_ONLY_KEYS`), so that their
+only writers stayed in the KB and Reactions pickers and the write path was not duplicated. The
+redesign retires those pickers (`adm_react:` / `adm_react_menu:` / `adm_react_toggle:` with
+their handlers and keyboard are deleted here; `adm_kb:` / `adm_kb_menu:` belong to §A4), which
+removes the reason: the three are now ordinary switches in 🧠 Память and 😀 Реакции, written by the same
+`toggle_bool_field` as every other bool, and the panel is again their single writer.
+`test_kb_enabled_code_now_reaches_chat_settings_write` (integration) is the old
+`…never_reaches…` test inverted on purpose. Two things the old split carried survive it: the
+three switches still show the raw-column + global-default value (below), so the memory section
+and the KB area cannot disagree, and switching reactions on still runs the live admin check
+(ADR-0004 Decision 5).
 
 #### Effective-value resolution
 
 Merge order is YAML → `bot_config.default_*` → `chat_settings` → `ChatConfig`. Three
 resolution paths exist and must stay consistent:
 
-- `ChatConfigService.get_config()` — used by the chat panel for everything except the link
-  rows.
-- `_fresh_effective()` / `_effective_kb_enabled()` / `_resolve_toggles()` — direct raw-row +
-  global-default reads used for the KB/Reactions rows, mirroring each other.
+- `ChatConfigService.get_config()` — everything the chat panel shows, except the three
+  switches below.
+- `_fresh_effective()` (keys and fallbacks in `_LIVE_DEFAULTS`) — raw column, then
+  `bot_config.default_*`, then the bot's own fallback, for `kb_enabled`,
+  `reactions_enabled`, `reactions_history_enabled`. Mirrors `admin_kb._effective_kb_enabled`.
 - `_resolve_values()` in `admin_defaults.py` — `bot_config.get_defaults()` with the
   `ChatConfig(chat_id=0)` dataclass as fallback (layer 1).
 
 Toggles always flip the **effective** value, never the raw column, so a chat that is on via
 the global default turns off on the first tap. `toggle_bool_field` performs the negation
 inside the `UPDATE` (`NOT COALESCE(col, $effective)`), which closes the double-tap race, and
-returns `None` when no row matched — the handler reports that as an error rather than a
-success toast.
+returns `None` when no row matched — the handler answers that with an alert rather than a
+success notice. Every write re-reads the chat (`_load_view`) before drawing, so the notice
+and the switch never show a value from before the write.
 
 #### Cache invalidation
 
@@ -611,6 +628,58 @@ a single update (measured 2026-08-06). They become load-bearing if the scope mov
 `Scope.APP` — at which point the two write sites that do **not** invalidate
 (`approve_attempt` in `access_card.py`, `handle_wl_remove` in `admin.py`) must be fixed in
 the same commit. Tracked as TD-046.
+
+### A2.2 Screens, callbacks and entries
+
+| Callback | Payload | Screen |
+|---|---|---|
+| `adm_pnl:` | `lang:page` | `chats` / `chats.empty` |
+| `adm_pnl_menu:` | `lang:chat_id` | `chat` |
+| `adm_pnl_grp:` | `lang:chat_id:section` | a section; `rules` hands over to `show_rules` (§A3) |
+| `adm_pnl_tgl:` | `lang:chat_id:code` | the code's own section (`SECTION_OF`), with a notice |
+| `adm_pnl_tol:` | `lang:chat_id` / `lang:chat_id:in` | `tol.prompt` / `tol.in` |
+| `adm_pnl_tolset:` | `lang:chat_id:value` | `chat.stickers`, with a notice |
+| `adm_pnl_tolcancel:` | `lang:chat_id` | `chat.stickers` |
+| `adm_pnl_sp*:` | `lang:chat_id[:rev]` | the instruction editor, then `behavior` |
+
+- **The list** is `AdminRepository.get_enabled_chats_page_by_activity(page, per_page)`, with
+  `count_attempts("pending" / "rejected")` for the entry row. `screens.chats_per_page` is 3
+  when that row is shown and 4 otherwise. A page past the end is fetched again as the last page.
+- **Old group tokens** map through `sections.LEGACY_GROUPS` (`modules`, `kb` → memory,
+  `rules` → the rules screen), so a button drawn before the redesign still lands somewhere real.
+- **Back is the tree parent**: a section → its chat, a chat → the list, the list → the hub.
+  The old `:p` origin token (back to a KB/Reactions picker) is gone with the pickers.
+- **The reactions section asks Telegram every time it is drawn**
+  (`utils.is_bot_chat_admin`; the bot id from `dp["bot_id"]`, else `bot.me()`). Switching
+  `rx` on asks once more and pops `REACTIONS_NOT_ADMIN_ALERT` if the answer is no; the
+  write stands either way.
+- **Hidden switches refuse stale taps** (`_HIDDEN_WHILE_OFF`): the five community parts while
+  `cm` is off, `rh` while `rx` is off. Their buttons are not drawn then, so a tap is from an
+  older screen; it writes nothing and re-renders the section under a line saying so.
+- **Tolerance input** is `AdminStates.awaiting_setting_value` with `tol_chat_id`, `tol_lang` and
+  `tol_prompt_id` in the FSM data. Each new answer first takes the keyboard off the previous
+  prompt (`_drop_prompt_keyboard`, `TelegramBadRequest` suppressed — a deliberate raw edit, see
+  `test_edit_call_sites_are_guarded.py`), so only the newest prompt can act. A rejected value
+  sends one new prompt and records its id; an accepted one clears the state and sends the
+  stickers section as one new message.
+- **Unparsable payloads** — a non-integer chat id or page, an unknown section or code, a
+  non-bool code on the toggle, a preset outside 0..1 — go to `show_stale`. The two cancel
+  handlers (`adm_pnl_tolcancel:`, `adm_pnl_spx:`) clear their own state first, so the way out
+  never depends on the payload.
+- **A chat with no settings row** shows the list with `_CHAT_GONE` above it; a toggle or a
+  preset on such a chat keeps the `_NO_ROW` alert, since nothing was written.
+- **`show_chat(target, lang, chat_id, *, notice=None, data)`** resolves five dependencies from
+  `data` (`ChatSettingsRepository`, `BotConfigRepository`, `ChatConfigService`,
+  `RulesRepository`, `AdminRepository`); **`show_chats(target, lang, page=0, *, notice=None,
+  data)`** resolves `AdminRepository`. Both edit for a callback and send for a message.
+- **`/panel`** is `Command("panel")` + `IsAdmin()` + `F.chat.type == "private"` (the chat-type
+  guard is a filter, never a body check). A reference goes through `parse_chat_reference` and
+  must resolve to a row with `enabled`; a title goes to `find_enabled_chats_by_title(query,
+  limit=FIND_SHOWN + 1)`, the extra row being how the screen knows to say the list was cut.
+
+Reaction *updates* from chats are `handlers/reactions.py`, which keeps its own
+`chat_config.enabled` guard: `AccessControlMiddleware` does not understand `message_reaction`
+(CLAUDE.md, Gotchas).
 
 ---
 

@@ -10,7 +10,7 @@ import asyncio
 import datetime as dt
 from dataclasses import replace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiogram.types import Chat, Message, MessageEntity, Sticker, User
@@ -25,6 +25,10 @@ from src.bot.handlers.admin_chat_panel import (
     handle_chat_panel_sp_redo,
     handle_chat_panel_sp_save,
     router,
+)
+from src.bot.keyboards.admin_chat_panel import (
+    system_prompt_cancel_keyboard,
+    system_prompt_confirm_keyboard,
 )
 from src.bot.states.admin import AdminStates
 from src.models.chat_config import ChatConfig
@@ -556,11 +560,13 @@ class TestRedoAndCancel:
         state = _editing()
         callback = _callback("adm_pnl_spx:ru:not-an-int")
 
-        await handle_chat_panel_sp_cancel(
-            callback, state, _chat_settings_repo({}), _bot_config_repo(), _config_service()
-        )
+        with patch("src.bot.handlers.admin_chat_panel.show_stale", new=AsyncMock()) as stale:
+            await handle_chat_panel_sp_cancel(
+                callback, state, _chat_settings_repo({}), _bot_config_repo(), _config_service()
+            )
 
         assert state.state is None
+        stale.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cancel_from_another_chats_screen_keeps_this_draft(self) -> None:
@@ -675,3 +681,26 @@ class TestDraftVersion:
         message = _message("заново", 40)
         await handle_chat_panel_sp_input(message, state, _bot(), _bot_config_repo())
         assert state.data["sp_parts"] == [[40, "заново"]]
+
+
+class TestSystemPromptKeyboards:
+    def test_system_prompt_keyboards_carry_distinct_prefixes(self) -> None:
+        """``startswith("adm_pnl_sp:")`` must not also catch save/redo/cancel."""
+        cancel = system_prompt_cancel_keyboard("ru", CHAT_ID)
+        confirm = system_prompt_confirm_keyboard("ru", CHAT_ID, 2147483647)
+        datas = [b.callback_data for kb in (cancel, confirm) for r in kb.inline_keyboard for b in r]
+        assert sorted(datas) == sorted(
+            [
+                f"adm_pnl_spx:ru:{CHAT_ID}",
+                f"adm_pnl_spok:ru:{CHAT_ID}:2147483647",
+                f"adm_pnl_spre:ru:{CHAT_ID}:2147483647",
+                f"adm_pnl_spx:ru:{CHAT_ID}",
+            ]
+        )
+        assert not any(d.startswith("adm_pnl_sp:") for d in datas)
+        assert all(len(d.encode()) <= 64 for d in datas)
+
+    def test_incomplete_draft_keyboard_has_no_save(self) -> None:
+        kb = system_prompt_confirm_keyboard("ru", CHAT_ID, 5, can_save=False)
+        datas = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert datas == [f"adm_pnl_spre:ru:{CHAT_ID}:5", f"adm_pnl_spx:ru:{CHAT_ID}"]

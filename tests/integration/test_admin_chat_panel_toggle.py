@@ -256,30 +256,38 @@ class TestToggleInvalidatesCache:
 
 
 # ---------------------------------------------------------------------------
-# Decision 2 boundary, re-verified against a real (non-mocked) repo
+# The knowledge base switch, now a panel toggle, against a real repo
 # ---------------------------------------------------------------------------
 
 
-class TestToggleRejectsLinkOnlyFieldAgainstRealRepo:
+class TestKnowledgeBaseTogglesThroughThePanelAgainstRealRepo:
     @pytest.mark.asyncio
-    async def test_kb_enabled_code_never_reaches_chat_settings_write(
+    async def test_kb_enabled_code_now_reaches_chat_settings_write(
         self,
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
         service: ChatConfigService,
     ) -> None:
-        """KB's own toggle handler (admin_kb.py) owns this write, not the
-        generic panel toggle -- the row must stay untouched even though this
-        is a real repository, not a mock asserting call args."""
+        """Inverted on purpose. This used to prove the panel could never write
+        ``kb_enabled`` (ADR-0010: the switch lived only in admin_kb.py). The
+        switch now sits in the chat's memory section and toggles through the
+        same ``toggle_bool_field`` as every other switch; the superseding note
+        is in docs/admin-dm-internals.md. What must hold against a real
+        database: a fresh row carries NULL (the column has no DEFAULT), the
+        panel flips it from the value the chat actually runs with, and the
+        service serves the new value after the write."""
         await chat_settings_repo.ensure_exists(CHAT_ID, "Chat", "group")
         before = await chat_settings_repo.get(CHAT_ID)
+        assert before is not None
+        assert before["kb_enabled"] is None
+        assert (await service.get_config(CHAT_ID)).kb_enabled is False
 
-        await handle_chat_panel_toggle(
-            _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:kb"),
-            chat_settings_repo,
-            bot_config_repo,
-            service,
-        )
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:kb")
+        await handle_chat_panel_toggle(callback, chat_settings_repo, bot_config_repo, service)
 
         after = await chat_settings_repo.get(CHAT_ID)
-        assert after == before
+        assert after is not None
+        assert after["kb_enabled"] is True
+        assert (await service.get_config(CHAT_ID)).kb_enabled is True
+        text = callback.message.edit_text.await_args.args[0]
+        assert text.startswith("<i>✓ Включено: Знания</i>")
