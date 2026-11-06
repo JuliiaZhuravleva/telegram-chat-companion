@@ -1,7 +1,7 @@
 """Write every registered sample screen to one JSON file, for the screen-map renderer.
 
-    python3 scripts/dump_screens.py                      # → /tmp/screens-dump.json, ru labels
-    python3 scripts/dump_screens.py --out x.json --lang en
+    python3 scripts/dump_screens.py                      # → /tmp/screens-dump.json
+    python3 scripts/dump_screens.py --out x.json --lang en   # ``rows`` in English
 
 Offline: no bot, no database, no network. The samples are built from the
 invented values in ``src/bot/screens/samples/fake.py``, and a button's target
@@ -12,10 +12,19 @@ a picture, not a gate (``tests/unit/test_screen_rules.py`` is the gate).
 
 Output shape::
 
-    {"screens": [{"id", "section", "title", "text_ru", "text_en",
+    {"screens": [{"id", "key", "section", "title", "text_ru", "text_en",
                   "surface": "dm" | "group", "kind": "msg",
-                  "rows": [[{"label", "goes_to"}]], "replaces": []}],
+                  "rows": [[{"label", "goes_to"}]], "rows_ru": [...], "rows_en": [...],
+                  "replaces": []}],
      "kept": {}}
+
+Every variant of a screen is its own item. They share ``id`` (the screen) and
+differ in ``key``, ``"<id>#<n>"`` counted from 1 in registry order, which is
+what a renderer names its file after: by ``id`` alone the variants of one
+screen overwrite each other. Both languages are always in the item — the text
+as ``text_ru``/``text_en``, the buttons as ``rows_ru``/``rows_en`` — and
+``rows`` repeats the language ``--lang`` asks for, for a reader that knows no
+other key.
 
 ``replaces`` (the as-is screens a screen takes over) is always empty: that
 mapping belongs to the design, not to the code. The renderer reads the key on
@@ -90,19 +99,22 @@ def _rows(screen: Screen) -> list[list[dict[str, str]]]:
     return rows
 
 
-def _item(sample: Sample, lang: Lang) -> dict[str, Any]:
+def _item(sample: Sample, lang: Lang, n: int) -> dict[str, Any]:
     from src.bot.screens.render import render_text
 
-    screen = sample.build(lang)
+    built = {each: sample.build(each) for each in LANGS}
     return {
         "id": sample.screen_id,
+        "key": f"{sample.screen_id}#{n}",
         "section": sample.section,
         "title": sample.title,
-        "text_ru": render_text(sample.build("ru")),
-        "text_en": render_text(sample.build("en")),
+        "text_ru": render_text(built["ru"]),
+        "text_en": render_text(built["en"]),
         "surface": "group" if sample.nav == "group" else "dm",
         "kind": "msg",
-        "rows": _rows(screen),
+        "rows": _rows(built[lang]),
+        "rows_ru": _rows(built["ru"]),
+        "rows_en": _rows(built["en"]),
         "replaces": [],
     }
 
@@ -119,8 +131,8 @@ def dump(lang: Lang) -> tuple[dict[str, Any], list[str]]:
     screens: list[dict[str, Any]] = []
     warnings: list[str] = []
     for screen_id, variants in sorted(load_all().items()):
-        for sample in variants:
-            screens.append(_item(sample, lang))
+        for n, sample in enumerate(variants, start=1):
+            screens.append(_item(sample, lang, n))
             for check_lang in LANGS:
                 built = sample.build(check_lang)
                 for problem in check_screen(built, sample, check_lang, route=route):
@@ -131,7 +143,9 @@ def dump(lang: Lang) -> tuple[dict[str, Any], list[str]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--out", default=DEFAULT_OUT, help=f"output path (default {DEFAULT_OUT})")
-    parser.add_argument("--lang", default="ru", choices=("ru", "en"), help="button label language")
+    parser.add_argument(
+        "--lang", default="ru", choices=("ru", "en"), help="language of the plain ``rows`` key"
+    )
     args = parser.parse_args(argv)
 
     from src.bot.screens.i18n import lang_of
