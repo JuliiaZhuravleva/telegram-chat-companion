@@ -240,6 +240,14 @@ that first, then the original, and raises `LookupError` when neither is there �
 an empty screen. `tests/unit/test_screens_entries.py` feeds `/admin` and the menu button
 through a real dispatcher, with a control showing the command path breaks without the alias.
 
+aiogram does the same to its own `state`: a handler that declares `state: FSMContext` gets it
+as that parameter and not in `**kwargs`. An entry that has to leave a prompt (`show_rules`
+leaves `awaiting_rule_config`, as the rules-list button does; `show_stale` leaves any
+`AdminStates` prompt) would find no state and leave the prompt armed to swallow the admin's
+next message. The same middleware copies `state` to `screen_state`, and `deps.state_of(data)`
+reads either key and returns `None` when there is no context. The entries test proves it with
+a handler that declares `state`, and a control without the alias where the prompt survives.
+
 #### Callback table: `routes.py`
 
 `ROUTES` maps every panel prefix to the screen it opens (an id, or a function of the payload's
@@ -267,19 +275,35 @@ keyboard functions — is the compatibility surface for buttons already sitting 
 `tests/unit/test_routes.py` checks that every prefix ends in `:` and none is a prefix of
 another; that the worst-case payload of every writable prefix fits 64 bytes; that every prefix
 a handler filters on, or a keyboard writes, is in `ROUTES`; that every payload an old button
-can carry reaches a handler, and a live one (not the catch-all) for `kept` and `legacy`
-prefixes; that garbled panel payloads do reach the catch-all; and the router order of §F.2.
+can carry reaches a handler, and a live one (not the catch-all) for `kept` prefixes and for a
+`legacy` prefix that some file still writes (a legacy prefix its area stops writing may lose
+its handler); that garbled panel payloads do reach the catch-all; and the router order of §F.2.
+
+Two ratchets in the same file hold the line while the areas work, each frozen at the state
+the areas start from: no file may start writing a `retired` or `compat` prefix
+(`RETIRED_WRITES_TODAY` lists the file/prefix pairs that still do; a write is
+`callback_data=`, a screen `Button`'s `callback=`, or `cb(...)`), and no file may add an
+untranslated `"Invalid data"`-style popup (`INVALID_ALERTS_TODAY`, counts per file). A payload
+a live handler cannot parse is a stale button and owes the user `show_stale`, so those counts
+only go down; an area that removes its pairs or popups may lower the numbers in the same change.
 The walk it uses (`tests/unit/screen_routing.py`, built on `lint.first_handler`) evaluates
 each handler's registered filters in aiogram's order over the real router tree without
 calling anything; async filters such as `IsAdmin` count as passing.
 
 #### Stale fallback: `stale.py`
 
-The `stale` router (placement in §F.2) takes `adm_` / `ar_` payloads in a private chat that no
-earlier router took. For a bot admin it calls `show_stale`: clear the FSM state if it belongs
-to `AdminStates`, log `stale_button`, and draw the hub in that message under the out-of-date
-line, with no popup. Any other tap of such a payload (not a bot admin, or not in a private
-chat) is answered with an alert and draws nothing.
+The `stale` router (placement in §F.2) takes `adm_` / `ar_` payloads that no earlier router
+took, and answers by who tapped and where:
+
+- a bot admin in the private chat: `show_stale` clears the FSM state if it belongs to
+  `AdminStates`, logs `stale_button`, and draws the hub in that message under the out-of-date
+  line, with no popup;
+- a bot admin anywhere else (a panel button forwarded or posted into a group): an alert saying
+  the panel opens in the private chat with the bot. "Access denied" would be false and send
+  them looking for a permission problem;
+- anyone else: an "access denied" alert.
+
+The last two draw nothing.
 
 What reaches it: `retired` prefixes once their area has removed the handler, `new` prefixes
 whose area has not landed, and payloads no live handler's filters accept. A live handler whose filter matches has **consumed** the update
@@ -301,7 +325,7 @@ shows the parent screen with a notice that says what happened.
 | R4 | a back button names its destination, never a bare "Назад" / "Back" |
 | R5 | the first line is an emoji and a bold title |
 | R6 | every callback fits 64 bytes |
-| R7 | every callback reaches a live handler, not the catch-all (needs `route`) |
+| R7 | no callback writes a `retired` or `compat` prefix (read from `ROUTES`, always checked); every other callback reaches a live handler, not the catch-all (needs `route`) |
 | R8 | Russian copy addresses the reader as «вы», with no singular imperatives or nagging words |
 | R9 | no Cyrillic in English copy, no Latin words in Russian, outside user data |
 | R10 | each label fits its share of a 390 px phone row |
@@ -310,7 +334,15 @@ shows the parent screen with a notice that says what happened.
 | R13 | `custom_emoji` recognises the keyboard as a screen |
 
 `route` maps a payload to the handler that would take it: the tests pass `first_match`, the
-dump passes `first_handler` over `src.bot.handlers.router`.
+dump passes `first_handler` over `src.bot.handlers.router`. The retired/compat half of R7 reads
+the table instead of the router on purpose: a retired prefix still has its handler today and
+loses it when its area merges, and a verdict that flips with somebody else's merge would fail
+in a branch that cannot fix it.
+
+For the same reason the rules test checks R7 under two routings: today's tree (`first_match`),
+and the tree once every area has landed (a `new` prefix counts as handled, a `retired` one
+reaches the catch-all). A registered sample must pass, with every exemption still needed,
+under both.
 
 A sample may exempt a rule only with a reason (`exempt={"R2": "why"}`; an empty reason is
 refused), and `test_every_exemption_is_needed` fails when an exemption no longer fires, since a
@@ -330,11 +362,15 @@ Sample data comes from `samples/fake.py` only, and every value there is invented
 repository is public. Its chat id is the longest id a supergroup can have, so a payload that
 fits with it fits with any real one.
 
-`samples/foundation.py` registers one screen, `stale`: today's hub under the out-of-date line,
-with the exemptions today's hub needs until the hub is redesigned, each with its reason. It also
-holds `DESIGN_COPIES`, ten screens of the redesign's target look rebuilt as data and **not**
-registered, for one assertion: the lint passes them. A rule that flags the design is wrong, not
-the design.
+`samples/foundation.py` registers one screen, `stale`: the hub under the out-of-date line. It
+draws `hub.sample_hub(lang)` and carries `hub.SAMPLE_HUB_EXEMPT`, both declared in
+`screens/hub.py`, which the hub area owns: today they are today's hub and the five rules it
+breaks (nine rows, no title emoji, four retired payloads, mixed-language labels, a label that
+truncates), each with its reason. Redesigning the hub means changing those two names in
+`hub.py`; the stale sample follows without an edit to the foundation's file. It also holds
+`DESIGN_COPIES`, ten screens of the redesign's target look rebuilt as data and **not**
+registered, for one assertion: the lint passes them, under the landed routing, with no
+exemptions at all. A rule that flags the design is wrong, not the design.
 
 `tests/unit/test_screen_rules.py` asserts that every registered sample passes in both languages,
 that every rule has a known-bad control it flags, that the design copies pass, and that every
@@ -350,8 +386,10 @@ python3 scripts/dump_screens.py [--out PATH] [--lang ru|en]    # default /tmp/sc
 ```
 
 Writes every registered sample as JSON for the screen-map renderer, offline:
-`{"screens": [{id, section, title, text_ru, text_en, surface, kind, rows}], "kept": {}}`, where
-each row is a list of `{label, goes_to}`. `goes_to` is the button's own `goes_to`, otherwise
+`{"screens": [{id, section, title, text_ru, text_en, surface, kind, rows, replaces}], "kept": {}}`,
+where each row is a list of `{label, goes_to}`. `replaces` is always an empty list: which old
+screens a new one takes over belongs to the design, not the code, but the renderer reads the
+key on every item and stops on a missing one. `goes_to` is the button's own `goes_to`, otherwise
 «ссылка» for a URL, «копирует текст» for a copy button, «нет действия» for `noop`, and the
 target of its payload for everything else; reply-keyboard rows follow the inline ones. The
 same rule violations the test reports are printed on stderr, and the exit code stays 0: the
@@ -361,18 +399,20 @@ dump is a picture, the test is the gate.
 
 - The custom-emoji layer draws an icon for "⬅️ Панель" but leaves a bare "◀" / "▶" pager arrow
   as plain text. `test_screens_render.py` pins both, so a change in either direction is seen.
-- `show_hub` currently draws today's hub, and `test_screens_render.py` pins it to
+- `show_hub` currently draws today's hub, and `test_hub_today.py` pins it to
   `main_menu_keyboard` and the old title, so moving the hub onto the new path changed nothing
-  visible.
+  visible. That file belongs to the hub area and goes when the hub is redesigned.
 
 #### The screen system's tests
 
 | Test | Covers |
 |---|---|
 | `tests/unit/test_screen_rules.py` | the rules on every sample, one control per rule, the design copies, the sample ratchet, the section table |
-| `tests/unit/test_routes.py` | the callback table, 64-byte budgets, routing of legacy / new / garbled payloads, router order |
+| `tests/unit/test_routes.py` | the callback table, 64-byte budgets, routing of legacy / new / garbled payloads, router order, the retired-write and "Invalid data" ratchets |
 | `tests/unit/test_screens_render.py` | delivery: edit vs new message, the fallbacks, toasts answered once, splitting, the builders |
-| `tests/unit/test_screens_entries.py` | the container reaching `show_hub` through a real dispatcher, the stale catch-all, the stable entries |
+| `tests/unit/test_screens_entries.py` | the container and the FSM context reaching an entry through a real dispatcher, the stale catch-all's three answers, every entry refusing without `data` |
+| `tests/unit/test_dump_screens.py` | the dump carries every key the renderer reads |
+| `tests/unit/test_hub_today.py` (hub area), `test_rules_show_rules.py` (rules area), `test_admin_chat_panel_entries.py` (chats area) | what each stable entry draws today; each owning area changes its file with its screen |
 | `tests/unit/test_screen_counts.py`, `tests/integration/test_screen_counts.py` | `count_attempts` and `count_for_chat`, the latter against real PostgreSQL |
 | `tests/unit/test_access_card.py` | the access card after its move |
 
@@ -490,7 +530,9 @@ which renders from the registry in §A2.1).
 `handle_admin_command` and `handle_menu` draw the hub through `show_hub`. `handle_language_set`
 still draws it through `admin._MENU_TITLE` + `main_menu_keyboard`, so the hub exists in two
 places until this area folds the language screen into `show_hub`;
-`test_screens_render.py` pins the two to the same look meanwhile.
+`test_hub_today.py` pins the two to the same look meanwhile. `hub.py` also declares
+`sample_hub(lang)` and `SAMPLE_HUB_EXEMPT`, which the stale sample draws (§F.6); a redesigned
+hub replaces both there.
 `AdminRepository.count_attempts(status)` counts what the pending / rejected pages list (same
 predicate), for a count on an entry button.
 

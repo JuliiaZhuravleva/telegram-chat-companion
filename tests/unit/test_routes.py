@@ -173,11 +173,10 @@ def test_worst_case_payload_fits(prefix: str):
     assert len(data.encode()) <= CALLBACK_LIMIT
 
 
-def test_contract_arithmetic():
-    """The three longest payloads the contract computed by hand: 45, 40, 36.
-
-    Its hand count ran one byte high on two of them (safe side); the measured
-    sizes are pinned here so a change to an id shape shows up as a diff."""
+def test_longest_payloads_measured():
+    """The three longest payloads, measured. A hand count of 45 / 40 / 36 ran one
+    byte high on two of them (safe side); the measured sizes are pinned here so
+    a change to an id shape shows up as a diff."""
     assert len(cb("adm_kb_org_undo:", "en", CID, UID)) == 44
     assert len(cb("adm_pnl_grp:", "en", CID, "community")) == 39
     assert len(cb("ar_view:", "en", INT4, CID)) == 36
@@ -188,22 +187,33 @@ def test_contract_arithmetic():
 # ---------------------------------------------------------------------------
 
 _FILTER_RE = re.compile(r"""F\.data\.startswith\(\s*["']([a-z_]+:?)["']""")
-_WRITE_RE = re.compile(r"""callback_data\s*=\s*f?["']([a-z][a-z_]*:)""")
+_WRITE_RE = re.compile(r"""(?:\bcallback(?:_data)?\s*=\s*f?["']|\bcb\(\s*["'])([a-z][a-z_]*:)""")
+"""A payload written into a button: aiogram's ``callback_data=``, a screen
+`Button`'s ``callback=``, or `routes.cb`."""
 OWN_PREFIXES = ("adm_", "ar_", "help_", "kb_")
 
 
 def _scan(pattern: re.Pattern[str]) -> dict[str, list[str]]:
+    """prefix → the files under ``src/bot`` that match it, relative to it."""
     found: dict[str, list[str]] = {}
     for path in sorted(SRC_BOT.rglob("*.py")):
         for match in pattern.finditer(path.read_text(encoding="utf-8")):
-            found.setdefault(match.group(1), []).append(path.name)
+            found.setdefault(match.group(1), []).append(path.relative_to(SRC_BOT).as_posix())
     return found
 
 
 def test_the_scanners_see_the_source():
-    """Known positives, so an empty scan is not mistaken for a clean one."""
+    """Known positives, so an empty scan is not mistaken for a clean one: one
+    from the tree (a kept prefix, so it outlives every area's change) and one
+    per write form the regex claims to read."""
     assert "adm_pnl_menu:" in _scan(_FILTER_RE)
     assert "adm_pnl_menu:" in _scan(_WRITE_RE)
+    for line in (
+        'InlineKeyboardButton(text=t, callback_data=f"adm_wl:{lang}")',
+        'Button(_WHITELIST(lg), callback=f"adm_wl:{lg}")',
+        'Button(label, callback=cb("adm_wl:", lg))',
+    ):
+        assert [m.group(1) for m in _WRITE_RE.finditer(line)] == ["adm_wl:"], line
 
 
 def test_every_filter_prefix_is_routed():
@@ -224,6 +234,106 @@ def test_every_written_prefix_is_routed():
     assert unknown == {}, "a keyboard writes a prefix routes.ROUTES does not know"
 
 
+RETIRED_WRITES_TODAY = frozenset(
+    {
+        ("keyboards/admin.py", "adm_kb:"),
+        ("keyboards/admin.py", "adm_react:"),
+        ("keyboards/admin.py", "adm_rules:"),
+        ("keyboards/admin.py", "adm_wl:"),
+        ("keyboards/admin.py", "adm_wl_chats:"),
+        ("keyboards/admin_chat_panel.py", "adm_kb_menu:"),
+        ("keyboards/admin_chat_panel.py", "adm_react_menu:"),
+        ("keyboards/admin_kb.py", "adm_kb:"),
+        ("keyboards/admin_kb.py", "adm_kb_menu:"),
+        ("keyboards/admin_kb.py", "adm_kb_toggle:"),
+        ("keyboards/admin_reactions.py", "adm_react:"),
+        ("keyboards/admin_reactions.py", "adm_react_menu:"),
+        ("keyboards/admin_reactions.py", "adm_react_toggle:"),
+        ("keyboards/admin_sticker.py", "adm_stk_set:"),
+        ("keyboards/rules.py", "adm_rules:"),
+        ("keyboards/rules.py", "ar_tog:"),
+        ("screens/hub.py", "adm_kb:"),
+        ("screens/hub.py", "adm_react:"),
+        ("screens/hub.py", "adm_rules:"),
+        ("screens/hub.py", "adm_wl:"),
+    }
+)
+"""Where a ``retired`` or ``compat`` prefix is still written on the base the
+areas start from. A ratchet: each area deletes its own pairs (and may then
+delete them here); nothing may add one. A retired write is a button that
+reaches the catch-all the day its area merges."""
+
+
+def _unwritable_writes(scan: dict[str, list[str]]) -> set[tuple[str, str]]:
+    return {
+        (path, prefix)
+        for prefix, paths in scan.items()
+        if prefix in ROUTES and ROUTES[prefix].status not in WRITABLE
+        for path in paths
+    }
+
+
+def test_no_new_retired_or_compat_writes():
+    new = _unwritable_writes(_scan(_WRITE_RE)) - RETIRED_WRITES_TODAY
+    assert new == set(), "a file writes a retired or compat prefix; its button would go stale"
+
+
+def test_the_retired_write_ratchet_says_no():
+    """Its control: one more file writing ``adm_wl:``, or one more retired
+    prefix in a file already listed, is refused."""
+    scan = {"adm_wl:": ["keyboards/new.py"], "ar_tog:": ["screens/hub.py"], "adm_pnl:": ["x.py"]}
+    assert _unwritable_writes(scan) - RETIRED_WRITES_TODAY == {
+        ("keyboards/new.py", "adm_wl:"),
+        ("screens/hub.py", "ar_tog:"),
+    }
+
+
+_INVALID_RE = re.compile(r"""answer\(\s*["']Invalid (?:data|type|preset|chat ID)["']""")
+INVALID_ALERTS_TODAY = {
+    "handlers/access_card.py": 2,
+    "handlers/admin.py": 10,
+    "handlers/admin_chat_panel.py": 7,
+    "handlers/admin_defaults.py": 1,
+    "handlers/admin_kb.py": 7,
+    "handlers/admin_reactions.py": 2,
+    "handlers/admin_sticker.py": 1,
+    "handlers/rules.py": 1,
+}
+"""Untranslated ``"Invalid data"`` popups a live handler shows for a payload it
+cannot parse, on the base the areas start from. A payload a handler cannot
+parse is a stale button and owes the user `screens.stale.show_stale` — the
+panel as it is now, in their language — not an English alert. A ratchet:
+counts only go down."""
+
+
+def _invalid_alerts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in sorted(SRC_BOT.rglob("*.py")):
+        n = len(_INVALID_RE.findall(path.read_text(encoding="utf-8")))
+        if n:
+            counts[path.relative_to(SRC_BOT).as_posix()] = n
+    return counts
+
+
+def test_no_new_invalid_data_alerts():
+    grown = {
+        path: (n, INVALID_ALERTS_TODAY.get(path, 0))
+        for path, n in _invalid_alerts().items()
+        if n > INVALID_ALERTS_TODAY.get(path, 0)
+    }
+    assert grown == {}, "file: (now, allowed) — call show_stale on a payload you cannot parse"
+
+
+def test_the_invalid_alert_scan_sees_both_quotes():
+    for line in (
+        'await callback.answer("Invalid data", show_alert=True)',
+        "await callback.answer('Invalid preset', show_alert=True)",
+        'await callback.answer(\n            "Invalid type",\n            show_alert=True)',
+    ):
+        assert _INVALID_RE.search(line), line
+    assert not _INVALID_RE.search('await callback.answer("Invalid callback data.")')
+
+
 # ---------------------------------------------------------------------------
 # Every payload lands
 # ---------------------------------------------------------------------------
@@ -241,15 +351,19 @@ def test_legacy_sample_is_its_prefix(prefix: str, data: str):
 
 @pytest.mark.parametrize(("prefix", "data"), list(LEGACY_SAMPLES.items()))
 def test_legacy_payloads_land(prefix: str, data: str):
-    """No spinner, ever: every payload an old button can carry reaches a handler.
+    """No spinner, ever: every payload an old button can carry reaches a handler,
+    live or the catch-all.
 
-    A kept or legacy prefix must reach its live handler, not the catch-all — the
-    catch-all would make a working button look out of date. Retired and compat
-    prefixes may reach either while their area is mid-change.
+    A kept prefix must reach its live handler: the catch-all would make a
+    working button look out of date. So must a legacy prefix while some file
+    still writes it; once its area stops writing it (``ar_cancel:`` may be
+    replaced) the handler may go and old buttons fall to the catch-all.
+    Retired and compat prefixes may reach either while their area is mid-change.
     """
     handler = first_match(data)
     assert handler is not None, f"{data!r} reaches no handler"
-    if ROUTES[prefix].status in ("kept", "legacy"):
+    status = ROUTES[prefix].status
+    if status == "kept" or (status == "legacy" and prefix in _scan(_WRITE_RE)):
         assert not handler.startswith("stale."), f"{data!r} fell to {handler}"
 
 
@@ -293,7 +407,7 @@ def test_noop_reaches_a_handler():
 
 
 # ---------------------------------------------------------------------------
-# Router order (contract item 7)
+# Router order (docs/admin-dm-internals.md, F.2)
 # ---------------------------------------------------------------------------
 
 ROUTER_ORDER = (

@@ -4,12 +4,19 @@ Created by the foundation with TODAY's look — nine rows, the same labels and
 payloads ``keyboards.admin.main_menu_keyboard`` builds — so the stale fallback
 and every caller have a stable entry before the hub itself is redesigned.
 The hub area owns this file from here on; `show_hub`'s signature is shared.
+
+`sample_hub` and `SAMPLE_HUB_EXEMPT` are shared too. The stale fallback's
+registered sample (``samples/foundation.py``) is the hub under one extra line,
+so it draws whatever `sample_hub` returns and carries whatever exemptions this
+module declares. Whoever changes the hub changes both here, in the same file,
+and the stale sample follows without an edit to the foundation's module.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Final
 
 from aiogram.types import CallbackQuery, Message
 
@@ -72,6 +79,34 @@ def build_hub(lang: str, *, notice: str | None = None, notice_raw: str | None = 
             (Button(_CLOSE(lg), callback=cb("adm_close:", lg), kind="exit"),),
         ),
     )
+
+
+def sample_hub(lang: str) -> Screen:
+    """The hub as a sample draws it: from invented data, nothing read from a database.
+
+    Today's hub reads nothing, so this is `build_hub`. A hub that grows a
+    status line builds it here from ``samples/fake.py`` values instead.
+    """
+    return build_hub(lang)
+
+
+_TODAYS_HUB = "today's hub, kept as it is until the hub is redesigned"
+
+SAMPLE_HUB_EXEMPT: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "R2": f"nine rows: {_TODAYS_HUB}",
+        "R5": f"the title has no emoji: {_TODAYS_HUB}",
+        "R7": (
+            "Whitelist, Rules, Knowledge base and Reactions write the retired "
+            f"adm_wl:, adm_rules:, adm_kb:, adm_react: — {_TODAYS_HUB}"
+        ),
+        "R9": f"'Whitelist' and 'Language / Язык' mix languages: {_TODAYS_HUB}",
+        "R10": f"'Глобальные настройки' truncates on a phone: {_TODAYS_HUB}",
+    }
+)
+"""The rules `sample_hub` breaks, each with its reason (`registry.make_sample`'s
+``exempt``). ``test_every_exemption_is_needed`` fails on one that stops firing,
+so the hub's redesign empties this in the same change that fixes the screen."""
 
 
 async def show_hub(

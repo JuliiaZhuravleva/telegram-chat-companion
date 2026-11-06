@@ -19,6 +19,12 @@ wrapper does not know, so ``**kwargs`` carries it either way. It is installed
 on the main handlers router (`install`). aiogram runs a parent router's inner
 middlewares for every nested router's handler, so one installation covers
 every screen.
+
+aiogram does the same to its own keys: a handler that declares ``state:
+FSMContext`` receives it as that parameter and NOT in ``**kwargs``. An entry
+that must disarm a prompt (`show_rules`, `show_stale`) would then find no state
+and leave the prompt armed to swallow the admin's next message. The middleware
+aliases ``state`` too, and `state_of` reads either key.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, TypeVar
 
 from aiogram import BaseMiddleware, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import TelegramObject
 from dishka import AsyncContainer
 
@@ -34,10 +41,13 @@ T = TypeVar("T")
 
 DISHKA_KEY = "dishka_container"
 SCREEN_CONTAINER = "screen_container"
+STATE_KEY = "state"
+SCREEN_STATE = "screen_state"
 
 
 class ContainerAliasMiddleware(BaseMiddleware):
-    """Copy ``data["dishka_container"]`` to ``data["screen_container"]``."""
+    """Copy ``data["dishka_container"]`` to ``data["screen_container"]`` and
+    ``data["state"]`` to ``data["screen_state"]``."""
 
     async def __call__(
         self,
@@ -48,6 +58,9 @@ class ContainerAliasMiddleware(BaseMiddleware):
         container = data.get(DISHKA_KEY)
         if container is not None:
             data.setdefault(SCREEN_CONTAINER, container)
+        state = data.get(STATE_KEY)
+        if state is not None:
+            data.setdefault(SCREEN_STATE, state)
         return await handler(event, data)
 
 
@@ -74,6 +87,19 @@ def container_of(data: Mapping[str, Any]) -> AsyncContainer:
         )
     result: AsyncContainer = container
     return result
+
+
+def state_of(data: Mapping[str, Any]) -> FSMContext | None:
+    """The FSM context carried by a handler's ``**kwargs``, or None.
+
+    None is a legitimate answer (a direct call from a test, an update without
+    a user); an entry that gets it simply has no prompt to disarm.
+    """
+    for key in (SCREEN_STATE, STATE_KEY):
+        state = data.get(key)
+        if isinstance(state, FSMContext):
+            return state
+    return None
 
 
 async def resolve(data: Mapping[str, Any], dependency: type[T]) -> T:

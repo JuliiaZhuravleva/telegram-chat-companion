@@ -9,6 +9,11 @@ before ``commands``; nothing after it handles those prefixes.
 
 "Object gone" (a deleted rule, a resolved request, a removed chat) is NOT
 stale: the live handler renders the parent screen with a notice of its own.
+
+Three answers, by who tapped and where: a bot admin in the DM gets the hub; a
+bot admin anywhere else (an ``adm_`` button forwarded or posted into a group)
+is told the panel lives in the DM — "access denied" would be false and would
+send them looking for a permission problem; anyone else gets "access denied".
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from src.bot.filters.admin import IsAdmin
+from src.bot.screens.deps import state_of
 from src.bot.screens.hub import show_hub
 from src.bot.screens.i18n import Tr, lang_of
 from src.bot.states.admin import AdminStates
@@ -37,6 +43,10 @@ STALE_NOTICE: Final = Tr(
     "<i>This button is out of date and changed nothing. Here is the panel now.</i>",
 )
 NO_ACCESS: Final = Tr("Нет доступа", "Access denied")
+IN_DM_ONLY: Final = Tr(
+    "Панель открывается в личке с ботом",
+    "The panel opens in a private chat with the bot",
+)
 
 
 def _lang(data: str | None) -> str:
@@ -62,8 +72,8 @@ async def show_stale(
     returning silently.
     """
     data = data or {}
-    context = state if state is not None else data.get("state")
-    if isinstance(context, FSMContext):
+    context = state if state is not None else state_of(data)
+    if context is not None:
         current = await context.get_state()
         if current is not None and current in AdminStates.__all_states_names__:
             await context.clear()
@@ -83,6 +93,21 @@ async def show_stale(
 async def handle_stale(callback: CallbackQuery, **kwargs: Any) -> None:
     """A panel payload no live handler took, from a bot admin in the DM."""
     await show_stale(callback, _lang(callback.data), data=kwargs)
+
+
+@router.callback_query(
+    F.data.startswith(PANEL_PREFIXES),
+    F.message.chat.type != "private",
+    IsAdmin(),
+)
+async def handle_stale_outside_dm(callback: CallbackQuery, **_kwargs: Any) -> None:
+    """A bot admin tapped a panel payload outside the DM: say where the panel is."""
+    logger.info(
+        "stale_button_outside_dm",
+        action=(callback.data or "").split(":")[0],
+        user_id=getattr(callback.from_user, "id", None),
+    )
+    await callback.answer(IN_DM_ONLY(_lang(callback.data)), show_alert=True)
 
 
 @router.callback_query(F.data.startswith(PANEL_PREFIXES))

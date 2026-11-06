@@ -5,9 +5,16 @@ Three things are proven here, each at the call site rather than in a helper:
 * the request container reaches ``show_hub`` from BOTH hub handlers through a
   real ``Dispatcher`` with ``setup_dishka(auto_inject=True)`` — the path that a
   direct handler call with mocks cannot see (`screens.deps`);
-* the stale catch-all clears only the panel's own prompts and draws the hub;
-* ``show_chat`` / ``show_chats`` / ``show_rules`` resolve their repositories
-  from ``data`` and render exactly what today's button renders.
+* the FSM context reaches an entry the same way, including from a handler
+  that declares ``state`` and so loses it from ``**kwargs``;
+* the stale catch-all clears only the panel's own prompts, hands the hub its
+  line, and answers each kind of tapper in the right place;
+* every stable entry refuses to render without ``data``.
+
+What each entry DRAWS is pinned next to the area that owns it
+(``test_rules_show_rules.py``, ``test_admin_chat_panel_entries.py``,
+``test_hub_today.py``): this file must not go red because an area redesigned
+its own screen.
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ import pytest
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import CallbackQuery, Chat, Message, Update, User
 from dishka import Provider, Scope, make_async_container
 from dishka.integrations.aiogram import setup_dishka
@@ -28,16 +36,11 @@ from src.bot.handlers import admin
 from src.bot.handlers import router as main_router
 from src.bot.handlers.admin_chat_panel import show_chat, show_chats
 from src.bot.handlers.rules import show_rules
-from src.bot.keyboards.rules import rules_list_keyboard
 from src.bot.screens import deps, stale
-from src.bot.screens.deps import ContainerAliasMiddleware, container_of, install
-from src.bot.screens.hub import build_hub
-from src.bot.screens.render import with_notice
+from src.bot.screens.deps import ContainerAliasMiddleware, container_of, install, state_of
+from src.bot.states.admin import AdminStates
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
-from src.database.repositories.chat_settings import ChatSettingsRepository
-from src.database.repositories.rules import RulesRepository
-from src.services.chat_config import ChatConfigService
 
 ADMIN_ID = 555000111  # invented, from samples/fake.py's range
 CHAT_ID = -1009999999999
@@ -174,6 +177,72 @@ def test_no_container_is_an_error_not_an_empty_screen():
 # ---------------------------------------------------------------------------
 
 
+def test_state_of_reads_either_key_and_only_a_context():
+    context = MagicMock(spec=FSMContext)
+    assert state_of({deps.SCREEN_STATE: context}) is context
+    assert state_of({"state": context}) is context
+    assert state_of({}) is None
+    assert state_of({"state": "awaiting_rule_config"}) is None
+
+
+# ---------------------------------------------------------------------------
+# A real Dispatcher: does the FSM context reach an entry?
+# ---------------------------------------------------------------------------
+
+BOT_ID = 42  # from the token "42:TEST"
+
+
+async def _armed_after_stale(*, alias: bool) -> str | None:
+    """A handler that declares ``state`` hands its ``**kwargs`` to `show_stale`
+    while a panel prompt is armed; return the state left afterwards."""
+    root = Router(name="probe-root")
+    if alias:
+        install(root)
+    inner = Router(name="probe-live")
+
+    @inner.callback_query(F.data.startswith("adm_probe:"))
+    async def declares_state(
+        callback: CallbackQuery,
+        state: FSMContext,  # noqa: ARG001 — declaring it is what removes it from kwargs
+        **kwargs: Any,
+    ) -> None:
+        assert "state" not in kwargs  # aiogram's half of the trap
+        await stale.show_stale(callback, "ru", data=kwargs)
+
+    root.include_router(inner)
+    dp = Dispatcher()
+    dp.include_router(root)
+    key = StorageKey(bot_id=BOT_ID, chat_id=ADMIN_ID, user_id=ADMIN_ID)
+    context = FSMContext(storage=dp.storage, key=key)
+    await context.set_state(AdminStates.awaiting_rule_config)
+
+    update = _button_update()
+    assert update.callback_query is not None
+    update = update.model_copy(
+        update={"callback_query": update.callback_query.model_copy(update={"data": "adm_probe:ru"})}
+    )
+    bot = Bot(token="42:TEST")
+    try:
+        with patch.object(stale, "show_hub", new=AsyncMock()) as hub:
+            await dp.feed_update(bot, update)
+        assert hub.await_count == 1, "the probe handler did not run"
+    finally:
+        await bot.session.close()
+    return await context.get_state()
+
+
+@pytest.mark.asyncio
+async def test_a_handler_that_declares_state_still_disarms_the_prompt():
+    assert await _armed_after_stale(alias=True) is None
+
+
+@pytest.mark.asyncio
+async def test_control_without_the_alias_the_prompt_stays_armed():
+    """The trap the alias closes: the prompt survives the stale tap and would
+    take the admin's next message as a rule config."""
+    assert await _armed_after_stale(alias=False) == AdminStates.awaiting_rule_config.state
+
+
 def _callback(data: str = "adm_wl:ru") -> MagicMock:
     callback = MagicMock()
     callback.data = data
@@ -192,36 +261,97 @@ def _state(current: str | None) -> MagicMock:
     return state
 
 
+@pytest.fixture
+def hub() -> Any:
+    """`show_hub` as the catch-all calls it. Patched: what the hub draws is the
+    hub area's to change, and the stale contract is only the call."""
+    with patch.object(stale, "show_hub", new=AsyncMock()) as spy:
+        yield spy
+
+
 @pytest.mark.asyncio
-async def test_stale_shows_the_hub_with_its_line():
+async def test_stale_shows_the_hub_with_its_line(hub):
     callback = _callback()
-    await stale.handle_stale(callback)
+    kwargs = {"event_from_user": callback.from_user}
+    await stale.handle_stale(callback, **kwargs)
 
-    callback.message.edit_text.assert_awaited_once()
-    text = callback.message.edit_text.await_args.args[0]
-    assert text == with_notice(build_hub("ru").text, notice_raw=stale.STALE_NOTICE("ru"))
-    callback.answer.assert_awaited_once_with()  # no popup: the line is the explanation
-
-
-@pytest.mark.asyncio
-async def test_stale_in_english():
-    callback = _callback("ar_tog:en:1")
-    await stale.handle_stale(callback)
-    assert callback.message.edit_text.await_args.args[0].startswith(stale.STALE_NOTICE("en"))
+    hub.assert_awaited_once_with(callback, "ru", notice_raw=stale.STALE_NOTICE("ru"), data=kwargs)
+    callback.answer.assert_not_awaited()  # no popup: the line is the explanation
 
 
 @pytest.mark.asyncio
-async def test_stale_disarms_a_panel_prompt():
+async def test_stale_in_english(hub):
+    await stale.handle_stale(_callback("ar_tog:en:1"))
+    assert hub.await_args.args[1] == "en"
+    assert hub.await_args.kwargs["notice_raw"] == stale.STALE_NOTICE("en")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("hub")
+@pytest.mark.parametrize("key", ["state", deps.SCREEN_STATE])
+async def test_stale_disarms_a_panel_prompt(key: str):
     state = _state("AdminStates:awaiting_rule_words")
-    await stale.handle_stale(_callback(), state=state)
+    await stale.handle_stale(_callback(), **{key: state})
     state.clear.assert_awaited_once()
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("hub")
 async def test_stale_leaves_a_foreign_state_alone():
     state = _state("SomeOtherFlow:waiting")
     await stale.handle_stale(_callback(), state=state)
     state.clear.assert_not_awaited()
+
+
+def _tap(chat_type: str) -> CallbackQuery:
+    chat_id = ADMIN_ID if chat_type == "private" else CHAT_ID
+    return CallbackQuery(
+        id="1",
+        from_user=_user(),
+        chat_instance="1",
+        data="adm_nonexistent:ru",
+        message=Message(
+            message_id=1,
+            date=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+            chat=Chat(id=chat_id, type=chat_type),
+            text="old",
+        ),
+    )
+
+
+async def _stale_handler_for(event: CallbackQuery, *, is_admin: bool) -> str | None:
+    """The first stale handler whose REAL filters pass, as aiogram picks it.
+    ``is_admin`` is the kwarg `IsAdmin` reads when the middleware has run."""
+    for handler in stale.router.callback_query.handlers:
+        passed, _ = await handler.check(event, is_admin=is_admin)
+        if passed:
+            return handler.callback.__name__
+    return None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_type", "is_admin", "expected"),
+    [
+        ("private", True, "handle_stale"),
+        ("group", True, "handle_stale_outside_dm"),
+        ("supergroup", True, "handle_stale_outside_dm"),
+        ("private", False, "handle_stale_denied"),
+        ("supergroup", False, "handle_stale_denied"),
+    ],
+)
+async def test_each_tapper_gets_the_right_answer(chat_type: str, is_admin: bool, expected: str):
+    assert await _stale_handler_for(_tap(chat_type), is_admin=is_admin) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_bot_admin_outside_the_dm_is_told_where_the_panel_is():
+    callback = _callback("adm_wl:en")
+    await stale.handle_stale_outside_dm(callback)
+    callback.answer.assert_awaited_once_with(
+        "The panel opens in a private chat with the bot", show_alert=True
+    )
+    callback.message.edit_text.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -233,72 +363,20 @@ async def test_stale_denied_answers_with_an_alert():
 
 
 # ---------------------------------------------------------------------------
-# Stable entries: show_chat, show_chats, show_rules
+# Stable entries: what they draw is pinned in each area's own tests
 # ---------------------------------------------------------------------------
 
 
-def _data(**repos: Any) -> dict[str, Any]:
-    container = MagicMock()
-    container.get = AsyncMock(side_effect=lambda dependency: repos[dependency.__name__])
-    return {deps.SCREEN_CONTAINER: container}
-
-
 @pytest.mark.asyncio
-async def test_show_rules_renders_the_list_with_a_notice():
-    rules_repo = MagicMock(spec=RulesRepository)
-    rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
-    callback = _callback()
-
-    await show_rules(
-        callback, "ru", CHAT_ID, notice="Правило удалено", data=_data(RulesRepository=rules_repo)
-    )
-
-    rules_repo.get_rules_page.assert_awaited_once()
-    assert rules_repo.get_rules_page.await_args.args[:2] == (CHAT_ID, 0)
-    args, kwargs = callback.message.edit_text.await_args
-    assert args[0].startswith("<i>✓ Правило удалено</i>\n\n")
-    assert kwargs["reply_markup"] == rules_list_keyboard("ru", [], 0, 1, CHAT_ID)
-
-
-@pytest.mark.asyncio
-async def test_show_chats_renders_the_picker():
-    admin_repo = MagicMock(spec=AdminRepository)
-    admin_repo.get_enabled_chats_page_by_activity = AsyncMock(return_value=([], 0))
-    message = MagicMock(spec=Message)
-    message.answer = AsyncMock()
-
-    await show_chats(message, "en", 3, data=_data(AdminRepository=admin_repo))
-
-    # page 3 of an empty list clamps to the first page, as the button does
-    assert admin_repo.get_enabled_chats_page_by_activity.await_args.args[0] == 0
-    message.answer.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_show_chat_resolves_its_three_dependencies():
-    resolved = {
-        "ChatSettingsRepository": MagicMock(spec=ChatSettingsRepository),
-        "BotConfigRepository": MagicMock(spec=BotConfigRepository),
-        "ChatConfigService": MagicMock(spec=ChatConfigService),
-    }
-    callback = _callback()
-    with patch(
-        "src.bot.handlers.admin_chat_panel.render_chat_panel",
-        new=AsyncMock(return_value=("<b>Чат</b>", None)),
-    ) as render:
-        await show_chat(callback, "ru", CHAT_ID, data=_data(**resolved))
-
-    render.assert_awaited_once_with(
-        resolved["ChatSettingsRepository"],
-        resolved["BotConfigRepository"],
-        resolved["ChatConfigService"],
-        "ru",
-        CHAT_ID,
-    )
-    assert callback.message.edit_text.await_args.args[0] == "<b>Чат</b>"
-
-
-@pytest.mark.asyncio
-async def test_an_entry_without_data_refuses():
+@pytest.mark.parametrize(
+    "entry",
+    [
+        lambda: show_rules(_callback(), "ru", CHAT_ID, data={}),
+        lambda: show_chat(_callback(), "ru", CHAT_ID, data={}),
+        lambda: show_chats(_callback(), "ru", 0, data={}),
+    ],
+    ids=["show_rules", "show_chat", "show_chats"],
+)
+async def test_an_entry_without_data_refuses(entry):
     with pytest.raises(LookupError):
-        await show_rules(_callback(), "ru", CHAT_ID, data={})
+        await entry()

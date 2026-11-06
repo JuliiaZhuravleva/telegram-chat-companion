@@ -1,8 +1,9 @@
 """The foundation's samples: the stale fallback, and ten design screens copied as data.
 
-``stale`` is registered: it is the one screen the foundation ships. It shows
-TODAY's hub (``hub.build_hub``) under the stale line, so it carries the
-exemptions today's hub needs until the hub area replaces it.
+``stale`` is registered: it is the one screen the foundation ships. It is the
+hub under the stale line, so it draws ``hub.sample_hub`` and carries
+``hub.SAMPLE_HUB_EXEMPT`` — both declared in ``screens/hub.py``, which the hub
+area owns, so redesigning the hub never needs an edit here.
 
 `DESIGN_COPIES` is NOT registered. It is the redesign's target look for ten
 screens, rebuilt as `Screen` data from invented values, and it exists for one
@@ -10,6 +11,13 @@ assertion in the rules test: the lint passes them. A rule that flags the
 design itself is wrong, not the design ("does not wrongly refuse"). Keeping
 them out of the registry keeps them out of the dump, where they would sit
 next to the real screens the areas build.
+
+The copies are the END state, so the rules test routes their buttons as if
+every area had landed: a ``new`` prefix counts as handled even while today's
+tree still sends it to the catch-all. Nothing here is exempt from R7 — an
+exemption for "not routed yet" would be needed today and unused tomorrow, and
+the test that refuses unused exemptions would then fail in an area's branch
+over a file that area may not edit.
 """
 
 from __future__ import annotations
@@ -17,7 +25,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Final
 
-from src.bot.screens.hub import build_hub
+from src.bot.screens.hub import SAMPLE_HUB_EXEMPT, sample_hub
 from src.bot.screens.i18n import Lang, Tr
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.registry import Sample, make_sample, sample
@@ -25,8 +33,6 @@ from src.bot.screens.render import back, pager
 from src.bot.screens.routes import cb
 from src.bot.screens.samples import fake
 from src.bot.screens.stale import STALE_NOTICE
-
-TODAYS_HUB: Final = "today's hub is kept until the hub area replaces it (E1/E2)"
 
 # ---------------------------------------------------------------------------
 # The stale fallback (registered)
@@ -38,23 +44,15 @@ TODAYS_HUB: Final = "today's hub is kept until the hub area replaces it (E1/E2)"
     section="В чатах",
     title="Устаревшая кнопка",
     nav="root",
-    exempt={
-        "R2": f"nine rows: {TODAYS_HUB}",
-        "R5": f"title has no emoji: {TODAYS_HUB}",
-        "R9": f"'Whitelist' and 'Language / Язык' are mixed-language: {TODAYS_HUB}",
-        "R10": f"'Глобальные настройки' truncates on a phone: {TODAYS_HUB}",
-    },
+    exempt=SAMPLE_HUB_EXEMPT,
 )
 def stale(lang: Lang) -> Screen:
-    return replace(build_hub(lang, notice_raw=STALE_NOTICE(lang)), id="stale")
+    return replace(sample_hub(lang), id="stale", notice=None, notice_raw=STALE_NOTICE(lang))
 
 
 # ---------------------------------------------------------------------------
 # Ten design screens (unregistered; see the module docstring)
 # ---------------------------------------------------------------------------
-
-NOT_YET_ROUTED: Final = "a new prefix; its area lands the handler, until then the stale catch-all"
-"""R7 exemption for a design copy that uses a prefix no live handler takes yet."""
 
 _CID = fake.CHAT_ID
 _CLOSE = Tr("✖️ Закрыть", "✖️ Close")
@@ -353,7 +351,6 @@ DESIGN_COPIES: Final[tuple[Sample, ...]] = (
         section="Панель",
         title="Панель",
         nav="root",
-        exempt={"R7": f"⚙️ Общие настройки (adm_settings:) — {NOT_YET_ROUTED}"},
     ),
     make_sample(
         "chats",
@@ -392,7 +389,6 @@ DESIGN_COPIES: Final[tuple[Sample, ...]] = (
         title="Правила",
         nav="panel",
         user_data=(fake.CHAT_TITLE, RULE_WORDS, RULE_NAME),
-        exempt={"R7": f"✅ Все правила (ar_all:) — {NOT_YET_ROUTED}"},
     ),
     make_sample(
         "stk.card",
@@ -401,7 +397,6 @@ DESIGN_COPIES: Final[tuple[Sample, ...]] = (
         title="Карточка стикера",
         nav="panel",
         user_data=(*STICKER_FACTS, fake.PACK_TITLE),
-        exempt={"R7": f"adm_stk_score: and adm_stk_pk: — {NOT_YET_ROUTED}"},
     ),
     make_sample("status", _status, section="Состояние", title="Состояние", nav="panel"),
     make_sample("settings", _settings, section="Настройки", title="Общие настройки", nav="panel"),

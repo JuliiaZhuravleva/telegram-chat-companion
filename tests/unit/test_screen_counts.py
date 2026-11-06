@@ -1,4 +1,4 @@
-"""The two counts the redesigned panel shows on entry buttons (F item 5).
+"""The two counts the redesigned panel shows on entry buttons.
 
 SQL semantics — that the count agrees with the list behind it — are checked
 against real Postgres in ``tests/integration/test_screen_counts.py``; here only

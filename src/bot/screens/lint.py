@@ -16,7 +16,8 @@ R3  navigation by screen kind (``Sample.nav``): a panel screen has exactly one
 R4  a back button says where it goes; never "Назад"/"Back"
 R5  first line: emoji, space, ``<b>title</b>`` (a tail after ``</b>`` is fine)
 R6  every callback fits in 64 bytes
-R7  every callback reaches a live handler (needs the real router, see ``route``)
+R7  no callback writes a ``retired`` or ``compat`` prefix (always checked), and
+    every other callback reaches a live handler (needs the router, see ``route``)
 R8  Russian copy: "вы", no singular imperatives, no nag words
 R9  English copy has no Cyrillic, Russian labels no Latin words, outside user data
 R10 a label fits its share of a 390 px phone row
@@ -36,7 +37,15 @@ from typing import TYPE_CHECKING, Any, Final
 from src.bot.custom_emoji import _is_screen
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import render_text, to_markup
-from src.bot.screens.routes import BACK_NAMES, CALLBACK_LIMIT, NOOP, ROUTES, prefix_of, target_of
+from src.bot.screens.routes import (
+    BACK_NAMES,
+    CALLBACK_LIMIT,
+    NOOP,
+    ROUTES,
+    WRITABLE,
+    prefix_of,
+    target_of,
+)
 from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
 if TYPE_CHECKING:
@@ -255,8 +264,11 @@ def check_screen(
     """Every rule ``screen`` breaks, as ``"R<n>: what"`` strings; [] when clean.
 
     ``sample`` supplies the navigation kind, user data and exemptions; without
-    one the screen is checked as a ``panel`` with no exemptions. R7 runs only
-    when ``route`` (payload → handler name or None) is given.
+    one the screen is checked as a ``panel`` with no exemptions. R7's routing
+    half runs only when ``route`` (payload → handler name or None) is given;
+    its other half — a ``retired`` or ``compat`` prefix is never written —
+    reads `ROUTES` and runs always, so its verdict does not depend on which
+    areas have deleted which handlers yet.
     """
     nav = sample.nav if sample is not None else "panel"
     user_data = sample.user_data if sample is not None else ()
@@ -331,7 +343,14 @@ def check_screen(
         size = len(b.callback.encode("utf-8"))
         if size > CALLBACK_LIMIT:
             found.append(f"R6: {b.callback!r} is {size} bytes")
-        if route is not None and b.callback != NOOP:
+        prefix = prefix_of(b.callback)
+        status = ROUTES[prefix].status if prefix is not None else None
+        if status is not None and status not in WRITABLE:
+            # Judged by the table, not by the router: today a retired prefix may
+            # still have its handler, tomorrow its area deletes it. A verdict
+            # that flips with someone else's merge is not a rule (see `route`).
+            found.append(f"R7: {b.callback!r} writes a {status} prefix")
+        elif route is not None and b.callback != NOOP:
             handler = route(b.callback)
             if handler is None or handler.startswith("stale."):
                 found.append(f"R7: {b.callback!r} reaches {handler or 'no handler'}")

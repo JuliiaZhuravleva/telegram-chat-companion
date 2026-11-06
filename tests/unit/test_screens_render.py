@@ -22,8 +22,6 @@ from aiogram.types import (
     ReplyKeyboardRemove,
 )
 
-from src.bot.keyboards.admin import main_menu_keyboard
-from src.bot.screens.hub import build_hub
 from src.bot.screens.model import Button, ReplyButton, Screen
 from src.bot.screens.render import (
     back,
@@ -239,24 +237,6 @@ async def test_too_long_is_split_with_the_keyboard_on_the_last_piece():
 # ---------------------------------------------------------------------------
 # Markup and text
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("lang", ["ru", "en"])
-def test_the_hub_looks_exactly_as_today(lang: str):
-    """Contract item 10: the look is unchanged. Same rows, labels and payloads
-    as the keyboard the hub was drawn with before the screen model existed."""
-    built = to_markup(build_hub(lang))
-    assert built is not None
-    assert built.model_dump(exclude_none=True) == main_menu_keyboard(lang).model_dump(
-        exclude_none=True
-    )
-
-
-def test_the_hub_title_is_todays():
-    from src.bot.handlers.admin import _MENU_TITLE
-
-    assert build_hub("ru").text == _MENU_TITLE["ru"]
-    assert build_hub("en").text == _MENU_TITLE["en"]
 
 
 def test_inline_rows_and_a_reply_keyboard_are_exclusive():

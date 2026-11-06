@@ -10,6 +10,14 @@ Three kinds of test live here, and each needs the others to mean anything:
 
 The rules are in `src.bot.screens.lint`; ``scripts/dump_screens.py`` prints the
 same list as warnings.
+
+R7 asks the real handler tree, and that tree changes under this file: each
+area adds handlers for its ``new`` prefixes and deletes the ``retired`` ones,
+in parallel, and none of them may edit this file. So R7 is checked under two
+routings — today's tree, and the tree once every area has landed (`_landed`)
+— and a sample must give the same verdict under both. A check that passes
+today and fails after somebody else's merge would fail in a branch that cannot
+fix it.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ from src.bot.screens.lint import budget, check_screen, label_width_px
 from src.bot.screens.model import Button, ReplyButton, Screen
 from src.bot.screens.registry import Sample, load_all, make_sample, sample
 from src.bot.screens.render import back, cancel, pager
+from src.bot.screens.routes import ROUTES, prefix_of
 from src.bot.screens.samples.foundation import DESIGN_COPIES
 from src.bot.screens.sections import _MEMBERS, SECTION_OF
 from src.bot.settings_fields import FIELDS_BY_CODE
@@ -42,6 +51,27 @@ def _sample_id(item: Sample) -> str:
     return f"{item.screen_id}[{item.title}]"
 
 
+def _landed(data: str) -> str | None:
+    """Where ``data`` lands once every area has merged.
+
+    A ``new`` prefix has its handler; a ``retired`` one has lost it and falls to
+    the catch-all; everything else routes as it does today. ``legacy`` is left
+    as today because its area may go either way — and lint judges ``retired``
+    and ``compat`` writes from the table, not from the route, anyway.
+    """
+    prefix = prefix_of(data)
+    status = ROUTES[prefix].status if prefix is not None else None
+    if status == "retired":
+        return "stale.handle_stale"
+    today = first_match(data)
+    if status == "new" and (today is None or today.startswith("stale.")):
+        return f"landed.{prefix}"
+    return today
+
+
+ROUTINGS = {"today": first_match, "landed": _landed}
+
+
 # ---------------------------------------------------------------------------
 # Every registered sample, both languages
 # ---------------------------------------------------------------------------
@@ -53,23 +83,38 @@ def test_the_registry_is_not_empty():
     assert any(item.screen_id == "stale" for item in REGISTERED)
 
 
+@pytest.mark.parametrize("routing", ROUTINGS)
 @pytest.mark.parametrize("lang", LANGS)
 @pytest.mark.parametrize("item", REGISTERED, ids=_sample_id)
-def test_sample_follows_the_rules(item: Sample, lang: str):
+def test_sample_follows_the_rules(item: Sample, lang: str, routing: str):
     screen = item.build(lang)
     assert screen.id == item.screen_id
-    assert check_screen(screen, item, lang, route=first_match) == []
+    assert check_screen(screen, item, lang, route=ROUTINGS[routing]) == []
 
 
-@pytest.mark.parametrize("item", [*REGISTERED, *DESIGN_COPIES], ids=_sample_id)
-def test_every_exemption_is_needed(item: Sample):
+_EXEMPTION_CASES = [
+    *((item, routing) for item in REGISTERED for routing in ROUTINGS),
+    *((item, "landed") for item in DESIGN_COPIES),
+]
+
+
+@pytest.mark.parametrize(
+    ("item", "routing"),
+    _EXEMPTION_CASES,
+    ids=[f"{_sample_id(item)}-{routing}" for item, routing in _EXEMPTION_CASES],
+)
+def test_every_exemption_is_needed(item: Sample, routing: str):
     """An exemption the screen no longer needs hides the next real violation
-    of that rule; each one must still fire in at least one language."""
+    of that rule; each one must still fire in at least one language — today
+    AND after every area has landed, or it turns unused in somebody's branch.
+    The design copies are the end state, so only the second applies to them."""
     bare = replace(item, exempt=MappingProxyType({}))
     fired: set[str] = set()
     for lang in LANGS:
-        fired |= _rule_ids(check_screen(item.build(lang), bare, lang, route=first_match))
-    assert set(item.exempt) <= fired, f"unused exemptions: {set(item.exempt) - fired}"
+        found = check_screen(item.build(lang), bare, lang, route=ROUTINGS[routing])
+        fired |= _rule_ids(found)
+    unused = {rule: item.exempt[rule] for rule in set(item.exempt) - fired}
+    assert unused == {}, f"exemptions that no longer fire ({routing} routing): {unused}"
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +142,19 @@ def test_the_ten_design_screens_are_all_copied():
 @pytest.mark.parametrize("lang", LANGS)
 @pytest.mark.parametrize("item", DESIGN_COPIES, ids=_sample_id)
 def test_design_copy_passes(item: Sample, lang: str):
-    assert check_screen(item.build(lang), item, lang, route=first_match) == []
+    assert check_screen(item.build(lang), item, lang, route=_landed) == []
+
+
+def test_landed_routing_still_says_no():
+    """`_landed` forgives a ``new`` prefix and nothing else: a payload no area
+    will ever route still fails R7, and so does a retired write."""
+    garbled = _panel((_act(data="adm_nonexistent:ru"),))
+    assert _flags(garbled, "R7", route=_landed) == [
+        "R7: 'adm_nonexistent:ru' reaches stale.handle_stale"
+    ]
+    assert _landed("adm_settings:ru") == "landed.adm_settings:"
+    assert _landed("adm_wl:ru") == "stale.handle_stale"
+    assert _landed("adm_pnl_menu:ru:-100") == first_match("adm_pnl_menu:ru:-100")
 
 
 # ---------------------------------------------------------------------------
@@ -361,15 +418,30 @@ def test_r6_counts_bytes_not_characters():
 
 
 def test_r7_unrouted_and_stale_payloads():
-    stale = _flags(_panel((_act(data="adm_settings:ru"),)), "R7", route=first_match)
-    assert stale == ["R7: 'adm_settings:ru' reaches stale.handle_stale"]
+    """Controls built from payloads no area will ever route: a prefix from the
+    table would turn into a pass the day its area lands."""
+    assert prefix_of("adm_nonexistent:ru") is None
+    stale = _flags(_panel((_act(data="adm_nonexistent:ru"),)), "R7", route=first_match)
+    assert stale == ["R7: 'adm_nonexistent:ru' reaches stale.handle_stale"]
     nothing = _flags(_panel((_act(data="zz_unknown:ru"),)), "R7", route=first_match)
     assert nothing == ["R7: 'zz_unknown:ru' reaches no handler"]
     counter = Button("1/3", callback="noop", kind="noop")
     assert _flags(_panel((counter,)), "R7", route=first_match) == [], "noop counts as routed"
 
 
-def test_r7_needs_a_route_to_run():
+@pytest.mark.parametrize("route", [None, first_match, _landed], ids=["no route", "today", "landed"])
+def test_r7_retired_and_compat_writes(route: lint.RouteFn | None):
+    """Flagged from the table, the same under every routing: today the retired
+    ``adm_wl:`` still has its handler, after its area lands it has none."""
+    retired = _flags(_panel((_act("📋 Доступ", "adm_wl:ru"),)), "R7", route=route)
+    assert retired == ["R7: 'adm_wl:ru' writes a retired prefix"]
+    old_pack = "adm_stk_set:ru:test_pack:0"
+    compat = _flags(_panel((_act("📦 Пак", old_pack),)), "R7", route=route)
+    assert compat == [f"R7: {old_pack!r} writes a compat prefix"]
+    assert _flags(_panel((_act(),)), "R7", route=route) == [], "a kept prefix is fine"
+
+
+def test_r7_needs_a_route_to_check_routing():
     assert _flags(_panel((_act(data="zz_unknown:ru"),)), "R7") == []
 
 
@@ -425,10 +497,11 @@ def test_r9_user_data_is_exempt():
 
 
 def test_r10_calibration_controls():
-    """The two labels the estimator was calibrated against (contract §3)."""
+    """The two labels the estimator was calibrated against: one that truncates
+    on a 390 px phone in a two-button row, and one that does not."""
     wide = label_width_px("🌍 Глобальные настройки")
     narrow = label_width_px("🔔 Уведомления")
-    assert wide > budget(2), f"≈{wide:.0f}px must be flagged: it truncates on a phone (E2)"
+    assert wide > budget(2), f"≈{wide:.0f}px must be flagged: it truncates on a phone"
     assert narrow <= budget(2), f"≈{narrow:.0f}px must pass"
     pair = _panel((_act("🌍 Глобальные настройки"), _act("🔔 Уведомления")))
     assert _flags(pair, "R10") == [
@@ -437,6 +510,10 @@ def test_r10_calibration_controls():
 
 
 def test_r10_budget_formula():
+    """``(354 − 4·(n−1)) / n − 12``: a 354 px keyboard, 4 px gaps, the button's
+    12 px padding. These numbers are computed from the formula, not copied from prose:
+    a hand computation of 165 / 105.3 has circulated and is wrong — do not
+    "fix" the code to match it."""
     assert budget(1) == 342
     assert budget(2) == 163
     assert budget(3) == pytest.approx(103.33, abs=0.01)

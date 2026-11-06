@@ -1,4 +1,4 @@
-"""The panel's entry-button counts agree with the lists behind them (F item 5).
+"""The panel's entry-button counts agree with the lists behind them.
 
 A button that says "Заявки · 2" and opens a list of one is the failure this
 guards: the count and the page are two queries, so the only proof they share a

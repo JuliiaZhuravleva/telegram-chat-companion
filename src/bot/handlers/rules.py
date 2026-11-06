@@ -34,7 +34,7 @@ from src.bot.keyboards.rules import (
     rules_chat_list_keyboard,
     rules_list_keyboard,
 )
-from src.bot.screens.deps import resolve
+from src.bot.screens.deps import resolve, state_of
 from src.bot.screens.render import show_markup, with_notice
 from src.bot.states.admin import AdminStates
 from src.bot.utils import safe_edit_text
@@ -329,8 +329,13 @@ async def show_rules(
     """Show one chat's rules list (first page): edit in place, or a new message.
 
     Stable entry other areas call; ``data`` is the calling handler's
-    ``**kwargs`` (`screens.deps`). Renders as the ``ar_list:`` button does.
+    ``**kwargs`` (`screens.deps`). Renders as the ``ar_list:`` button does,
+    and like it leaves a rule-config prompt: the list has no Cancel, so a
+    prompt left armed would take the admin's next message as a rule config.
     """
+    state = state_of(data)
+    if state is not None:
+        await _leave_config_prompt(state)
     text, keyboard = await render_rules(
         await resolve(data, RulesRepository), _get_lang(lang), chat_id
     )

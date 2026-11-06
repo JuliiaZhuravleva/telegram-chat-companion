@@ -14,8 +14,13 @@ Output shape::
 
     {"screens": [{"id", "section", "title", "text_ru", "text_en",
                   "surface": "dm" | "group", "kind": "msg",
-                  "rows": [[{"label", "goes_to"}]]}],
+                  "rows": [[{"label", "goes_to"}]], "replaces": []}],
      "kept": {}}
+
+``replaces`` (the as-is screens a screen takes over) is always empty: that
+mapping belongs to the design, not to the code. The renderer reads the key on
+every item, so it is present rather than missing; its coverage check then
+lists the as-is screens the dump does not account for, which is the truth.
 
 ``goes_to`` is a screen id, or a description where a button opens no screen:
 ``"ссылка"`` for a URL, ``"копирует текст"`` for a copy button, ``"нет действия"``
@@ -98,6 +103,7 @@ def _item(sample: Sample, lang: Lang) -> dict[str, Any]:
         "surface": "group" if sample.nav == "group" else "dm",
         "kind": "msg",
         "rows": _rows(screen),
+        "replaces": [],
     }
 
 
