@@ -559,7 +559,7 @@ class TestSummaryCountParam:
 
         result = await summary_service.generate(chat_id=-1, count=500, language="ru")
 
-        assert "(2 сообщений)" in result
+        assert "· 2 сообщения\n" in result
         assert "500" not in result
 
     @pytest.mark.asyncio
@@ -571,8 +571,82 @@ class TestSummaryCountParam:
 
         result = await summary_service.generate(chat_id=-1, count=500, language="en")
 
-        assert "(1 messages)" in result
+        assert "· 1 message\n" in result
         assert "500" not in result
+
+
+class TestSummaryHeaderIsTheDesignedOne:
+    """The live summary's heading is ``summary.result``'s: the title, then the
+    count after a middle dot with the noun agreeing (``1 сообщение``,
+    ``2 сообщения``, ``5 сообщений``) -- not ``(2 сообщений)`` / ``(1 messages)``.
+    Only the heading moves: everything under it is byte for byte what the old
+    heading produced.
+    """
+
+    BODY = (
+        "**Темы:** обсуждали <script>alert(1)</script> & цены\n"
+        "- @@u0@@ предложил *вариант*, @@u1@@ ответила `код`\n"
+        "- ссылка https://example.invalid/a?b=1&c=2\n\n"
+        "**Итог:** договорились"
+    )
+
+    @staticmethod
+    def _rows(n: int) -> list[dict]:
+        people = [(111, "alice", "Alice"), (222, "bob", "Bob")]
+        return [
+            _make_message_row(
+                user_id=people[i % 2][0],
+                username=people[i % 2][1],
+                first_name=people[i % 2][2],
+                content=f"сообщение {i}",
+            )
+            for i in range(n)
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("language", ["ru", "en"])
+    @pytest.mark.parametrize("n", [1, 2, 5, 21])
+    async def test_heading_is_the_summary_result_heading(
+        self, summary_service, ai_router, message_repo, language, n
+    ) -> None:
+        from src.bot.screens import entry
+
+        message_repo.get_for_summary.return_value = self._rows(n)
+        ai_router.generate_text.return_value = _make_text_result(self.BODY)
+
+        result = await summary_service.generate(chat_id=-1, language=language)
+
+        heading = entry.summary_result(language, count=n, body_html="").text
+        assert result.startswith(heading), (heading, result[:80])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("language", "old"),
+        [
+            ("ru", "📋 **Саммари чата (2 сообщений)**\n\n"),
+            ("en", "📋 **Chat summary (2 messages)**\n\n"),
+        ],
+    )
+    async def test_everything_under_the_heading_is_unchanged(
+        self, summary_service, ai_router, message_repo, monkeypatch, language, old
+    ) -> None:
+        from src.bot.screens import entry
+        from src.services.modules import summary as summary_module
+
+        message_repo.get_for_summary.return_value = self._rows(2)
+        ai_router.generate_text.return_value = _make_text_result(self.BODY)
+
+        new = await summary_service.generate(chat_id=-1, language=language)
+        monkeypatch.setattr(summary_module, "_header", lambda _lang, _n: old)
+        before = await summary_service.generate(chat_id=-1, language=language)
+
+        new_heading = entry.summary_result(language, count=2, body_html="").text
+        old_heading = old.replace("**", "<b>", 1).replace("**", "</b>", 1)
+        assert before.startswith(old_heading)
+        assert new.startswith(new_heading)
+        assert new[len(new_heading) :] == before[len(old_heading) :]
+        # The body really went through the shared path: escaped, bolded, names resolved.
+        assert "&lt;script&gt;" in new and "<b>Итог:</b>" in new and "@@u0@@" not in new
 
 
 class TestSummaryConversationTruncation:
@@ -640,7 +714,7 @@ class TestSummaryConversationTruncation:
         result = await summary_service.generate(chat_id=-1, count=100, language="ru")
 
         mock_logger.warning.assert_not_called()
-        assert "(1 сообщений)" in result
+        assert "· 1 сообщение\n" in result
 
 
 # --- Participant aliases in a summary (TD-150) ------------------------------
