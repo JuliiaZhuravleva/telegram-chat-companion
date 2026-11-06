@@ -104,7 +104,8 @@ KNOWN_TAGS: Final = frozenset(
 
 _TITLE_RE: Final = re.compile(r"^\S+ <b>[^<]+</b>")
 _BACK_WORDS: Final = re.compile(r"^\W*(?:Назад|Back)\W*$", re.IGNORECASE)
-STATE_GLYPHS: Final = ("✅", "⚪", "⏸")
+STATE_GLYPHS: Final = ("✅", "⚪", "⏸", "▶")
+"""``▶`` is the resume half of a pause toggle (a paused rule card shows ``▶ Возобновить``)."""
 CLOSE_LABELS: Final = frozenset({"✖️ Закрыть", "✖️ Close"})
 CANCEL_LABELS: Final = frozenset({"✖️ Отмена", "✖️ Cancel"})
 
@@ -393,7 +394,7 @@ def check_screen(
             found.append(f"R11: link button {b.label!r} starts with a state glyph")
         prefix = prefix_of(b.callback) if b.callback else None
         if prefix is not None and ROUTES[prefix].toggle and not starts_with_state:
-            found.append(f"R11: toggle {b.label!r} does not start with ✅/⚪/⏸")
+            found.append(f"R11: toggle {b.label!r} does not start with ✅/⚪/⏸/▶")
 
     # R12 ------------------------------------------------------------------
     full = render_text(screen)

@@ -640,13 +640,16 @@ def test_r10_budget_formula():
 def test_r11_state_glyphs():
     bare_toggle = _act("Сохранять сообщения", "adm_pnl_tgl:ru:-100:sm")
     assert _flags(_panel((bare_toggle,)), "R11") == [
-        "R11: toggle 'Сохранять сообщения' does not start with ✅/⚪/⏸"
+        "R11: toggle 'Сохранять сообщения' does not start with ✅/⚪/⏸/▶"
     ]
     link = Button("✅ Открыть чат", url="https://t.me/example")
     assert _flags(_panel((link,)), "R11") == [
         "R11: link button '✅ Открыть чат' starts with a state glyph"
     ]
     assert _flags(_panel((_act("⚪ Сохранять сообщения", "adm_pnl_tgl:ru:-100:sm"),)), "R11") == []
+    # A paused rule card offers the resume half of the same toggle.
+    resume = _act("▶️ Возобновить", "ar_tog:ru:99999:-1009999999999:0")
+    assert _flags(_panel((resume,)), "R11") == []
 
 
 def test_r12_html_and_length():
