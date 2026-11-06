@@ -60,6 +60,12 @@ DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
         1,
         "hand-rolled not-modified guard, predates the helper",
     ),
+    ("admin_chat_panel.py", "_drop_prompt_keyboard"): (
+        1,
+        "cosmetic: takes the buttons off an earlier prompt by message id (there is no "
+        "Message object to hand safe_edit_reply_markup); a message too old or already "
+        "gone must not stop the value from being saved, so TelegramBadRequest is suppressed",
+    ),
     ("admin_sticker.py", "handle_run_analysis"): (
         2,
         "swallows ANY TelegramBadRequest and continues — the progress edit is cosmetic "

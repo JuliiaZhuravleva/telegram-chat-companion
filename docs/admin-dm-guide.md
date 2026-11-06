@@ -265,45 +265,91 @@ you navigate them.
 
 ## A2 — Chats and chat sections
 
-### A2.1 ⚙️ Chat settings (per chat)
+### A2.1 🗂 Chats and one chat's settings
 
-This screen and 🌍 Global settings (§A1.4) are the same 26 per-chat options at two layers,
+This screen and 🌍 Global settings (§A1.4) are the same per-chat options at two layers,
 and telling them apart is the single most important thing in the panel.
 
-Pick a chat, get every option grouped into 💬 Behaviour, 🧩 Modules, 🎨 Stickers, 📏 Rules,
-📚 Knowledge Base, 😀 Reactions.
+**The chat list** (`🗂 Чаты`) shows the connected chats, most active first, each with its
+message count for the last 24 hours. When there are access requests or rejected chats, a row
+`🙏 Заявки · N` / `🚫 Отклонённые · N` sits on top and the page holds one chat fewer, so the
+keyboard never grows. With no chats at all the screen says how a chat gets here (add the bot
+to a group, a request arrives) and still shows that row when a request is waiting.
 
-- **Boolean options toggle in place.** The toggle flips what the chat *currently behaves
-  like* (the merged value), then writes that as the chat's own value — so a chat inheriting
-  "on" turns off on the first tap. The flip is computed inside the database write, so
-  double-tapping cannot collapse two taps into one change.
-- **The Knowledge Base and Reactions rows are links**, not toggles: they show status and open
-  the panels in §A4.1 and §A2.2, which own those writes.
-- **`Уровень приличия стикеров` / sticker tolerance level** has its own small editor: tap it,
-  type a number between `0.0` and `1.0`. Out-of-range or non-numeric input is *rejected and
-  re-prompted*, never clamped. Commands still work while the prompt is open, and the prompt
-  carries a Cancel button — that is the way out, since an invalid value keeps the prompt
-  active.
-- **Every other non-boolean option is read-only for now** (trigger words, prompt, chances,
-  intervals, rules mode). They are displayed so the panel tells the whole truth about the
-  chat; a generic editor for them is not built yet.
-- **`· inherited`** appears on an option whose per-chat value is unset. Thirteen of the 26
-  options can show it. The other thirteen are older columns that always materialise a value
-  of their own, so they cannot honestly claim to inherit — and, for the same reason, they are
-  absent from the global screen.
+**One chat** opens on a short screen: the chat's name and id, one status line (the bot on or
+off there, and what calls it), a link that opens the chat, then six section buttons —
+🗣 Поведение, 🧠 Память, 🎙 Голос и фото, 🎨 Стикеры, 😀 Реакции, 👋 Сообщество — plus
+`📏 Правила · N` (the rules list, §A3.1) and `🔌 Отключить` (remove the chat from the
+whitelist, §A1.2). Every section has exactly one back button, to this screen; this screen's
+back button goes to the chat list.
+
+| Section | Switches | Shown, not switched here |
+|---|---|---|
+| 🗣 Поведение | stay out unless relevant, abuse protection, read links | trigger words, how often it joins in, reply language; `📝 Инструкция` opens the per-chat instruction editor |
+| 🧠 Память | save messages, search the chat archive, remember its conversations, knowledge base | `👥 Организаторы · N` opens the organizers list (§A4.1) |
+| 🎙 Голос и фото | voice, video notes, collapse transcripts, understand pictures | — |
+| 🎨 Стикеры | learn from stickers, sticker for a sticker, sticker for a photo | the three percentages; `🔞 Откровенность` (§A2.3) |
+| 😀 Реакции | reactions in the chat, keep people's reactions | whether the bot is a chat admin (§A2.2) |
+| 👋 Сообщество | community mode and its five parts, advice | — |
+
+- **A switch flips in place and says what changed** (`✓ Включено: База знаний` above the
+  section). It flips what the chat *currently behaves like* (the merged value) and writes
+  that as the chat's own value, so a chat inheriting "on" turns off on the first tap. The
+  flip happens inside the database write, so a double tap is two changes, never one lost.
+- **The knowledge base and both reaction switches are ordinary switches now**, in 🧠 Память
+  and 😀 Реакции. They used to be links to separate pickers; those pickers are gone.
+- **Values that are shown but not switched** (words, percentages, intervals, language) change
+  only in the database for now; the section says so in one line.
+- **`· общее`** (`· all`) marks a value the chat takes from the global settings. Only the 21
+  options whose per-chat column can be empty can show it. The other 13 are older columns that
+  always hold a value of their own, so they can never honestly claim to inherit, and for the
+  same reason they are absent from the global screen. The knowledge base says it in the
+  section's footnote instead (`База знаний включена в общих настройках.`): its button shares
+  a row with `👥 Организаторы · N`, and the marker does not fit half a phone row.
+- **A chat that has no settings row** (it left, or was never connected) opens the chat list
+  instead, with a line saying nothing changed. A switch or an explicitness value tapped or
+  typed for such a chat lands there too; nothing is written.
+
+`/panel` is the shortcut to one chat: `/panel` with a `t.me/c/…` link, an `@username`, a
+numeric id or part of the title. One match opens the chat; several show up to four of them
+(and say so when there are more, so the admin narrows the title) with `🗂 Все чаты`; none says
+so. Only connected chats are found. `/panel` with nothing after it explains the forms.
 
 ### A2.2 😀 Reactions
 
-Per-chat, so it starts with a chat picker.
+A section of one chat (§A2.1), no longer a separate picker.
 
-Two independent switches: the **module** (whether the bot records and uses reactions at all)
-and **history recording** (whether reaction events are stored).
+Two switches: **reactions in the chat** (whether the bot records and uses reactions at all)
+and **keep people's reactions** (whether reaction events are stored). The second is shown
+only while the first is on.
 
-The screen also carries a live status line — *is the bot an administrator in that chat?* —
-checked against Telegram on every render, never cached. This matters because Telegram simply
+The section also carries a live status line — *is the bot an administrator in that chat?* —
+checked against Telegram on every visit, never cached. This matters because Telegram simply
 does not deliver reaction updates to a non-admin bot and raises no error while doing so: the
-module would look enabled and do nothing. Turning the module on while the bot is not an
-admin pops an immediate warning, and the status line repeats it on every visit.
+module would look enabled and do nothing. Turning reactions on while the bot is not an admin
+pops an immediate warning (the switch still goes on), and the status line repeats it on every
+visit.
+
+### A2.3 🔞 Sticker explicitness
+
+`🔞 Откровенность` in 🎨 Стикеры shows the current level with the nearest preset name, or the
+bare number for a value of the chat's own. Tapping it offers five presets — Строго 0,
+Скромно 0.25, Обычно 0.5, Смелее 0.75, Всё можно 1 — that save on a tap and return to the
+section with a notice, and `✏️ Своё число`, which asks for a number between `0.0` and `1.0`
+(a comma works as the decimal point). An out-of-range or non-numeric value is *rejected and
+asked again* in one new message, never clamped. Commands still work while the question is
+open, and it carries `✖️ Отмена` — the way out, since an invalid value keeps it open. Only the
+newest question keeps its buttons. Going anywhere else in the panel — a button on an older
+message, `/panel`, or another screen opening a chat — closes the question too, so a later
+message is not taken for a value.
+
+### A2.4 👋 Community
+
+While community mode is off, the section shows only the mode switch and the advice switch
+(advice works without the mode). Turning the mode on brings back newcomer, welcome back,
+farewell, departures and joke. A tap on one of those from an older screen, made while the
+mode is off, changes nothing and says so; the same holds for the reactions history switch
+while reactions are off.
 
 ---
 
