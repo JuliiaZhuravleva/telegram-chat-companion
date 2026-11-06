@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.bot.handlers.admin import (
+    _MENU_TITLE,
     handle_admin_command,
     handle_close,
     handle_health,
@@ -29,6 +30,9 @@ from src.bot.handlers.admin import (
     handle_wl_remove_ask,
     handle_wl_restore,
 )
+from src.bot.keyboards.admin import main_menu_keyboard
+from src.bot.screens.hub import build_hub
+from src.bot.screens.render import to_markup
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1031,3 +1035,30 @@ class TestWlDelete:
         await handle_wl_delete(cb, admin_repo, is_admin=False)
 
         admin_repo.delete_attempt.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Today's hub on the screen model
+# ---------------------------------------------------------------------------
+
+
+class TestHubToday:
+    """`screens.hub.build_hub` pinned to the keyboard and title the hub was
+    drawn with before the screen model existed: moving it onto the new path
+    changed nothing a user sees. Lives here, in a file the hub area owns, so
+    the hub's redesign replaces these pins in its own change. Nothing else may
+    depend on the hub looking like this — the stale catch-all's tests patch
+    `show_hub`, and the stale sample draws `hub.sample_hub`."""
+
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    def test_the_hub_looks_exactly_as_today(self, lang: str):
+        """Same rows, labels and payloads as ``main_menu_keyboard``."""
+        built = to_markup(build_hub(lang))
+        assert built is not None
+        assert built.model_dump(exclude_none=True) == main_menu_keyboard(lang).model_dump(
+            exclude_none=True
+        )
+
+    def test_the_hub_title_is_todays(self):
+        assert build_hub("ru").text == _MENU_TITLE["ru"]
+        assert build_hub("en").text == _MENU_TITLE["en"]

@@ -13,8 +13,8 @@ Three things are proven here, each at the call site rather than in a helper:
 
 What each entry DRAWS is pinned next to the area that owns it
 (``test_rules_show_rules.py``, ``test_admin_chat_panel_entries.py``,
-``test_hub_today.py``): this file must not go red because an area redesigned
-its own screen.
+``TestHubToday`` in ``test_admin_handler.py``): this file must not go red
+because an area redesigned its own screen.
 """
 
 from __future__ import annotations
@@ -281,7 +281,7 @@ async def test_stale_shows_the_hub_with_its_line(hub):
 
 @pytest.mark.asyncio
 async def test_stale_in_english(hub):
-    await stale.handle_stale(_callback("ar_tog:en:1"))
+    await stale.handle_stale(_callback("adm_wl:en"))
     assert hub.await_args.args[1] == "en"
     assert hub.await_args.kwargs["notice_raw"] == stale.STALE_NOTICE("en")
 
@@ -304,6 +304,16 @@ async def test_stale_leaves_a_foreign_state_alone():
 
 
 def _tap(chat_type: str) -> CallbackQuery:
+    """A real tap; ``"inline"`` is a button on an inline message, which has no
+    ``message`` (and so no chat) at all."""
+    if chat_type == "inline":
+        return CallbackQuery(
+            id="1",
+            from_user=_user(),
+            chat_instance="1",
+            data="adm_nonexistent:ru",
+            inline_message_id="1",
+        )
     chat_id = ADMIN_ID if chat_type == "private" else CHAT_ID
     return CallbackQuery(
         id="1",
@@ -336,8 +346,10 @@ async def _stale_handler_for(event: CallbackQuery, *, is_admin: bool) -> str | N
         ("private", True, "handle_stale"),
         ("group", True, "handle_stale_outside_dm"),
         ("supergroup", True, "handle_stale_outside_dm"),
+        ("inline", True, "handle_stale_outside_dm"),
         ("private", False, "handle_stale_denied"),
         ("supergroup", False, "handle_stale_denied"),
+        ("inline", False, "handle_stale_denied"),
     ],
 )
 async def test_each_tapper_gets_the_right_answer(chat_type: str, is_admin: bool, expected: str):

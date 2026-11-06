@@ -84,6 +84,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "ar_list:": (LANG, CID, PAGE),
     "ar_all:": (LANG, CID),
     "ar_view:": (LANG, INT4, CID),
+    "ar_tog:": (LANG, INT4, CID, PAGE),
     "ar_del_ask:": (LANG, INT4, CID),
     "ar_del:": (LANG, INT4, CID),
     "ar_add:": (LANG, CID),
@@ -251,7 +252,6 @@ RETIRED_WRITES_TODAY = frozenset(
         ("keyboards/admin_reactions.py", "adm_react_toggle:"),
         ("keyboards/admin_sticker.py", "adm_stk_set:"),
         ("keyboards/rules.py", "adm_rules:"),
-        ("keyboards/rules.py", "ar_tog:"),
         ("screens/hub.py", "adm_kb:"),
         ("screens/hub.py", "adm_react:"),
         ("screens/hub.py", "adm_rules:"),
@@ -281,10 +281,14 @@ def test_no_new_retired_or_compat_writes():
 def test_the_retired_write_ratchet_says_no():
     """Its control: one more file writing ``adm_wl:``, or one more retired
     prefix in a file already listed, is refused."""
-    scan = {"adm_wl:": ["keyboards/new.py"], "ar_tog:": ["screens/hub.py"], "adm_pnl:": ["x.py"]}
+    scan = {
+        "adm_wl:": ["keyboards/new.py"],
+        "adm_stk_back:": ["screens/hub.py"],
+        "adm_pnl:": ["x.py"],
+    }
     assert _unwritable_writes(scan) - RETIRED_WRITES_TODAY == {
         ("keyboards/new.py", "adm_wl:"),
-        ("screens/hub.py", "ar_tog:"),
+        ("screens/hub.py", "adm_stk_back:"),
     }
 
 
@@ -453,7 +457,7 @@ def test_cb_builds():
     assert cb("adm_menu:", "en") == "adm_menu:en"
 
 
-@pytest.mark.parametrize("prefix", ["adm_stk_set:", "adm_wl:", "ar_tog:", "zz_unknown:"])
+@pytest.mark.parametrize("prefix", ["adm_stk_set:", "adm_wl:", "adm_stk_back:", "zz_unknown:"])
 def test_cb_refuses_what_must_not_be_written(prefix: str):
     with pytest.raises(UnknownRoute):
         cb(prefix, "ru")

@@ -97,11 +97,16 @@ async def handle_stale(callback: CallbackQuery, **kwargs: Any) -> None:
 
 @router.callback_query(
     F.data.startswith(PANEL_PREFIXES),
-    F.message.chat.type != "private",
+    ~(F.message.chat.type == "private"),
     IsAdmin(),
 )
 async def handle_stale_outside_dm(callback: CallbackQuery, **_kwargs: Any) -> None:
-    """A bot admin tapped a panel payload outside the DM: say where the panel is."""
+    """A bot admin tapped a panel payload outside the DM: say where the panel is.
+
+    "Outside" includes a button with no message at all (an inline message):
+    ``F.message.chat.type != "private"`` cannot resolve there and would send a
+    bot admin to "access denied", hence the negated equality.
+    """
     logger.info(
         "stale_button_outside_dm",
         action=(callback.data or "").split(":")[0],

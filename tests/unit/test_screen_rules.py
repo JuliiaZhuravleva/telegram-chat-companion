@@ -29,11 +29,13 @@ from types import MappingProxyType
 import pytest
 
 from src.bot.screens import lint
+from src.bot.screens.i18n import Tr
 from src.bot.screens.lint import budget, check_screen, label_width_px
 from src.bot.screens.model import Button, ReplyButton, Screen
 from src.bot.screens.registry import Sample, load_all, make_sample, sample
 from src.bot.screens.render import back, cancel, pager
-from src.bot.screens.routes import ROUTES, prefix_of
+from src.bot.screens.routes import ROUTES, WRITABLE, cb, prefix_of
+from src.bot.screens.samples import fake
 from src.bot.screens.samples.foundation import DESIGN_COPIES
 from src.bot.screens.sections import _MEMBERS, SECTION_OF
 from src.bot.settings_fields import FIELDS_BY_CODE
@@ -51,22 +53,26 @@ def _sample_id(item: Sample) -> str:
     return f"{item.screen_id}[{item.title}]"
 
 
-def _landed(data: str) -> str | None:
+def _landed(data: str, today: lint.RouteFn = first_match) -> str | None:
     """Where ``data`` lands once every area has merged.
 
     A ``new`` prefix has its handler; a ``retired`` one has lost it and falls to
     the catch-all; everything else routes as it does today. ``legacy`` is left
     as today because its area may go either way — and lint judges ``retired``
     and ``compat`` writes from the table, not from the route, anyway.
+
+    ``today`` is the tree being projected forward. Its only other caller is
+    `test_landed_routing_still_says_no`, which hands it both trees an area can
+    leave behind, so that test does not depend on which areas have merged.
     """
     prefix = prefix_of(data)
     status = ROUTES[prefix].status if prefix is not None else None
     if status == "retired":
         return "stale.handle_stale"
-    today = first_match(data)
-    if status == "new" and (today is None or today.startswith("stale.")):
+    handler = today(data)
+    if status == "new" and (handler is None or handler.startswith("stale.")):
         return f"landed.{prefix}"
-    return today
+    return handler
 
 
 ROUTINGS = {"today": first_match, "landed": _landed}
@@ -117,6 +123,34 @@ def test_every_exemption_is_needed(item: Sample, routing: str):
     assert unused == {}, f"exemptions that no longer fire ({routing} routing): {unused}"
 
 
+def _unrouted(screen: Screen, route: lint.RouteFn) -> list[str]:
+    """R7's routing half alone: what an R7 exemption must not hide.
+
+    The exemption is per rule, so a sample exempt from R7 for its retired
+    writes would also skip the routing check on every other button."""
+    return [
+        v
+        for v in check_screen(screen, None, "ru", route=route)
+        if v.startswith("R7:") and " writes a " not in v
+    ]
+
+
+@pytest.mark.parametrize("routing", ROUTINGS)
+@pytest.mark.parametrize("item", REGISTERED, ids=_sample_id)
+def test_every_sample_button_routes_despite_exemptions(item: Sample, routing: str):
+    """Every button that is not a retired or compat write reaches a live
+    handler, whatever the sample is exempt from."""
+    for lang in LANGS:
+        assert _unrouted(item.build(lang), ROUTINGS[routing]) == [], lang
+
+
+def test_the_routing_check_under_an_exemption_says_no():
+    """Its control: a garbled payload is reported, a retired write is left to
+    the exemption."""
+    screen = _panel((_act(data="adm_nonexistent:ru"), _act(data="adm_wl:ru")))
+    assert _unrouted(screen, first_match) == ["R7: 'adm_nonexistent:ru' reaches stale.handle_stale"]
+
+
 # ---------------------------------------------------------------------------
 # The design itself passes ("does not wrongly refuse")
 # ---------------------------------------------------------------------------
@@ -145,14 +179,98 @@ def test_design_copy_passes(item: Sample, lang: str):
     assert check_screen(item.build(lang), item, lang, route=_landed) == []
 
 
+def _tree_before(_data: str) -> str | None:
+    """A tree no area has touched: every panel payload reaches the catch-all."""
+    return "stale.handle_stale"
+
+
+def _tree_after(_data: str) -> str | None:
+    """A tree where every prefix has a live handler, retired ones included."""
+    return "area.live_handler"
+
+
+# ---------------------------------------------------------------------------
+# Every in-place toggle the design draws can be written
+# ---------------------------------------------------------------------------
+
+_CODE = next(iter(SECTION_OF))
+
+DESIGN_TOGGLES: dict[str, tuple[str, tuple[object, ...]]] = {
+    "behavior, memory, voice, chat.stickers, reactions, community": (
+        "adm_pnl_tgl:",
+        (fake.CHAT_ID, _CODE),
+    ),
+    "rules": ("ar_all:", (fake.CHAT_ID,)),
+    "rule": ("ar_tog:", (fake.RULE_ID, fake.CHAT_ID, 0)),
+    "defs.section": ("adm_defs_tgl:", (_CODE,)),
+    "notif": ("adm_ntog:", ("unauthorized",)),
+}
+"""Design screen → the prefix its ✅/⚪/⏸ buttons write. A toggle the design
+draws with no writable prefix is a screen its area cannot build without
+editing the foundation's table, or a permanent R7 exemption."""
+
+
+@pytest.mark.parametrize("screen_id", DESIGN_TOGGLES)
+def test_every_design_toggle_has_a_writable_prefix(screen_id: str):
+    prefix, args = DESIGN_TOGGLES[screen_id]
+    assert ROUTES[prefix].status in WRITABLE
+    assert ROUTES[prefix].toggle, "R11 must check its state glyph"
+    data = cb(prefix, "ru", *args)  # raises for a prefix that must not be written
+    # The design is the end state, so landed routing: a new prefix is handled.
+    assert _flags(_panel((_act("⏸ На паузу", data),)), "R7", route=_landed) == []
+
+
+def _rule_card(lang: str) -> Screen:
+    """The design's rule card: pause in place, delete, back to the list.
+    Not one of the ten copies; held here for its toggle."""
+    return Screen(
+        id="rule",
+        text=Tr("📏 <b>Правило</b> · работает", "📏 <b>Rule</b> · on")(lang),
+        rows=(
+            (
+                Button(
+                    Tr("⏸ На паузу", "⏸ Pause")(lang),
+                    callback=cb("ar_tog:", lang, fake.RULE_ID, fake.CHAT_ID, 0),
+                ),
+                Button(
+                    Tr("🗑 Удалить", "🗑 Delete")(lang),
+                    callback=cb("ar_del_ask:", lang, fake.RULE_ID, fake.CHAT_ID),
+                ),
+            ),
+            (back("rules", cb("ar_list:", lang, fake.CHAT_ID, 0), lang),),
+        ),
+    )
+
+
+@pytest.mark.parametrize("routing", ROUTINGS)
+@pytest.mark.parametrize("lang", LANGS)
+def test_the_rule_card_passes(lang: str, routing: str):
+    assert check_screen(_rule_card(lang), None, lang, route=ROUTINGS[routing]) == []
+
+
 def test_landed_routing_still_says_no():
     """`_landed` forgives a ``new`` prefix and nothing else: a payload no area
-    will ever route still fails R7, and so does a retired write."""
+    will ever route still fails R7, and so does a retired write.
+
+    Asserted against two stand-in trees, not against the real one: on the real
+    tree ``adm_settings:`` lands on a live handler the day the hub area merges,
+    and an assertion that it still says ``landed.`` would turn red in a branch
+    that cannot edit this file."""
     garbled = _panel((_act(data="adm_nonexistent:ru"),))
     assert _flags(garbled, "R7", route=_landed) == [
         "R7: 'adm_nonexistent:ru' reaches stale.handle_stale"
     ]
-    assert _landed("adm_settings:ru") == "landed.adm_settings:"
+    # A new prefix: projected while unhandled, its real handler once it has one.
+    assert _landed("adm_settings:ru", _tree_before) == "landed.adm_settings:"
+    assert _landed("adm_settings:ru", lambda _data: None) == "landed.adm_settings:"
+    assert _landed("adm_settings:ru", _tree_after) == "area.live_handler"
+    # A retired prefix falls to the catch-all even while its handler still exists.
+    assert _landed("adm_wl:ru", _tree_after) == "stale.handle_stale"
+    # Anything else is today's verdict, a stale one included.
+    assert _landed("adm_pnl_menu:ru:-100", _tree_before) == "stale.handle_stale"
+    assert _landed("adm_nonexistent:ru", _tree_after) == "area.live_handler"
+    # On the real tree, only what holds whichever areas have merged.
+    assert not (_landed("adm_settings:ru") or "").startswith("stale.")
     assert _landed("adm_wl:ru") == "stale.handle_stale"
     assert _landed("adm_pnl_menu:ru:-100") == first_match("adm_pnl_menu:ru:-100")
 

@@ -298,9 +298,11 @@ took, and answers by who tapped and where:
 - a bot admin in the private chat: `show_stale` clears the FSM state if it belongs to
   `AdminStates`, logs `stale_button`, and draws the hub in that message under the out-of-date
   line, with no popup;
-- a bot admin anywhere else (a panel button forwarded or posted into a group): an alert saying
-  the panel opens in the private chat with the bot. "Access denied" would be false and send
-  them looking for a permission problem;
+- a bot admin anywhere else (a panel button forwarded or posted into a group, or on an inline
+  message, which has no chat at all): an alert saying the panel opens in the private chat with
+  the bot. "Access denied" would be false and send them looking for a permission problem. The
+  filter is `~(F.message.chat.type == "private")`, not `!= "private"`: the latter cannot
+  resolve without a message and would drop the inline case into "access denied";
 - anyone else: an "access denied" alert.
 
 The last two draw nothing.
@@ -376,7 +378,10 @@ exemptions at all. A rule that flags the design is wrong, not the design.
 that every rule has a known-bad control it flags, that the design copies pass, and that every
 screen id in the design has a sample. The last is a ratchet keyed by samples module: an id is an
 expected failure naming its owner while `samples/<area>.py` does not exist, and a hard failure
-once it does. `pytest tests/unit/test_screen_rules.py -rx` lists what is still outstanding; when
+once it does. Exemptions are per rule, so a sample exempt from R7 for its retired writes would
+skip the routing check on its other buttons too; a separate test runs R7's routing half on every
+sample with exemptions ignored. Every in-place toggle the design draws (✅ / ⚪ / ⏸, including the
+rule card's pause) is checked to have a prefix `cb()` will write. `pytest tests/unit/test_screen_rules.py -rx` lists what is still outstanding; when
 every area has landed that list is empty.
 
 #### The dump
@@ -399,9 +404,10 @@ dump is a picture, the test is the gate.
 
 - The custom-emoji layer draws an icon for "⬅️ Панель" but leaves a bare "◀" / "▶" pager arrow
   as plain text. `test_screens_render.py` pins both, so a change in either direction is seen.
-- `show_hub` currently draws today's hub, and `test_hub_today.py` pins it to
-  `main_menu_keyboard` and the old title, so moving the hub onto the new path changed nothing
-  visible. That file belongs to the hub area and goes when the hub is redesigned.
+- `show_hub` currently draws today's hub, and `TestHubToday` in `test_admin_handler.py` pins
+  it to `main_menu_keyboard` and the old title, so moving the hub onto the new path changed
+  nothing visible. That file belongs to the hub area, which replaces the pins when it
+  redesigns the hub.
 
 #### The screen system's tests
 
@@ -412,7 +418,7 @@ dump is a picture, the test is the gate.
 | `tests/unit/test_screens_render.py` | delivery: edit vs new message, the fallbacks, toasts answered once, splitting, the builders |
 | `tests/unit/test_screens_entries.py` | the container and the FSM context reaching an entry through a real dispatcher, the stale catch-all's three answers, every entry refusing without `data` |
 | `tests/unit/test_dump_screens.py` | the dump carries every key the renderer reads |
-| `tests/unit/test_hub_today.py` (hub area), `test_rules_show_rules.py` (rules area), `test_admin_chat_panel_entries.py` (chats area) | what each stable entry draws today; each owning area changes its file with its screen |
+| `TestHubToday` in `tests/unit/test_admin_handler.py` (hub area), `test_rules_show_rules.py` (rules area), `test_admin_chat_panel_entries.py` (chats area) | what each stable entry draws today; each owning area changes its file with its screen |
 | `tests/unit/test_screen_counts.py`, `tests/integration/test_screen_counts.py` | `count_attempts` and `count_for_chat`, the latter against real PostgreSQL |
 | `tests/unit/test_access_card.py` | the access card after its move |
 
@@ -530,7 +536,7 @@ which renders from the registry in §A2.1).
 `handle_admin_command` and `handle_menu` draw the hub through `show_hub`. `handle_language_set`
 still draws it through `admin._MENU_TITLE` + `main_menu_keyboard`, so the hub exists in two
 places until this area folds the language screen into `show_hub`;
-`test_hub_today.py` pins the two to the same look meanwhile. `hub.py` also declares
+`TestHubToday` in `test_admin_handler.py` pins the two to the same look meanwhile. `hub.py` also declares
 `sample_hub(lang)` and `SAMPLE_HUB_EXEMPT`, which the stale sample draws (§F.6); a redesigned
 hub replaces both there.
 `AdminRepository.count_attempts(status)` counts what the pending / rejected pages list (same
@@ -613,7 +619,9 @@ the same commit. Tracked as TD-046.
 Files: [src/bot/handlers/rules.py](../src/bot/handlers/rules.py) (`show_rules`, rules CRUD,
 the JSON config prompt), [src/bot/keyboards/rules.py](../src/bot/keyboards/rules.py).
 `RulesRepository.count_for_chat(chat_id)` counts every rule of a chat, enabled or not — the
-number the list pages through. The three `awaiting_rule_*` states (§F.5) are declared for
+number the list pages through. `ar_tog:` is `kept` and targets `rule`: the card's pause/resume
+writes it. What the redesign drops is the list's per-row 🔄, which writes the same payload shape;
+once the list stops writing it, an old list button toggles the rule and opens its card. The three `awaiting_rule_*` states (§F.5) are declared for
 this area's rule builder.
 
 ---

@@ -103,6 +103,11 @@ ROUTES: Final[dict[str, Route]] = {
     "ar_list:": Route("rules", "kept"),
     "ar_all:": Route("rules", "new", toggle=True),
     "ar_view:": Route("rule", "kept"),
+    # The rule card's pause/resume. The list's per-row 🔄 wrote the same
+    # payload shape (``ar_tog:{l}:{rid}:{cid}:{page}``) and is what the
+    # redesign retires: the rules area stops writing it from the list, and an
+    # old list button, indistinguishable by shape, toggles and opens the card.
+    "ar_tog:": Route("rule", "kept", toggle=True),
     "ar_del_ask:": Route("rule.del_ask", "kept"),
     "ar_del:": Route("rules", "kept"),
     "ar_add:": Route("rule.type", "kept"),
@@ -170,7 +175,6 @@ ROUTES: Final[dict[str, Route]] = {
     "adm_react_toggle:": Route("reactions", "retired", toggle=True),
     "adm_rules:": Route("chats", "retired"),
     "adm_stk_back:": Route("stk.set", "retired"),
-    "ar_tog:": Route("rules", "retired", toggle=True),
 }
 
 WRITABLE: Final[frozenset[Status]] = frozenset({"kept", "new", "legacy"})
@@ -292,6 +296,7 @@ LEGACY_SAMPLES: Final[dict[str, str]] = {
     "adm_reject:": "adm_reject:ru:99999",
     "ar_list:": "ar_list:ru:-1009999999999:0",
     "ar_view:": "ar_view:ru:99999",
+    "ar_tog:": "ar_tog:ru:99999:-1009999999999:0",
     "ar_del_ask:": "ar_del_ask:ru:99999",
     "ar_del:": "ar_del:ru:99999",
     "ar_add:": "ar_add:ru:-1009999999999",
@@ -338,5 +343,4 @@ LEGACY_SAMPLES: Final[dict[str, str]] = {
     "adm_react_toggle:": "adm_react_toggle:ru:-1009999999999:rx:p",
     "adm_rules:": "adm_rules:ru:0",
     "adm_stk_back:": "adm_stk_back:ru:test_pack:0",
-    "ar_tog:": "ar_tog:ru:99999:-1009999999999:0",
 }
