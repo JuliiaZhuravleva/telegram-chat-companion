@@ -45,6 +45,7 @@ from src.bot.screens.stickers import (
     PackPage,
     PackRow,
     SetsPage,
+    StickerFacts,
     build_stk_card,
     build_stk_clear_ask,
     build_stk_error,
@@ -55,6 +56,7 @@ from src.bot.screens.stickers import (
     build_stk_unknown,
     facts_from_row,
     pack_key,
+    score_line,
 )
 from src.bot.states.admin import AdminStates
 from src.services.modules.sticker.models import ReanalyzeResult, StickerLearningResult
@@ -162,6 +164,7 @@ def _sticker_repo(
     repo.save_notification = AsyncMock(return_value=1)
     repo.clear_analysis = AsyncMock()
     repo.set_manual_explicitness_score = AsyncMock(return_value=True)
+    repo.update_explicitness_score = AsyncMock()
     repo.reset_explicitness_to_auto = AsyncMock(return_value=True)
     repo.get_notification_by_reply = AsyncMock(return_value=None)
     repo.upsert_sticker_set = AsyncMock()
@@ -900,7 +903,7 @@ class TestHandleStickerExplicitnessPreset:
     async def test_one_tap_sets_the_value_and_the_card_says_so(self) -> None:
         cb = _callback(f"adm_stk_expset:ru:{FUID}:3")
         repo = _sticker_repo()
-        state = _state()
+        state = _state(current=AdminStates.awaiting_sticker_score.state)
 
         await handle_sticker_explicitness_preset(cb, repo, _admin_repo(), _bot_config_repo(), state)
 
@@ -1139,7 +1142,7 @@ class TestRescore:
         bot = MagicMock()
         svc = _service()
         repo = _sticker_repo()
-        state = _state()
+        state = _state(current=AdminStates.awaiting_sticker_score.state)
 
         await handle_sticker_explicitness_reset(
             cb, bot, svc, repo, _admin_repo(), _bot_config_repo(), state
@@ -1586,3 +1589,269 @@ class TestCallbackBudget:
 
         repo.get_set_by_key.assert_awaited_once_with(pack_key(LONG_PACK))
         repo.get_stickers_in_set.assert_awaited_once_with(LONG_PACK, limit=4, offset=0)
+
+
+# ---------------------------------------------------------------------------
+# The verdict on the card is the search's own comparison
+# ---------------------------------------------------------------------------
+
+
+class TestScoreVerdict:
+    def test_a_score_equal_to_the_tolerance_passes(self) -> None:
+        """The ceiling is inclusive — a ``<`` anywhere on this path turns it into a block."""
+        line = score_line(StickerFacts(fuid=FUID, score=0.5, tolerance=0.5), "ru")
+
+        assert "0.50 · пройдёт в чате с допуском 0.50" in line
+        assert "не пройдёт" not in line
+
+    def test_the_card_asks_is_within_tolerance(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Not a copy of the inequality: whatever the search function says, the card says."""
+        verdict = MagicMock(return_value=False)
+        monkeypatch.setattr("src.bot.screens.stickers.is_within_tolerance", verdict)
+
+        line = score_line(StickerFacts(fuid=FUID, score=0.1, tolerance=0.5), "ru")
+
+        verdict.assert_called_once_with(0.1, 0.5)
+        assert "0.10 · не пройдёт в чате с допуском 0.50" in line
+
+
+# ---------------------------------------------------------------------------
+# A crash in the analysis is an error screen, never a frozen ⏳
+# ---------------------------------------------------------------------------
+
+
+_RETRY_AND_BACK: Buttons = [
+    ("🔁 Повторить", f"adm_stk_reanalyze:ru:{FUID}"),
+    ("⬅️ Стикер", f"adm_stk_card:ru:{FUID}"),
+]
+
+
+class TestAnalysisCrash:
+    @pytest.mark.asyncio()
+    async def test_reanalyze_raising_turns_the_placeholder_into_the_error(self) -> None:
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+        svc = _service()
+        svc.reanalyze.side_effect = RuntimeError("boom")
+        repo = _sticker_repo()
+
+        with patch(f"{MOD}.logger") as log:
+            await handle_run_analysis(
+                cb, MagicMock(), svc, repo, _admin_repo(), _bot_config_repo(), _state()
+            )
+
+        assert "⏳" in _edit(cb, 0)[0]
+        text, buttons = _edit(cb)
+        assert "⚠️ <b>Не получилось разобрать стикер</b>" in text
+        assert ERROR_REASONS["internal"]("ru") in text
+        assert buttons == _RETRY_AND_BACK
+        assert log.error.call_args.kwargs["exc_info"] is True
+        # A plain re-analysis drops no score, so there is nothing to put back.
+        repo.update_explicitness_score.assert_not_awaited()
+        repo.set_manual_explicitness_score.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_learn_raising_in_the_dm_check_is_the_error(self, download: AsyncMock) -> None:
+        cb = _dm_tap()
+        svc = _service()
+        svc.learn.side_effect = RuntimeError("boom")
+
+        with patch(f"{MOD}.logger") as log:
+            await _dm_analyze(cb, svc, _sticker_repo(missing=True))
+
+        assert "⏳" in _edit(cb, 0)[0]
+        text, buttons = _edit(cb)
+        assert ERROR_REASONS["internal"]("ru") in text
+        assert buttons == [("🔁 Повторить", f"adm_stk_dmchk:ru:{FUID}")]
+        assert log.error.call_args.kwargs["exc_info"] is True
+
+
+# ---------------------------------------------------------------------------
+# A failed re-score puts the score back
+# ---------------------------------------------------------------------------
+
+
+async def _rescore(repo: MagicMock, svc: MagicMock) -> MagicMock:
+    cb = _callback(f"adm_stk_expreset:ru:{FUID}")
+    await handle_sticker_explicitness_reset(
+        cb, MagicMock(), svc, repo, _admin_repo(), _bot_config_repo(), _state()
+    )
+    return cb
+
+
+class TestFailedRescoreKeepsTheScore:
+    @pytest.mark.asyncio()
+    async def test_a_manual_score_is_put_back_as_manual(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=True))
+        svc = _service(reanalyze=ReanalyzeResult(ok=False, reason="vision"))
+
+        cb = await _rescore(repo, svc)
+
+        repo.reset_explicitness_to_auto.assert_awaited_once_with(FUID)
+        repo.set_manual_explicitness_score.assert_awaited_once_with(FUID, 0.8)
+        repo.update_explicitness_score.assert_not_awaited()
+        text, buttons = _edit(cb)
+        assert ERROR_REASONS["vision"]("ru") in text
+        assert "Оценка осталась прежней: 0.80." in text
+        assert buttons == _RETRY_AND_BACK
+
+    @pytest.mark.asyncio()
+    async def test_an_automatic_score_is_put_back_as_automatic(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=0.25, explicitness_is_manual=False))
+        svc = _service()
+        svc.reanalyze.side_effect = RuntimeError("boom")
+
+        cb = await _rescore(repo, svc)
+
+        repo.update_explicitness_score.assert_awaited_once_with(FUID, 0.25)
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        text, _ = _edit(cb)
+        assert ERROR_REASONS["internal"]("ru") in text
+        assert "Оценка осталась прежней: 0.25." in text
+
+    @pytest.mark.asyncio()
+    async def test_when_putting_it_back_fails_the_screen_says_it_is_gone(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=True))
+        repo.set_manual_explicitness_score.side_effect = RuntimeError("db down")
+        svc = _service(reanalyze=ReanalyzeResult(ok=False, reason="download"))
+
+        cb = await _rescore(repo, svc)
+
+        text, buttons = _edit(cb)
+        assert "Оценка сброшена, и пока её нет, бот этот стикер не отправит." in text
+        assert "осталась прежней" not in text
+        assert buttons == [
+            ("🔁 Повторить", f"adm_stk_reanalyze:ru:{FUID}"),
+            ("🔞 Откровенность", f"adm_stk_score:ru:{FUID}"),
+            ("⬅️ Стикер", f"adm_stk_card:ru:{FUID}"),
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_a_refusal_with_a_lost_score_offers_the_manual_score_once(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=False))
+        repo.update_explicitness_score.side_effect = RuntimeError("db down")
+        svc = _service(reanalyze=ReanalyzeResult(ok=False, reason="content_filter"))
+
+        cb = await _rescore(repo, svc)
+
+        _, buttons = _edit(cb)
+        assert _callbacks(buttons).count(f"adm_stk_score:ru:{FUID}") == 1
+
+    @pytest.mark.asyncio()
+    async def test_an_unscored_sticker_has_nothing_to_put_back(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=None))
+        svc = _service(reanalyze=ReanalyzeResult(ok=False, reason="vision"))
+
+        cb = await _rescore(repo, svc)
+
+        repo.update_explicitness_score.assert_not_awaited()
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        text, buttons = _edit(cb)
+        assert "Оценка" not in text.split("</b>", 1)[1]
+        assert buttons == _RETRY_AND_BACK
+
+    @pytest.mark.asyncio()
+    async def test_a_successful_rescore_writes_nothing_back(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=True))
+
+        cb = await _rescore(repo, _service())
+
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        repo.update_explicitness_score.assert_not_awaited()
+        assert _edit(cb)[0].startswith("<i>✓ Оценка пересчитана</i>")
+
+
+# ---------------------------------------------------------------------------
+# The score screen's buttons leave another screen's prompt alone
+# ---------------------------------------------------------------------------
+
+
+_FOREIGN = AdminStates.awaiting_rule_react.state
+
+
+class TestForeignPromptSurvives:
+    @pytest.mark.asyncio()
+    async def test_preset(self) -> None:
+        state = _state(current=_FOREIGN)
+        repo = _sticker_repo()
+
+        await handle_sticker_explicitness_preset(
+            _callback(f"adm_stk_expset:ru:{FUID}:3"), repo, _admin_repo(), _bot_config_repo(), state
+        )
+
+        repo.set_manual_explicitness_score.assert_awaited_once_with(FUID, 0.75)
+        state.clear.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_rescore(self) -> None:
+        state = _state(current=_FOREIGN)
+        repo = _sticker_repo()
+
+        await handle_sticker_explicitness_reset(
+            _callback(f"adm_stk_expreset:ru:{FUID}"),
+            MagicMock(),
+            _service(),
+            repo,
+            _admin_repo(),
+            _bot_config_repo(),
+            state,
+        )
+
+        repo.reset_explicitness_to_auto.assert_awaited_once_with(FUID)
+        state.clear.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_cancel(self) -> None:
+        cb = _callback(f"adm_stk_expcancel:ru:{FUID}")
+        state = _state(current=_FOREIGN)
+
+        await handle_sticker_explicitness_cancel(
+            cb, _sticker_repo(), _admin_repo(), _bot_config_repo(), state
+        )
+
+        state.clear.assert_not_awaited()
+        assert "Сейчас 0.25, посчитал бот." in _edit(cb)[0]
+
+
+# ---------------------------------------------------------------------------
+# A sticker or a photo sent into the score prompt
+# ---------------------------------------------------------------------------
+
+
+class TestScorePromptGetsMedia:
+    @pytest.mark.asyncio()
+    async def test_the_prompt_says_to_send_text_and_how_to_leave(self, strip: AsyncMock) -> None:
+        msg = _typed("")
+        msg.text = None
+        msg.caption = None
+        msg.sticker = _tg_sticker()
+        state = _state(data=dict(_ARMED))
+        repo = _sticker_repo()
+
+        await handle_sticker_explicitness_input(msg, state, repo, _admin_repo(), _bot_config_repo())
+
+        text, buttons = _new(msg.answer)
+        assert (
+            "⚠️ Сюда нужно число текстом. Чтобы выйти, нажмите «✖️ Отмена» "
+            "или отправьте /cancel." in text
+        )
+        assert "Нужно число от 0.0 до 1.0" not in text
+        assert buttons == [("✖️ Отмена", f"adm_stk_expcancel:ru:{FUID}")]
+        state.clear.assert_not_awaited()
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        state.update_data.assert_awaited_once_with(exp_prompt_id=301)
+        assert strip.call_args.args[0].message_id == 250
+
+    @pytest.mark.asyncio()
+    async def test_english(self, strip: AsyncMock) -> None:
+        msg = _typed("")
+        msg.text = None
+        state = _state(data={**_ARMED, "exp_lang": "en"})
+
+        await handle_sticker_explicitness_input(
+            msg, state, _sticker_repo(), _admin_repo("en"), _bot_config_repo()
+        )
+
+        text, buttons = _new(msg.answer)
+        assert "Send the number as text. To leave, tap" in text
+        assert "“✖️ Cancel”" in text
+        assert buttons == [("✖️ Cancel", f"adm_stk_expcancel:en:{FUID}")]

@@ -32,9 +32,15 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.dispatcher.event.bases import UNHANDLED
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Chat, Message, User
 
 from src.bot.handlers import router as main_router
+from src.bot.handlers.admin_sticker import router as admin_sticker_router
+from src.bot.states.admin import AdminStates
 
 _SAMPLE_STICKER_ROW = {
     "file_id": "CAACAgIAAxkB",
@@ -476,3 +482,93 @@ class TestAdminDmSlashCommandReachesCommandHandlers:
         sticker_repo = data["sticker_repo"]
         assert isinstance(sticker_repo, MagicMock)
         sticker_repo.get_notification_by_reply.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# A sticker sent while a prompt is open answers that prompt
+# ---------------------------------------------------------------------------
+
+
+async def _open_prompt(state_name: str, data: dict[str, object]) -> FSMContext:
+    """A real FSM context with ``state_name`` armed, as the dispatcher would hand it."""
+    ctx = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=555, user_id=555))
+    await ctx.set_state(state_name)
+    await ctx.set_data(data)
+    return ctx
+
+
+class TestAdminDmStickerYieldsToAnOpenPrompt:
+    """admin_sticker's router is included before every other FSM-owning
+    router, so its catalogue check must not take a sticker that is the
+    answer to another screen's prompt — the rules reaction prompt asks for
+    exactly that."""
+
+    @pytest.mark.asyncio()
+    async def test_the_check_does_not_match_inside_the_rules_reaction_prompt(self) -> None:
+        msg, data = _make_router_message(is_admin=True, sticker_known=True)
+
+        result = await admin_sticker_router.propagate_event(
+            "message", msg, raw_state=AdminStates.awaiting_rule_react.state, **data
+        )
+
+        assert result is UNHANDLED
+        msg.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_control_with_no_prompt_open_the_check_matches(self) -> None:
+        msg, data = _make_router_message(is_admin=True, sticker_known=True)
+
+        result = await admin_sticker_router.propagate_event("message", msg, raw_state=None, **data)
+
+        assert result is not UNHANDLED
+        msg.reply.assert_awaited_once()
+
+    @pytest.mark.asyncio()
+    async def test_through_the_main_router_the_sticker_check_stays_out(self) -> None:
+        msg, data = _make_router_message(is_admin=True, sticker_known=True)
+        state_name = AdminStates.awaiting_rule_react.state
+        assert state_name is not None
+        data.update(
+            raw_state=state_name,
+            state=await _open_prompt(state_name, {"lang": "ru"}),
+            rules_repo=MagicMock(),
+            chat_config_service=MagicMock(),
+            chat_settings_repo=MagicMock(),
+        )
+
+        with patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new=AsyncMock(return_value=b"fake-bytes"),
+        ):
+            await main_router.propagate_event("message", msg, **data)
+
+        sticker_repo = data["sticker_repo"]
+        assert isinstance(sticker_repo, MagicMock)
+        sticker_repo.get_by_file_unique_id.assert_not_awaited()
+        msg.reply.assert_not_awaited()
+        # Nor does it fall through to media.py's silent auto-learn: the open
+        # prompt's own handler consumed it.
+        sticker_service = data["sticker_service"]
+        assert isinstance(sticker_service, MagicMock)
+        sticker_service.learn.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_in_the_score_prompt_a_sticker_gets_the_send_text_hint(self) -> None:
+        msg, data = _make_router_message(is_admin=True, sticker_known=True)
+        msg.bot = None  # no prompt to strip: the hint itself is what is under test
+        msg.answer = AsyncMock(return_value=MagicMock(message_id=7))
+        state_name = AdminStates.awaiting_sticker_score.state
+        assert state_name is not None
+        state = await _open_prompt(
+            state_name,
+            {"exp_file_unique_id": "AgADvh4AAlkbCFI", "exp_lang": "ru", "exp_prompt_id": 6},
+        )
+        data.update(raw_state=state_name, state=state)
+
+        await main_router.propagate_event("message", msg, **data)
+
+        msg.reply.assert_not_awaited()
+        msg.answer.assert_awaited_once()
+        assert "Сюда нужно число текстом" in msg.answer.call_args.args[0]
+        assert await state.get_state() == state_name
+        assert (await state.get_data())["exp_prompt_id"] == 7

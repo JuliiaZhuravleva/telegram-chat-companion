@@ -24,8 +24,9 @@ from typing import Any, Final, Literal
 from src.bot.custom_emoji import fence
 from src.bot.screens.i18n import Lang, Tr, plural_ru
 from src.bot.screens.model import Button, Screen
-from src.bot.screens.render import back, cancel, pager
+from src.bot.screens.render import CANCEL, back, cancel, pager
 from src.bot.screens.routes import cb
+from src.services.modules.sticker.tolerance import is_within_tolerance
 
 PRESETS: Final[tuple[float, ...]] = (0.0, 0.25, 0.5, 0.75, 1.0)
 """One-tap explicitness values. The INDEX rides in ``adm_stk_expset:`` — shorter
@@ -43,7 +44,7 @@ CONTEXTS_SHOWN: Final = 5
 
 DEFAULT_EMOJI: Final = "🖼"
 
-ErrorReason = Literal["download", "vision", "content_filter", "empty"]
+ErrorReason = Literal["download", "vision", "content_filter", "empty", "internal"]
 ReplyKind = Literal["ok", "note_saved", "content_filter", "failed"]
 
 # ── Copy ────────────────────────────────────────────────────────────────
@@ -132,6 +133,10 @@ _SCORE_IN_BAD = Tr(
     "⚠️ Нужно число от 0.0 до 1.0, например 0.3.",
     "⚠️ It has to be a number from 0.0 to 1.0, for example 0.3.",
 )
+_SCORE_IN_NOT_TEXT = Tr(
+    "⚠️ Сюда нужно число текстом. Чтобы выйти, нажмите «{cancel}» или отправьте /cancel.",
+    "⚠️ Send the number as text. To leave, tap “{cancel}” or send /cancel.",
+)
 
 _CLEAR_TITLE = Tr("Очистить разбор?", "Clear the analysis?")
 _CLEAR_BODY = Tr(
@@ -145,6 +150,13 @@ _ANALYZING_BODY = Tr("Это займёт несколько секунд.", "Th
 
 _ERROR_TITLE = Tr("Не получилось разобрать стикер", "Could not analyse the sticker")
 _ERROR_NOTES_KEPT = Tr("Заметки на месте.", "Notes are kept.")
+_ERROR_SCORE_KEPT = Tr("Оценка осталась прежней: {v}.", "The score is unchanged: {v}.")
+_ERROR_SCORE_LOST = Tr(
+    "Оценка сброшена, и пока её нет, бот этот стикер не отправит. "
+    "Задайте её вручную: 🔞 Откровенность.",
+    "The score was reset, and until it has one the bot will not send this sticker. "
+    "Set it by hand: 🔞 Explicitness.",
+)
 ERROR_REASONS: Final[Mapping[str, Tr]] = {
     "download": Tr(
         "Не получилось скачать стикер из Telegram.",
@@ -158,6 +170,10 @@ ERROR_REASONS: Final[Mapping[str, Tr]] = {
         "You can set the explicitness score by hand: 🔞 Explicitness.",
     ),
     "empty": Tr("Модель вернула пустой ответ.", "The model returned an empty answer."),
+    "internal": Tr(
+        "Что-то пошло не так на стороне бота.",
+        "Something went wrong on the bot's side.",
+    ),
 }
 
 _UNKNOWN_TITLE = Tr("Новый стикер", "New sticker")
@@ -369,12 +385,12 @@ def facts_from_row(
 def score_line(facts: StickerFacts, lang: str) -> str:
     """``Откровенность: 0.25 · пройдёт в чате с допуском 0.50`` (or "not rated").
 
-    Pass/fail is ``score <= tolerance`` — the same inequality as
-    ``tolerance.is_within_tolerance``, which the sticker search applies in SQL.
+    Pass/fail is ``is_within_tolerance`` itself — the one comparison the
+    sticker search applies (in SQL), so the card cannot disagree with it.
     """
     if facts.score is None:
         return f"{_SCORE(lang)}: {_SCORE_NONE(lang)}"
-    verdict = _PASSES if facts.score <= facts.tolerance else _BLOCKED
+    verdict = _PASSES if is_within_tolerance(facts.score, facts.tolerance) else _BLOCKED
     manual = _MANUAL(lang) if facts.score_manual else ""
     return f"{_SCORE(lang)}: {_score(facts.score)}{manual} · {verdict(lang).format(t=_score(facts.tolerance))}"
 
@@ -566,11 +582,19 @@ def build_stk_score(lang: Lang, facts: StickerFacts, *, notice: str | None = Non
     return Screen(id="stk.score", text=text, rows=rows, notice=notice)
 
 
-def build_stk_score_in(lang: Lang, facts: StickerFacts, *, invalid: bool = False) -> Screen:
-    """The typed-number prompt; ``invalid`` repeats it under a line saying what was wrong."""
+def build_stk_score_in(
+    lang: Lang, facts: StickerFacts, *, invalid: bool = False, not_text: bool = False
+) -> Screen:
+    """The typed-number prompt; ``invalid`` repeats it under a line saying what was wrong.
+
+    ``not_text``: the answer was a sticker, a photo or other media — the line
+    says the number goes in as text and how to leave the prompt instead.
+    """
     title = html.escape(_title_of(facts, lang))
     text = f"🔞 <b>{_SCORE(lang)}</b> · {title}\n\n"
-    if invalid:
+    if not_text:
+        text += f"{_SCORE_IN_NOT_TEXT(lang).format(cancel=CANCEL(lang))}\n\n"
+    elif invalid:
         text += f"{_SCORE_IN_BAD(lang)}\n\n"
     text += _SCORE_IN_ASK(lang)
     return Screen(
@@ -606,17 +630,33 @@ def build_stk_analyzing(lang: Lang) -> Screen:
     )
 
 
-def build_stk_error(lang: Lang, fuid: str, reason: str | None, *, dm: bool = False) -> Screen:
+def build_stk_error(
+    lang: Lang,
+    fuid: str,
+    reason: str | None,
+    *,
+    dm: bool = False,
+    score_kept: float | None = None,
+    score_lost: bool = False,
+) -> Screen:
     """Analysis failed: why, Retry, and for a content refusal the way to score by hand.
 
     ``dm``: the sticker the admin sent to the bot — Retry re-runs the DM check
     (``adm_stk_dmchk:``), and there is no catalogue parent to go back to.
+
+    ``score_kept`` / ``score_lost``: the failed analysis was a re-score, which
+    had already dropped the score — it was put back (and is this value), or
+    putting it back failed too and the sticker is now unscored.
     """
     copy = ERROR_REASONS.get(reason or "empty", ERROR_REASONS["empty"])
     body = copy(lang) if dm else f"{copy(lang)} {_ERROR_NOTES_KEPT(lang)}"
+    if score_lost:
+        body += f" {_ERROR_SCORE_LOST(lang)}"
+    elif score_kept is not None:
+        body += f" {_ERROR_SCORE_KEPT(lang).format(v=_score(score_kept))}"
     retry = cb("adm_stk_dmchk:", lang, fuid) if dm else cb("adm_stk_reanalyze:", lang, fuid)
     rows: list[tuple[Button, ...]] = [(Button(_RETRY(lang), retry),)]
-    if reason == "content_filter":
+    if reason == "content_filter" or score_lost:
         rows.append((Button(_SCORE_BTN(lang), cb("adm_stk_score:", lang, fuid)),))
     if not dm:
         rows.append((back("stk.card", cb("adm_stk_card:", lang, fuid), lang),))

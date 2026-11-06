@@ -17,6 +17,7 @@ from src.bot.reply_flow import (
     relevancy_allows_reply,
     send_quoted_reply,
 )
+from src.bot.screens.i18n import lang_of
 from src.bot.utils import ReplyContext, extract_reply_context, should_respond
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -746,6 +747,8 @@ async def handle_sticker_message(
                 if admin_ids_raw:
                     admin_ids = parse_admin_ids(admin_ids_raw)
                     if admin_ids:
+                        # The card is the admins' screen: their language, not the chat's.
+                        lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
                         await sticker_service.notify_admins(
                             bot,
                             sticker,
@@ -754,6 +757,7 @@ async def handle_sticker_message(
                             notification_mode=sticker_mode,
                             collage_png=learning_result.collage_png,
                             tolerance_level=chat_config.tolerance_level,
+                            lang=lang,
                         )
         except Exception:
             logger.exception("Failed to notify admins about new sticker")
