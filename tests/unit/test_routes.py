@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.types import ReplyKeyboardRemove
 
 from src.bot.handlers import router as main_router
 from src.bot.screens.routes import (
@@ -36,8 +38,9 @@ from src.bot.screens.routes import (
 )
 from src.bot.screens.sections import SECTIONS
 from src.bot.settings_fields import FIELDS_BY_CODE
+from src.bot.states.admin import PROMPT_OWN_TAPS, AdminStates, is_own_tap
 from src.models.rules import RuleType
-from tests.unit.screen_routing import first_match
+from tests.unit.screen_routing import FakeState, admin_tap, admin_text, deliver, first_match
 
 SRC_BOT = Path(__file__).resolve().parents[2] / "src" / "bot"
 
@@ -63,12 +66,12 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_pnl_menu:": (LANG, CID),
     "adm_pnl_grp:": (LANG, CID, SECTION),
     "adm_pnl_tgl:": (LANG, CID, CODE),
-    "adm_pnl_tol:": (LANG, CID),
+    "adm_pnl_tol:": (LANG, CID, "in"),
     "adm_pnl_tolset:": (LANG, CID, "0.95"),
     "adm_pnl_tolcancel:": (LANG, CID),
     "adm_pnl_sp:": (LANG, CID),
-    "adm_pnl_spok:": (LANG, CID),
-    "adm_pnl_spre:": (LANG, CID),
+    "adm_pnl_spok:": (LANG, CID, INT4),  # the draft's revision: a message id
+    "adm_pnl_spre:": (LANG, CID, INT4),
     "adm_pnl_spx:": (LANG, CID),
     "adm_wl_rm_ask:": (LANG, CID, PAGE),
     "adm_wl_rm:": (LANG, CID, PAGE),
@@ -82,25 +85,27 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_approve:": (LANG, INT4),
     "adm_reject:": (LANG, INT4),
     "ar_list:": (LANG, CID, PAGE),
-    "ar_all:": (LANG, CID),
-    "ar_view:": (LANG, INT4, CID),
+    "ar_all:": (LANG, CID, INT4),
+    "ar_view:": (LANG, INT4, CID, "j"),
     "ar_tog:": (LANG, INT4, CID, PAGE),
     "ar_del_ask:": (LANG, INT4, CID),
     "ar_del:": (LANG, INT4, CID),
     "ar_add:": (LANG, CID),
     "ar_type:": (LANG, CID, RULE_TYPE),
     "ar_cancel:": (LANG, CID),
-    "ar_b_type:": (LANG, CID, RULE_TYPE),
+    "ar_b_type:": (LANG, CID, "u", PAGE),
     "ar_b_match:": (LANG, CID, ARG16),
     "ar_b_who:": (LANG, CID, ARG16),
     "ar_b_n:": (LANG, CID, ARG16),
     "ar_b_act:": (LANG, CID, ARG16),
     "ar_b_txt:": (LANG, CID, ARG16),
     "ar_b_rx:": (LANG, CID, ARG16),
-    "ar_cfg:": (LANG, INT4, CID),
+    "ar_cfg:": (LANG, CID),
     "adm_kb_orgs:": (LANG, CID, PAGE),
     "adm_kb_org_rm:": (LANG, CID, UID),
-    "adm_kb_org_undo:": (LANG, CID, UID),
+    # The removed person's place in the list: nothing caps the list, so the
+    # widest integer the other ids use.
+    "adm_kb_org_undo:": (LANG, CID, UID, INT4),
     "adm_kb_org_list:": (LANG, CID, PAGE),
     "adm_kb_org_pick:": (LANG, CID, UID),
     "adm_kb_org_add:": (LANG, CID),
@@ -118,7 +123,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_stk_expedit:": (LANG, FUID),
     "adm_stk_expcancel:": (LANG, FUID),
     "adm_stk_expreset:": (LANG, FUID),
-    "adm_health:": (LANG,),
+    "adm_health:": (LANG, "now"),
     "adm_stats:": (LANG, "30d"),
     "adm_costs:": (LANG, "30d"),
     "adm_costs_verify:": (LANG, "30d"),
@@ -177,12 +182,68 @@ def test_worst_case_payload_fits(prefix: str):
 
 
 def test_longest_payloads_measured():
-    """The three longest payloads, measured. A hand count of 45 / 40 / 36 ran one
-    byte high on two of them (safe side); the measured sizes are pinned here so
-    a change to an id shape shows up as a diff."""
-    assert len(cb("adm_kb_org_undo:", "en", CID, UID)) == 44
+    """Sizes measured, not hand-counted (a hand count once ran a byte high), and
+    pinned so a change to an id shape shows up as a diff. The undo payload is
+    the longest of all: a chat id, a user id and a place in the list."""
+    assert len(cb("adm_kb_org_undo:", "en", CID, UID, INT4)) == 55
     assert len(cb("adm_pnl_grp:", "en", CID, "community")) == 39
-    assert len(cb("ar_view:", "en", INT4, CID)) == 36
+    assert len(cb("ar_view:", "en", INT4, CID, "j")) == 38
+    assert max(WORST_CASE, key=lambda p: len(cb(p, *WORST_CASE[p]))) == "adm_kb_org_undo:"
+
+
+def _written_payloads() -> dict[str, set[str]]:
+    """Every payload the registered samples write, both languages, by prefix —
+    plus the instruction editor's two inline keyboards, which no sample draws."""
+    from src.bot.keyboards.admin_chat_panel import (
+        system_prompt_cancel_keyboard,
+        system_prompt_confirm_keyboard,
+    )
+    from src.bot.screens.registry import load_all
+
+    payloads: list[str] = []
+    for variants in load_all().values():
+        for item in variants:
+            for lang in ("ru", "en"):
+                payloads += [b.callback for row in item.build(lang).rows for b in row]
+    for markup in (
+        system_prompt_cancel_keyboard("ru", -100123),
+        system_prompt_confirm_keyboard("ru", -100123, 4242),
+    ):
+        payloads += [b.callback_data or "" for row in markup.inline_keyboard for b in row]
+    by_prefix: dict[str, set[str]] = {}
+    for data in payloads:
+        prefix = prefix_of(data) if data and data != NOOP else None
+        if prefix is not None:
+            by_prefix.setdefault(prefix, set()).add(data)
+    return by_prefix
+
+
+def test_worst_cases_have_the_shape_the_screens_write():
+    """A worst case with fewer fields than the screens write measures a shorter
+    payload than the one sent: ``adm_kb_org_undo:``'s row had no place in the
+    list, so the longest payload of all was counted eleven bytes short."""
+    written = _written_payloads()
+    assert len(written) > 60, "the samples were not walked"
+    short: list[str] = []
+    for prefix, datas in sorted(written.items()):
+        worst = [str(f) for f in WORST_CASE[prefix]]
+        for data in sorted(datas):
+            fields = data[len(prefix) :].split(":")
+            if len(fields) > len(worst):
+                short.append(f"{data}: {len(fields)} fields, worst case has {len(worst)}")
+            short += [
+                f"{data}: field {i} {got!r} wider than {want!r}"
+                for i, (got, want) in enumerate(zip(fields, worst, strict=False))
+                if len(got) > len(want)
+            ]
+    assert short == []
+
+
+def test_the_shape_check_sees_a_missing_field():
+    """The control: the undo row as it was, without the place in the list."""
+    payload = cb("adm_kb_org_undo:", "ru", -100123, 555, 1)
+    assert len(payload[len("adm_kb_org_undo:") :].split(":")) > len((LANG, CID, UID))
+    assert any(d.count(":") == 4 for d in _written_payloads()["adm_kb_org_undo:"])
 
 
 # ---------------------------------------------------------------------------
@@ -475,3 +536,162 @@ def test_target_of():
     assert target_of("adm_pnl_tgl:ru:-100:tol", "chat") == "chat.stickers"
     assert target_of("adm_pnl_grp:ru:-100:modules", "chat") == "memory"  # legacy group token
     assert target_of("adm_pnl_grp:ru:-100", "chat") == "chat"
+
+
+# ---------------------------------------------------------------------------
+# Leaving a typed-input prompt by another screen's button
+# ---------------------------------------------------------------------------
+
+_PROMPT_INPUT: dict[str, str] = {
+    AdminStates.awaiting_setting_value.state: "admin_chat_panel.handle_chat_panel_tolerance_input",
+    AdminStates.awaiting_system_prompt.state: "admin_chat_panel.handle_chat_panel_sp_input",
+    AdminStates.awaiting_sticker_score.state: "admin_sticker.handle_sticker_explicitness_input",
+    AdminStates.awaiting_kb_organizer.state: "admin_kb.handle_kb_organizer_add_reply",
+    AdminStates.awaiting_rule_config.state: "rules.handle_rule_config_input",
+    AdminStates.awaiting_rule_words.state: "rules.handle_rule_words_input",
+    AdminStates.awaiting_rule_text.state: "rules.handle_rule_text_input",
+    AdminStates.awaiting_rule_react.state: "rules.handle_rule_react_input",
+}
+"""Each armed prompt → the handler that reads the admin's next message as its answer."""
+
+_PROMPT_SCREENS: dict[str, tuple[str, ...]] = {
+    AdminStates.awaiting_setting_value.state: ("tol.in", "tol.invalid"),
+    AdminStates.awaiting_sticker_score.state: ("stk.score_in",),
+    AdminStates.awaiting_kb_organizer.state: ("org.add", "org.fail", "org.list"),
+    AdminStates.awaiting_rule_config.state: ("rule.cfg", "rule.cfg_bad"),
+    AdminStates.awaiting_rule_words.state: ("rule.words",),
+    AdminStates.awaiting_rule_text.state: ("rule.text",),
+    AdminStates.awaiting_rule_react.state: ("rule.react", "rule.react_in"),
+}
+"""The screens shown while a prompt is armed: their buttons must not end it."""
+
+_ALL_STATES = [s.state for s in AdminStates.__all_states__]
+
+
+def test_every_prompt_state_has_an_allowlist():
+    assert set(PROMPT_OWN_TAPS) == set(_ALL_STATES)
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+def test_an_allowlist_names_routes(state: str):
+    """An entry is a routed prefix, or a family (``ar_``) that covers some."""
+    for entry in PROMPT_OWN_TAPS[state]:
+        assert entry != NOOP
+        if entry.endswith(":"):
+            assert entry in ROUTES, entry
+        else:
+            assert entry.endswith("_") and any(p.startswith(entry) for p in ROUTES), entry
+
+
+@pytest.mark.parametrize("state", sorted(_PROMPT_SCREENS))
+def test_a_prompt_screen_does_not_end_its_prompt(state: str):
+    from src.bot.screens.registry import load_all
+
+    samples = load_all()
+    for screen_id in _PROMPT_SCREENS[state]:
+        assert screen_id in samples, screen_id
+        for item in samples[screen_id]:
+            for row in item.build("ru").rows:
+                for button in row:
+                    if button.callback != NOOP:
+                        assert is_own_tap(state, button.callback), (item.title, button.callback)
+
+
+def test_the_instruction_editor_keyboards_do_not_end_it():
+    from src.bot.keyboards.admin_chat_panel import (
+        system_prompt_cancel_keyboard,
+        system_prompt_confirm_keyboard,
+    )
+
+    state = AdminStates.awaiting_system_prompt.state
+    for markup in (
+        system_prompt_cancel_keyboard("ru", -100123),
+        system_prompt_confirm_keyboard("ru", -100123, 4242),
+    ):
+        for row in markup.inline_keyboard:
+            for button in row:
+                assert is_own_tap(state, button.callback_data or ""), button.callback_data
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_a_foreign_tap_ends_the_prompt_and_its_own_taps_keep_it(state: str):
+    """Every writable payload, through the real router: a prompt's own taps keep
+    it armed, every other tap clears it before the handler that takes it."""
+    kept, cleared, wrong = [], [], []
+    for prefix, args in WORST_CASE.items():
+        data = cb(prefix, *args)
+        fsm = FakeState(state)
+        taken = await deliver("callback_query", admin_tap(data), fsm)
+        assert taken is not None, data
+        own = is_own_tap(state, data)
+        now = await fsm.get_state()
+        (kept if now == state else cleared).append(prefix)
+        if (now == state) != own:
+            wrong.append((data, taken, now))
+    assert wrong == []
+    assert cleared, "no tap ended the prompt"
+    assert "adm_menu:" in cleared and "adm_close:" in cleared
+    assert all(is_own_tap(state, p) for p in kept)
+
+
+async def test_a_page_counter_does_not_end_a_prompt():
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    assert await deliver("callback_query", admin_tap(NOOP), fsm) == "admin.handle_noop"
+    assert await fsm.get_state() == AdminStates.awaiting_kb_organizer.state
+
+
+async def test_a_foreign_tap_ends_the_prompt_and_its_handler_still_runs():
+    """No stop at the handler: ``✖️ Закрыть`` closes the message as always."""
+    fsm = FakeState(AdminStates.awaiting_setting_value)
+    tap = admin_tap("adm_close:ru")
+    await deliver("callback_query", tap, fsm, call=True)
+    assert await fsm.get_state() is None
+    tap.answer.assert_awaited_once()
+    tap.message.delete.assert_awaited_once()
+
+
+@pytest.mark.parametrize("state", sorted(_PROMPT_INPUT))
+async def test_a_typed_message_after_a_foreign_tap_is_not_the_prompts_answer(state: str):
+    text = "0.5"
+    armed = FakeState(state)
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, armed) == _PROMPT_INPUT[state], "control"
+
+    fsm = FakeState(state)
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    msg, _ = admin_text(text)
+    taken = await deliver("message", msg, fsm)
+    assert taken != _PROMPT_INPUT[state]
+    assert taken == "message.handle_text_message"
+
+
+@pytest.mark.parametrize("text", ["✖️ Отмена", "Отмена", "✖️ Cancel", "Cancel"])
+async def test_the_organizer_keyboard_cancel_after_its_prompt_is_a_cancel(text: str):
+    """The reply keyboard outlives a prompt ended by another screen's button; its
+    «Отмена» is answered like /cancel, not passed to the bot as a chat message."""
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState()) == "fsm_cancel.handle_leftover_cancel"
+    msg, _ = admin_text(text)
+    in_prompt = FakeState(AdminStates.awaiting_kb_organizer)
+    assert await deliver("message", msg, in_prompt) == "admin_kb.handle_kb_organizer_cancel_label"
+    msg, _ = admin_text(text)
+    in_rule = FakeState(AdminStates.awaiting_rule_words)
+    assert await deliver("message", msg, in_rule) == "rules.handle_rule_words_input"
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(), is_admin=False) != (
+        "fsm_cancel.handle_leftover_cancel"
+    )
+
+
+async def test_the_leftover_cancel_removes_the_keyboard():
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value="ru")
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    assert await fsm.get_state() is None
+    msg, bot = admin_text("✖️ Отмена")
+    await deliver("message", msg, fsm, call=True, admin_repo=repo, bot_config_repo=AsyncMock())
+    (method,) = [c.args[0] for c in bot.call_args_list]
+    # The prompt is already gone: said so, and the keyboard taken away with it.
+    assert method.text == "Нечего отменять."
+    assert isinstance(method.reply_markup, ReplyKeyboardRemove)

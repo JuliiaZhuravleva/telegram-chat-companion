@@ -43,11 +43,14 @@ from __future__ import annotations
 
 import structlog
 from aiogram import F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardRemove
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import bare_label
+from src.bot.filters.admin import IsAdmin
+from src.bot.keyboards.admin_kb import ORG_CANCEL_LABEL
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 
@@ -63,6 +66,13 @@ _NOTHING_TO_CANCEL: dict[str, str] = {
     "ru": "Нечего отменять.",
     "en": "Nothing to cancel.",
 }
+
+_LEFTOVER_CANCEL: frozenset[str] = frozenset(bare_label(v) for v in ORG_CANCEL_LABEL.values())
+"""What the organizer prompt's «✖️ Отмена» reply button sends, with or without its glyph."""
+
+
+def _is_leftover_cancel(text: str) -> bool:
+    return bare_label(text) in _LEFTOVER_CANCEL
 
 
 @router.message(
@@ -91,6 +101,46 @@ async def handle_cancel(
     matches neither key and silently falls through to Russian, making the
     English string unreachable for those clients.
     """
+    await _cancel(message, state, admin_repo, bot_config_repo, via="command")
+
+
+@router.message(
+    F.chat.type == "private",
+    F.forward_origin.is_(None),
+    F.text.func(_is_leftover_cancel),
+    # Only with no prompt armed, which is where a tap on another screen leaves
+    # the keyboard. In its own prompt the button is admin_kb's to answer, and
+    # in any other prompt the word is that prompt's answer: «Отмена» is a word
+    # a rule may well be asked to watch for.
+    StateFilter(None),
+    # Only an admin was ever shown that keyboard; anyone else's «Отмена» is
+    # an ordinary message to the bot.
+    IsAdmin(),
+)
+async def handle_leftover_cancel(
+    message: Message,
+    state: FSMContext,
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+) -> None:
+    """«✖️ Отмена» from the organizer prompt's reply keyboard after the prompt ended.
+
+    A tap on another screen's button ends that prompt without a message, so
+    the keyboard outlives it (`src/bot/middleware/prompt_exit.py`). Its
+    «Отмена» then means what /cancel means, and is answered the same way,
+    keyboard removed — not passed on to the bot as a chat message.
+    """
+    await _cancel(message, state, admin_repo, bot_config_repo, via="leftover keyboard")
+
+
+async def _cancel(
+    message: Message,
+    state: FSMContext,
+    admin_repo: AdminRepository,
+    bot_config_repo: BotConfigRepository,
+    *,
+    via: str,
+) -> None:
     current = await state.get_state()
     await state.clear()
 
@@ -107,4 +157,5 @@ async def handle_cancel(
         "FSM dialog cancelled by the user",
         user_id=message.from_user.id if message.from_user else None,
         cleared_state=current,
+        via=via,
     )

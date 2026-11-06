@@ -19,6 +19,7 @@ from src.bot.handlers.media import router as media_router
 from src.bot.handlers.message import router as message_router
 from src.bot.handlers.reactions import router as reactions_router
 from src.bot.handlers.rules import router as rules_router
+from src.bot.middleware.prompt_exit import PromptExitMiddleware
 from src.bot.screens.deps import install as install_container_alias
 from src.bot.screens.stale import router as stale_router
 
@@ -82,6 +83,11 @@ router = Router(name="main")
 # declares a FromDishka parameter, so it is copied under a second key here, for
 # every message and callback handler below (see `src/bot/screens/deps.py`).
 install_container_alias(router)
+
+# A typed-input prompt ends when the admin taps a button that is not its own,
+# whichever router takes the tap: one outer middleware here instead of every
+# area closing every other area's prompt (`src/bot/middleware/prompt_exit.py`).
+router.callback_query.outer_middleware(PromptExitMiddleware())
 router.include_router(fsm_cancel_router)
 router.include_router(admin_sticker_router)
 router.include_router(admin_kb_router)
