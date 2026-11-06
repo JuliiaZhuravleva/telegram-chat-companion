@@ -11,6 +11,7 @@ import json
 import random
 import re
 from dataclasses import dataclass, field
+from time import monotonic
 from typing import Any
 
 import structlog
@@ -20,6 +21,25 @@ from src.database.repositories.rules import RulesRepository
 from src.models.rules import Rule, RuleAction, RuleMatch, RulesMode, RuleType
 
 logger = structlog.get_logger(__name__)
+
+_STICKER_FLOOD_FIRED: dict[int, float] = {}
+"""sticker_flood rule id -> ``monotonic()`` of its last firing.
+
+Module-level because the engine is built per update: a cooldown held on the
+instance would be forgotten by the next sticker. One process runs the bot, so
+this is the whole memory of it; a restart forgets it, which costs at most one
+early repeat.
+"""
+
+
+def _flood_cooling(rule_id: int, interval: float, now: float) -> bool:
+    fired = _STICKER_FLOOD_FIRED.get(rule_id)
+    return fired is not None and now - fired < interval
+
+
+def _flood_interval(rule: Rule) -> float:
+    value = rule.config.get("interval_seconds", 60)
+    return float(value) if isinstance(value, int | float) else 60.0
 
 
 @dataclass
@@ -83,7 +103,7 @@ class RuleEngine:
         selected = self._apply_mode(optional, mode)
 
         # Combine mandatory (always) + selected optional
-        final = mandatory + selected
+        final = self._claim_flood_cooldowns(mandatory + selected)
 
         # Build action results
         actions: list[RuleActionResult] = []
@@ -132,7 +152,7 @@ class RuleEngine:
             if rule.rule_type == RuleType.USER_SPECIFIC:
                 return self._eval_user_specific(rule, user_id, message)
             if rule.rule_type == RuleType.STICKER_FLOOD:
-                return await self._eval_sticker_flood(rule, chat_id)
+                return await self._eval_sticker_flood(rule, chat_id, message)
             if rule.rule_type == RuleType.SPAM_DETECT:
                 return await self._eval_spam_detect(rule, chat_id, user_id)
         except Exception:
@@ -200,11 +220,24 @@ class RuleEngine:
 
         return RuleMatch(rule=rule, triggered=False)
 
-    async def _eval_sticker_flood(self, rule: Rule, chat_id: int) -> RuleMatch:
-        """Evaluate sticker_flood rule."""
+    async def _eval_sticker_flood(self, rule: Rule, chat_id: int, message: Message) -> RuleMatch:
+        """Evaluate sticker_flood rule: a sticker that takes the chat over the limit.
+
+        Only a sticker can fire it: the count is chat-wide, so before this a text
+        message from anyone, sent while the window still held enough stickers,
+        fired it again, every message for up to a whole interval. And once fired it
+        rests for an interval (`_claim_flood_cooldowns`), so a flood of thirty
+        stickers is one alert, not twenty.
+        """
+        if message.sticker is None:
+            return RuleMatch(rule=rule, triggered=False)
         cfg = rule.config
         max_stickers = cfg.get("max_stickers_per_interval", 10)
         interval = cfg.get("interval_seconds", 60)
+        # Checked before the count as well: a resting rule costs no query and,
+        # under a weight mode, is not picked over a rule that will act.
+        if _flood_cooling(rule.id, _flood_interval(rule), monotonic()):
+            return RuleMatch(rule=rule, triggered=False)
 
         count = await self._rules_repo.count_stickers_in_interval(chat_id, interval)
         if count >= max_stickers:
@@ -239,6 +272,25 @@ class RuleEngine:
                 match_detail=f"spam:chars={max_len}/{max_chars}",
             )
         return RuleMatch(rule=rule, triggered=False)
+
+    @staticmethod
+    def _claim_flood_cooldowns(matches: list[RuleMatch]) -> list[RuleMatch]:
+        """Start the rest of every sticker_flood rule about to act; drop one already resting.
+
+        Synchronous on purpose: two stickers evaluated concurrently both passed
+        `_eval_sticker_flood`'s check across its awaits, and only a check and a
+        stamp with no await between them lets exactly one of them act.
+        """
+        now = monotonic()
+        kept: list[RuleMatch] = []
+        for match in matches:
+            rule = match.rule
+            if rule.rule_type == RuleType.STICKER_FLOOD:
+                if _flood_cooling(rule.id, _flood_interval(rule), now):
+                    continue
+                _STICKER_FLOOD_FIRED[rule.id] = now
+            kept.append(match)
+        return kept
 
     @staticmethod
     def _apply_mode(matches: list[RuleMatch], mode: RulesMode) -> list[RuleMatch]:
