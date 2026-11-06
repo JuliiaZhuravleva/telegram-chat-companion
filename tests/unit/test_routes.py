@@ -237,11 +237,6 @@ def test_every_written_prefix_is_routed():
 
 RETIRED_WRITES_TODAY = frozenset(
     {
-        ("keyboards/admin.py", "adm_kb:"),
-        ("keyboards/admin.py", "adm_react:"),
-        ("keyboards/admin.py", "adm_rules:"),
-        ("keyboards/admin.py", "adm_wl:"),
-        ("keyboards/admin.py", "adm_wl_chats:"),
         ("keyboards/admin_chat_panel.py", "adm_kb_menu:"),
         ("keyboards/admin_chat_panel.py", "adm_react_menu:"),
         ("keyboards/admin_kb.py", "adm_kb:"),
@@ -252,10 +247,6 @@ RETIRED_WRITES_TODAY = frozenset(
         ("keyboards/admin_reactions.py", "adm_react_toggle:"),
         ("keyboards/admin_sticker.py", "adm_stk_set:"),
         ("keyboards/rules.py", "adm_rules:"),
-        ("screens/hub.py", "adm_kb:"),
-        ("screens/hub.py", "adm_react:"),
-        ("screens/hub.py", "adm_rules:"),
-        ("screens/hub.py", "adm_wl:"),
     }
 )
 """Where a ``retired`` or ``compat`` prefix is still written on the base the
@@ -295,9 +286,7 @@ def test_the_retired_write_ratchet_says_no():
 _INVALID_RE = re.compile(r"""answer\(\s*["']Invalid (?:data|type|preset|chat ID)["']""")
 INVALID_ALERTS_TODAY = {
     "handlers/access_card.py": 2,
-    "handlers/admin.py": 10,
     "handlers/admin_chat_panel.py": 7,
-    "handlers/admin_defaults.py": 1,
     "handlers/admin_kb.py": 7,
     "handlers/admin_reactions.py": 2,
     "handlers/admin_sticker.py": 1,

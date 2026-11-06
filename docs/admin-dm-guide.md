@@ -128,138 +128,189 @@ already handled, a chat that was removed. The screen that owned it says what hap
 
 ## A1 — Hub, requests, status, settings
 
-### A1.1 Main menu
+### A1.1 The hub
 
-`/admin` opens twelve destinations plus **✖️ Закрыть / Close**:
+`/admin` sends the hub as a new message; every "⬅️ Панель / Panel" button brings it back in
+place. It is four buttons and one status line:
 
-| Entry | Purpose | Section |
+```
+🛠 Панель
+💚 Всё работает · 💰 расход за сутки $0.04
+```
+
+The line reads what is already recorded: the verdict of the **last** health check, the AI
+spend over the last 24 hours, and — on the Chats button — how many requests are waiting.
+Opening the panel never runs a check, so it costs nothing and does not change what the next
+alert says; «🔁 Обновить» on the status screen (§A1.3) is the one place a check runs on
+demand. Before the first check the line says «❔ Проверок пока не было». If the database
+cannot be asked at all, the hub shows its title alone rather than a line it cannot back.
+A day under one cent keeps four decimals, so it does not read as $0.00.
+
+| Button | Leads to | Section |
 |---|---|---|
-| 📋 Whitelist | Approve, reject and revoke chat access | §A1.2 |
-| 📏 Правила / Rules | Per-chat custom rules engine | §A3.1 |
-| 🎨 Стикеры / Stickers | Browse the learned sticker catalogue | §A5 |
-| 🌍 Глобальные настройки / Global settings | Defaults applied to every chat with no own value | §A1.4 |
-| 📊 Статистика / Statistics | Traffic counters for 1h / 24h / 7d | §A1.3 |
-| 💰 Расходы / Costs | AI spend, with an optional OpenAI cross-check | §A1.3 |
-| 💚 Здоровье / Health | Live health check | §A1.3 |
-| 🔔 Уведомления / Notifications | Which pushes the bot sends | §A1.5 |
-| 📚 База знаний / Knowledge Base | Per-chat facts and organizers | §A4.1 |
-| 😀 Реакции / Reactions | Per-chat reaction module | §A2.2 |
-| ⚙️ Настройки чата / Chat settings | The full per-chat settings panel | §A2.1 |
-| 🌐 Язык / Language | Panel language (ru/en) | §A1.5 |
+| 🗂 Чаты / Chats — `· 2 заявки` while requests wait | The chat list; requests and rejected chats are reached from there | §A1.2, §A2 |
+| 📦 Паки стикеров / Sticker packs | The sticker catalogue | §A5 |
+| 📊 Состояние / Status | The last health check, statistics, costs | §A1.3 |
+| ⚙️ Общие настройки / General settings | Settings for every chat, notifications, panel language | §A1.4, §A1.5 |
+| ✖️ Закрыть / Close | Deletes the panel message | — |
 
-### A1.2 Whitelist — access control
+Everything that belongs to one chat is reached through that chat (§A2), not from the hub.
+
+### A1.2 Requests and rejected chats
 
 The bot answers only in chats whose `chat_settings.enabled` is true. Everything else is an
-*attempt*, and attempts are what this section manages.
+*attempt*, and attempts are what this section manages. How a chat lands among the requests —
+a message from an unknown chat, or the bot being added to a group — is described with the
+card it produces, in §A6.1.
 
-How a chat lands in the pending list — a message from an unknown chat, or the bot being
-added to a group — is described with the card it produces, in §A6.1.
+The chat list (§A2) carries the way in: **🙏 Заявки / Requests** and **🚫 Отклонённые /
+Rejected**. Both show **one chat per page** — its title, id and type, who wrote and the first
+50 characters of what they wrote — with the two actions directly under it and ◀️ n/N ▶️ to
+walk the list. A number in the text never has to be matched to a button. A button pointing
+past the end of a list that has since shrunk shows the last entry.
 
-#### The three lists
+#### Requests
 
-**💬 Чаты / Chats** — currently whitelisted chats, five per page. Each row is a link to the
-chat plus a numbered ❌ that asks for confirmation and then **disables** the chat. This is a
-soft switch: settings, history and knowledge base survive, the bot simply stops responding,
-and the chat can be re-approved later.
+Chats that are already enabled are filtered out, so the list never shows work that has been
+done elsewhere.
 
-**⏳ Ожидают / Pending** — attempts waiting for a decision. Chats that are already enabled
-are filtered out, so the list never shows work that has been done elsewhere.
+- **👍 Одобрить / Approve** enables the chat, copies its title and type onto its settings row,
+  marks *every* waiting request from that chat approved at once, and opens **the new chat's
+  own screen** with «✓ Новый чат подключён» — that is where its settings are.
+- **❌ Отклонить / Reject** marks the request rejected and shows the next one with
+  «✓ Отклонено»; after the last one, the chat list with the same line.
+- If another admin, or the card in the DM, got there first, the requests are redrawn with
+  «✓ Заявку уже разобрали» and the request is not acted on twice.
 
-- **Approve** flips the chat to enabled, copies the chat title/type onto its settings row,
-  and marks *every* pending attempt for that chat as approved at once. The screen then offers
-  a direct "⚙️ Настройки чата" link into the new chat's panel, because the approved row has
-  just left the pending list and there would be nothing to attach it to.
-- **Reject** marks the attempt rejected and does nothing else visible.
+#### Rejected — a rejection is a block
 
-**🚫 Отклонённые / Rejected** — this is the important one, because *rejection is a block*.
 While a chat has any rejected attempt:
 
 - new messages from it are not logged as attempts, and
 - no notification is sent, ever — not even after the 30-minute cooldown.
 
-So the admin will not hear from that chat again until the record is dealt with:
+The screen says so in one line («Бот молчит в этих чатах и не присылает от них заявок»). The
+admin will not hear from that chat again until the record is dealt with:
 
-- **🔄 Вернуть / Restore** puts the attempt back to pending — notifications resume.
-- **🗑 Delete** (with confirmation) removes the record permanently. The chat becomes an
-  unknown chat again: its next message produces a fresh attempt and a fresh notification.
+- **↩️ Вернуть в заявки / Back to requests** puts it back among the requests — notifications
+  resume. «✓ Заявка возвращена».
+- **🗑 Забыть / Forget** asks first, then removes the record permanently: the chat becomes an
+  unknown chat again, and its next message produces a fresh request and a fresh notification.
+  «✓ Отказ забыт». «⬅️ Не забывать» returns to the same page.
 
-### A1.3 Observability screens
+A record someone else already removed is answered with «✓ Запись не найдена».
 
-#### 📊 Statistics (`adm_stats`)
+#### Turning the bot off in one chat
 
-Deployment-wide counters over a rolling window — 1 hour, 24 hours or 7 days, selected by the
-row of period buttons. Five numbers: whitelisted chats (a total, not windowed), active chats,
-messages stored, bot responses, unauthorized attempts. There is no per-chat breakdown here.
+A chat's own screen (§A2) carries **🔌 Отключить**. It asks first — «Отключить бота здесь?» —
+and says exactly two things: the bot stops answering in that chat, and its settings are kept.
+Settings, history and knowledge base all survive; the switch is `enabled=false`, nothing more.
+Confirming shows the chat list with «✓ Бот отключён в чате «…»»; «⬅️ Не отключать» returns to
+the chat.
 
-#### 💰 Costs (`adm_costs`, or `/costs` for the 24-hour view)
+### A1.3 Status, statistics, costs
 
-What the bot *believes* it spent, computed from its own usage log: a total, a split by task
-type (text / embeddings / vision / transcription) and the top eight models. Same three
-periods.
+#### 📊 Status
 
-**🔍 Сверить (OpenAI) / Verify (OpenAI)** cross-checks that belief against OpenAI's billing
-API. Business rules worth knowing:
+Shows the **last recorded** health check and when it ran (in the bot's display time zone:
+`14:00` today, `03.11 14:00` on another day): the verdict, then each problem with the
+provider's own error and the advice the alert carried, then whether the database answers,
+messages in the last 30 minutes and fallback-AI answers in the last 15 minutes. A
+check that found a warning or a failure leads with the problems. It is a snapshot of the
+deployment, not of one chat.
+
+**🔁 Обновить / Refresh** runs a check right then and shows its result. If the check itself
+fails, the screen shows the last recorded one, whose time says how old it is. The advice
+lines are stored with the check in Russian, so an English panel shows them in Russian.
+
+Scheduled checks that find a problem also push an alert — to the first admin only.
+
+From here: **📈 Статистика** and **💰 Расходы**, both opening on 24 hours.
+
+#### 📈 Statistics
+
+Deployment-wide counters over 1 hour, 24 hours or 7 days, picked by the row of period buttons
+(the current one is marked `•`). Five numbers: whitelisted chats (a total, not windowed),
+active chats, messages stored, bot responses, unauthorized attempts. There is no per-chat
+breakdown here.
+
+#### 💰 Costs (`/costs` sends the 24-hour view as a new message)
+
+What the bot *believes* it spent, computed from its own usage log: a total, the top eight
+models, and a split by task (text / embeddings / vision / transcription / community), each
+with its number of calls in brackets. Same three periods.
+
+**🔍 Сверить с OpenAI / Check against OpenAI** cross-checks that belief against OpenAI's
+billing API. Business rules worth knowing:
 
 - It needs **two** settings — an organization-level admin key (`OPENAI_ADMIN_API_KEY`; the
   key the bot generates replies with will not work) and a project id (`OPENAI_PROJECT_ID`).
-  If either is missing, the screen names the missing one and links to the page to fix it,
-  without spending a request.
+  If either is missing, the screen names the missing one and says where to get it, without
+  spending a request.
 - It is rate-limited to **one check per admin per 10 seconds** — it is the only button in the
-  panel that calls a metered third-party API.
+  panel that calls a metered third-party API. A press inside that window is answered with a
+  short note and leaves the screen as it was.
 - The comparison window follows OpenAI, not the button. OpenAI bills in whole daily buckets,
-  so a "1h" check may cover a full day; the bot re-measures its own figure over whatever the
-  buckets actually cover and prints that window, rather than subtracting two different spans
-  and reporting the difference as an error.
+  so a "1 hour" check may cover a full day; the bot re-measures its own figure over whatever
+  the buckets actually cover and prints that window («Окно: последние N ч»), rather than
+  subtracting two different spans and reporting the difference as an error.
 - The check **refuses to show a number it cannot trust**: if OpenAI never finishes paginating,
   or returns data for other projects (the project filter did not apply), it reports the
-  failure instead of a possibly inflated total. If OpenAI returns no per-project breakdown at
-  all, the figure is shown but explicitly marked as unconfirmed in scope.
+  failure, with «🔁 Повторить», instead of a possibly inflated total. If OpenAI returns no
+  per-project breakdown at all, the figure is shown but explicitly marked as unconfirmed in
+  scope.
 
-#### 💚 Health
+### A1.4 ⚙️ General settings → 🌍 All chats
 
-Opening or refreshing this screen **runs a health check right then**, then shows the newest
-result: status, timestamp, database reachability, messages in the last 30 minutes, AI
-fallbacks in the last 15 minutes, and a list of issues. It is a snapshot of the deployment,
-not of one chat. Scheduled checks that find a problem also push an alert — to the first admin
-only.
+**⚙️ Общие настройки / General settings** — from the hub, or `/settings` as a new message —
+holds what belongs to the bot as a whole rather than to one chat: **🌍 Для всех чатов /
+All chats** (this section), **🔔 Уведомления / Notifications** and **🌐 Язык / Language**
+(§A1.5).
 
-### A1.4 🌍 Global settings
-
-The second layer of the 26 per-chat options described in §A2.1.
+*All chats* is the second layer of the per-chat options described in §A2.1.
 
 **This is not a template for new chats.** It is the layer underneath every chat: change a
 value here and it applies immediately to every chat that has not overridden that option —
-existing chats included. A chat's own value always wins. The screen says so in its subtitle,
-and the toast after a toggle says "for every chat without its own value", because the older
-wording ("defaults for new chats") promised the opposite and made fleet-wide changes look
-harmless.
+existing chats included. A chat's own value always wins. The screen says so under its title,
+and the toast after a switch says «✓ Включено для всех чатов без своего значения» (or
+«Выключено…»), because the older wording ("defaults for new chats") promised the opposite
+and made fleet-wide changes look harmless.
 
-Only the twelve non-legacy options appear here, for the reason given in §A2.1 (the
-`· inherited` note).
+It has the same seven sections as a chat's own panel — 🗣 Поведение, 🧠 Память, 🎙 Голос и
+фото, 🎨 Стикеры, 😀 Реакции, 👋 Сообщество, 📏 Правила. A section shows its yes/no options as
+switches (✅ on, ⚪ off; a switch redraws the same section) and its other values as lines of
+text — sticker and photo chances, sticker frankness, which rules apply — which are set via
+config or the database. Only the options that can honestly be set globally appear; the
+legacy ones are left out for the reason given in §A2.1 (the `· inherited` note).
 
-### A1.5 Panel-wide settings
+### A1.5 ⚙️ General settings → notifications and language
 
 #### 🔔 Notifications
 
-Five controls, all global:
+Two controls, both global:
 
-- **🖼 Стикеры / Stickers** cycles through three states rather than toggling:
-  `выкл / off` → `вкл / on` (sticker + description) → `подробно / detailed` (adds the analysis
-  collage and the stored RAG fields: contexts, style tags, emoji, whether an embedding
-  exists) → back to off.
-- **🔒 Unauthorized access**, **⚠️ Jailbreak**, **🚫 Blacklist**, **🔄 AI Fallback** — plain
-  on/off.
+- **🖼 Новые стикеры / New stickers** cycles through three states rather than toggling:
+  `выкл / off` → `кратко / brief` (sticker + description) → `подробно / detailed` (adds the
+  analysis collage and the stored RAG fields: contexts, style tags, emoji, whether an
+  embedding exists) → back to off.
+- **Заявки чатов / Chat requests** — the access card (§A6.1), on or off. While it is off the
+  screen says so: «Заявки чатов сейчас не присылаются: они ждут в «🗂 Чаты».»
 
-Everything is on by default (stickers: "on"). Switching a notification off suppresses the
-*message* only; the underlying event is still recorded — an unauthorized attempt still lands
-in the pending list even with its notification off.
+Both are on by default (stickers: brief). Switching a notification off suppresses the
+*message* only; the underlying event is still recorded — a request still lands in the list
+with its notification off. Bot failures (health alerts) always arrive and have no switch.
+
+The jailbreak, blacklist and AI-fallback switches are no longer on this screen. They keep
+whatever value was last stored, and an old button for one of them is answered as out of date
+(§F.4).
 
 #### 🌐 Language
 
-Switches the panel between Russian and English and immediately re-renders. It is one shared
-setting for all admins, and it is unrelated to the language the bot answers chats in (that is
-a per-chat option). Panel messages already sent keep the language they were rendered in until
-you navigate them.
+Switches the panel between Russian and English. Picking one saves it and shows General
+settings in the new language with «✓ Язык панели: …». It is one shared setting for all
+admins, and it is unrelated to the language the bot answers chats in (that is a per-chat
+option). Panel messages already sent keep the language they were rendered in until you
+navigate them.
 
 ---
 
