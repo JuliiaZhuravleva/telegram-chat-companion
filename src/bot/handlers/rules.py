@@ -1,14 +1,30 @@
-"""Rules management handlers — admin interface for custom rules.
+"""Rules: one chat's list, a rule's card, and the button builder that makes a rule.
 
 Callback routes (all DM-only, admin-only):
-- ``adm_rules:{lang}:{page?}``     — chat selection (entry from main menu)
-- ``ar_list:{lang}:{chat_id}:{page}`` — rule list for a chat
-- ``ar_view:{lang}:{rule_id}``     — view rule details
-- ``ar_tog:{lang}:{rule_id}:{chat_id}:{page}`` — toggle on/off
-- ``ar_del:{lang}:{rule_id}:{chat_id}:{page}`` — delete a rule
-- ``ar_add:{lang}:{chat_id}``      — start creation (select type)
-- ``ar_type:{lang}:{chat_id}:{rule_type}`` — selected type, await config
-- ``ar_cancel:{lang}:{chat_id}``   — leave the config prompt without creating
+
+- ``ar_list:{lang}:{chat_id}:{page}``         — the chat's rules, three a page
+- ``ar_all:{lang}:{chat_id}[:{rule_id}]``     — every rule of the chat on/off
+  (``chat_settings.rules_enabled``); with a rule id, redraws that rule's card
+- ``ar_view:{lang}:{rule_id}[:{chat_id}[:j|n]]`` — a rule's card; ``j`` opens its
+  JSON, ``n`` sends the card as a new message (from the admin card a fired rule sends)
+- ``ar_tog:{lang}:{rule_id}:{chat_id}:{page}`` — pause or resume one rule
+- ``ar_del_ask:{lang}:{rule_id}[:{chat_id}]``  — confirm deleting it
+- ``ar_del:{lang}:{rule_id}[:{chat_id}]``      — delete it, back to the list
+- ``ar_add:{lang}:{chat_id}``                 — the builder's first step: what sets it off
+- ``ar_b_type:{lang}:{chat_id}:{k|u|f|s}[:{page}]`` — words, a person, stickers, messages
+- ``ar_b_match:{lang}:{chat_id}:{c|e}``       — a word inside a message or the word alone
+- ``ar_b_who:{lang}:{chat_id}:{user_id}``     — whose messages
+- ``ar_b_n:{lang}:{chat_id}:{n}``             — how many a minute is too many
+- ``ar_b_act:{lang}:{chat_id}:{n|w|c|r|ri}``  — what the rule does
+- ``ar_b_txt:{lang}:{chat_id}:{i}``           — a ready warning text
+- ``ar_b_rx:{lang}:{chat_id}:{i}``            — a ready reaction
+- ``ar_cfg:{lang}:{chat_id}``                 — the whole rule as JSON
+- ``ar_type:{lang}:{chat_id}:{rule_type}``    — old buttons: the JSON prompt for a type
+- ``ar_cancel:{lang}:{chat_id}``              — old buttons: leave the JSON prompt
+
+The builder keeps its answers in FSM data (``rule_*`` keys) and asks for typed
+input in four states (`_RULE_STATES`). A payload a handler cannot parse, or a
+builder step whose draft is gone or belongs to another chat, is a stale button.
 """
 
 from __future__ import annotations
@@ -16,156 +32,99 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from html import escape
-from typing import Any
+from typing import Any, Final
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.custom_emoji import fence
 from src.bot.filters.admin import IsAdmin
-from src.bot.keyboards.rules import (
-    confirm_delete_rule_keyboard,
-    rule_config_cancel_keyboard,
-    rule_detail_keyboard,
-    rule_type_keyboard,
-    rules_chat_list_keyboard,
-    rules_list_keyboard,
-)
+from src.bot.screens import rules as screens
 from src.bot.screens.deps import resolve, state_of
-from src.bot.screens.render import show_markup, with_notice
+from src.bot.screens.i18n import Tr, lang_of
+from src.bot.screens.model import Screen
+from src.bot.screens.render import page_slice, show
+from src.bot.screens.routes import cb, parse
+from src.bot.screens.sections import shows_common
+from src.bot.screens.stale import show_stale
+from src.bot.settings_fields import FIELDS_BY_CODE
 from src.bot.states.admin import AdminStates
-from src.bot.utils import safe_edit_text
+from src.bot.utils import safe_edit_reply_markup
 from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.messages import MessageRepository
 from src.database.repositories.rules import RulesRepository
 from src.models.rules import _VALID_RULE_ACTIONS, _VALID_RULE_TYPES, RuleAction
+from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
 
 logger = structlog.get_logger(__name__)
 
 router = Router(name="rules")
 
-_PER_PAGE = 5
-
-# ---------------------------------------------------------------------------
-# i18n texts
-# ---------------------------------------------------------------------------
-
-_RULES_TITLE: dict[str, str] = {
-    "ru": "<b>Управление правилами</b>\n\nВыберите чат:",
-    "en": "<b>Rules Management</b>\n\nSelect a chat:",
-}
-
-_RULES_LIST_TITLE: dict[str, str] = {
-    "ru": "<b>Правила чата</b>",
-    "en": "<b>Chat Rules</b>",
-}
-
-_NO_RULES: dict[str, str] = {
-    "ru": "<b>Правила чата</b>\n\nНет правил.",
-    "en": "<b>Chat Rules</b>\n\nNo rules.",
-}
-
-_NO_CHATS: dict[str, str] = {
-    "ru": "<b>Управление правилами</b>\n\nНет чатов в whitelist.",
-    "en": "<b>Rules Management</b>\n\nNo whitelisted chats.",
-}
-
 _NOT_ADMIN: dict[str, str] = {
     "ru": "У вас нет доступа.",
     "en": "Access denied.",
 }
 
-_TYPE_SELECTED: dict[str, str] = {
-    "ru": (
-        "<b>Создание правила</b>\n\n"
-        "Тип: <code>{rule_type}</code>\n\n"
-        "Отправьте JSON-конфиг правила.\n\n"
-        "Пример для keyword_trigger:\n"
-        '<code>{{"name": "spam-words", "keywords": ["spam", "buy"], '
-        '"match_type": "contains", "action": "warn_user", '
-        '"warning_message": "No spam!"}}</code>\n\n'
-        "Действия: <code>notify_admin</code>, <code>warn_user</code>, "
-        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊" — '
-        "только из набора реакций Telegram). Для keyword_trigger опционально "
-        '"target_users": [id].'
+CREATED: Final = Tr("Правило создано", "Rule created")
+DELETED: Final = Tr("Правило удалено", "Rule deleted")
+SPAM_NAME: Final = Tr("Сообщения: {n} за минуту", "Messages: {n} a minute")
+FLOOD_NAME: Final = Tr("Стикеры: {n} за минуту", "Stickers: {n} a minute")
+_NAME_CHARS: Final = 60
+"""A rule built from words is named by them, cut here: the name heads its card."""
+_SHOWN_WORD_CHARS: Final = 30
+"""An over-long word is quoted back cut to this, so the error stays one line."""
+
+_RULE_STATES: Final = frozenset(
+    {
+        AdminStates.awaiting_rule_config.state,
+        AdminStates.awaiting_rule_words.state,
+        AdminStates.awaiting_rule_text.state,
+        AdminStates.awaiting_rule_react.state,
+    }
+)
+"""The typed-input prompts this file arms. Only these does a rules screen end."""
+
+_DRAFT_KEYS: Final = (
+    "rule_chat_id",
+    "rule_type",
+    "rule_words",
+    "rule_match",
+    "rule_user",
+    "rule_name",
+    "rule_n",
+    "rule_action",
+    "rule_people",
+    "rule_prompt_id",
+)
+"""The builder's answers in FSM data, set to None when a new rule starts."""
+
+_STATE_SETTERS: Final[Mapping[str, str]] = {
+    "handle_type_selected": (
+        "an old type button opens the JSON prompt for its type: it arms "
+        "awaiting_rule_config, so clearing it first would be undone by the same tap"
     ),
-    "en": (
-        "<b>Create Rule</b>\n\n"
-        "Type: <code>{rule_type}</code>\n\n"
-        "Send JSON config for the rule.\n\n"
-        "Example for keyword_trigger:\n"
-        '<code>{{"name": "spam-words", "keywords": ["spam", "buy"], '
-        '"match_type": "contains", "action": "warn_user", '
-        '"warning_message": "No spam!"}}</code>\n\n'
-        "Actions: <code>notify_admin</code>, <code>warn_user</code>, "
-        '<code>custom_response</code>, <code>set_reaction</code> (+ "emoji": "💊" — '
-        "Telegram's reaction set only). For keyword_trigger, optionally "
-        '"target_users": [id].'
+    "handle_rule_cfg": "opens the JSON prompt: it arms awaiting_rule_config",
+    "handle_builder_type": (
+        "«Ключевые слова» opens the words prompt; the other kinds leave any armed "
+        "prompt through the helper with keep_draft, because the draft is this tap's input"
     ),
-}
-
-_RULE_CREATED: dict[str, str] = {
-    "ru": "Правило #{rule_id} создано.",
-    "en": "Rule #{rule_id} created.",
-}
-
-_RULE_DELETED: dict[str, str] = {
-    "ru": "Правило удалено.",
-    "en": "Rule deleted.",
-}
-
-_RULE_NOT_FOUND: dict[str, str] = {
-    "ru": "Правило не найдено.",
-    "en": "Rule not found.",
-}
-
-_RULE_DEL_CONFIRM_TITLE: dict[str, str] = {
-    "ru": "<b>Удалить правило?</b>",
-    "en": "<b>Delete rule?</b>",
-}
-
-_RULE_DEL_CONFIRM_BODY: dict[str, str] = {
-    "ru": "Это действие необратимо.",
-    "en": "This action cannot be undone.",
-}
-
-_RULE_TOGGLED: dict[str, str] = {
-    "ru": "Правило {status}.",
-    "en": "Rule {status}.",
-}
-
-_INVALID_JSON: dict[str, str] = {
-    "ru": "Невалидный JSON. Попробуйте ещё раз.",
-    "en": "Invalid JSON. Please try again.",
-}
-
-_INVALID_ACTION: dict[str, str] = {
-    "ru": "Неизвестное действие <code>{action}</code>. Доступные: {valid}.",
-    "en": "Unknown action <code>{action}</code>. Available: {valid}.",
-}
-
-_INVALID_EMOJI: dict[str, str] = {
-    "ru": (
-        "Для <code>set_reaction</code> поле <code>emoji</code> должно быть "
-        "одним из стандартных эмодзи-реакций Telegram (например 💊, 🔥, 🤡). "
-        "Попробуйте ещё раз."
-    ),
-    "en": (
-        "For <code>set_reaction</code>, <code>emoji</code> must be one of "
-        "Telegram's standard reaction emoji (e.g. 💊, 🔥, 🤡). "
-        "Please try again."
+    "handle_builder_action": (
+        "warning and reply texts and a typed reaction arm their prompts; the other "
+        "actions leave any armed prompt through the helper"
     ),
 }
+"""Callback handlers that set a state, so they cannot start by leaving one.
+
+Every other callback handler here starts with `_leave_config_prompt`; the
+escape test walks this module and holds both halves, with these reasons.
+"""
 
 
-def _get_lang(raw: str | None) -> str:
-    return raw if raw in ("ru", "en") else "ru"
-
-
-def _check_admin(data: dict[str, Any]) -> bool:
+def _check_admin(data: Mapping[str, Any]) -> bool:
     return bool(data.get("is_admin", False))
 
 
@@ -176,100 +135,142 @@ def _is_private(callback: CallbackQuery) -> bool:
     return False
 
 
-async def _leave_config_prompt(state: FSMContext) -> None:
-    """Drop `awaiting_rule_config` when the admin navigates away from it.
+async def _denied(callback: CallbackQuery, data: Mapping[str, Any]) -> bool:
+    if _check_admin(data) and _is_private(callback):
+        return False
+    lang = lang_of(_field(_fields(callback.data), 0))
+    await callback.answer(_NOT_ADMIN[lang], show_alert=True)
+    return True
+
+
+async def _leave_config_prompt(state: FSMContext, *, keep_draft: bool = False) -> None:
+    """Drop a rule prompt (`_RULE_STATES`) when the admin navigates away from it.
 
     Without this the state outlives the screen that created it. Concrete
     misfire: open the type prompt for chat A, tap «Назад», wander off, and
     paste any valid JSON dict into the DM an hour later -- a rule is silently
     created in chat A with the type chosen back then. `/cancel` and the cancel
     button do not cover it, because the admin never realises a dialog is still
-    open.
+    open. The words, text and reaction prompts have the same shape: a stray
+    message an hour later would become a rule.
 
     Only OUR state is cleared. A rules screen has no business ending someone
     else's dialog, and `state.clear()` is indiscriminate.
+
+    ``keep_draft`` drops only the state, keeping the builder's answers: a
+    builder step that leaves a prompt still needs what was picked before it.
     """
-    if await state.get_state() == AdminStates.awaiting_rule_config.state:
-        await state.clear()
+    if await state.get_state() in _RULE_STATES:
+        if keep_draft:
+            await state.set_state(None)
+        else:
+            await state.clear()
 
 
-# ---------------------------------------------------------------------------
-# Entry: chat selection
-# ---------------------------------------------------------------------------
+async def _retire_prompt(message: Message, prompt_id: object) -> None:
+    """Take the keyboard off an earlier prompt, so one live Cancel remains.
 
-
-@router.callback_query(F.data.startswith("adm_rules:"))
-async def handle_rules_menu(
-    callback: CallbackQuery,
-    state: FSMContext,
-    chat_settings_repo: FromDishka[ChatSettingsRepository],
-    **kwargs: Any,
-) -> None:
-    """Show paginated list of chats to manage rules for."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    A typed answer arrives as a new message and is answered by one; the prompt
+    above it would otherwise keep a Cancel that still works. Cosmetic: when
+    Telegram refuses (the prompt was deleted, or is too old), the old Cancel
+    stays and is harmless, since the list it opens is current.
+    """
+    if not isinstance(prompt_id, int) or isinstance(prompt_id, bool) or message.bot is None:
         return
+    stub = Message(message_id=prompt_id, date=message.date, chat=message.chat).as_(message.bot)
+    try:
+        await safe_edit_reply_markup(stub, reply_markup=None)
+    except TelegramAPIError as exc:
+        logger.info("rule_prompt_keyboard_kept", prompt_id=prompt_id, error=str(exc))
 
-    await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+def _int(raw: str | None) -> int | None:
+    try:
+        return int(raw) if raw is not None else None
+    except ValueError:
+        return None
 
-    await callback.answer()
 
-    # Get enabled chats
-    rows = await chat_settings_repo._pool.fetch(
-        """
-        SELECT chat_id, chat_title, chat_type
-        FROM chat_settings WHERE enabled = true
-        ORDER BY chat_title NULLS LAST, chat_id
-        LIMIT $1 OFFSET $2
-        """,
-        _PER_PAGE,
-        page * _PER_PAGE,
-    )
-    total = (
-        await chat_settings_repo._pool.fetchval(
-            "SELECT COUNT(*) FROM chat_settings WHERE enabled = true"
-        )
-        or 0
-    )
-    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
-    chats = [dict(r) for r in rows]
+def _field(fields: list[str], i: int) -> str | None:
+    return fields[i] if len(fields) > i and fields[i] else None
 
-    # Resolve missing titles via Telegram API and persist
-    for chat in chats:
-        if not chat.get("chat_title") and callback.bot:
-            try:
-                chat_info = await callback.bot.get_chat(chat["chat_id"])
-                title = chat_info.title or chat_info.full_name
-                if title:
-                    chat["chat_title"] = title
-                    await chat_settings_repo.upsert(
-                        chat["chat_id"],
-                        chat_title=title,
-                    )
-            except Exception:
-                logger.debug(
-                    "Could not resolve chat title via Telegram API",
-                    chat_id=chat["chat_id"],
-                    exc_info=True,
-                )
 
-    msg = callback.message
-    if isinstance(msg, Message):
-        text = _NO_CHATS[lang] if not chats else _RULES_TITLE[lang]
-        await safe_edit_text(
-            msg,
-            text,
-            parse_mode="HTML",
-            reply_markup=rules_chat_list_keyboard(lang, chats, page, total_pages),
-        )
+def _fields(data: str | None) -> list[str]:
+    return (data or "").split(":")[1:]
 
 
 # ---------------------------------------------------------------------------
-# Rule list for a chat
+# What the screens read
+# ---------------------------------------------------------------------------
+
+
+async def _chat(
+    chat_id: int,
+    chat_config_service: ChatConfigService,
+    chat_settings_repo: ChatSettingsRepository,
+) -> tuple[screens.ChatRules, str]:
+    """The chat's rule settings (NULL-aware, like the panel's toggles) and its title."""
+    config = await chat_config_service.get_config(chat_id)
+    row = await chat_settings_repo.get(chat_id) or {}
+    chat = screens.ChatRules(
+        enabled=bool(config.rules_enabled),
+        common=shows_common(FIELDS_BY_CODE["re"], row),
+        mode=str(config.rules_mode),
+    )
+    title = row.get("chat_title")
+    return chat, title if isinstance(title, str) and title else screens.chat_id_text(chat_id)
+
+
+async def _list(
+    lang: str,
+    chat_id: int,
+    page: int,
+    *,
+    rules_repo: RulesRepository,
+    chat_config_service: ChatConfigService,
+    chat_settings_repo: ChatSettingsRepository,
+    notice: str | None = None,
+    gone: bool = False,
+) -> Screen:
+    """The chat's rules on ``page`` (clamped into range), or ``rule.gone`` over it."""
+    chat, title = await _chat(chat_id, chat_config_service, chat_settings_repo)
+    rows, total = await rules_repo.get_rules_page(chat_id, page, screens.PER_PAGE)
+    clamped, pages, _ = page_slice(total, page, screens.PER_PAGE)
+    if clamped != page:
+        rows, total = await rules_repo.get_rules_page(chat_id, clamped, screens.PER_PAGE)
+        clamped, pages, _ = page_slice(total, clamped, screens.PER_PAGE)
+    rules = [screens.rule_view(row) for row in rows]
+    if gone:
+        return screens.gone_screen(
+            lang, chat_id=chat_id, title=title, chat=chat, rules=rules, page=clamped, pages=pages
+        )
+    return screens.rules_screen(
+        lang,
+        chat_id=chat_id,
+        title=title,
+        chat=chat,
+        rules=rules,
+        page=clamped,
+        pages=pages,
+        notice=notice,
+    )
+
+
+async def _card(
+    lang: str,
+    rule: screens.RuleView,
+    *,
+    chat_config_service: ChatConfigService,
+    chat_settings_repo: ChatSettingsRepository,
+    show_json: bool = False,
+    notice: str | None = None,
+) -> Screen:
+    chat, _ = await _chat(rule.chat_id, chat_config_service, chat_settings_repo)
+    return screens.rule_screen(lang, rule, chat=chat, show_json=show_json, notice=notice)
+
+
+# ---------------------------------------------------------------------------
+# The list and the switch for all of a chat's rules
 # ---------------------------------------------------------------------------
 
 
@@ -278,44 +279,33 @@ async def handle_rules_list(
     callback: CallbackQuery,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """Show paginated rules for a specific chat."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """One chat's rules, a page of them."""
+    if await _denied(callback, kwargs):
         return
-
     await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    chat_id = int(parts[2]) if len(parts) > 2 else 0
-    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-
-    await callback.answer()
-
-    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
-    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
-
-    msg = callback.message
-    if isinstance(msg, Message):
-        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await safe_edit_text(
-            msg,
-            text,
-            parse_mode="HTML",
-            reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
-        )
-
-
-async def render_rules(
-    rules_repo: RulesRepository, lang: str, chat_id: int, page: int = 0
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Text and keyboard of one chat's rules list (``ar_list:``)."""
-    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
-    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
-    text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-    return text, rules_list_keyboard(lang, rules, page, total_pages, chat_id)
+    fields = parse(callback.data, 2)
+    lang = lang_of(_field(_fields(callback.data), 0))
+    chat_id = _int(fields[1]) if fields else None
+    page = _int(_field(_fields(callback.data), 2)) or 0
+    if chat_id is None:
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await show(
+        callback,
+        await _list(
+            lang,
+            chat_id,
+            page,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
+        ),
+    )
 
 
 async def show_rules(
@@ -330,22 +320,87 @@ async def show_rules(
 
     Stable entry other areas call; ``data`` is the calling handler's
     ``**kwargs`` (`screens.deps`). Renders as the ``ar_list:`` button does,
-    and like it leaves a rule-config prompt: the list has no Cancel, so a
-    prompt left armed would take the admin's next message as a rule config.
+    and like it leaves a rule prompt: the list has no Cancel, so a prompt left
+    armed would take the admin's next message as a rule's input.
     """
+    rules_repo = await resolve(data, RulesRepository)
+    chat_config_service = await resolve(data, ChatConfigService)
+    chat_settings_repo = await resolve(data, ChatSettingsRepository)
     state = state_of(data)
     if state is not None:
         await _leave_config_prompt(state)
-    text, keyboard = await render_rules(
-        await resolve(data, RulesRepository), _get_lang(lang), chat_id
+    screen = await _list(
+        lang_of(lang),
+        chat_id,
+        0,
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+        notice=notice,
     )
-    return await show_markup(
-        target, with_notice(text, notice), keyboard, screen_id="rules", parse_mode="HTML"
-    )
+    return await show(target, screen)
+
+
+@router.callback_query(F.data.startswith("ar_all:"))
+async def handle_rules_all(
+    callback: CallbackQuery,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """Turn every rule of a chat on or off (``chat_settings.rules_enabled``).
+
+    NULL-aware like the panel's toggles: an inherited value flips from what the
+    chat actually does, and the flip happens inside the UPDATE, so a double tap
+    is two flips. With a rule id the tap came from that rule's card, which is
+    redrawn; otherwise the list is.
+    """
+    if await _denied(callback, kwargs):
+        return
+    await _leave_config_prompt(state)
+
+    fields = parse(callback.data, 2)
+    lang = lang_of(_field(_fields(callback.data), 0))
+    chat_id = _int(fields[1]) if fields else None
+    raw_rule = _field(_fields(callback.data), 2)
+    rule_id = _int(raw_rule)
+    if chat_id is None or (raw_rule is not None and rule_id is None):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+
+    effective = bool((await chat_config_service.get_config(chat_id)).rules_enabled)
+    stored = await chat_settings_repo.toggle_bool_field(chat_id, "rules_enabled", effective)
+    if stored is None:
+        logger.warning("rules_toggle_no_row", chat_id=chat_id)
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    chat_config_service.invalidate(chat_id)
+
+    row = await rules_repo.get(rule_id) if rule_id is not None else None
+    if row is not None:
+        screen = await _card(
+            lang,
+            screens.rule_view(row),
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
+        )
+    else:
+        screen = await _list(
+            lang,
+            chat_id,
+            0,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
+            gone=rule_id is not None,
+        )
+    await show(callback, screen)
 
 
 # ---------------------------------------------------------------------------
-# View rule details
+# One rule: its card, pause, delete
 # ---------------------------------------------------------------------------
 
 
@@ -354,67 +409,79 @@ async def handle_rule_view(
     callback: CallbackQuery,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """Show details for a single rule."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """A rule's card, its JSON open with ``j``; a new message with ``n``."""
+    if await _denied(callback, kwargs):
         return
-
     await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    rule_id = int(parts[2]) if len(parts) > 2 else 0
-
-    await callback.answer()
-
-    rule = await rules_repo.get(rule_id)
-    msg = callback.message
-    if not isinstance(msg, Message):
+    fields = parse(callback.data, 2)
+    lang = lang_of(_field(_fields(callback.data), 0))
+    rule_id = _int(fields[1]) if fields else None
+    raw_chat = _field(_fields(callback.data), 2)
+    chat_id = _int(raw_chat)
+    flag = _field(_fields(callback.data), 3)
+    if rule_id is None or (raw_chat is not None and chat_id is None):
+        await show_stale(callback, lang, data=kwargs, state=state)
         return
 
-    if rule is None:
-        await safe_edit_text(
-            msg,
-            {"ru": "Правило не найдено.", "en": "Rule not found."}.get(lang, ""),
-            parse_mode="HTML",
+    row = await rules_repo.get(rule_id)
+    if row is None:
+        await _show_gone(
+            callback,
+            lang,
+            chat_id,
+            data=kwargs,
+            state=state,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
         )
         return
-
-    config = rule.get("config", {})
-    if isinstance(config, str):
-        try:
-            config = json.loads(config)
-        except json.JSONDecodeError:
-            config = {}
-
-    name = fence(escape(config.get("name", f"Rule #{rule_id}")))
-    enabled_icon = "✅" if rule.get("enabled") else "⏸"
-    config_str = escape(json.dumps(config, ensure_ascii=False, indent=2))
-
-    text = (
-        f"<b>{name}</b> {enabled_icon}\n\n"
-        f"<b>ID:</b> {rule_id}\n"
-        f"<b>Type:</b> {escape(str(rule.get('rule_type', '')))}\n"
-        f"<b>Weight:</b> {rule.get('weight', 1)}\n"
-        f"<b>Mandatory:</b> {rule.get('mandatory', False)}\n"
-        f"<b>Triggers:</b> {rule.get('trigger_count', 0)}\n\n"
-        f"<b>Config:</b>\n<pre>{config_str}</pre>"
+    screen = await _card(
+        lang,
+        screens.rule_view(row),
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+        show_json=flag == "j",
     )
+    await show(callback, screen, new_message=flag == "n")
 
-    chat_id = rule.get("chat_id", 0)
-    await safe_edit_text(
-        msg,
-        text,
-        parse_mode="HTML",
-        reply_markup=rule_detail_keyboard(lang, rule_id, chat_id),
+
+async def _show_gone(
+    callback: CallbackQuery,
+    lang: str,
+    chat_id: int | None,
+    *,
+    data: Mapping[str, Any],
+    state: FSMContext,
+    rules_repo: RulesRepository,
+    chat_config_service: ChatConfigService,
+    chat_settings_repo: ChatSettingsRepository,
+) -> None:
+    """The rule a button points at is gone: its chat's list says so.
+
+    An old button that carries no chat id cannot say which list; that one is
+    a stale button and gets the hub.
+    """
+    if chat_id is None:
+        await show_stale(callback, lang, data=data, state=state)
+        return
+    await show(
+        callback,
+        await _list(
+            lang,
+            chat_id,
+            0,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
+            gone=True,
+        ),
     )
-
-
-# ---------------------------------------------------------------------------
-# Toggle rule
-# ---------------------------------------------------------------------------
 
 
 @router.callback_query(F.data.startswith("ar_tog:"))
@@ -422,54 +489,45 @@ async def handle_rule_toggle(
     callback: CallbackQuery,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """Toggle a rule on/off."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """Pause or resume one rule, and redraw its card."""
+    if await _denied(callback, kwargs):
         return
-
     await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    rule_id = int(parts[2]) if len(parts) > 2 else 0
-    chat_id = int(parts[3]) if len(parts) > 3 else 0
-    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-
-    rule = await rules_repo.get(rule_id)
-    if rule is None:
-        await callback.answer("Not found", show_alert=True)
+    fields = parse(callback.data, 3)
+    lang = lang_of(_field(_fields(callback.data), 0))
+    rule_id = _int(fields[1]) if fields else None
+    chat_id = _int(fields[2]) if fields else None
+    if rule_id is None or chat_id is None:
+        await show_stale(callback, lang, data=kwargs, state=state)
         return
 
-    new_enabled = not rule.get("enabled", True)
-    await rules_repo.toggle(rule_id, enabled=new_enabled)
-
-    status = (
-        {"ru": "включено", "en": "enabled"}
-        if new_enabled
-        else {"ru": "выключено", "en": "disabled"}
-    )
-    await callback.answer(_RULE_TOGGLED[lang].format(status=status.get(lang, "")))
-
-    # Refresh list
-    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
-    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
-
-    msg = callback.message
-    if isinstance(msg, Message):
-        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await safe_edit_text(
-            msg,
-            text,
-            parse_mode="HTML",
-            reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
+    row = await rules_repo.get(rule_id)
+    if row is not None:
+        row = await rules_repo.toggle(rule_id, enabled=not bool(row.get("enabled", True)))
+    if row is None:
+        await _show_gone(
+            callback,
+            lang,
+            chat_id,
+            data=kwargs,
+            state=state,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
         )
-
-
-# ---------------------------------------------------------------------------
-# Ask confirmation before deleting a rule
-# ---------------------------------------------------------------------------
+        return
+    screen = await _card(
+        lang,
+        screens.rule_view(row),
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
+    await show(callback, screen)
 
 
 @router.callback_query(F.data.startswith("ar_del_ask:"))
@@ -477,58 +535,38 @@ async def handle_rule_delete_ask(
     callback: CallbackQuery,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """Show confirmation prompt before deleting a rule."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """The one confirmation here: deleting a rule cannot be undone."""
+    if await _denied(callback, kwargs):
         return
-
     await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    rule_id = int(parts[2]) if len(parts) > 2 else 0
-    chat_id = int(parts[3]) if len(parts) > 3 else 0
-    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
-
-    await callback.answer()
-
-    rule = await rules_repo.get(rule_id)
-    msg = callback.message
-    if not isinstance(msg, Message):
+    fields = parse(callback.data, 2)
+    lang = lang_of(_field(_fields(callback.data), 0))
+    rule_id = _int(fields[1]) if fields else None
+    raw_chat = _field(_fields(callback.data), 2)
+    chat_id = _int(raw_chat)
+    if rule_id is None or (raw_chat is not None and chat_id is None):
+        await show_stale(callback, lang, data=kwargs, state=state)
         return
 
-    if rule is None:
-        await safe_edit_text(
-            msg,
-            _RULE_NOT_FOUND[lang],
-            parse_mode="HTML",
+    row = await rules_repo.get(rule_id)
+    if row is None:
+        await _show_gone(
+            callback,
+            lang,
+            chat_id,
+            data=kwargs,
+            state=state,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
         )
         return
-
-    config = rule.get("config", {})
-    if isinstance(config, str):
-        try:
-            import json as _json
-
-            config = _json.loads(config)
-        except (ValueError, KeyError):
-            config = {}
-    name = fence(escape(config.get("name", f"#{rule_id}")))
-
-    text = f"{_RULE_DEL_CONFIRM_TITLE[lang]}\n\n{name}\n\n{_RULE_DEL_CONFIRM_BODY[lang]}"
-    await safe_edit_text(
-        msg,
-        text,
-        parse_mode="HTML",
-        reply_markup=confirm_delete_rule_keyboard(lang, rule_id, chat_id, page),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Delete rule
-# ---------------------------------------------------------------------------
+    await show(callback, screens.delete_ask_screen(lang, screens.rule_view(row)))
 
 
 @router.callback_query(F.data.startswith("ar_del:"))
@@ -536,42 +574,149 @@ async def handle_rule_delete(
     callback: CallbackQuery,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """Delete a rule and refresh the list."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """Delete a rule and show its chat's list with a notice."""
+    if await _denied(callback, kwargs):
         return
-
     await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    rule_id = int(parts[2]) if len(parts) > 2 else 0
-    chat_id = int(parts[3]) if len(parts) > 3 else 0
-    page = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+    fields = parse(callback.data, 2)
+    lang = lang_of(_field(_fields(callback.data), 0))
+    rule_id = _int(fields[1]) if fields else None
+    raw_chat = _field(_fields(callback.data), 2)
+    chat_id = _int(raw_chat)
+    if rule_id is None or (raw_chat is not None and chat_id is None):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
 
-    await rules_repo.delete(rule_id)
-    await callback.answer(_RULE_DELETED[lang])
-
-    # Refresh list
-    rules, total = await rules_repo.get_rules_page(chat_id, page, _PER_PAGE)
-    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
-
-    msg = callback.message
-    if isinstance(msg, Message):
-        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await safe_edit_text(
-            msg,
-            text,
-            parse_mode="HTML",
-            reply_markup=rules_list_keyboard(lang, rules, page, total_pages, chat_id),
+    row = await rules_repo.get(rule_id)
+    if row is None or not await rules_repo.delete(rule_id):
+        await _show_gone(
+            callback,
+            lang,
+            chat_id,
+            data=kwargs,
+            state=state,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
         )
+        return
+    await show(
+        callback,
+        await _list(
+            lang,
+            screens.rule_view(row).chat_id,
+            0,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
+            notice=DELETED(lang),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Add rule: select type
+# The builder
 # ---------------------------------------------------------------------------
+
+
+async def _draft(state: FSMContext, chat_id: int) -> dict[str, Any] | None:
+    """The builder's answers so far, or None when they are gone or for another chat.
+
+    A builder button outlives its draft: a new rule started for another chat,
+    a finished rule, a restart. Such a tap is stale, never a rule in the
+    wrong chat.
+    """
+    data = await state.get_data()
+    if data.get("rule_chat_id") != chat_id or data.get("rule_type") not in _VALID_RULE_TYPES:
+        return None
+    return data
+
+
+def _builder_args(callback: CallbackQuery, n: int) -> tuple[str, int | None, list[str]]:
+    """``(lang, chat_id, the other fields)``; chat_id None when the payload is garbled."""
+    lang = lang_of(_field(_fields(callback.data), 0))
+    fields = parse(callback.data, n)
+    if fields is None:
+        return lang, None, []
+    return lang, _int(fields[1]), [*fields[2:], *_fields(callback.data)[n:]]
+
+
+def _config_for(draft: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The engine's config for what the builder picked, or None when a step is missing."""
+    rule_type = draft.get("rule_type")
+    name = draft.get("rule_name")
+    if not isinstance(name, str):
+        return None
+    if rule_type == "keyword_trigger":
+        words = draft.get("rule_words")
+        match = draft.get("rule_match")
+        if not isinstance(words, list) or match not in ("contains", "exact"):
+            return None
+        return {"name": name, "keywords": words, "match_type": match}
+    if rule_type == "user_specific":
+        user_id = draft.get("rule_user")
+        if not isinstance(user_id, int):
+            return None
+        # `any_message` is what makes the rule fire on the person's every
+        # message: without it the engine looks for `conditions.keywords`,
+        # finds none, and the rule never fires.
+        return {"name": name, "user_ids": [user_id], "conditions": {"any_message": True}}
+    n = draft.get("rule_n")
+    if not isinstance(n, int):
+        return None
+    if rule_type == "spam_detect":
+        # The engine's default length cap is 4000 characters, which the
+        # builder never asks about: written out as 0 ("off") so the rule does
+        # exactly what its card says, a count of messages.
+        return {
+            "name": name,
+            "max_messages": n,
+            "time_window_seconds": 60,
+            "max_chars_per_message": 0,
+        }
+    if rule_type == "sticker_flood":
+        return {"name": name, "max_stickers_per_interval": n, "interval_seconds": 60}
+    return None
+
+
+async def _create(
+    target: CallbackQuery | Message,
+    lang: str,
+    chat_id: int,
+    draft: Mapping[str, Any],
+    action: str,
+    extra: Mapping[str, Any],
+    *,
+    rules_repo: RulesRepository,
+    chat_config_service: ChatConfigService,
+    chat_settings_repo: ChatSettingsRepository,
+) -> Message | None:
+    """Save the rule the builder describes and show its card with «Правило создано»."""
+    config = _config_for(draft)
+    if config is None:
+        return None
+    config = {**config, "action": action, **extra}
+    rule_type = str(draft["rule_type"])
+    rule_id = await rules_repo.create(
+        chat_id=chat_id, rule_type=rule_type, config=config, weight=1, mandatory=False
+    )
+    logger.info(
+        "rule_created", chat_id=chat_id, rule_id=rule_id, rule_type=rule_type, via="builder"
+    )
+    rule = screens.RuleView(id=int(rule_id), chat_id=chat_id, rule_type=rule_type, config=config)
+    screen = await _card(
+        lang,
+        rule,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+        notice=CREATED(lang),
+    )
+    return await show(target, screen)
 
 
 @router.callback_query(F.data.startswith("ar_add:"))
@@ -580,32 +725,319 @@ async def handle_add_rule(
     state: FSMContext,
     **kwargs: Any,
 ) -> None:
-    """Show rule type selection."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """A new rule: start a fresh draft for this chat and ask what sets it off."""
+    if await _denied(callback, kwargs):
         return
-
     await _leave_config_prompt(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    chat_id = int(parts[2]) if len(parts) > 2 else 0
+    lang, chat_id, _ = _builder_args(callback, 2)
+    if chat_id is None:
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    # One mapping: `rule_chat_id` is itself a draft key, and spelling it twice
+    # as keyword arguments is a TypeError on every tap.
+    await state.update_data({**dict.fromkeys(_DRAFT_KEYS), "rule_chat_id": chat_id, "lang": lang})
+    await show(callback, screens.type_screen(lang, chat_id))
 
-    await callback.answer()
 
-    msg = callback.message
-    if isinstance(msg, Message):
-        await safe_edit_text(
-            msg,
-            {"ru": "<b>Тип правила:</b>", "en": "<b>Rule type:</b>"}.get(lang, ""),
-            parse_mode="HTML",
-            reply_markup=rule_type_keyboard(lang, chat_id),
-        )
+@router.callback_query(F.data.startswith("ar_b_type:"))
+async def handle_builder_type(
+    callback: CallbackQuery,
+    state: FSMContext,
+    message_repo: FromDishka[MessageRepository],
+    **kwargs: Any,
+) -> None:
+    """What sets the rule off. Words are typed; the rest is picked."""
+    if await _denied(callback, kwargs):
+        return
+    lang, chat_id, rest = _builder_args(callback, 3)
+    kind = rest[0] if rest else None
+    rule_type = screens.KINDS.get(kind or "")
+    data = await state.get_data()
+    if chat_id is None or rule_type is None or data.get("rule_chat_id") != chat_id:
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+
+    if kind == "k":
+        await state.set_state(AdminStates.awaiting_rule_words)
+        await state.update_data(rule_type=rule_type, lang=lang)
+        sent = await show(callback, screens.words_screen(lang, chat_id))
+        await state.update_data(rule_prompt_id=sent.message_id if sent else None)
+        return
+
+    await _leave_config_prompt(state, keep_draft=True)
+    await state.update_data(rule_type=rule_type, lang=lang)
+    if kind == "u":
+        page = _int(rest[1] if len(rest) > 1 else None) or 0
+        people, total = await message_repo.get_top_active_users(chat_id, page, screens.WHO_PER_PAGE)
+        clamped, pages, _ = page_slice(total, page, screens.WHO_PER_PAGE)
+        if clamped != page:
+            people, total = await message_repo.get_top_active_users(
+                chat_id, clamped, screens.WHO_PER_PAGE
+            )
+            clamped, pages, _ = page_slice(total, clamped, screens.WHO_PER_PAGE)
+        persons = [
+            screens.Person(int(p["user_id"]), p.get("first_name"), p.get("username"))
+            for p in people
+        ]
+        await state.update_data(rule_people={str(p.user_id): p.display for p in persons})
+        await show(callback, screens.who_screen(lang, chat_id, persons, page=clamped, pages=pages))
+        return
+    await show(callback, screens.count_screen(lang, chat_id, kind or ""))
+
+
+@router.callback_query(F.data.startswith("ar_b_match:"))
+async def handle_builder_match(
+    callback: CallbackQuery,
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """A word inside a message, or the message being only the word."""
+    if await _denied(callback, kwargs):
+        return
+    await _leave_config_prompt(state, keep_draft=True)
+    lang, chat_id, rest = _builder_args(callback, 3)
+    match = {"c": "contains", "e": "exact"}.get(rest[0] if rest else "")
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    if (
+        chat_id is None
+        or match is None
+        or draft is None
+        or draft.get("rule_type") != "keyword_trigger"
+        or not isinstance(draft.get("rule_words"), list)
+    ):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await state.update_data(rule_match=match)
+    await show(callback, screens.action_screen(lang, chat_id, str(draft.get("rule_name") or "")))
+
+
+@router.callback_query(F.data.startswith("ar_b_who:"))
+async def handle_builder_who(
+    callback: CallbackQuery,
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """Whose messages: one person from the chat's most active ones."""
+    if await _denied(callback, kwargs):
+        return
+    await _leave_config_prompt(state, keep_draft=True)
+    lang, chat_id, rest = _builder_args(callback, 3)
+    user_id = _int(rest[0] if rest else None)
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    if (
+        chat_id is None
+        or user_id is None
+        or draft is None
+        or draft.get("rule_type") != "user_specific"
+    ):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    people = draft.get("rule_people")
+    shown = people.get(str(user_id)) if isinstance(people, dict) else None
+    name = shown if isinstance(shown, str) and shown else str(user_id)
+    await state.update_data(rule_user=user_id, rule_name=name)
+    await show(callback, screens.action_screen(lang, chat_id, name))
+
+
+@router.callback_query(F.data.startswith("ar_b_n:"))
+async def handle_builder_count(
+    callback: CallbackQuery,
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """How many stickers in the chat, or messages from one person, a minute."""
+    if await _denied(callback, kwargs):
+        return
+    await _leave_config_prompt(state, keep_draft=True)
+    lang, chat_id, rest = _builder_args(callback, 3)
+    n = _int(rest[0] if rest else None)
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    rule_type = draft.get("rule_type") if draft else None
+    choices, name = (
+        (screens.FLOOD_CHOICES, FLOOD_NAME)
+        if rule_type == "sticker_flood"
+        else (screens.SPAM_CHOICES, SPAM_NAME)
+    )
+    if (
+        chat_id is None
+        or draft is None
+        or rule_type not in ("sticker_flood", "spam_detect")
+        or n not in choices
+    ):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    rule_name = name(lang).format(n=n)
+    await state.update_data(rule_n=n, rule_name=rule_name)
+    await show(callback, screens.action_screen(lang, chat_id, rule_name))
+
+
+@router.callback_query(F.data.startswith("ar_b_act:"))
+async def handle_builder_action(
+    callback: CallbackQuery,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """What the rule does. «Написать админу» saves it at once; the rest ask one more thing."""
+    if await _denied(callback, kwargs):
+        return
+    lang, chat_id, rest = _builder_args(callback, 3)
+    token = rest[0] if rest else ""
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    if (
+        chat_id is None
+        or draft is None
+        or token not in (*screens.ACTIONS, "ri")
+        or _config_for(draft) is None
+    ):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    name = str(draft.get("rule_name") or "")
+
+    if token in ("w", "c"):
+        action = screens.ACTIONS[token]
+        await state.set_state(AdminStates.awaiting_rule_text)
+        await state.update_data(rule_action=action, lang=lang)
+        sent = await show(callback, screens.text_screen(lang, chat_id, name, action=action))
+        await state.update_data(rule_prompt_id=sent.message_id if sent else None)
+        return
+    if token == "ri":
+        await state.set_state(AdminStates.awaiting_rule_react)
+        await state.update_data(rule_action=RuleAction.SET_REACTION.value, lang=lang)
+        sent = await show(callback, screens.react_in_screen(lang, chat_id, name))
+        await state.update_data(rule_prompt_id=sent.message_id if sent else None)
+        return
+
+    if token == "r":
+        await _leave_config_prompt(state, keep_draft=True)
+        await show(callback, screens.react_screen(lang, chat_id, name))
+        return
+    await _leave_config_prompt(state)
+    await state.update_data(**dict.fromkeys(_DRAFT_KEYS))
+    await _create(
+        callback,
+        lang,
+        chat_id,
+        draft,
+        RuleAction.NOTIFY_ADMIN.value,
+        {},
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
+
+
+@router.callback_query(F.data.startswith("ar_b_txt:"))
+async def handle_builder_preset_text(
+    callback: CallbackQuery,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """A ready warning text: the rule is saved."""
+    if await _denied(callback, kwargs):
+        return
+    lang, chat_id, rest = _builder_args(callback, 3)
+    i = _int(rest[0] if rest else None)
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    await _leave_config_prompt(state)
+    if (
+        chat_id is None
+        or draft is None
+        or i is None
+        or not 0 <= i < len(screens.WARN_PRESETS)
+        or draft.get("rule_action") != RuleAction.WARN_USER.value
+        or _config_for(draft) is None
+    ):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await state.update_data(**dict.fromkeys(_DRAFT_KEYS))
+    await _create(
+        callback,
+        lang,
+        chat_id,
+        draft,
+        RuleAction.WARN_USER.value,
+        {"warning_message": screens.WARN_PRESETS[i](lang)},
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
+
+
+@router.callback_query(F.data.startswith("ar_b_rx:"))
+async def handle_builder_preset_reaction(
+    callback: CallbackQuery,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """A ready reaction: the rule is saved."""
+    if await _denied(callback, kwargs):
+        return
+    lang, chat_id, rest = _builder_args(callback, 3)
+    i = _int(rest[0] if rest else None)
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    await _leave_config_prompt(state)
+    if (
+        chat_id is None
+        or draft is None
+        or i is None
+        or not 0 <= i < len(screens.REACTIONS)
+        or _config_for(draft) is None
+    ):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await state.update_data(**dict.fromkeys(_DRAFT_KEYS))
+    await _create(
+        callback,
+        lang,
+        chat_id,
+        draft,
+        RuleAction.SET_REACTION.value,
+        {"emoji": screens.REACTIONS[i]},
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
 
 
 # ---------------------------------------------------------------------------
-# Add rule: type selected → await JSON config
+# The JSON prompt
 # ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data.startswith("ar_cfg:"))
+async def handle_rule_cfg(
+    callback: CallbackQuery,
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """The whole rule as JSON, for what the buttons do not cover."""
+    if await _denied(callback, kwargs):
+        return
+    lang, chat_id, _ = _builder_args(callback, 2)
+    if chat_id is None:
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await state.set_state(AdminStates.awaiting_rule_config)
+    await _cfg_prompt(callback, state, lang, chat_id, None)
+
+
+async def _cfg_prompt(
+    callback: CallbackQuery, state: FSMContext, lang: str, chat_id: int, rule_type: str | None
+) -> None:
+    """The JSON prompt's screen and draft; the caller has armed its state."""
+    await state.update_data(rule_chat_id=chat_id, rule_type=rule_type, lang=lang)
+    sent = await show(callback, screens.cfg_screen(lang, chat_id, rule_type))
+    await state.update_data(rule_prompt_id=sent.message_id if sent else None)
 
 
 @router.callback_query(F.data.startswith("ar_type:"))
@@ -614,35 +1046,16 @@ async def handle_type_selected(
     state: FSMContext,
     **kwargs: Any,
 ) -> None:
-    """Rule type selected — ask for JSON config via FSM."""
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    """An old type button: the JSON prompt for its type."""
+    if await _denied(callback, kwargs):
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    chat_id = int(parts[2]) if len(parts) > 2 else 0
-    rule_type = parts[3] if len(parts) > 3 else ""
-
-    if rule_type not in _VALID_RULE_TYPES:
-        await callback.answer("Invalid type", show_alert=True)
+    lang, chat_id, rest = _builder_args(callback, 3)
+    rule_type = rest[0] if rest else ""
+    if chat_id is None or rule_type not in _VALID_RULE_TYPES:
+        await show_stale(callback, lang, data=kwargs, state=state)
         return
-
-    await callback.answer()
-
-    # Save context in FSM
     await state.set_state(AdminStates.awaiting_rule_config)
-    await state.update_data(rule_chat_id=chat_id, rule_type=rule_type, lang=lang)
-
-    msg = callback.message
-    if isinstance(msg, Message):
-        text = _TYPE_SELECTED[lang].format(rule_type=escape(rule_type))
-        await safe_edit_text(
-            msg,
-            text,
-            parse_mode="HTML",
-            reply_markup=rule_config_cancel_keyboard(lang, chat_id),
-        )
+    await _cfg_prompt(callback, state, lang, chat_id, rule_type)
 
 
 @router.callback_query(F.data.startswith("ar_cancel:"))
@@ -650,47 +1063,263 @@ async def handle_rule_config_cancel(
     callback: CallbackQuery,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """Leave the config prompt without creating anything, and show the list.
+    """An old Cancel under the JSON prompt: leave it without creating anything.
 
     Gated exactly like every other callback in this file: a cancel screen
     re-renders a chat's rule list, so it is not "harmless navigation".
     """
-    if not _check_admin(kwargs) or not _is_private(callback):
-        await callback.answer(_NOT_ADMIN.get("en", ""), show_alert=True)
+    if await _denied(callback, kwargs):
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    chat_id = int(parts[2]) if len(parts) > 2 else 0
-
     # NOT a bare `state.clear()`. These cancel buttons ride on standalone reply
-    # messages (the three invalid-input re-prompts) that nothing ever edits, so
+    # messages (the invalid-input re-prompts) that nothing ever edits, so
     # they stay tappable indefinitely — an admin who later opens a DIFFERENT
     # dialog and scrolls up to an old «✖️ Отмена» would otherwise have that
     # dialog silently wiped, state and data. Same rule the sibling helper
     # states: a rules screen has no business ending someone else's dialog.
     await _leave_config_prompt(state)
-    await callback.answer()
-
-    rules, total = await rules_repo.get_rules_page(chat_id, 0, _PER_PAGE)
-    total_pages = max(1, (total + _PER_PAGE - 1) // _PER_PAGE)
-
-    msg = callback.message
-    if isinstance(msg, Message):
-        text = _NO_RULES[lang] if not rules else _RULES_LIST_TITLE[lang]
-        await safe_edit_text(
-            msg,
-            text,
-            parse_mode="HTML",
-            reply_markup=rules_list_keyboard(lang, rules, 0, total_pages, chat_id),
-        )
+    lang, chat_id, _ = _builder_args(callback, 2)
+    if chat_id is None:
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await show(
+        callback,
+        await _list(
+            lang,
+            chat_id,
+            0,
+            rules_repo=rules_repo,
+            chat_config_service=chat_config_service,
+            chat_settings_repo=chat_settings_repo,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
-# FSM: receive JSON config
+# Typed answers
 # ---------------------------------------------------------------------------
+#
+# Four filters on each, and each one closes a hole the body could not (TD-049):
+#
+# ``IsAdmin()`` -- these handlers write a rule for whatever ``chat_id`` the FSM
+# data carries. The FSM key binds the state to one user, which is exactly the
+# TOCTOU the security register records as S-11: it binds it to the user who
+# *was* an admin when the dialog opened.
+#
+# ``F.chat.type == "private"`` -- the dialogs are only ever opened from a DM
+# callback, so this costs nothing and stops a state from ever applying anywhere
+# else.
+#
+# The two slash guards are one guard. aiogram resolves a command from
+# ``message.text or message.caption``, so ``/help`` sent as a photo caption is a
+# real command -- and ``~F.text.startswith("/")`` returns True for it, because
+# ``.text`` is None. Measured: with the text-only guard, a captioned ``/help``
+# was still eaten by the JSON handler and answered "Невалидный JSON". The same
+# shape is why the escape hatches live on the keyboard and on ``/cancel`` rather
+# than in a handler's body: a filtered-out update is one a handler never sees.
+
+
+def _typed(message: Message) -> str:
+    return (message.text or message.caption or "").strip()
+
+
+async def _reject(
+    message: Message,
+    state: FSMContext,
+    screen_id: str,
+    text: str,
+    cancel_cb: str,
+    lang: str,
+) -> None:
+    """A typed answer that cannot be used: say why, keep the prompt armed.
+
+    The error carries the one live Cancel; the prompt above it loses its own.
+    """
+    data = await state.get_data()
+    sent = await show(message, screens.error_screen(screen_id, text, cancel_cb, lang))
+    await _retire_prompt(message, data.get("rule_prompt_id"))
+    await state.update_data(rule_prompt_id=sent.message_id if sent else None)
+
+
+def _split_words(text: str) -> list[str]:
+    words: list[str] = []
+    seen: set[str] = set()
+    for chunk in text.replace("\n", ",").split(","):
+        word = chunk.strip()
+        if word and word.casefold() not in seen:
+            seen.add(word.casefold())
+            words.append(word)
+    return words
+
+
+def _words_name(words: list[str]) -> str:
+    name = ", ".join(words)
+    return name if len(name) <= _NAME_CHARS else name[: _NAME_CHARS - 1].rstrip() + "…"
+
+
+@router.message(
+    AdminStates.awaiting_rule_words,
+    F.chat.type == "private",
+    IsAdmin(),
+    ~F.text.startswith("/"),
+    ~F.caption.startswith("/"),
+)
+async def handle_rule_words_input(message: Message, state: FSMContext) -> None:
+    """The words, typed: then how to match them."""
+    data = await state.get_data()
+    lang = lang_of(data.get("lang"))
+    chat_id = data.get("rule_chat_id")
+    if not isinstance(chat_id, int):
+        logger.warning("rule_prompt_without_chat", state=await state.get_state())
+        await state.clear()
+        return
+    cancel_cb = cb("ar_list:", lang, chat_id, 0)
+    words = _split_words(_typed(message))
+    if not words:
+        await _reject(message, state, "rule.words", screens.WORDS_NONE(lang), cancel_cb, lang)
+        return
+    if len(words) > screens.MAX_WORDS:
+        text = screens.WORDS_TOO_MANY(lang).format(n=screens.MAX_WORDS)
+        await _reject(message, state, "rule.words", text, cancel_cb, lang)
+        return
+    long = next((w for w in words if len(w) > screens.MAX_WORD_CHARS), None)
+    if long is not None:
+        shown = long if len(long) <= _SHOWN_WORD_CHARS else long[:_SHOWN_WORD_CHARS] + "…"
+        text = screens.WORDS_TOO_LONG(lang).format(n=screens.MAX_WORD_CHARS, w=f"«{escape(shown)}»")
+        await _reject(message, state, "rule.words", text, cancel_cb, lang)
+        return
+
+    await state.set_state(None)
+    await state.update_data(rule_words=words, rule_name=_words_name(words))
+    await show(message, screens.match_screen(lang, chat_id, words))
+    await _retire_prompt(message, data.get("rule_prompt_id"))
+    await state.update_data(rule_prompt_id=None)
+
+
+@router.message(
+    AdminStates.awaiting_rule_text,
+    F.chat.type == "private",
+    IsAdmin(),
+    ~F.text.startswith("/"),
+    ~F.caption.startswith("/"),
+)
+async def handle_rule_text_input(
+    message: Message,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+) -> None:
+    """The warning or the reply, typed: the rule is saved."""
+    data = await state.get_data()
+    lang = lang_of(data.get("lang"))
+    chat_id = data.get("rule_chat_id")
+    action = data.get("rule_action")
+    if not isinstance(chat_id, int) or action not in (
+        RuleAction.WARN_USER.value,
+        RuleAction.CUSTOM_RESPONSE.value,
+    ):
+        logger.warning("rule_prompt_without_chat", state=await state.get_state())
+        await state.clear()
+        return
+    cancel_cb = cb("ar_list:", lang, chat_id, 0)
+    text = _typed(message)
+    if not text:
+        await _reject(message, state, "rule.text", screens.TEXT_EMPTY(lang), cancel_cb, lang)
+        return
+    if len(text) > screens.MAX_TEXT_CHARS:
+        error = screens.TEXT_TOO_LONG(lang).format(n=screens.MAX_TEXT_CHARS)
+        await _reject(message, state, "rule.text", error, cancel_cb, lang)
+        return
+    key = "warning_message" if action == RuleAction.WARN_USER.value else "response_template"
+    await _finish_typed(
+        message,
+        state,
+        data,
+        lang,
+        chat_id,
+        str(action),
+        {key: text},
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
+
+
+@router.message(
+    AdminStates.awaiting_rule_react,
+    F.chat.type == "private",
+    IsAdmin(),
+    ~F.text.startswith("/"),
+    ~F.caption.startswith("/"),
+)
+async def handle_rule_react_input(
+    message: Message,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+) -> None:
+    """One emoji, typed; only Telegram's reaction set is accepted."""
+    data = await state.get_data()
+    lang = lang_of(data.get("lang"))
+    chat_id = data.get("rule_chat_id")
+    if not isinstance(chat_id, int):
+        logger.warning("rule_prompt_without_chat", state=await state.get_state())
+        await state.clear()
+        return
+    emoji = ReactionSelector.select(_typed(message) or None)
+    if emoji is None:
+        cancel_cb = cb("ar_b_act:", lang, chat_id, "r")
+        await _reject(message, state, "rule.react_in", screens.EMOJI_BAD(lang), cancel_cb, lang)
+        return
+    await _finish_typed(
+        message,
+        state,
+        data,
+        lang,
+        chat_id,
+        RuleAction.SET_REACTION.value,
+        {"emoji": emoji},
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
+
+
+async def _finish_typed(
+    message: Message,
+    state: FSMContext,
+    data: Mapping[str, Any],
+    lang: str,
+    chat_id: int,
+    action: str,
+    extra: Mapping[str, Any],
+    *,
+    rules_repo: RulesRepository,
+    chat_config_service: ChatConfigService,
+    chat_settings_repo: ChatSettingsRepository,
+) -> None:
+    """Save the rule from a typed last answer; the prompt above loses its Cancel."""
+    await state.clear()
+    if _config_for(data) is None:
+        logger.warning("rule_draft_incomplete", chat_id=chat_id, rule_type=data.get("rule_type"))
+        return
+    await _create(
+        message,
+        lang,
+        chat_id,
+        data,
+        action,
+        extra,
+        rules_repo=rules_repo,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+    )
+    await _retire_prompt(message, data.get("rule_prompt_id"))
 
 
 @router.message(
@@ -704,46 +1333,39 @@ async def handle_rule_config_input(
     message: Message,
     state: FSMContext,
     rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
 ) -> None:
-    """Receive JSON config and create the rule.
+    """Receive a rule as JSON and create it.
 
-    Four filters, and each one closes a hole the body could not (TD-049):
-
-    ``IsAdmin()`` -- this handler writes a rule for whatever ``chat_id`` the
-    FSM data carries, and until now it did so with **no authority check at
-    all**, unlike both of its siblings. The FSM key binds the state to one
-    user, which is exactly the TOCTOU the security register records as S-11:
-    it binds it to the user who *was* an admin when the dialog opened.
-
-    ``F.chat.type == "private"`` -- the dialog is only ever opened from a DM
-    callback, so this costs nothing and stops the state from ever applying
-    anywhere else.
-
-    The two slash guards are one guard. aiogram resolves a command from
-    ``message.text or message.caption``, so ``/help`` sent as a photo caption
-    is a real command -- and ``~F.text.startswith("/")`` returns True for it,
-    because ``.text`` is None. Measured: with the text-only guard, a captioned
-    ``/help`` was still eaten by this handler and answered "Невалидный JSON".
-    The same shape is why the escape hatches live on the keyboard and on
-    ``/cancel`` rather than in this handler's body: a filtered-out update is
-    one this handler never sees.
+    The type comes from the JSON's ``type`` field, else from the old type
+    button that opened the prompt, else it is keywords.
     """
     data = await state.get_data()
-    lang = _get_lang(data.get("lang"))
-    chat_id = data.get("rule_chat_id", 0)
-    rule_type = data.get("rule_type", "")
+    lang = lang_of(data.get("lang"))
+    chat_id = data.get("rule_chat_id")
+    if not isinstance(chat_id, int):
+        logger.warning("rule_prompt_without_chat", state=await state.get_state())
+        await state.clear()
+        return
+    cancel_cb = cb("ar_add:", lang, chat_id)
 
-    text = message.text or ""
     try:
-        config = json.loads(text)
+        config = json.loads(message.text or "")
         if not isinstance(config, dict):
             raise ValueError  # noqa: TRY301
-    except (json.JSONDecodeError, ValueError):
-        await message.reply(
-            _INVALID_JSON[lang],
-            parse_mode="HTML",
-            reply_markup=rule_config_cancel_keyboard(lang, chat_id),
+    except ValueError:
+        await _reject(message, state, "rule.cfg_bad", screens.CFG_NOT_JSON(lang), cancel_cb, lang)
+        return
+
+    stated = config.pop("type", None)
+    rule_type = stated if stated is not None else data.get("rule_type") or "keyword_trigger"
+    if rule_type not in _VALID_RULE_TYPES:
+        error = screens.CFG_BAD_TYPE(lang).format(
+            t=escape(str(rule_type)),
+            valid=", ".join(f"<code>{t}</code>" for t in screens.KINDS.values()),
         )
+        await _reject(message, state, "rule.cfg_bad", error, cancel_cb, lang)
         return
 
     # Validate what the engine would otherwise drop silently at evaluation
@@ -752,36 +1374,45 @@ async def handle_rule_config_input(
     # only trace is a server-side log line.
     action = config.get("action")
     if action is not None and action not in _VALID_RULE_ACTIONS:
-        await message.reply(
-            _INVALID_ACTION[lang].format(
-                action=escape(str(action)),
-                valid=", ".join(f"<code>{a}</code>" for a in RuleAction),
-            ),
-            parse_mode="HTML",
-            reply_markup=rule_config_cancel_keyboard(lang, chat_id),
+        error = screens.CFG_BAD_ACTION(lang).format(
+            action=escape(str(action)),
+            valid=", ".join(f"<code>{a}</code>" for a in RuleAction),
         )
+        await _reject(message, state, "rule.cfg_bad", error, cancel_cb, lang)
         return
     if action == RuleAction.SET_REACTION:
         emoji = config.get("emoji")
         if not isinstance(emoji, str) or ReactionSelector.select(emoji) is None:
-            await message.reply(
-                _INVALID_EMOJI[lang],
-                parse_mode="HTML",
-                reply_markup=rule_config_cancel_keyboard(lang, chat_id),
+            await _reject(
+                message, state, "rule.cfg_bad", screens.CFG_BAD_EMOJI(lang), cancel_cb, lang
             )
             return
 
-    # Create rule
+    weight = config.pop("weight", 1)
+    mandatory = config.pop("mandatory", False)
     rule_id = await rules_repo.create(
         chat_id=chat_id,
-        rule_type=rule_type,
+        rule_type=str(rule_type),
         config=config,
-        weight=config.pop("weight", 1),
-        mandatory=config.pop("mandatory", False),
+        weight=weight,
+        mandatory=mandatory,
     )
-
+    logger.info("rule_created", chat_id=chat_id, rule_id=rule_id, rule_type=rule_type, via="json")
     await state.clear()
-    await message.reply(
-        _RULE_CREATED[lang].format(rule_id=rule_id),
-        parse_mode="HTML",
+    rule = screens.RuleView(
+        id=int(rule_id),
+        chat_id=chat_id,
+        rule_type=str(rule_type),
+        config=config,
+        weight=weight if isinstance(weight, int) and not isinstance(weight, bool) else 1,
+        mandatory=bool(mandatory),
     )
+    screen = await _card(
+        lang,
+        rule,
+        chat_config_service=chat_config_service,
+        chat_settings_repo=chat_settings_repo,
+        notice=CREATED(lang),
+    )
+    await show(message, screen)
+    await _retire_prompt(message, data.get("rule_prompt_id"))

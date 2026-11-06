@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+import asyncio
+from collections.abc import Iterator
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.models.rules import RuleAction
+from src.services.rules import engine as engine_module
 from src.services.rules.engine import RuleEngine
+
+
+@pytest.fixture(autouse=True)
+def _no_flood_cooldowns() -> Iterator[None]:
+    """sticker_flood's rest is process-wide state: no test inherits another's."""
+    engine_module._STICKER_FLOOD_FIRED.clear()
+    yield
+    engine_module._STICKER_FLOOD_FIRED.clear()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -18,10 +30,13 @@ def _make_message(
     text: str | None = "hello world",
     caption: str | None = None,
     user_id: int = 100,
+    *,
+    sticker: bool = False,
 ) -> MagicMock:
     msg = MagicMock()
     msg.text = text
     msg.caption = caption
+    msg.sticker = MagicMock() if sticker else None
     msg.from_user = MagicMock()
     msg.from_user.id = user_id
     msg.from_user.first_name = "Alice"
@@ -460,7 +475,7 @@ class TestStickerFlood:
         actions = await engine.evaluate(
             chat_id=-1001,
             user_id=100,
-            message=_make_message(),
+            message=_make_message(text=None, sticker=True),
             rules_mode="all",
         )
         assert len(actions) == 1
@@ -488,10 +503,125 @@ class TestStickerFlood:
         actions = await engine.evaluate(
             chat_id=-1001,
             user_id=100,
-            message=_make_message(),
+            message=_make_message(text=None, sticker=True),
             rules_mode="all",
         )
         assert len(actions) == 0
+
+
+def _flood(rule_id: int = 1, *, weight: int = 1, interval: int = 60) -> dict:
+    return _rule_row(
+        rule_id=rule_id,
+        rule_type="sticker_flood",
+        config={"max_stickers_per_interval": 5, "interval_seconds": interval},
+        weight=weight,
+    )
+
+
+def _flood_engine(*rules: dict, count: int = 6) -> tuple[RuleEngine, AsyncMock]:
+    repo = AsyncMock()
+    repo.get_active_rules = AsyncMock(return_value=list(rules))
+    repo.record_trigger = AsyncMock()
+    repo.count_stickers_in_interval = AsyncMock(return_value=count)
+    repo.count_user_messages_in_interval = AsyncMock(return_value=(0, 0))
+    return RuleEngine(repo), repo
+
+
+async def _fired(engine: RuleEngine, *, sticker: bool = True, mode: str = "all") -> list[int]:
+    actions = await engine.evaluate(
+        chat_id=-1001,
+        user_id=100,
+        message=_make_message(text=None if sticker else "hi", sticker=sticker),
+        rules_mode=mode,
+    )
+    return [a.rule.id for a in actions]
+
+
+class TestStickerFloodFiresOnAStickerOnce:
+    """The count is chat-wide, so it must be a sticker that fires the rule, and
+    a flood must be one alert, not one per sticker for the rest of the minute."""
+
+    @pytest.mark.asyncio
+    async def test_a_text_message_during_a_flood_does_not_fire_it(self) -> None:
+        engine, repo = _flood_engine(_flood())
+
+        assert await _fired(engine, sticker=False) == []
+        repo.count_stickers_in_interval.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_the_next_sticker_inside_the_interval_does_not_fire_it_again(self) -> None:
+        engine, repo = _flood_engine(_flood())
+
+        assert await _fired(engine) == [1]
+        assert await _fired(engine) == []
+        assert repo.count_stickers_in_interval.await_count == 1, "a resting rule costs no query"
+        repo.record_trigger.assert_awaited_once_with(1)
+
+    @pytest.mark.asyncio
+    async def test_it_fires_again_once_the_interval_has_passed(self) -> None:
+        engine, _ = _flood_engine(_flood(interval=60))
+        now = [1000.0]
+        with patch.object(engine_module, "monotonic", side_effect=lambda: now[0]):
+            assert await _fired(engine) == [1]
+            now[0] = 1059.0
+            assert await _fired(engine) == [], "59 s later: still resting"
+            now[0] = 1060.0
+            assert await _fired(engine) == [1], "60 s later: a new flood"
+
+    @pytest.mark.asyncio
+    async def test_each_rule_rests_on_its_own(self) -> None:
+        engine, _ = _flood_engine(_flood(1), _flood(2))
+
+        assert await _fired(engine) == [1, 2]
+        assert await _fired(engine) == []
+
+    @pytest.mark.asyncio
+    async def test_two_stickers_at_once_fire_it_once(self) -> None:
+        """Both pass the check before the count; only one may act."""
+        engine, repo = _flood_engine(_flood())
+        release = asyncio.Event()
+        waiting = 0
+
+        async def count(*_: object) -> int:
+            nonlocal waiting
+            waiting += 1
+            await release.wait()
+            return 6
+
+        repo.count_stickers_in_interval = AsyncMock(side_effect=count)
+        first = asyncio.create_task(_fired(engine))
+        second = asyncio.create_task(_fired(engine))
+        while waiting < 2:
+            await asyncio.sleep(0)
+        release.set()
+
+        assert sorted([await first, await second]) == [[], [1]]
+
+    @pytest.mark.asyncio
+    async def test_a_resting_rule_does_not_shadow_another_under_highest_weight(self) -> None:
+        anyone = _rule_row(
+            rule_id=2,
+            rule_type="user_specific",
+            config={"user_ids": [100], "conditions": {"any_message": True}},
+            weight=1,
+        )
+        engine, _ = _flood_engine(_flood(1, weight=5), anyone)
+
+        assert await _fired(engine, mode="highest_weight") == [1]
+        assert await _fired(engine, mode="highest_weight") == [2]
+
+    @pytest.mark.asyncio
+    async def test_a_match_that_does_not_act_does_not_start_the_rest(self) -> None:
+        anyone = _rule_row(
+            rule_id=2,
+            rule_type="user_specific",
+            config={"user_ids": [100], "conditions": {"any_message": True}},
+            weight=5,
+        )
+        engine, _ = _flood_engine(_flood(1, weight=1), anyone)
+
+        assert await _fired(engine, mode="highest_weight") == [2]
+        assert engine_module._STICKER_FLOOD_FIRED == {}
 
 
 # ---------------------------------------------------------------------------

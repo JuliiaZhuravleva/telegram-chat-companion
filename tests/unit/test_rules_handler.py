@@ -1,363 +1,1163 @@
-"""Tests for rules management handlers — focused on confirm-before-delete (TD-004)."""
+"""Rules handlers: a chat's list, a rule's card, the builder, the JSON prompt.
+
+Every handler runs for real against fake repositories, and what it shows is
+read back through `show`'s real delivery: ``edit_text`` on a tapped message,
+``answer`` under a typed one. Expected screens are built with the screen
+functions themselves, so a test fails on a wrong screen, not on wording.
+"""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+import json
+from collections.abc import Iterator
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.fsm.state import State
+from aiogram.methods import EditMessageReplyMarkup
+from aiogram.types import Chat, Message
 
-from src.bot.handlers.rules import handle_rule_delete, handle_rule_delete_ask
+from src.bot.handlers import rules as handlers
+from src.bot.screens import rules as screens
+from src.bot.screens.render import render_text, to_markup
+from src.bot.states.admin import AdminStates
+from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.messages import MessageRepository
+from src.database.repositories.rules import RulesRepository
+from src.models.chat_config import ChatConfig
+from src.services.chat_config import ChatConfigService
+from src.services.modules.reactions.selector import ReactionSelector
+
+CHAT_ID = -1009999999999  # invented
+OTHER_CHAT = -1008888888888  # invented
+RULE_ID = 42
+TITLE = "Тестовый чат"
+PROMPT_ID = 555
+
+_ON = screens.ChatRules(enabled=True, common=False)
+_OFF = screens.ChatRules(enabled=False, common=False)
+
+
+def _rule(**over: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "id": RULE_ID,
+        "chat_id": CHAT_ID,
+        "rule_type": "keyword_trigger",
+        "config": {"name": "spam-words", "keywords": ["spam"], "action": "notify_admin"},
+        "enabled": True,
+        "weight": 1,
+        "mandatory": False,
+        "trigger_count": 0,
+    }
+    row.update(over)
+    return row
+
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Doubles
 # ---------------------------------------------------------------------------
 
 
-def _make_callback(data: str = "ar_del_ask:ru:42:99:0") -> MagicMock:
-    """Mock aiogram CallbackQuery for rules callbacks."""
-    from aiogram.types import Message
+class _State:
+    """A dict-backed FSMContext: what the handlers read is what they wrote."""
 
+    def __init__(self, current: State | None = None, **data: Any) -> None:
+        self.current = current.state if current is not None else None
+        self.data: dict[str, Any] = dict(data)
+
+    async def get_state(self) -> str | None:
+        return self.current
+
+    async def set_state(self, state: State | str | None = None) -> None:
+        self.current = state.state if isinstance(state, State) else state
+
+    async def get_data(self) -> dict[str, Any]:
+        return dict(self.data)
+
+    async def update_data(
+        self, data: dict[str, Any] | None = None, **kwargs: Any
+    ) -> dict[str, Any]:
+        self.data.update(kwargs)
+        self.data.update(data or {})
+        return dict(self.data)
+
+    async def set_data(self, data: dict[str, Any]) -> None:
+        self.data = dict(data)
+
+    async def clear(self) -> None:
+        self.current = None
+        self.data = {}
+
+
+def _callback(data: str) -> MagicMock:
     callback = MagicMock()
     callback.data = data
-    callback.from_user = MagicMock()
-    callback.from_user.id = 12345
+    callback.from_user = MagicMock(id=1)
     callback.answer = AsyncMock()
-
-    inner_msg = MagicMock(spec=Message)
-    inner_msg.edit_text = AsyncMock()
-    inner_msg.chat = MagicMock()
-    inner_msg.chat.type = "private"
-    callback.message = inner_msg
-
+    message = MagicMock(spec=Message)
+    message.message_id = PROMPT_ID
+    message.chat = MagicMock()
+    message.chat.type = "private"
+    message.edit_text = AsyncMock()
+    message.answer = AsyncMock(return_value=MagicMock(message_id=PROMPT_ID + 1))
+    callback.message = message
     return callback
 
 
-def _make_rules_repo(rule: dict | None = None) -> MagicMock:
-    """Mock RulesRepository."""
-    repo = AsyncMock()
-    repo.get = AsyncMock(return_value=rule)
-    repo.delete = AsyncMock()
-    repo.get_rules_page = AsyncMock(return_value=([], 0))
-    return repo
+def _typed(text: str | None = None, *, caption: str | None = None) -> MagicMock:
+    message = MagicMock(spec=Message)
+    message.text = text
+    message.caption = caption
+    message.chat = Chat(id=1001, type="private")
+    message.date = datetime(2026, 11, 1, tzinfo=UTC)
+    message.bot = MagicMock()
+    message.answer = AsyncMock(return_value=MagicMock(message_id=900))
+    return message
 
 
-_SAMPLE_RULE = {
-    "id": 42,
+def _deps(
+    rule: dict[str, Any] | None = None,
+    *,
+    rows: list[dict[str, Any]] | None = None,
+    enabled: bool = True,
+    stored: bool | None = True,
+    people: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    rules_repo = MagicMock(spec=RulesRepository)
+    rules_repo.get = AsyncMock(return_value=rule)
+    listed = list(rows or [])
+    rules_repo.get_rules_page = AsyncMock(return_value=(listed, len(listed)))
+    rules_repo.create = AsyncMock(return_value=RULE_ID)
+    rules_repo.delete = AsyncMock(return_value=True)
+    rules_repo.toggle = AsyncMock(
+        side_effect=lambda _rid, *, enabled: {**rule, "enabled": enabled} if rule else None
+    )
+    service = MagicMock(spec=ChatConfigService)
+    service.get_config = AsyncMock(
+        return_value=replace(ChatConfig(chat_id=CHAT_ID), rules_enabled=enabled)
+    )
+    settings = MagicMock(spec=ChatSettingsRepository)
+    settings.get = AsyncMock(
+        return_value={"chat_id": CHAT_ID, "chat_title": TITLE, "rules_enabled": enabled}
+    )
+    settings.toggle_bool_field = AsyncMock(return_value=stored)
+    message_repo = MagicMock(spec=MessageRepository)
+    found = list(people or [])
+    message_repo.get_top_active_users = AsyncMock(return_value=(found, len(found)))
+    return {
+        "rules_repo": rules_repo,
+        "chat_config_service": service,
+        "chat_settings_repo": settings,
+        "message_repo": message_repo,
+        "is_admin": True,
+    }
+
+
+def _services(deps: dict[str, Any]) -> dict[str, Any]:
+    """A message handler takes its services only: the admin check is its filter."""
+    return {k: deps[k] for k in ("rules_repo", "chat_config_service", "chat_settings_repo")}
+
+
+async def _tap(handler: Any, data: str, state: _State, deps: dict[str, Any]) -> MagicMock:
+    callback = _callback(data)
+    await handler(callback, state, **deps)
+    return callback
+
+
+def _shown(callback: MagicMock) -> tuple[str, Any]:
+    """The text and keyboard the tap edited its message into."""
+    args, kwargs = callback.message.edit_text.await_args
+    return args[0], kwargs["reply_markup"]
+
+
+def _sent(message: MagicMock) -> tuple[str, Any]:
+    """The text and keyboard answered under a message."""
+    args, kwargs = message.answer.await_args
+    return args[0], kwargs["reply_markup"]
+
+
+def _datas(markup: Any) -> list[str]:
+    return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+
+
+def _labels(markup: Any) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def _same(shown: tuple[str, Any], screen: Any) -> bool:
+    return shown == (render_text(screen), to_markup(screen))
+
+
+@pytest.fixture(autouse=True)
+def stale() -> Iterator[AsyncMock]:
+    with patch.object(handlers, "show_stale", new_callable=AsyncMock) as mock:
+        yield mock
+
+
+@pytest.fixture(autouse=True)
+def retire() -> Iterator[AsyncMock]:
+    """The prompt above a typed answer loses its keyboard through this call."""
+    with patch.object(handlers, "safe_edit_reply_markup", new_callable=AsyncMock) as mock:
+        yield mock
+
+
+# ---------------------------------------------------------------------------
+# The list
+# ---------------------------------------------------------------------------
+
+
+class TestTheList:
+    async def test_shows_the_chats_rules(self) -> None:
+        deps = _deps(rows=[_rule()])
+        callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:0", _State(), deps)
+
+        expected = screens.rules_screen(
+            "ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[screens.rule_view(_rule())]
+        )
+        assert _same(_shown(callback), expected)
+
+    @pytest.mark.parametrize("enabled", [True, False])
+    async def test_rows_open_a_card_and_neither_pause_nor_delete(self, enabled: bool) -> None:
+        """Pause and delete live on the rule's card; a row only opens it."""
+        rows = [_rule(), _rule(id=43, enabled=False), _rule(id=44)]
+        callback = await _tap(
+            handlers.handle_rules_list,
+            f"ar_list:ru:{CHAT_ID}:0",
+            _State(),
+            _deps(rows=rows, enabled=enabled),
+        )
+
+        datas = _datas(_shown(callback)[1])
+        assert [d for d in datas if d.startswith(("ar_tog:", "ar_del"))] == []
+        assert [d for d in datas if d.startswith("ar_view:")] == [
+            f"ar_view:ru:{rid}:{CHAT_ID}" for rid in (42, 43, 44)
+        ]
+        assert f"ar_all:ru:{CHAT_ID}" in datas
+
+    async def test_a_page_past_the_end_shows_the_last_one(self) -> None:
+        """A list that shrank under an old pager button: the last page, not an empty one."""
+        deps = _deps()
+        last = [_rule(id=50)]
+        deps["rules_repo"].get_rules_page = AsyncMock(side_effect=[([], 4), (last, 4)])
+
+        callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:5", _State(), deps)
+
+        assert deps["rules_repo"].get_rules_page.await_args.args == (CHAT_ID, 1, screens.PER_PAGE)
+        expected = screens.rules_screen(
+            "ru",
+            chat_id=CHAT_ID,
+            title=TITLE,
+            chat=_ON,
+            rules=[screens.rule_view(last[0])],
+            page=1,
+            pages=2,
+        )
+        assert _same(_shown(callback), expected)
+
+    async def test_an_untitled_chat_is_named_by_its_id(self) -> None:
+        deps = _deps()
+        deps["chat_settings_repo"].get = AsyncMock(return_value=None)
+
+        callback = await _tap(handlers.handle_rules_list, f"ar_list:en:{CHAT_ID}:0", _State(), deps)
+
+        assert screens.chat_id_text(CHAT_ID) in _shown(callback)[0]
+
+    @pytest.mark.parametrize("data", ["ar_list:ru:abc:0", "ar_list:ru", "ar_list:ru::0"])
+    async def test_a_garbled_payload_is_stale(self, data: str, stale: AsyncMock) -> None:
+        deps = _deps()
+        callback = await _tap(handlers.handle_rules_list, data, _State(), deps)
+
+        stale.assert_awaited_once()
+        callback.message.edit_text.assert_not_awaited()
+        deps["rules_repo"].get_rules_page.assert_not_awaited()
+
+    async def test_a_non_admin_gets_an_alert(self) -> None:
+        deps = {**_deps(), "is_admin": False}
+        callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:0", _State(), deps)
+
+        assert callback.answer.await_args.kwargs.get("show_alert") is True
+        callback.message.edit_text.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The switch for all of a chat's rules
+# ---------------------------------------------------------------------------
+
+
+class TestTheMasterSwitch:
+    @pytest.mark.parametrize("effective", [True, False])
+    async def test_flips_from_what_the_chat_does(self, effective: bool) -> None:
+        """NULL-aware: the repository flips the EFFECTIVE value inside its UPDATE."""
+        deps = _deps(enabled=effective, stored=not effective)
+        await _tap(handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}", _State(), deps)
+
+        deps["chat_settings_repo"].toggle_bool_field.assert_awaited_once_with(
+            CHAT_ID, "rules_enabled", effective
+        )
+        deps["chat_config_service"].invalidate.assert_called_once_with(CHAT_ID)
+
+    async def test_an_inherited_value_is_labelled_common(self) -> None:
+        deps = _deps(enabled=False)
+        deps["chat_settings_repo"].get = AsyncMock(
+            return_value={"chat_id": CHAT_ID, "chat_title": TITLE, "rules_enabled": None}
+        )
+        callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:0", _State(), deps)
+
+        assert "⚪ Правила выключены · общее" in _labels(_shown(callback)[1])
+
+    async def test_from_a_card_redraws_the_card(self) -> None:
+        deps = _deps(_rule(), enabled=False)
+        callback = await _tap(
+            handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}:{RULE_ID}", _State(), deps
+        )
+
+        expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_OFF)
+        assert _same(_shown(callback), expected)
+
+    async def test_from_a_card_whose_rule_is_gone_shows_the_list_saying_so(self) -> None:
+        deps = _deps(None)
+        callback = await _tap(
+            handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}:{RULE_ID}", _State(), deps
+        )
+
+        expected = screens.gone_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
+        assert _same(_shown(callback), expected)
+
+    async def test_no_settings_row_is_stale_and_logged(self, stale: AsyncMock) -> None:
+        deps = _deps(stored=None)
+        with patch.object(handlers, "logger") as logger:
+            await _tap(handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}", _State(), deps)
+
+        stale.assert_awaited_once()
+        deps["chat_config_service"].invalidate.assert_not_called()
+        logger.warning.assert_called_once_with("rules_toggle_no_row", chat_id=CHAT_ID)
+
+    async def test_a_garbled_rule_id_is_stale_before_anything_is_written(
+        self, stale: AsyncMock
+    ) -> None:
+        deps = _deps()
+        await _tap(handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}:x", _State(), deps)
+
+        stale.assert_awaited_once()
+        deps["chat_settings_repo"].toggle_bool_field.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# One rule: its card, pause, delete
+# ---------------------------------------------------------------------------
+
+
+class TestTheCard:
+    async def test_shows_the_rule(self) -> None:
+        callback = await _tap(
+            handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}", _State(), _deps(_rule())
+        )
+
+        expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_ON)
+        assert _same(_shown(callback), expected)
+
+    async def test_j_opens_its_json(self) -> None:
+        callback = await _tap(
+            handlers.handle_rule_view,
+            f"ar_view:ru:{RULE_ID}:{CHAT_ID}:j",
+            _State(),
+            _deps(_rule()),
+        )
+
+        expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_ON, show_json=True)
+        assert _same(_shown(callback), expected)
+        assert "<pre>" in _shown(callback)[0]
+
+    async def test_n_sends_it_as_a_new_message(self) -> None:
+        """From the card a fired rule sends: that card stays as the record."""
+        callback = await _tap(
+            handlers.handle_rule_view,
+            f"ar_view:ru:{RULE_ID}:{CHAT_ID}:n",
+            _State(),
+            _deps(_rule()),
+        )
+
+        callback.message.edit_text.assert_not_awaited()
+        expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_ON)
+        assert _same(_sent(callback.message), expected)
+
+    async def test_a_config_stored_as_a_string_is_read(self) -> None:
+        rule = _rule(config=json.dumps({"name": "json-rule", "keywords": ["x"]}))
+        callback = await _tap(
+            handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}", _State(), _deps(rule)
+        )
+
+        assert "json-rule" in _shown(callback)[0]
+
+    async def test_a_gone_rule_shows_its_chats_list_saying_so(self) -> None:
+        callback = await _tap(
+            handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}", _State(), _deps(None)
+        )
+
+        expected = screens.gone_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
+        assert _same(_shown(callback), expected)
+        assert _shown(callback)[0].startswith(screens.GONE_NOTICE("ru"))
+
+    async def test_a_gone_rule_on_an_old_button_without_its_chat_is_stale(
+        self, stale: AsyncMock
+    ) -> None:
+        await _tap(handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}", _State(), _deps(None))
+
+        stale.assert_awaited_once()
+
+    @pytest.mark.parametrize("data", ["ar_view:ru:x", f"ar_view:ru:{RULE_ID}:chat", "ar_view:ru"])
+    async def test_a_garbled_payload_is_stale(self, data: str, stale: AsyncMock) -> None:
+        deps = _deps(_rule())
+        await _tap(handlers.handle_rule_view, data, _State(), deps)
+
+        stale.assert_awaited_once()
+        deps["rules_repo"].get.assert_not_awaited()
+
+
+class TestPause:
+    async def test_pauses_and_redraws_the_card_with_resume(self) -> None:
+        deps = _deps(_rule())
+        callback = await _tap(
+            handlers.handle_rule_toggle, f"ar_tog:ru:{RULE_ID}:{CHAT_ID}:0", _State(), deps
+        )
+
+        deps["rules_repo"].toggle.assert_awaited_once_with(RULE_ID, enabled=False)
+        expected = screens.rule_screen("ru", screens.rule_view(_rule(enabled=False)), chat=_ON)
+        assert _same(_shown(callback), expected)
+        assert "▶ Возобновить" in _labels(_shown(callback)[1])
+
+    async def test_resumes(self) -> None:
+        deps = _deps(_rule(enabled=False))
+        callback = await _tap(
+            handlers.handle_rule_toggle, f"ar_tog:en:{RULE_ID}:{CHAT_ID}:0", _State(), deps
+        )
+
+        deps["rules_repo"].toggle.assert_awaited_once_with(RULE_ID, enabled=True)
+        assert "⏸ Pause" in _labels(_shown(callback)[1])
+
+    async def test_a_gone_rule_shows_the_list_saying_so(self) -> None:
+        deps = _deps(None)
+        callback = await _tap(
+            handlers.handle_rule_toggle, f"ar_tog:ru:{RULE_ID}:{CHAT_ID}:0", _State(), deps
+        )
+
+        deps["rules_repo"].toggle.assert_not_awaited()
+        assert _shown(callback)[0].startswith(screens.GONE_NOTICE("ru"))
+
+    async def test_an_old_button_without_a_chat_is_stale(self, stale: AsyncMock) -> None:
+        deps = _deps(_rule())
+        await _tap(handlers.handle_rule_toggle, f"ar_tog:ru:{RULE_ID}", _State(), deps)
+
+        stale.assert_awaited_once()
+        deps["rules_repo"].toggle.assert_not_awaited()
+
+
+class TestDeleteAsk:
+    async def test_asks_and_deletes_nothing(self) -> None:
+        deps = _deps(_rule())
+        callback = await _tap(
+            handlers.handle_rule_delete_ask, f"ar_del_ask:ru:{RULE_ID}:{CHAT_ID}", _State(), deps
+        )
+
+        expected = screens.delete_ask_screen("ru", screens.rule_view(_rule()))
+        assert _same(_shown(callback), expected)
+        assert "spam-words" in _shown(callback)[0]
+        deps["rules_repo"].delete.assert_not_awaited()
+
+    async def test_yes_deletes_and_back_returns_to_the_rule(self) -> None:
+        callback = await _tap(
+            handlers.handle_rule_delete_ask,
+            f"ar_del_ask:ru:{RULE_ID}:{CHAT_ID}",
+            _State(),
+            _deps(_rule()),
+        )
+
+        assert _datas(_shown(callback)[1]) == [
+            f"ar_del:ru:{RULE_ID}:{CHAT_ID}",
+            f"ar_view:ru:{RULE_ID}:{CHAT_ID}",
+        ]
+
+    async def test_english(self) -> None:
+        callback = await _tap(
+            handlers.handle_rule_delete_ask,
+            f"ar_del_ask:en:{RULE_ID}:{CHAT_ID}",
+            _State(),
+            _deps(_rule()),
+        )
+
+        assert "Delete the rule?" in _shown(callback)[0]
+
+    async def test_a_non_admin_gets_an_alert(self) -> None:
+        deps = {**_deps(_rule()), "is_admin": False}
+        callback = await _tap(
+            handlers.handle_rule_delete_ask, f"ar_del_ask:ru:{RULE_ID}:{CHAT_ID}", _State(), deps
+        )
+
+        assert callback.answer.await_args.kwargs.get("show_alert") is True
+        callback.message.edit_text.assert_not_awaited()
+        deps["rules_repo"].delete.assert_not_awaited()
+
+    async def test_a_gone_rule_shows_the_list_saying_so(self) -> None:
+        callback = await _tap(
+            handlers.handle_rule_delete_ask,
+            f"ar_del_ask:ru:{RULE_ID}:{CHAT_ID}",
+            _State(),
+            _deps(None),
+        )
+
+        assert _shown(callback)[0].startswith(screens.GONE_NOTICE("ru"))
+
+
+class TestDelete:
+    async def test_deletes_and_shows_the_list_with_a_notice(self) -> None:
+        deps = _deps(_rule())
+        callback = await _tap(
+            handlers.handle_rule_delete, f"ar_del:ru:{RULE_ID}:{CHAT_ID}", _State(), deps
+        )
+
+        deps["rules_repo"].delete.assert_awaited_once_with(RULE_ID)
+        expected = screens.rules_screen(
+            "ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[], notice="Правило удалено"
+        )
+        assert _same(_shown(callback), expected)
+
+    async def test_an_old_button_without_its_chat_still_lands_on_the_rules_chat(self) -> None:
+        deps = _deps(_rule())
+        await _tap(handlers.handle_rule_delete, f"ar_del:ru:{RULE_ID}", _State(), deps)
+
+        assert deps["rules_repo"].get_rules_page.await_args.args[0] == CHAT_ID
+
+    async def test_lost_a_race_shows_the_list_saying_so(self) -> None:
+        deps = _deps(_rule())
+        deps["rules_repo"].delete = AsyncMock(return_value=False)
+        callback = await _tap(
+            handlers.handle_rule_delete, f"ar_del:ru:{RULE_ID}:{CHAT_ID}", _State(), deps
+        )
+
+        assert _shown(callback)[0].startswith(screens.GONE_NOTICE("ru"))
+
+    async def test_a_non_admin_cannot_delete(self) -> None:
+        deps = {**_deps(_rule()), "is_admin": False}
+        callback = await _tap(
+            handlers.handle_rule_delete, f"ar_del:ru:{RULE_ID}:{CHAT_ID}", _State(), deps
+        )
+
+        deps["rules_repo"].delete.assert_not_awaited()
+        assert callback.answer.await_args.kwargs.get("show_alert") is True
+
+
+# ---------------------------------------------------------------------------
+# The builder
+# ---------------------------------------------------------------------------
+
+
+async def _start(deps: dict[str, Any], state: _State, lang: str = "ru") -> MagicMock:
+    return await _tap(handlers.handle_add_rule, f"ar_add:{lang}:{CHAT_ID}", state, deps)
+
+
+def _created(deps: dict[str, Any]) -> dict[str, Any]:
+    """What the builder handed `RulesRepository.create`."""
+    deps["rules_repo"].create.assert_awaited_once()
+    return dict(deps["rules_repo"].create.await_args.kwargs)
+
+
+class TestBuilderStart:
+    async def test_a_new_rule_forgets_the_last_draft(self) -> None:
+        state = _State(rule_chat_id=OTHER_CHAT, rule_type="spam_detect", rule_n=40, keep="x")
+        callback = await _start(_deps(), state)
+
+        assert _same(_shown(callback), screens.type_screen("ru", CHAT_ID))
+        assert state.data["rule_chat_id"] == CHAT_ID
+        assert all(state.data[k] is None for k in handlers._DRAFT_KEYS if k != "rule_chat_id")
+        assert state.data["keep"] == "x", "only the builder's own keys are reset"
+
+    async def test_it_leaves_a_rule_prompt(self) -> None:
+        state = _State(AdminStates.awaiting_rule_text, rule_chat_id=OTHER_CHAT)
+        await _start(_deps(), state)
+
+        assert state.current is None
+
+
+class TestBuilderKeywords:
+    async def test_words_to_a_rule(self, retire: AsyncMock) -> None:
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+
+        callback = await _tap(
+            handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:k", state, deps
+        )
+        assert state.current == AdminStates.awaiting_rule_words.state
+        assert _same(_shown(callback), screens.words_screen("ru", CHAT_ID))
+        assert state.data["rule_prompt_id"] == PROMPT_ID
+
+        typed = _typed("реклама, Купи\nреклама,  купи ")
+        await handlers.handle_rule_words_input(typed, state)
+        assert state.current is None
+        assert state.data["rule_words"] == ["реклама", "Купи"]
+        assert _same(_sent(typed), screens.match_screen("ru", CHAT_ID, ["реклама", "Купи"]))
+        assert retire.await_args.args[0].message_id == PROMPT_ID
+
+        callback = await _tap(
+            handlers.handle_builder_match, f"ar_b_match:ru:{CHAT_ID}:e", state, deps
+        )
+        assert _same(_shown(callback), screens.action_screen("ru", CHAT_ID, "реклама, Купи"))
+
+        callback = await _tap(
+            handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", state, deps
+        )
+        assert _created(deps) == {
+            "chat_id": CHAT_ID,
+            "rule_type": "keyword_trigger",
+            "config": {
+                "name": "реклама, Купи",
+                "keywords": ["реклама", "Купи"],
+                "match_type": "exact",
+                "action": "notify_admin",
+            },
+            "weight": 1,
+            "mandatory": False,
+        }
+        text, markup = _shown(callback)
+        assert text.startswith("<i>✓ Правило создано</i>\n\n")
+        assert f"ar_tog:ru:{RULE_ID}:{CHAT_ID}:0" in _datas(markup)
+        assert all(state.data[k] is None for k in handlers._DRAFT_KEYS), "the draft is spent"
+
+    async def test_a_long_list_of_words_is_named_by_its_start(self) -> None:
+        words = [f"слово{i:02d}" for i in range(15)]
+        state = _State(AdminStates.awaiting_rule_words, rule_chat_id=CHAT_ID, lang="ru")
+
+        await handlers.handle_rule_words_input(_typed(", ".join(words)), state)
+
+        name = state.data["rule_name"]
+        assert len(name) <= 60
+        assert name.endswith("…")
+
+    @pytest.mark.parametrize(
+        ("typed", "error"),
+        [
+            (" , ,\n", screens.WORDS_NONE("ru")),
+            (", ".join(f"w{i}" for i in range(21)), screens.WORDS_TOO_MANY("ru").format(n=20)),
+        ],
+        ids=["none", "too-many"],
+    )
+    async def test_unusable_words_keep_the_prompt(
+        self, typed: str, error: str, retire: AsyncMock
+    ) -> None:
+        state = _State(
+            AdminStates.awaiting_rule_words,
+            rule_chat_id=CHAT_ID,
+            lang="ru",
+            rule_prompt_id=PROMPT_ID,
+        )
+        message = _typed(typed)
+
+        await handlers.handle_rule_words_input(message, state)
+
+        text, markup = _sent(message)
+        assert text == error
+        assert _datas(markup) == [f"ar_list:ru:{CHAT_ID}:0"]
+        assert state.current == AdminStates.awaiting_rule_words.state
+        assert state.data["rule_prompt_id"] == 900, "the error is now the one live Cancel"
+        assert retire.await_args.args[0].message_id == PROMPT_ID
+
+    async def test_exactly_the_cap_is_accepted(self) -> None:
+        state = _State(AdminStates.awaiting_rule_words, rule_chat_id=CHAT_ID, lang="ru")
+        await handlers.handle_rule_words_input(_typed(", ".join(f"w{i}" for i in range(20))), state)
+        assert state.current is None
+        assert len(state.data["rule_words"]) == 20
+
+    async def test_an_over_long_word_is_quoted_back_cut_and_escaped(self) -> None:
+        state = _State(AdminStates.awaiting_rule_words, rule_chat_id=CHAT_ID, lang="ru")
+        message = _typed("ok, <b>" + "я" * 70)
+
+        await handlers.handle_rule_words_input(message, state)
+
+        text = _sent(message)[0]
+        assert "&lt;b&gt;" in text
+        assert "<b>" not in text
+        assert "…»" in text
+        assert state.current == AdminStates.awaiting_rule_words.state
+
+    async def test_a_word_of_exactly_the_cap_is_accepted(self) -> None:
+        state = _State(AdminStates.awaiting_rule_words, rule_chat_id=CHAT_ID, lang="ru")
+        await handlers.handle_rule_words_input(_typed("я" * 64), state)
+        assert state.current is None
+
+    async def test_a_prompt_without_a_chat_ends_quietly(self) -> None:
+        state = _State(AdminStates.awaiting_rule_words, lang="ru")
+        message = _typed("реклама")
+        with patch.object(handlers, "logger") as logger:
+            await handlers.handle_rule_words_input(message, state)
+
+        message.answer.assert_not_awaited()
+        assert state.current is None
+        logger.warning.assert_called_once()
+
+
+class TestBuilderPerson:
+    async def test_a_person_to_a_rule_that_fires_on_every_message(self) -> None:
+        people = [
+            {"user_id": 7001, "first_name": "Аня", "username": "anya", "message_count": 9},
+            {"user_id": 7002, "first_name": None, "username": None, "message_count": 3},
+        ]
+        deps, state = _deps(people=people), _State()
+        await _start(deps, state)
+
+        callback = await _tap(
+            handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:u", state, deps
+        )
+        persons = [screens.Person(7001, "Аня", "anya"), screens.Person(7002)]
+        assert _same(_shown(callback), screens.who_screen("ru", CHAT_ID, persons))
+
+        await _tap(handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:7001", state, deps)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", state, deps)
+
+        assert _created(deps)["config"] == {
+            "name": "Аня @anya",
+            "user_ids": [7001],
+            "conditions": {"any_message": True},
+            "action": "notify_admin",
+        }
+
+    async def test_a_person_paged_past_the_end_shows_the_last_page(self) -> None:
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+        last = [{"user_id": 7009, "first_name": "Ира", "username": None}]
+        deps["message_repo"].get_top_active_users = AsyncMock(side_effect=[([], 5), (last, 5)])
+
+        callback = await _tap(
+            handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:u:9", state, deps
+        )
+
+        assert deps["message_repo"].get_top_active_users.await_args.args == (
+            CHAT_ID,
+            1,
+            screens.WHO_PER_PAGE,
+        )
+        expected = screens.who_screen("ru", CHAT_ID, [screens.Person(7009, "Ира")], page=1, pages=2)
+        assert _same(_shown(callback), expected)
+
+    async def test_a_person_for_a_rule_of_another_kind_is_stale(self, stale: AsyncMock) -> None:
+        state = _State(rule_chat_id=CHAT_ID, rule_type="spam_detect")
+        await _tap(handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:7001", state, _deps())
+        stale.assert_awaited_once()
+
+
+class TestBuilderCounts:
+    async def test_stickers_to_a_rule_with_a_ready_reaction(self) -> None:
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+
+        callback = await _tap(
+            handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:f", state, deps
+        )
+        assert _same(_shown(callback), screens.count_screen("ru", CHAT_ID, "f"))
+        await _tap(handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:10", state, deps)
+        callback = await _tap(
+            handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:r", state, deps
+        )
+        assert _same(_shown(callback), screens.react_screen("ru", CHAT_ID, "Стикеры: 10 за минуту"))
+        await _tap(handlers.handle_builder_preset_reaction, f"ar_b_rx:ru:{CHAT_ID}:1", state, deps)
+
+        created = _created(deps)
+        assert created["rule_type"] == "sticker_flood"
+        assert created["config"] == {
+            "name": "Стикеры: 10 за минуту",
+            "max_stickers_per_interval": 10,
+            "interval_seconds": 60,
+            "action": "set_reaction",
+            "emoji": screens.REACTIONS[1],
+        }
+
+    async def test_messages_to_a_rule_with_a_ready_warning(self) -> None:
+        """Spam counts messages only: the engine's length cap is written out as off."""
+        deps, state = _deps(), _State()
+        await _start(deps, state, lang="en")
+
+        await _tap(handlers.handle_builder_type, f"ar_b_type:en:{CHAT_ID}:s", state, deps)
+        await _tap(handlers.handle_builder_count, f"ar_b_n:en:{CHAT_ID}:20", state, deps)
+        callback = await _tap(
+            handlers.handle_builder_action, f"ar_b_act:en:{CHAT_ID}:w", state, deps
+        )
+        assert state.current == AdminStates.awaiting_rule_text.state
+        assert _same(
+            _shown(callback),
+            screens.text_screen("en", CHAT_ID, "Messages: 20 a minute", action="warn_user"),
+        )
+        await _tap(handlers.handle_builder_preset_text, f"ar_b_txt:en:{CHAT_ID}:1", state, deps)
+
+        created = _created(deps)
+        assert created["rule_type"] == "spam_detect"
+        assert created["config"] == {
+            "name": "Messages: 20 a minute",
+            "max_messages": 20,
+            "time_window_seconds": 60,
+            "max_chars_per_message": 0,
+            "action": "warn_user",
+            "warning_message": screens.WARN_PRESETS[1]("en"),
+        }
+        assert state.current is None
+
+    @pytest.mark.parametrize(("kind", "n"), [("f", 20), ("s", 10)])
+    async def test_a_count_from_the_other_kinds_choices_is_stale(
+        self, kind: str, n: int, stale: AsyncMock
+    ) -> None:
+        """5/10/20 stickers and 10/20/40 messages: a count is checked against its own kind."""
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:{kind}", state, deps)
+        other = {"f": 40, "s": 5}[kind]
+
+        await _tap(handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:{other}", state, deps)
+        stale.assert_awaited_once()
+
+        stale.reset_mock()
+        await _tap(handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:{n}", state, deps)
+        stale.assert_not_awaited()
+
+
+class TestBuilderTypedAnswers:
+    async def _to_action(self, deps: dict[str, Any], state: _State) -> None:
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:s", state, deps)
+        await _tap(handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:40", state, deps)
+
+    async def test_a_typed_reply_makes_the_rule(self, retire: AsyncMock) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:c", state, deps)
+        message = _typed("Тише, {first_name}! <b>не</b> & так")
+
+        await handlers.handle_rule_text_input(message, state, **_services(deps))
+
+        config = _created(deps)["config"]
+        assert config["action"] == "custom_response"
+        assert config["response_template"] == "Тише, {first_name}! <b>не</b> & так"
+        assert _sent(message)[0].startswith("<i>✓ Правило создано</i>")
+        assert state.current is None
+        assert retire.await_args.args[0].message_id == PROMPT_ID
+
+    async def test_a_typed_reaction_is_stored_in_telegrams_spelling(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:ri", state, deps)
+        assert state.current == AdminStates.awaiting_rule_react.state
+
+        await handlers.handle_rule_react_input(_typed("❤️"), state, **_services(deps))
+
+        emoji = _created(deps)["config"]["emoji"]
+        assert emoji == ReactionSelector.select("❤️")
+        assert emoji == "❤", "Telegram spells this reaction without U+FE0F"
+
+    async def test_a_reaction_telegram_refuses_keeps_the_prompt(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:ri", state, deps)
+        message = _typed("🚀")
+
+        await handlers.handle_rule_react_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        text, markup = _sent(message)
+        assert text == screens.EMOJI_BAD("ru")
+        assert _datas(markup) == [f"ar_b_act:ru:{CHAT_ID}:r"]
+        assert state.current == AdminStates.awaiting_rule_react.state
+
+    @pytest.mark.parametrize(
+        ("text", "error"),
+        [
+            ("   ", screens.TEXT_EMPTY("ru")),
+            (None, screens.TEXT_EMPTY("ru")),
+            ("я" * 4097, screens.TEXT_TOO_LONG("ru").format(n=4096)),
+        ],
+        ids=["blank", "a-photo-without-caption", "too-long"],
+    )
+    async def test_an_unusable_text_keeps_the_prompt(self, text: str | None, error: str) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:w", state, deps)
+        message = _typed(text)
+
+        await handlers.handle_rule_text_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert _sent(message)[0] == error
+        assert state.current == AdminStates.awaiting_rule_text.state
+
+    async def test_a_text_of_exactly_the_cap_is_accepted(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:w", state, deps)
+
+        await handlers.handle_rule_text_input(_typed("я" * 4096), state, **_services(deps))
+
+        assert len(_created(deps)["config"]["warning_message"]) == 4096
+
+    async def test_created_while_the_chats_rules_are_off_says_so_and_offers_the_switch(
+        self,
+    ) -> None:
+        deps, state = _deps(enabled=False), _State()
+        await self._to_action(deps, state)
+
+        callback = await _tap(
+            handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", state, deps
+        )
+
+        text, markup = _shown(callback)
+        assert text.startswith("<i>✓ Правило создано</i>")
+        assert "Правила этого чата выключены" in text
+        assert _datas(markup)[0] == f"ar_all:ru:{CHAT_ID}:{RULE_ID}"
+
+
+_FULL_DRAFT: dict[str, Any] = {
     "rule_type": "keyword_trigger",
-    "config": {"name": "spam-words", "keywords": ["spam"]},
-    "enabled": True,
-    "weight": 1,
-    "mandatory": False,
-    "trigger_count": 0,
-    "chat_id": 99,
+    "rule_words": ["w"],
+    "rule_match": "contains",
+    "rule_name": "w",
+    "rule_action": "warn_user",
 }
 
 
-# ---------------------------------------------------------------------------
-# handle_rule_delete_ask  (ar_del_ask:)
-# ---------------------------------------------------------------------------
+class TestBuilderStaleSteps:
+    """A builder button outlives its draft; such a tap is stale, never a rule elsewhere."""
 
-
-def _state():
-    """FSMContext stand-in for handlers that now clear a stale rule prompt.
-
-    `_leave_config_prompt` reads `get_state()` and clears only when it matches
-    `awaiting_rule_config`, so a context reporting None is the right neutral
-    for these tests — they are about deletion, not about the FSM.
-    """
-    ctx = MagicMock()
-    ctx.get_state = AsyncMock(return_value=None)
-    ctx.clear = AsyncMock()
-    return ctx
-
-
-class TestHandleRuleDeleteAsk:
-    @pytest.mark.asyncio
-    async def test_shows_confirm_screen_for_admin(self):
-        """Confirm screen shown; no deletion occurs."""
-        cb = _make_callback("ar_del_ask:ru:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
-
-        cb.answer.assert_awaited_once()
-        cb.message.edit_text.assert_awaited_once()
-        text = cb.message.edit_text.call_args.args[0]
-        assert "Удалить" in text or "Delete" in text
-        # Rule must NOT be deleted
-        repo.delete.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_confirm_screen_contains_rule_name(self):
-        """The confirm screen displays the rule name from config."""
-        cb = _make_callback("ar_del_ask:ru:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
-
-        text = cb.message.edit_text.call_args.args[0]
-        assert "spam-words" in text
-
-    @pytest.mark.asyncio
-    async def test_confirm_keyboard_has_yes_and_cancel(self):
-        """Yes button targets ar_del:, Cancel returns to ar_list:."""
-        cb = _make_callback("ar_del_ask:ru:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
-
-        keyboard = cb.message.edit_text.call_args.kwargs.get("reply_markup")
-        assert keyboard is not None
-        callbacks = [
-            btn.callback_data
-            for row in keyboard.inline_keyboard
-            for btn in row
-            if btn.callback_data
-        ]
-        assert any(c.startswith("ar_del:") for c in callbacks), f"No ar_del: in {callbacks}"
-        assert any(c.startswith("ar_list:") for c in callbacks), f"No ar_list: in {callbacks}"
-
-    @pytest.mark.asyncio
-    async def test_english_confirm_text(self):
-        """English confirm text is rendered correctly."""
-        cb = _make_callback("ar_del_ask:en:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
-
-        text = cb.message.edit_text.call_args.args[0]
-        assert "Delete" in text
-
-    @pytest.mark.asyncio
-    async def test_blocks_non_admin(self):
-        """Non-admin gets access-denied alert; confirm screen not shown."""
-        cb = _make_callback("ar_del_ask:ru:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=False)
-
-        cb.answer.assert_awaited_once()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-        cb.message.edit_text.assert_not_awaited()
-        repo.delete.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_handles_missing_rule(self):
-        """Shows not-found message when rule doesn't exist (race condition guard)."""
-        cb = _make_callback("ar_del_ask:ru:42:99:0")
-        repo = _make_rules_repo(None)  # rule not found
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
-
-        cb.message.edit_text.assert_awaited_once()
-        text = cb.message.edit_text.call_args.args[0]
-        assert "не найдено" in text or "not found" in text
-
-    @pytest.mark.asyncio
-    async def test_handles_json_string_config(self):
-        """Rule config stored as JSON string is parsed and name shown."""
-        import json
-
-        rule_with_json_config = dict(_SAMPLE_RULE)
-        rule_with_json_config["config"] = json.dumps({"name": "json-rule"})
-        cb = _make_callback("ar_del_ask:ru:42:99:0")
-        repo = _make_rules_repo(rule_with_json_config)
-
-        await handle_rule_delete_ask(cb, _state(), repo, is_admin=True)
-
-        text = cb.message.edit_text.call_args.args[0]
-        assert "json-rule" in text
-
-
-# ---------------------------------------------------------------------------
-# handle_rule_delete  (ar_del:)
-# ---------------------------------------------------------------------------
-
-
-class TestHandleRuleDelete:
-    @pytest.mark.asyncio
-    async def test_deletes_rule_and_refreshes_list(self):
-        """Confirm step passes — rule is deleted and list refreshed."""
-        cb = _make_callback("ar_del:ru:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete(cb, _state(), repo, is_admin=True)
-
-        repo.delete.assert_awaited_once_with(42)
-        cb.answer.assert_awaited_once()
-        # List should be re-rendered
-        cb.message.edit_text.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_blocks_non_admin(self):
-        """Non-admin cannot execute the delete even if they somehow hit ar_del:."""
-        cb = _make_callback("ar_del:ru:42:99:0")
-        repo = _make_rules_repo(_SAMPLE_RULE)
-
-        await handle_rule_delete(cb, _state(), repo, is_admin=False)
-
-        repo.delete.assert_not_awaited()
-        assert cb.answer.call_args.kwargs.get("show_alert") is True
-
-    @pytest.mark.asyncio
-    async def test_cancel_stays_on_list(self):
-        """Regression: ar_del_ask: Cancel button returns ar_list:, not ar_del:."""
-        from src.bot.keyboards.rules import confirm_delete_rule_keyboard
-
-        kb = confirm_delete_rule_keyboard("ru", rule_id=42, chat_id=99, page=0)
-        callbacks = [
-            btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data
-        ]
-        # Cancel must go to ar_list:, not ar_del:
-        cancel_cbs = [c for c in callbacks if "Отмена" not in c and c.startswith("ar_list:")]
-        yes_cbs = [c for c in callbacks if c.startswith("ar_del:")]
-        assert cancel_cbs, "Cancel button must target ar_list:"
-        assert yes_cbs, "Yes button must target ar_del:"
-        # Verify no direct ar_del: in Cancel button
-        for c in callbacks:
-            if c.startswith("ar_list:"):
-                assert "ar_del" not in c
-
-
-# ---------------------------------------------------------------------------
-# Keyboard regression: 🗑 in rules_list_keyboard uses ar_del_ask:
-# ---------------------------------------------------------------------------
-
-
-class TestRulesListKeyboardDeleteButton:
-    def test_delete_button_points_to_ask_not_del(self):
-        """🗑 in rules list must route through confirmation, not direct delete."""
-        from src.bot.keyboards.rules import rules_list_keyboard
-
-        rules = [
-            {
-                "id": 10,
-                "rule_type": "keyword_trigger",
-                "config": {"name": "test-rule"},
-                "enabled": True,
-            }
-        ]
-        kb = rules_list_keyboard("ru", rules, page=0, total_pages=1, chat_id=99)
-        callbacks = [
-            btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data
-        ]
-        # Must have ar_del_ask:, must NOT have ar_del: for the delete action
-        assert any(c.startswith("ar_del_ask:") for c in callbacks), "Expected ar_del_ask:"
-        # ar_del: should only be in confirm keyboard, not in list keyboard
-        assert not any(c.startswith("ar_del:") for c in callbacks), (
-            "ar_del: must not appear in list"
-        )
-
-    def test_detail_keyboard_delete_uses_ask(self):
-        """🗑 Delete button in rule detail view also routes through confirmation."""
-        from src.bot.keyboards.rules import rule_detail_keyboard
-
-        kb = rule_detail_keyboard("ru", rule_id=10, chat_id=99)
-        callbacks = [
-            btn.callback_data for row in kb.inline_keyboard for btn in row if btn.callback_data
-        ]
-        assert any(c.startswith("ar_del_ask:") for c in callbacks), "Expected ar_del_ask:"
-        assert not any(c.startswith("ar_del:") for c in callbacks), (
-            "ar_del: must not appear in detail view"
-        )
-
-
-# ---------------------------------------------------------------------------
-# handle_rule_config_input — create-time validation
-# ---------------------------------------------------------------------------
-
-
-def _make_config_message(text: str) -> MagicMock:
-    msg = MagicMock()
-    msg.text = text
-    msg.reply = AsyncMock()
-    return msg
-
-
-def _make_state() -> MagicMock:
-    state = MagicMock()
-    state.get_data = AsyncMock(
-        return_value={"lang": "ru", "rule_chat_id": -1001, "rule_type": "keyword_trigger"}
+    @pytest.mark.parametrize(
+        ("handler", "data"),
+        [
+            (handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:k"),
+            (handlers.handle_builder_match, f"ar_b_match:ru:{CHAT_ID}:c"),
+            (handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:7001"),
+            (handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:10"),
+            (handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n"),
+            (handlers.handle_builder_preset_text, f"ar_b_txt:ru:{CHAT_ID}:0"),
+            (handlers.handle_builder_preset_reaction, f"ar_b_rx:ru:{CHAT_ID}:0"),
+        ],
+        ids=lambda v: v if isinstance(v, str) else v.__name__,
     )
-    state.clear = AsyncMock()
+    @pytest.mark.parametrize("draft_chat", [None, OTHER_CHAT], ids=["no-draft", "another-chat"])
+    async def test_a_step_without_this_chats_draft_is_stale(
+        self, handler: Any, data: str, draft_chat: int | None, stale: AsyncMock
+    ) -> None:
+        state = _State(rule_chat_id=draft_chat, **_FULL_DRAFT)
+        deps = _deps()
+
+        await _tap(handler, data, state, deps)
+
+        stale.assert_awaited_once()
+        deps["rules_repo"].create.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("handler", "data"),
+        [
+            (handlers.handle_add_rule, "ar_add:ru:chat"),
+            (handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:z"),
+            (handlers.handle_builder_match, f"ar_b_match:ru:{CHAT_ID}:x"),
+            (handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:anna"),
+            (handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:many"),
+            (handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:q"),
+            (handlers.handle_builder_preset_text, f"ar_b_txt:ru:{CHAT_ID}:9"),
+            (handlers.handle_builder_preset_reaction, f"ar_b_rx:ru:{CHAT_ID}:-1"),
+            (handlers.handle_rule_cfg, "ar_cfg:ru"),
+            (handlers.handle_type_selected, f"ar_type:ru:{CHAT_ID}:no_such_type"),
+            (handlers.handle_rule_config_cancel, "ar_cancel:ru:x"),
+        ],
+        ids=lambda v: v if isinstance(v, str) else v.__name__,
+    )
+    async def test_a_garbled_payload_is_stale(
+        self, handler: Any, data: str, stale: AsyncMock
+    ) -> None:
+        state = _State(rule_chat_id=CHAT_ID, **_FULL_DRAFT)
+        deps = _deps()
+
+        callback = await _tap(handler, data, state, deps)
+
+        stale.assert_awaited_once()
+        deps["rules_repo"].create.assert_not_awaited()
+        callback.message.edit_text.assert_not_awaited()
+
+    async def test_an_action_before_the_count_is_stale(self, stale: AsyncMock) -> None:
+        state = _State(rule_chat_id=CHAT_ID, rule_type="spam_detect")
+        deps = _deps()
+
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", state, deps)
+
+        stale.assert_awaited_once()
+        deps["rules_repo"].create.assert_not_awaited()
+
+    async def test_a_ready_warning_for_a_reply_rule_is_stale(self, stale: AsyncMock) -> None:
+        """Warning presets sit on the warning prompt; the reply prompt has none."""
+        state = _State(
+            rule_chat_id=CHAT_ID,
+            rule_type="spam_detect",
+            rule_n=20,
+            rule_name="x",
+            rule_action="custom_response",
+        )
+        deps = _deps()
+
+        await _tap(handlers.handle_builder_preset_text, f"ar_b_txt:ru:{CHAT_ID}:0", state, deps)
+
+        stale.assert_awaited_once()
+        deps["rules_repo"].create.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# The JSON prompt
+# ---------------------------------------------------------------------------
+
+
+async def _cfg(deps: dict[str, Any], rule_type: str | None = None) -> _State:
+    state = _State()
+    data = f"ar_type:ru:{CHAT_ID}:{rule_type}" if rule_type else f"ar_cfg:ru:{CHAT_ID}"
+    handler = handlers.handle_type_selected if rule_type else handlers.handle_rule_cfg
+    callback = await _tap(handler, data, state, deps)
+    assert state.current == AdminStates.awaiting_rule_config.state
+    assert _same(_shown(callback), screens.cfg_screen("ru", CHAT_ID, rule_type))
     return state
 
 
-class TestHandleRuleConfigInput:
-    """An invalid action / set_reaction emoji must be rejected at creation —
-    at evaluation time both are dropped with only a server-side log, so
-    "Rule created" would mean a permanent, invisible no-op."""
+class TestTheJsonPrompt:
+    """An invalid action or set_reaction emoji is refused at creation: at
+    evaluation time both are dropped with only a server-side log, so «Правило
+    создано» would mean a permanent, invisible no-op."""
 
-    @pytest.mark.asyncio
-    async def test_valid_set_reaction_rule_created(self):
-        from src.bot.handlers.rules import handle_rule_config_input
-
-        msg = _make_config_message(
+    async def test_a_valid_set_reaction_rule_is_created(self, retire: AsyncMock) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+        message = _typed(
             '{"name": "pill", "keywords": ["kw"], "action": "set_reaction", "emoji": "💊"}'
         )
-        state = _make_state()
-        repo = _make_rules_repo()
-        repo.create = AsyncMock(return_value=7)
 
-        await handle_rule_config_input(msg, state, repo)
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
 
-        repo.create.assert_awaited_once()
-        state.clear.assert_awaited_once()
-        assert "создано" in msg.reply.call_args.args[0]
+        created = _created(deps)
+        assert created["rule_type"] == "keyword_trigger"
+        assert created["config"]["emoji"] == "💊"
+        assert state.current is None
+        assert _sent(message)[0].startswith("<i>✓ Правило создано</i>")
+        assert retire.await_args.args[0].message_id == PROMPT_ID
 
-    @pytest.mark.asyncio
-    async def test_unknown_action_rejected(self):
-        from src.bot.handlers.rules import handle_rule_config_input
+    async def test_the_type_field_picks_the_type_and_leaves_the_config(self) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
 
-        msg = _make_config_message('{"keywords": ["kw"], "action": "set_reacton"}')
-        state = _make_state()
-        repo = _make_rules_repo()
-        repo.create = AsyncMock()
+        await handlers.handle_rule_config_input(
+            _typed('{"type": "spam_detect", "max_messages": 5, "weight": 3, "mandatory": true}'),
+            state,
+            **_services(deps),
+        )
 
-        await handle_rule_config_input(msg, state, repo)
+        assert _created(deps) == {
+            "chat_id": CHAT_ID,
+            "rule_type": "spam_detect",
+            "config": {"max_messages": 5},
+            "weight": 3,
+            "mandatory": True,
+        }
 
-        repo.create.assert_not_awaited()
-        state.clear.assert_not_awaited()  # FSM stays active for a retry
-        assert "set_reacton" in msg.reply.call_args.args[0]
+    async def test_an_old_type_button_supplies_the_type(self) -> None:
+        deps = _deps()
+        state = await _cfg(deps, "sticker_flood")
 
-    @pytest.mark.asyncio
-    async def test_set_reaction_with_non_reaction_emoji_rejected(self):
-        from src.bot.handlers.rules import handle_rule_config_input
+        await handlers.handle_rule_config_input(
+            _typed('{"max_stickers_per_interval": 3}'), state, **_services(deps)
+        )
 
-        msg = _make_config_message('{"keywords": ["kw"], "action": "set_reaction", "emoji": "🚀"}')
-        state = _make_state()
-        repo = _make_rules_repo()
-        repo.create = AsyncMock()
+        assert _created(deps)["rule_type"] == "sticker_flood"
 
-        await handle_rule_config_input(msg, state, repo)
+    async def test_a_rule_without_an_action_is_still_created(self) -> None:
+        """The action key is optional: the engine defaults to notify_admin."""
+        deps = _deps()
+        state = await _cfg(deps)
 
-        repo.create.assert_not_awaited()
-        state.clear.assert_not_awaited()
+        await handlers.handle_rule_config_input(
+            _typed('{"name": "plain", "keywords": ["kw"]}'), state, **_services(deps)
+        )
 
-    @pytest.mark.asyncio
-    async def test_set_reaction_with_non_string_emoji_rejected(self):
-        from src.bot.handlers.rules import handle_rule_config_input
+        deps["rules_repo"].create.assert_awaited_once()
 
-        msg = _make_config_message('{"keywords": ["kw"], "action": "set_reaction", "emoji": 5}')
-        state = _make_state()
-        repo = _make_rules_repo()
-        repo.create = AsyncMock()
+    @pytest.mark.parametrize(
+        ("typed", "says"),
+        [
+            ("not json at all", "Невалидный JSON"),
+            ('["a list"]', "Невалидный JSON"),
+            ('{"type": "nonsense"}', "<code>nonsense</code>"),
+            ('{"keywords": ["kw"], "action": "set_reacton"}', "<code>set_reacton</code>"),
+            ('{"keywords": ["kw"], "action": "set_reaction", "emoji": "🚀"}', "emoji"),
+            ('{"keywords": ["kw"], "action": "set_reaction", "emoji": 5}', "emoji"),
+            ('{"action": "<b>x</b>"}', "&lt;b&gt;x&lt;/b&gt;"),
+        ],
+        ids=["not-json", "not-a-dict", "type", "action", "emoji", "emoji-type", "escaped"],
+    )
+    async def test_a_refused_rule_keeps_the_prompt(self, typed: str, says: str) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+        message = _typed(typed)
 
-        await handle_rule_config_input(msg, state, repo)
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
 
-        repo.create.assert_not_awaited()
+        deps["rules_repo"].create.assert_not_awaited()
+        assert state.current == AdminStates.awaiting_rule_config.state
+        text, markup = _sent(message)
+        assert says in text
+        assert _datas(markup) == [f"ar_add:ru:{CHAT_ID}"]
 
-    @pytest.mark.asyncio
-    async def test_rule_without_action_still_created(self):
-        """The action key is optional (engine defaults to notify_admin) —
-        validation must not reject configs that omit it."""
-        from src.bot.handlers.rules import handle_rule_config_input
+    async def test_its_cancel_returns_to_the_builder_and_ends_the_prompt(self) -> None:
+        """The prompt stays armed on a refused answer, so leaving must not need valid JSON."""
+        deps = _deps()
+        state = await _cfg(deps)
 
-        msg = _make_config_message('{"name": "plain", "keywords": ["kw"]}')
-        state = _make_state()
-        repo = _make_rules_repo()
-        repo.create = AsyncMock(return_value=8)
+        callback = await _tap(handlers.handle_add_rule, f"ar_add:ru:{CHAT_ID}", state, deps)
 
-        await handle_rule_config_input(msg, state, repo)
+        assert state.current is None
+        assert _same(_shown(callback), screens.type_screen("ru", CHAT_ID))
 
-        repo.create.assert_awaited_once()
+    async def test_the_old_cancel_shows_the_list(self) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+
+        callback = await _tap(
+            handlers.handle_rule_config_cancel, f"ar_cancel:ru:{CHAT_ID}", state, deps
+        )
+
+        assert state.current is None
+        expected = screens.rules_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
+        assert _same(_shown(callback), expected)
+
+
+# ---------------------------------------------------------------------------
+# The prompt above a typed answer
+# ---------------------------------------------------------------------------
+
+
+class TestRetirePrompt:
+    async def test_takes_the_keyboard_off_the_prompt(self, retire: AsyncMock) -> None:
+        message = _typed("x")
+        await handlers._retire_prompt(message, PROMPT_ID)
+
+        stub = retire.await_args.args[0]
+        assert stub.message_id == PROMPT_ID
+        assert stub.chat == message.chat
+        assert retire.await_args.kwargs == {"reply_markup": None}
+
+    @pytest.mark.parametrize("prompt_id", [None, True, "555"])
+    async def test_without_a_prompt_id_does_nothing(
+        self, prompt_id: object, retire: AsyncMock
+    ) -> None:
+        await handlers._retire_prompt(_typed("x"), prompt_id)
+        retire.assert_not_awaited()
+
+    async def test_a_refused_edit_is_logged_not_raised(self, retire: AsyncMock) -> None:
+        retire.side_effect = TelegramBadRequest(
+            method=EditMessageReplyMarkup(chat_id=1, message_id=PROMPT_ID),
+            message="message to edit not found",
+        )
+        with patch.object(handlers, "logger") as logger:
+            await handlers._retire_prompt(_typed("x"), PROMPT_ID)
+
+        logger.info.assert_called_once()
+        assert logger.info.call_args.args[0] == "rule_prompt_keyboard_kept"

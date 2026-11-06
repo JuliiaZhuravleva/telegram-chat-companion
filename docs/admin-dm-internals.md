@@ -700,13 +700,55 @@ Reaction *updates* from chats are `handlers/reactions.py`, which keeps its own
 
 ## A3 — Rules
 
-Files: [src/bot/handlers/rules.py](../src/bot/handlers/rules.py) (`show_rules`, rules CRUD,
-the JSON config prompt), [src/bot/keyboards/rules.py](../src/bot/keyboards/rules.py).
-`RulesRepository.count_for_chat(chat_id)` counts every rule of a chat, enabled or not — the
-number the list pages through. `ar_tog:` is `kept` and targets `rule`: the card's pause/resume
-writes it. What the redesign drops is the list's per-row 🔄, which writes the same payload shape;
-once the list stops writing it, an old list button toggles the rule and opens its card. The three `awaiting_rule_*` states (§F.5) are declared for
-this area's rule builder.
+Files: [src/bot/handlers/rules.py](../src/bot/handlers/rules.py) (the routes are listed in its
+module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure builders),
+[src/bot/screens/samples/rules.py](../src/bot/screens/samples/rules.py). There is no
+`keyboards/rules.py` any more. `show_rules` is the stable entry other areas open a chat's list by.
+
+- **The switch for all rules** (`ar_all:`) flips the *effective* value through
+  `ChatSettingsRepository.toggle_bool_field(chat_id, "rules_enabled", effective)`, as the panel
+  toggles do, so a chat that inherited the default gets a value of its own; «· общее» comes from
+  `shows_common(FIELDS_BY_CODE["re"], row)`. No settings row is a stale tap, logged as
+  `rules_toggle_no_row`. With a rule id it redraws that rule's card.
+- **`ar_tog:`** is `kept` and targets `rule`: the card's pause/resume writes it and redraws the
+  card. The list no longer writes it (`test_rules_handler.py` pins that), so an old list button
+  toggles the rule and lands on its card. `RulesRepository.get_rules_page` gives the page and the
+  total; a page past the end is clamped and fetched again.
+- **The builder keeps its draft in FSM data** (`_DRAFT_KEYS`, all `rule_*`). Each step checks that
+  the draft exists and belongs to the payload's chat; otherwise the tap is stale, never a rule
+  made in another chat. `ar_add:` resets only the draft keys, in one mapping: `rule_chat_id` is
+  itself a draft key, and passing it again as a keyword argument raised on every tap.
+- **Four prompt states** (`_RULE_STATES`: words, text, reaction, JSON). Every callback handler
+  starts by leaving them (`_leave_config_prompt`) except the four in `_STATE_SETTERS`, each with
+  its reason; `test_fsm_escape.py` walks the module and holds both halves. A typed answer that
+  is accepted sends one new message and takes the keyboard off the prompt (`_retire_prompt`, by
+  `rule_prompt_id`); a refused one sends the error with its own Cancel, and that becomes the
+  prompt.
+- **What the builder writes, beyond the obvious**: `user_specific` gets
+  `conditions.any_message = true`, since without keywords the engine never fires it;
+  `spam_detect` gets `max_chars_per_message: 0`, since the engine's default of 4000 would also
+  fire it on one long message; both counted kinds get a 60-second window.
+- **Validation**: words ≤ 20 × ≤ 64 characters; a typed reaction goes through
+  `ReactionSelector.select()` and is stored in Telegram's spelling; a text ≤ 4096; the JSON
+  prompt checks the type and action against `_VALID_RULE_TYPES` / `_VALID_RULE_ACTIONS` and a
+  `set_reaction` emoji, and pops `type`, `weight` and `mandatory` out of the config.
+- **The executor** (`services/rules/executor.py`) imports the screens lazily. `notify_admin` sends
+  `rule_card` (`card.rule`) in `admin_settings.lang`, with the chat's title when the message
+  carries one; its button is `ar_view:…:n`, which answers with a new message. `custom_response`
+  is sent with `parse_mode=None`, so the values go in unescaped — escaping them showed
+  `Tom &amp; Jerry`. `warn_user` without a text posts `WARN_FALLBACK("ru")`: the chat's
+  language is unknown.
+- **`sticker_flood`** (`services/rules/engine.py`) fires only when `message.sticker` is set: the
+  count is chat-wide, so any message used to re-fire it for the rest of the window. After firing,
+  the rule rests for `interval_seconds`. The rest lives in module-level `_STICKER_FLOOD_FIRED`
+  because the engine is built per update. It is checked before the count query, so a resting
+  rule costs nothing and cannot be picked over a rule that will act. It is claimed in
+  `_claim_flood_cooldowns`, after the mode has picked and with no await between check and stamp,
+  so two stickers evaluated together act once and a match that was not picked starts no rest.
+  It is process-local, so a restart forgets it.
+- **Known gap**: in `awaiting_rule_react` a *sticker* is taken by `admin_sticker`'s `F.sticker`
+  handler, which carries no state filter and runs earlier in the router order. A typed emoji is
+  text, so the flow works; a sticker sent there does nothing for the rule.
 
 ---
 

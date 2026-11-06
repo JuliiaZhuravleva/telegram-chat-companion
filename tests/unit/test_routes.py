@@ -244,7 +244,6 @@ RETIRED_WRITES_TODAY = frozenset(
         ("keyboards/admin.py", "adm_wl_chats:"),
         ("keyboards/admin_chat_panel.py", "adm_kb_menu:"),
         ("keyboards/admin_sticker.py", "adm_stk_set:"),
-        ("keyboards/rules.py", "adm_rules:"),
         ("screens/hub.py", "adm_kb:"),
         ("screens/hub.py", "adm_react:"),
         ("screens/hub.py", "adm_rules:"),
@@ -291,7 +290,6 @@ INVALID_ALERTS_TODAY = {
     "handlers/admin.py": 10,
     "handlers/admin_defaults.py": 1,
     "handlers/admin_sticker.py": 1,
-    "handlers/rules.py": 1,
 }
 """Untranslated ``"Invalid data"`` popups a live handler shows for a payload it
 cannot parse, on the base the areas start from. A payload a handler cannot

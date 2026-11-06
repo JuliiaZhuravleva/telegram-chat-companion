@@ -357,20 +357,43 @@ while reactions are off.
 
 ### A3.1 Rules
 
-A small per-chat rules engine (keyword triggers, spam detection, regex matching) reached from
-📏 Правила: pick a chat, then browse its rules five per page.
+A small per-chat rules engine. 📏 Правила on a chat's screen opens that chat's rules, three a page.
 
-- A rule row shows `✅`/`⏸`, the rule's name and its type, with a 🔄 (toggle) and 🗑 (delete)
-  button next to it; tapping the name opens a detail view with weight, mandatory flag,
-  trigger count and the full config.
-- **Toggle** switches a rule on/off without deleting it.
-- **Delete** asks for confirmation and is irreversible.
-- **Add** means: choose a rule type, then send the rule as a **JSON object** (the screen shows
-  a worked example). The bot validates that it parses as a JSON object and nothing more —
-  a syntactically valid but semantically wrong rule is accepted and simply will not behave as
-  intended. `weight` and `mandatory` are read out of that JSON if present.
+- **One switch for all of the chat's rules** sits at the top: «✅ Все правила включены» /
+  «⚪ Правила выключены». It is the same `rules_enabled` value as on the chat settings panel.
+  While the chat has no value of its own the label ends in «· общее» and the global default
+  applies; a tap writes the chat's own value, the opposite of what the chat was doing.
+- The mode (how several matching rules combine) is a line of text. A rule's weight shows in its
+  row only under a weight mode, the only place it means anything.
+- A row shows ✅/⏸ and the rule's name and opens the rule's card: what sets it off and what it
+  does in words, how often it fired, and 🧩 JSON for the raw config.
+- **On the card**: ⏸ На паузу / ▶ Возобновить, and 🗑 Удалить, which asks first and cannot be
+  undone. While the chat's rules are off the card says so and carries the same switch.
+- **➕ Новое правило** builds a rule with buttons:
+  - what sets it off — words (typed, by comma or line, up to 20 words of up to 64 characters,
+    then "inside a message" or "the word alone"), a person (picked from the chat's most active
+    writers; the rule fires on each of their messages), stickers in the chat a minute (5, 10, 20)
+    or messages from one person a minute (10, 20, 40);
+  - what it does — tell the admins, warn (a ready text or a typed one), reply with a typed text
+    (`{first_name}`, `{username}` and `{rule_name}` are filled in), or react (a ready emoji or a
+    typed one; Telegram accepts only its own reaction set). A typed text is one message, at most
+    4096 characters.
+  The new rule opens on its card with «✓ Правило создано». A refused answer says why and keeps
+  the question open; ✖️ Отмена leaves it.
+- **🧩 JSON** in the builder takes the whole rule as a JSON object, for what the buttons do not
+  cover (regular expressions, exclusions, weight). The type goes in a `type` field, `weight` and
+  `mandatory` are read out of the object. An unknown type or action, and a reaction Telegram
+  would refuse, are refused here — otherwise the rule would be created and silently never act.
+  The rest of the config is not checked. Cancel returns to the builder's first step.
 
-Rules are also gated by the per-chat `rules_enabled` switch on the chat settings panel.
+What a rule does in the chat:
+
+- **Tell the admins** sends each admin a card in the panel's language: the chat, the author, what
+  matched and the start of the message, with 📏 Открыть правило, which sends the rule's card as a
+  new message so the alert stays as the record.
+- **Warn** without a text of its own posts «⚠️ Сработало автоматическое правило чата.»
+- **A sticker rule** counts stickers in the whole chat, fires only on a sticker that brings the
+  count to the limit, and then rests for its interval: one flood, one action.
 
 ---
 
