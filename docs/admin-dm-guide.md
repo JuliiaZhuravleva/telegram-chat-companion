@@ -287,15 +287,28 @@ so turns off on the first tap, as one would expect.
 Facts saved by an organizer carry a lower authority than facts saved by a bot admin, which is
 what decides who wins when two facts contradict.
 
-Three ways to add one, all from the add screen:
+The organizers screen has two buttons: **➕ Добавить** and **👥 Из участников**.
 
-1. **Forward a message** from them. If Telegram hides the original sender (forward privacy),
+**➕ Добавить** sends a prompt with a keyboard under the input field:
+
+1. **🔍 Найти в Telegram** opens Telegram's own person picker (`request_users`) — search
+   by name or username across the admin's contacts and chats, the same as choosing whom to
+   message. The bot gets the id, name and username of whoever is picked, so this works for
+   people who have never written in the chat and for those without a username. If Telegram
+   reports that the person is not in the chat now, they are added anyway with a ⚠️ line —
+   an organizer may join later. Clients that cannot open the picker send the label as text;
+   the bot answers with the alternatives below and keeps the prompt open.
+2. **Forward a message** from them. If Telegram hides the original sender (forward privacy),
    the bot says exactly that and suggests the alternatives — it does not report "not found".
-2. **Send their `@username`.** There is no username lookup in the Bot API, so this only works
+3. **Send their `@username`.** There is no username lookup in the Bot API, so this only works
    for usernames the bot has already recorded posting *in that chat*; "I know this username
    but not from this chat" is reported as its own case.
-3. **Pick from the participant list** — the five most active posters per page, by message
-   count. This is the path that always works.
+
+**✖️ Отмена** on that keyboard (or `/cancel`) ends the prompt. Every exit removes the
+keyboard. A pick made from a keyboard that outlived its prompt adds nobody and says so.
+
+**👥 Из участников** lists the five most active posters per page, by message count — the
+path that needs nothing from the admin's contacts.
 
 Removing an organizer is a single tap on their name in the list — no confirmation, since
 re-adding is trivial.

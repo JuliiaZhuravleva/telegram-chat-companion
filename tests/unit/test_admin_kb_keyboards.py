@@ -14,6 +14,7 @@ checked against the handlers' REAL filters rather than a re-typed prefix.
 from __future__ import annotations
 
 from src.bot.keyboards.admin_kb import (
+    ORG_PICK_REQUEST_ID,
     _candidate_label,
     kb_menu_keyboard,
     kb_org_add_prompt_keyboard,
@@ -66,15 +67,55 @@ class TestCandidateLabel:
 
 
 class TestKbOrgAddPromptKeyboard:
-    def test_has_show_participants_button(self):
-        kb = kb_org_add_prompt_keyboard("ru", chat_id=CHAT_ID)
-        callbacks = _get_callbacks(kb)
-        assert callbacks == [f"adm_kb_org_list:ru:{CHAT_ID}:0"]
+    """The prompt's keyboard is Telegram's own person picker (request_users)."""
 
-    def test_english_label(self):
-        kb = kb_org_add_prompt_keyboard("en", chat_id=CHAT_ID)
-        labels = _get_labels(kb)
-        assert any("Show participants" in label for label in labels)
+    def test_top_button_asks_telegram_for_one_person_not_a_bot(self):
+        kb = kb_org_add_prompt_keyboard("ru")
+        button = kb.keyboard[0][0]
+        request = button.request_users
+        assert button.text == "🔍 Найти в Telegram"
+        assert request is not None
+        assert request.request_id == ORG_PICK_REQUEST_ID
+        assert request.user_is_bot is False
+        assert request.max_quantity == 1
+        # Without these the shared user arrives as a bare id and the answer
+        # could only say "участник 123".
+        assert request.request_name is True
+        assert request.request_username is True
+
+    def test_second_row_is_a_plain_cancel_button(self):
+        kb = kb_org_add_prompt_keyboard("ru")
+        assert [[b.text for b in row] for row in kb.keyboard] == [
+            ["🔍 Найти в Telegram"],
+            ["✖️ Отмена"],
+        ]
+        assert kb.keyboard[1][0].request_users is None
+
+    def test_one_time_and_resized(self):
+        kb = kb_org_add_prompt_keyboard("ru")
+        assert kb.one_time_keyboard is True
+        assert kb.resize_keyboard is True
+
+    def test_english_labels(self):
+        kb = kb_org_add_prompt_keyboard("en")
+        assert [[b.text for b in row] for row in kb.keyboard] == [
+            ["🔍 Find in Telegram"],
+            ["✖️ Cancel"],
+        ]
+
+    def test_request_id_fits_telegrams_signed_32_bit_field(self):
+        assert 0 < ORG_PICK_REQUEST_ID < 2**31
+
+
+class TestOrganizersScreenAddRow:
+    def test_add_and_from_members_sit_on_one_row_with_the_origin(self):
+        kb = kb_organizers_keyboard(
+            [], lang="ru", chat_id=CHAT_ID, page=0, total=0, origin=PANEL_ORIGIN
+        )
+        add_row = kb.inline_keyboard[-2]
+        assert [b.text for b in add_row] == ["➕ Добавить", "👥 Из участников"]
+        assert add_row[0].callback_data == f"adm_kb_org_add:ru:{CHAT_ID}:{PANEL_ORIGIN}"
+        assert add_row[1].callback_data == f"adm_kb_org_list:ru:{CHAT_ID}:0:{PANEL_ORIGIN}"
 
 
 class TestKbOrganizerPickerKeyboard:

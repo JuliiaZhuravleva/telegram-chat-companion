@@ -382,7 +382,11 @@ class TestHandleKbOrganizerAddPrompt:
     """B-2: the add-organizer prompt now offers a picker entry point too."""
 
     @pytest.mark.asyncio
-    async def test_prompt_includes_show_participants_button(self) -> None:
+    async def test_prompt_opens_telegrams_person_picker(self) -> None:
+        """➕ sends a NEW message carrying the request_users keyboard and parks
+        the admin in the prompt state for that chat."""
+        from aiogram.types import ReplyKeyboardMarkup
+
         callback = _make_callback(f"adm_kb_org_add:ru:{CHAT_ID}")
         callback.message.answer = AsyncMock()
         bot_config_repo = _make_bot_config_repo()
@@ -393,13 +397,9 @@ class TestHandleKbOrganizerAddPrompt:
         callback.message.answer.assert_awaited_once()
         _, kwargs = callback.message.answer.call_args
         keyboard = kwargs["reply_markup"]
-        callbacks = [
-            btn.callback_data
-            for row in keyboard.inline_keyboard
-            for btn in row
-            if btn.callback_data
-        ]
-        assert f"adm_kb_org_list:ru:{CHAT_ID}:0" in callbacks
+        assert isinstance(keyboard, ReplyKeyboardMarkup)
+        assert keyboard.keyboard[0][0].request_users is not None
+        state.update_data.assert_awaited_once_with(kb_chat_id=CHAT_ID, kb_lang="ru")
 
     @pytest.mark.asyncio
     async def test_denies_non_admin(self) -> None:

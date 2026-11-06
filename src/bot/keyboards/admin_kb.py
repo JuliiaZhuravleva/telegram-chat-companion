@@ -17,7 +17,13 @@ from __future__ import annotations
 
 import math
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestUsers,
+    ReplyKeyboardMarkup,
+)
 
 from src.bot.custom_emoji import fence
 from src.bot.nav import back_callback, origin_suffix
@@ -165,12 +171,19 @@ def kb_organizers_keyboard(
             )
         rows.append(nav)
 
-    add_text = "➕ Добавить организатора" if lang == "ru" else "➕ Add organizer"
+    # Two ways in, side by side: Telegram's own person picker (behind ➕, a
+    # sent prompt — a reply keyboard can only ride on a new message) and the
+    # participant list (an in-place edit). They cannot share the prompt: one
+    # message carries ONE reply_markup, inline or reply keyboard, never both.
     rows.append(
         [
             InlineKeyboardButton(
-                text=add_text,
+                text="➕ Добавить" if lang == "ru" else "➕ Add",
                 callback_data=f"adm_kb_org_add:{lang}:{chat_id}{suffix}",
+            ),
+            InlineKeyboardButton(
+                text="👥 Из участников" if lang == "ru" else "👥 From members",
+                callback_data=f"adm_kb_org_list:{lang}:{chat_id}:0{suffix}",
             ),
         ]
     )
@@ -186,25 +199,49 @@ def kb_organizers_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def kb_org_add_prompt_keyboard(
-    lang: str, *, chat_id: int, origin: str = ""
-) -> InlineKeyboardMarkup:
-    """Single-button footer on the add-organizer prompt (B-2 picker entry point).
+#: ``request_id`` of the organizer picker. The only person picker this bot
+#: shows, so a ``users_shared`` carrying any other id is not ours. Which chat the
+#: pick is for lives in FSM state, not here: a request id is a signed 32-bit
+#: int and a supergroup id (-100…) does not fit in it.
+ORG_PICK_REQUEST_ID = 1
 
-    Offers "show participants" as an alternative to the forward/@username
-    reply the prompt text asks for -- browsing the picker doesn't cancel
-    the pending reply, both paths stay live until one resolves it.
+ORG_PICK_LABEL = {"ru": "🔍 Найти в Telegram", "en": "🔍 Find in Telegram"}
+ORG_CANCEL_LABEL = {"ru": "✖️ Отмена", "en": "✖️ Cancel"}
+
+
+def kb_org_add_prompt_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    """One-time keyboard under the input on the add-organizer prompt.
+
+    The top button opens Telegram's own person search (``request_users``):
+    contacts, recent chats and a global search by name or @username — the
+    path that needs no forwarded message and no username the bot has seen.
+    It is private-chat only, which the admin DM is. The same pattern as
+    sweet-home's sitter pick and nutricore's invite.
+
+    ``✖️ Отмена`` is a plain button: its label comes back as the admin's text
+    and is routed before the forward/@username reader. Every answer to the
+    pick sends ``ReplyKeyboardRemove`` — ``one_time_keyboard`` only HIDES the
+    keyboard, it stays reachable behind the input's keyboard icon.
     """
-    text = "👥 Показать участников" if lang == "ru" else "👥 Show participants"
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+    return ReplyKeyboardMarkup(
+        keyboard=[
             [
-                InlineKeyboardButton(
-                    text=text,
-                    callback_data=f"adm_kb_org_list:{lang}:{chat_id}:0{origin_suffix(origin)}",
-                ),
+                KeyboardButton(
+                    text=ORG_PICK_LABEL[lang],
+                    request_users=KeyboardButtonRequestUsers(
+                        request_id=ORG_PICK_REQUEST_ID,
+                        user_is_bot=False,
+                        max_quantity=1,
+                        request_name=True,
+                        request_username=True,
+                    ),
+                )
             ],
-        ]
+            [KeyboardButton(text=ORG_CANCEL_LABEL[lang])],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        input_field_placeholder="@username",
     )
 
 

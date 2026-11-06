@@ -5,8 +5,9 @@ Handles:
 - ``adm_kb_menu:*``  — per-chat submenu (organizers + kb_enabled toggle)
 - ``adm_kb_toggle:*`` — flip kb_enabled
 - ``adm_kb_orgs:*``  — paginated organizer list
-- ``adm_kb_org_add:*`` / message reply — add organizer (forward a message,
-  plain @username, or the B-2 participant picker below)
+- ``adm_kb_org_add:*`` / message reply — add organizer: Telegram's own person
+  picker (``request_users`` → a ``users_shared`` service message), or, as the
+  fallback, a forwarded message or a plain @username
 - ``adm_kb_org_list:*`` — B-2 participant picker, paginated by message count
 - ``adm_kb_org_pick:*`` — B-2 picker selection (adds the tapped participant)
 - ``adm_kb_org_rm:*`` — remove organizer
@@ -23,12 +24,24 @@ from html import escape as html_escape
 from typing import Any
 
 import structlog
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, MessageOriginHiddenUser, MessageOriginUser
+from aiogram.types import (
+    CallbackQuery,
+    Message,
+    MessageOriginHiddenUser,
+    MessageOriginUser,
+    ReplyKeyboardRemove,
+    SharedUser,
+)
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.keyboards.admin_kb import (
+    ORG_CANCEL_LABEL,
+    ORG_PICK_LABEL,
+    ORG_PICK_REQUEST_ID,
     kb_chat_picker_keyboard,
     kb_menu_keyboard,
     kb_org_add_prompt_keyboard,
@@ -76,8 +89,38 @@ _ORGS_EMPTY = {
 _TOGGLE_ON = {"ru": "Сбор фактов включён", "en": "Fact collection enabled"}
 _TOGGLE_OFF = {"ru": "Сбор фактов выключен", "en": "Fact collection disabled"}
 _ADD_PROMPT = {
-    "ru": "Перешлите сообщение от нового организатора или отправьте его @username.",
-    "en": "Forward a message from the new organizer, or send their @username.",
+    "ru": "👥 <b>Новый организатор</b>\n\n"
+    "Нажмите «🔍 Найти в Telegram» внизу и выберите человека. "
+    "Ещё можно переслать его сообщение или написать @username.",
+    "en": "👥 <b>New organizer</b>\n\n"
+    "Tap «🔍 Find in Telegram» below and pick the person. "
+    "You can also forward their message or send their @username.",
+}
+_ADD_CANCELLED = {
+    "ru": "Добавление организатора отменено.",
+    "en": "Adding an organizer cancelled.",
+}
+# The pick arrived but the prompt it answers is gone (cleared by /cancel, a
+# pick from the participant list, a restart — MemoryStorage) — the keyboard
+# outlives it behind the input's keyboard icon. Nothing is written: without
+# the state there is no chat to write to.
+_PICK_STALE = {
+    "ru": "Этот выбор уже закрыт, никто не добавлен. "
+    "Откройте «👥 Организаторы» и нажмите «➕ Добавить» ещё раз.",
+    "en": "This pick is closed, nobody was added. "
+    "Open «👥 Chat organizers» and tap «➕ Add» again.",
+}
+# The picker's label arrived as TEXT: only a client that cannot show the
+# picker sends it that way (a request_users button is never sent as text).
+_PICK_UNSUPPORTED = {
+    "ru": "Это приложение Telegram не открывает поиск. "
+    "Перешлите сообщение этого человека или напишите его @username.",
+    "en": "This Telegram app can't open the search. "
+    "Forward a message from the person, or send their @username.",
+}
+_PICK_NOT_IN_CHAT = {
+    "ru": "⚠️ Сейчас этого человека в чате нет.",
+    "en": "⚠️ This person is not in the chat right now.",
 }
 _ADD_SUCCESS = {
     "ru": "✅ {name} добавлен(а) в организаторы.",
@@ -99,6 +142,9 @@ _ADD_NOT_IN_CHAT = {
     "ru": "🤔 Знаю такой @username, но не видел его в этом чате.",
     "en": "🤔 I know that @username, but haven't seen them in this chat.",
 }
+# The add flow ends on every answer of the reader (it clears state on entry),
+# so each answer also takes the picker keyboard away.
+_NO_KEYBOARD = ReplyKeyboardRemove()
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
 
 # B-2: participant picker, alternative to the forward/@username prompt above.
@@ -147,6 +193,50 @@ def _parse_organizer_ids(raw: Any) -> list[int]:
     cannot disagree about who an organizer is.
     """
     return parse_user_id_list(raw)
+
+
+async def _add_organizer(
+    chat_settings_repo: ChatSettingsRepository, chat_id: int, user_id: int
+) -> None:
+    """Append ``user_id`` to the chat's organizers; a repeat is a no-op."""
+    row = await chat_settings_repo.get(chat_id)
+    organizer_ids = _parse_organizer_ids(row.get("kb_organizer_ids") if row else None)
+    if user_id not in organizer_ids:
+        organizer_ids.append(user_id)
+        await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
+
+
+def _shared_user_label(user: SharedUser) -> str:
+    """``First Last (@nick)``, falling back to whichever part exists, then the id."""
+    name = " ".join(part for part in (user.first_name, user.last_name) if part)
+    if user.username:
+        return f"{name} (@{user.username})" if name else f"@{user.username}"
+    return name or str(user.user_id)
+
+
+async def _left_the_chat(bot: Bot | None, chat_id: int, user_id: int) -> bool:
+    """True only when Telegram SAYS the person is not in the chat.
+
+    Telegram's picker offers anyone — contacts, recent chats, global search —
+    so the pick can be someone who never was in this chat. That is worth a
+    line in the answer, not a refusal: the organizer list is an authority
+    list, and someone about to be invited may be on it on purpose. Any API
+    failure answers False: an unverifiable membership is not reported as
+    absence.
+    """
+    if bot is None:
+        return False
+    try:
+        member = await bot.get_chat_member(chat_id, user_id)
+    except TelegramAPIError as exc:
+        logger.warning(
+            "Organizer pick: membership check failed",
+            chat_id=chat_id,
+            user_id=user_id,
+            error=str(exc),
+        )
+        return False
+    return member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED)
 
 
 async def _render_chat_picker(
@@ -454,7 +544,11 @@ async def handle_kb_organizer_add_prompt(
     bot_config_repo: FromDishka[BotConfigRepository],
     state: FSMContext,
 ) -> None:
-    """Prompt the admin to forward a message / send @username for the new organizer."""
+    """Send the add-organizer prompt with Telegram's person picker under the input.
+
+    A NEW message, not an edit: a reply keyboard can only be attached by
+    sending (the edit methods take inline markup only).
+    """
     if not _is_private(callback):
         await callback.answer()
         return
@@ -472,18 +566,15 @@ async def handle_kb_organizer_add_prompt(
         await callback.answer("Invalid data", show_alert=True)
         return
 
-    # Only the "show participants" button needs the origin — the other way to
-    # finish this add (replying with a forwarded message) answers with plain
-    # text and no keyboard, so there is no Back target to preserve in state.
-    origin = parse_origin(parts, 3)
+    # Every way to finish this add answers with plain text, no inline
+    # keyboard, so there is no Back target (origin) to keep in state.
     await state.set_state(AdminStates.awaiting_kb_organizer)
     await state.update_data(kb_chat_id=chat_id, kb_lang=lang)
 
     await callback.answer()
     if isinstance(callback.message, Message):
         await callback.message.answer(
-            _ADD_PROMPT[lang],
-            reply_markup=kb_org_add_prompt_keyboard(lang, chat_id=chat_id, origin=origin),
+            _ADD_PROMPT[lang], reply_markup=kb_org_add_prompt_keyboard(lang)
         )
 
 
@@ -552,15 +643,92 @@ async def handle_kb_organizer_pick(
         return
 
     await state.clear()
-
-    row = await chat_settings_repo.get(chat_id)
-    organizer_ids = _parse_organizer_ids(row.get("kb_organizer_ids") if row else None)
-    if user_id not in organizer_ids:
-        organizer_ids.append(user_id)
-        await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
+    await _add_organizer(chat_settings_repo, chat_id, user_id)
 
     await callback.answer()
     await _render_organizers(callback, chat_settings_repo, lang, chat_id, 0, parse_origin(parts, 4))
+
+
+@router.message(F.users_shared, F.chat.type == "private")
+async def handle_kb_organizer_shared(
+    message: Message,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    admin_repo: FromDishka[AdminRepository],
+    state: FSMContext,
+) -> None:
+    """The admin picked a person with «🔍 Найти в Telegram» (``request_users``).
+
+    Telegram delivers the pick as a service message from the admin carrying
+    ``users_shared``. Matched in ANY state, ahead of the forward/@username
+    reader: that reader's filter would take this message too (no text, no
+    forward) and answer "not found". Out of the prompt's state it is a pick
+    from a keyboard that outlived its prompt, answered as stale.
+
+    Every answer removes the keyboard. Mirrors sweet-home's sitter pick and
+    nutricore's invite (``KeyboardButtonRequestUsers``).
+    """
+    shared = message.users_shared
+    if shared is None or not await check_admin_direct(
+        bot_config_repo, message.from_user.id if message.from_user else None
+    ):
+        logger.warning("Organizer pick ignored: not an admin")
+        return
+
+    current = await state.get_state()
+    data = await state.get_data()
+    chat_id = data.get("kb_chat_id") if current == AdminStates.awaiting_kb_organizer else None
+    lang = (
+        _get_lang(data.get("kb_lang"))
+        if chat_id is not None
+        else _get_lang(await admin_repo.get_admin_language(bot_config_repo))
+    )
+
+    if shared.request_id != ORG_PICK_REQUEST_ID or not shared.users or chat_id is None:
+        logger.info(
+            "Organizer pick is stale",
+            request_id=shared.request_id,
+            has_state=chat_id is not None,
+        )
+        await message.answer(_PICK_STALE[lang], reply_markup=ReplyKeyboardRemove())
+        return
+
+    await state.clear()
+    person = shared.users[0]
+    await _add_organizer(chat_settings_repo, chat_id, person.user_id)
+    logger.info("Organizer added via Telegram picker", chat_id=chat_id, user_id=person.user_id)
+
+    text = _ADD_SUCCESS[lang].format(name=html_escape(_shared_user_label(person)))
+    if await _left_the_chat(message.bot, chat_id, person.user_id):
+        text = f"{text}\n{_PICK_NOT_IN_CHAT[lang]}"
+    await message.answer(text, reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(
+    AdminStates.awaiting_kb_organizer,
+    F.chat.type == "private",
+    F.forward_origin.is_(None),
+    F.text.in_(set(ORG_CANCEL_LABEL.values())),
+)
+async def handle_kb_organizer_cancel_label(message: Message, state: FSMContext) -> None:
+    """«✖️ Отмена» under the prompt. A label is user text, so it is routed
+    before the reader below, which would look it up as a username."""
+    lang = _get_lang((await state.get_data()).get("kb_lang"))
+    await state.clear()
+    await message.answer(_ADD_CANCELLED[lang], reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(
+    AdminStates.awaiting_kb_organizer,
+    F.chat.type == "private",
+    F.forward_origin.is_(None),
+    F.text.in_(set(ORG_PICK_LABEL.values())),
+)
+async def handle_kb_organizer_pick_label_as_text(message: Message, state: FSMContext) -> None:
+    """The picker's label arrived as text: this client cannot show the picker.
+    The prompt stays open for the fallback (forward or @username)."""
+    lang = _get_lang((await state.get_data()).get("kb_lang"))
+    await message.answer(_PICK_UNSUPPORTED[lang])
 
 
 @router.message(
@@ -622,11 +790,11 @@ async def handle_kb_organizer_add_reply(
     origin = message.forward_origin
     if origin is not None:
         if isinstance(origin, MessageOriginHiddenUser):
-            await message.reply(_ADD_FORWARD_HIDDEN[lang])
+            await message.reply(_ADD_FORWARD_HIDDEN[lang], reply_markup=_NO_KEYBOARD)
             return
         if not isinstance(origin, MessageOriginUser):
             # Forwarded from a chat/channel, not a user -- not organizer material.
-            await message.reply(_ADD_NOT_FOUND[lang])
+            await message.reply(_ADD_NOT_FOUND[lang], reply_markup=_NO_KEYBOARD)
             return
         forward_user = origin.sender_user
         user_id = forward_user.id
@@ -638,20 +806,21 @@ async def handle_kb_organizer_add_reply(
     else:
         username = _extract_username(message.text)
         if username is None:
-            await message.reply(_ADD_NOT_FOUND[lang])
+            await message.reply(_ADD_NOT_FOUND[lang], reply_markup=_NO_KEYBOARD)
             return
         found = await message_repo.find_by_username(chat_id, username)
         if found is None:
             known_elsewhere = await message_repo.username_seen_elsewhere(chat_id, username)
-            await message.reply(_ADD_NOT_IN_CHAT[lang] if known_elsewhere else _ADD_NOT_FOUND[lang])
+            await message.reply(
+                _ADD_NOT_IN_CHAT[lang] if known_elsewhere else _ADD_NOT_FOUND[lang],
+                reply_markup=_NO_KEYBOARD,
+            )
             return
         user_id = found["user_id"]
         display_name = f"@{username}"
 
-    row = await chat_settings_repo.get(chat_id)
-    organizer_ids = _parse_organizer_ids(row.get("kb_organizer_ids") if row else None)
-    if user_id not in organizer_ids:
-        organizer_ids.append(user_id)
-        await chat_settings_repo.set_field(chat_id, "kb_organizer_ids", json.dumps(organizer_ids))
-
-    await message.reply(_ADD_SUCCESS[lang].format(name=html_escape(display_name)))
+    await _add_organizer(chat_settings_repo, chat_id, user_id)
+    await message.reply(
+        _ADD_SUCCESS[lang].format(name=html_escape(display_name)),
+        reply_markup=ReplyKeyboardRemove(),
+    )

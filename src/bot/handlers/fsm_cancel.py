@@ -45,7 +45,7 @@ import structlog
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove
 from dishka.integrations.aiogram import FromDishka
 
 from src.database.repositories.admin import AdminRepository
@@ -96,7 +96,12 @@ async def handle_cancel(
 
     lang = await admin_repo.get_admin_language(bot_config_repo)
     texts = _CANCELLED if current is not None else _NOTHING_TO_CANCEL
-    await message.answer(texts.get(lang, texts["ru"]), parse_mode=None)
+    # Also takes away a reply keyboard a prompt left (the organizer picker):
+    # a one-time keyboard only hides, it stays behind the input's icon. The
+    # bot has no standing reply menu to lose by this.
+    await message.answer(
+        texts.get(lang, texts["ru"]), parse_mode=None, reply_markup=ReplyKeyboardRemove()
+    )
 
     logger.info(
         "FSM dialog cancelled by the user",

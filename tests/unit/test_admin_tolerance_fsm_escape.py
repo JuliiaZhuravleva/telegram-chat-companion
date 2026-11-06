@@ -47,6 +47,9 @@ def _make_fsm_message(
     msg.voice = None
     msg.video_note = None
     msg.photo = None
+    # An unset MagicMock attribute is truthy, and admin_kb's organizer picker
+    # filters on `F.users_shared` — a real Message has it None.
+    msg.users_shared = None
     msg.reply_to_message = MagicMock() if reply_to else None
     msg.message_id = 1
     msg.chat = MagicMock()

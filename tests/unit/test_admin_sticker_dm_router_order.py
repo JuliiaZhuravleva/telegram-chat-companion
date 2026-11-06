@@ -93,6 +93,8 @@ def _make_router_message(
     # group→supergroup migration. A real aiogram Message has both as None.
     msg.migrate_to_chat_id = None
     msg.migrate_from_chat_id = None
+    # And admin_kb's organizer picker filters on `F.users_shared`.
+    msg.users_shared = None
     msg.message_id = 1
     msg.chat = MagicMock()
     msg.chat.id = 555
