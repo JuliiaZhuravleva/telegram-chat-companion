@@ -1048,14 +1048,47 @@ are in `keyboards/kb.py`, outside the panel. The prompt's state is described in 
   `_names` takes the name from the store but leaves `_Name.username` empty, since a stored
   username may have been freed and re-taken and `t.me/{it}` would open a stranger. The
   stored `@nick` still serves as the list's and the title's name (`orgs.display_name`
-  prefers it) — a label, not a link. The mention `tg://user?id=` lives in the text, never in
-  a URL button: `BUTTON_USER_PRIVACY_RESTRICTED` would reject the whole message.
+  prefers it) — a label, not a link: in the card and invite titles `orgs.title_name` puts
+  it in `<code>` after «участник» unless it is the live username, so Telegram detects no
+  mention there (INFERRED, not measured). Button labels are not parsed; the remove and undo
+  notices still carry it as plain text (open).
+- **`getChat` is the second live name** (`_private`): when `getChatMember` answers with a Bot
+  API error — a 400, or a 403 such as the bot removed from the group — it named nobody, so
+  `getChat(user_id)` is asked. It returns the private chat, with
+  name and username, for anyone who has opened the bot, and «chat not found» for everyone
+  else (expected: debug log; any other failure: warning). Its username is as live as a
+  member's and reaches the `t.me` link. Not asked after `_NO_ANSWER` — a network failure, a
+  429 or a 5xx, where a second call would only wait or be refused again — nor after a
+  failure outside the Bot API. The order is: Telegram now (either call) → the store → «участник <id>».
+- **The person link is a button, never the text** (`orgs.person_url`, `💬 Написать лично`,
+  always the first row): `t.me/{username}` for a live username, else
+  `tg://openmessage?user_id=`. Measured on the dev bot 2026-11-07, taps on Julia's phone:
+  a `tg://user?id=` text mention is accepted but silently dropped for a person the bot
+  cannot see (kept as a `text_mention` for one it can); a `tg://user` URL button was refused
+  with the whole message for both people tried — `BUTTON_USER_INVALID` (never seen) and
+  `BUTTON_USER_PRIVACY_RESTRICTED` (seen, with privacy settings); a seen person without such
+  settings was not tried; `tg://openmessage` is kept
+  as a text link and accepted as a button for both, and the button opened the private chat
+  in both cases. Desktop and Web are untested, so the body name is plain text and the card
+  has one link, labelled.
+- **A refused link costs the button, not the card** (`_show_card`, at the three places the
+  card is shown). A refused button fails the edit and the new-message fallback alike, so
+  `render.show` raises. A `TelegramBadRequest` whose text matches `_LINK_REFUSED`
+  (`BUTTON_[A-Z_]+` or a whole-word upper-case `URL`; case-sensitive, so entity errors
+  that mention `"url"` do not count) re-shows the card once via `orgs.without_person_link`,
+  with `answered=True`, and logs «Organizer card: link button refused». Anything else
+  propagates; «message is not modified» never reaches it (`safe_edit_text` suppresses it).
+  `test_the_guard_answers_a_refused_link_only` raises each text at the guard directly, so
+  the pattern itself is pinned and not only the delivery path.
 - **The card's role line follows the state**: `CARD_ROLE` for `in_chat` and `unknown`,
   `CARD_ROLE_OUTSIDE` («…сможет, когда будет в чате.») for `orgs.ABSENT`, because
   `/remember` only works from inside the group.
 - **The «участник <id>» fallback keeps the id in `<code>`** (`orgs.title_name`) in the card
   and invite titles, outside the `<b>` so lint R5's plain-text title still holds, and the
-  card drops `CARD_ID` as a repeat. A bare 9-11 digit number in a message is autolinked by
+  card's body drops the name line and `CARD_ID` as repeats. A remembered `@nick` (one that
+  is not the live username) goes the same way, «участник <code>@nick</code>», and the body
+  has a name line only when it adds to the title: the full name, or ` · @nick` for a live
+  username. A bare 9-11 digit number in a message is autolinked by
   Telegram as a phone number.
 - **The invite only for `left` and `never_joined`** (`orgs.INVITABLE`). A banned person is
   refused at the door, so the card says the ban must be lifted; `unknown` might be someone

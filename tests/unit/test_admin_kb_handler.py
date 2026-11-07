@@ -23,7 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import asyncpg
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
-from aiogram.methods import GetChatMember
+from aiogram.methods import GetChat, GetChatMember
 from aiogram.types import (
     CallbackQuery,
     Chat,
@@ -94,6 +94,8 @@ class FakeBot:
     ``error`` makes every lookup fail with that ``TelegramBadRequest`` text (or
     raise that exception); ``left`` are members who left the group;
     ``restricted`` are restricted members, mapped to their ``is_member``.
+    ``getChat`` answers «chat not found» for everyone, as Telegram does for a
+    person who never opened the bot; ``chats`` records the ids it was asked.
     """
 
     def __init__(
@@ -104,6 +106,7 @@ class FakeBot:
         restricted: Mapping[int, bool] | None = None,
     ) -> None:
         self.asked: list[int] = []
+        self.chats: list[int] = []
         self.error = error
         self.left = set(left)
         self.restricted = dict(restricted or {})
@@ -128,6 +131,12 @@ class FakeBot:
         if user_id in self.restricted:
             return _restricted(user, is_member=self.restricted[user_id])
         return ChatMemberLeft(user=user) if user_id in self.left else ChatMemberMember(user=user)
+
+    async def get_chat(self, chat_id: int) -> object:
+        self.chats.append(chat_id)
+        raise TelegramBadRequest(
+            method=GetChat(chat_id=chat_id), message="Bad Request: chat not found"
+        )
 
 
 def _restricted(user: User, *, is_member: bool) -> ChatMemberRestricted:

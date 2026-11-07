@@ -10,7 +10,7 @@ with current organizers marked, and every reason ``org.fail`` tells apart.
 
 The card and invite samples take their arguments in the shape the handler
 passes them (``_card`` mirrors ``admin_kb._card_view``): the name the list uses,
-the full name for the mention, a username without ``@`` or None, the page.
+the full name for the card body, a username without ``@`` or None, the page.
 
 Every one-page list shows three people, the count on the chat's root sample:
 a reader walking from «👥 Организаторы · 3» must land on three names.
@@ -272,10 +272,20 @@ def org_card_left(lang: Lang) -> Screen:
 
 @sample("org.card", section="Чаты", title="Не вступал в чат", nav="panel", user_data=_PEOPLE)
 def org_card_never_joined(lang: Lang) -> Screen:
-    # Telegram answers "member not found" with no user: the name comes from
-    # the store, @username and all, but that username gets no 👤 Профиль and
-    # no «· @nick»: it may have been freed and taken by someone else since.
+    # Telegram answers "member not found" with no user, and getChat «chat not
+    # found» (they never opened the bot): the name comes from the store,
+    # @username and all, but that username gets no t.me link and no «· @nick»:
+    # it may have been freed and taken by someone else since. The title shows
+    # it as «участник <code>@nick</code>», a label Telegram does not turn into
+    # a mention. 💬 Написать лично goes by id (tg://openmessage).
     return _card(lang, "never_joined", name=fake.USERNAME, username=None)
+
+
+@sample("org.card", section="Чаты", title="Не вступал, писал боту", nav="panel", user_data=_PEOPLE)
+def org_card_never_joined_private(lang: Lang) -> Screen:
+    # Never in the group, but they opened the bot: getChat names them, live,
+    # so their username makes the t.me link, as a member's would.
+    return _card(lang, "never_joined")
 
 
 @sample("org.card", section="Чаты", title="Имя неизвестно", nav="panel", user_data=_PEOPLE)
@@ -327,6 +337,7 @@ def _invite(lang: Lang, *, notice: str | None = None, notice_raw: str | None = N
         _LINK,
         notice=notice,
         notice_raw=notice_raw,
+        username=_NICK,  # live, as for a person who left: what the handler passes
     )
 
 

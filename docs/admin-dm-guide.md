@@ -514,19 +514,34 @@ that person's card and changes nothing. (Until 2026-11 the same tap removed the 
 once, which is the mistake the card exists to prevent.) An empty list says so, and that bot
 admins can always save facts.
 
-**The card** («👤 {name} · {chat}») shows a mention of the person that opens their profile,
-their `@username` when Telegram gives one right now, the id, what Telegram says about them
-right now (one `getChatMember`: in the chat, not in the chat, never joined, removed and
-banned, or «Telegram не ответил») and what an organizer can do — for someone outside the
-group, as something they can do once inside («Сохранять факты командой /remember сможет,
-когда будет в чате.»). When no name was ever known, the title reads «участник» with the id
-in a copyable code span instead of a bare number (Telegram would turn that into a dead phone
-link), and the separate ID line is left out. Its buttons, at most four plus the way back:
+**The card** («👤 {name} · {chat}») shows the person's name as plain text, their `@username`
+when Telegram gives one right now, the id, what Telegram says about them right now (one
+`getChatMember`: in the chat, not in the chat, never joined, removed and banned, or «Telegram
+не ответил») and what an organizer can do — for someone outside the group, as something they
+can do once inside («Сохранять факты командой /remember сможет, когда будет в чате.»). For
+someone who never joined, Telegram's membership answer carries no name; the bot then asks
+for their private chat with it (`getChat`), which names anyone who has ever opened the bot,
+and only after that falls back to the name it remembered. It asks the same when Telegram
+answers the membership question with any other refusal (for instance after the bot was
+removed from the group), but not when Telegram did not answer at all. When no name was ever known, the
+title reads «участник» with the id in a copyable code span instead of a bare number
+(Telegram would turn that into a dead phone link), and the body does not repeat the name or
+the id. More generally, the body has a name line only when it adds something to the title:
+the first and last name when the title shows a username, and a username Telegram gave just
+now. Its buttons, at most four plus the way back:
 
-- **👤 Профиль** opens `t.me/{username}`; only for a valid username (4 to 32 letters, digits
-  or `_`) that Telegram gave just now. A username the bot remembered from earlier gets no
-  button and no `@username` beside the mention: it may since have been freed and taken by
-  someone else.
+- **💬 Написать лично**, first on every card: it opens the private chat with the person.
+  It goes to `t.me/{username}` for a valid username (4 to 32 letters, digits or `_`) that
+  Telegram gave just now, and otherwise by id (`tg://openmessage?user_id=…`), which on the
+  phone opened the chat even with someone the bot had never seen (2026-11-07; Telegram
+  Desktop and Web not tried). A username the bot remembered from earlier is never the button's
+  target and gets no `@username` beside the name: it may since have been freed and taken by
+  someone else. Where it is the name, the card and invite titles show it as «участник» with
+  the `@username` in a code span, so that Telegram does not turn it into a mention of
+  whoever holds it now (inferred from how Telegram treats bot text, not measured on this
+  card). The notices after a remove or an undo still show it as plain text. The name itself is not a link: Telegram silently drops a `tg://user`
+  mention for people the bot cannot see, so it worked on some cards and not others. Should
+  Telegram ever refuse the button, the card arrives without it and the bot logs a warning.
 - **✉️ Пригласить в чат**, only for someone who is not in the chat or never joined. A banned
   person gets a line instead: a link will not let them in until the ban is lifted in the
   group's settings. When Telegram did not answer, there is no invite either: the person may
