@@ -9,10 +9,12 @@ Every value is invented (``fake.py``).
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Final
 
 from src.bot.screens import chat as screens
 from src.bot.screens.chat import ChatView, config_values, fit_label
+from src.bot.screens.hub import TURNED_OFF, TURNED_ON
 from src.bot.screens.i18n import Lang
 from src.bot.screens.model import Screen
 from src.bot.screens.registry import sample
@@ -130,6 +132,51 @@ def chats_plain(lang: Lang) -> Screen:
 def chats_last_page_rejected_only(lang: Lang) -> Screen:
     rows = _chat_rows((fake.CHAT_ID_NEW, fake.CHAT_TITLE_NEW, 0))
     return screens.build_chats(lang, rows, total=5, page=1, pages=2, rejected=1)
+
+
+@sample(
+    "chats",
+    section=_SECTION,
+    title="Бот отключён в чате: «↩️ Вернуть», запрос доступа и отклонённые",
+    nav="panel",
+    user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, fake.CHAT_TITLE_NEW),
+)
+def chats_after_turn_off(lang: Lang) -> Screen:
+    """What `handle_wl_remove` shows: four chats left on, the fifth just turned off.
+
+    The undo row takes one chat's place, so with a requests row the page holds two.
+    Four chats are built and the page size cuts them, as the handler's fetch
+    does: a page size that grew back would show here as a row too many.
+    """
+    per_page = screens.chats_per_page(1, 2, undo=True)
+    rows = _chat_rows(
+        (fake.CHAT_ID, fake.CHAT_TITLE, 148),
+        (fake.CHAT_ID_OTHER, fake.CHAT_TITLE_OTHER, 12),
+        (fake.CHAT_ID_SHORT, fake.CHAT_TITLE_EN, 7),
+        (fake.CHAT_ID_SHORT - 1, fake.CHAT_TITLE + " 2", 0),
+    )[:per_page]
+    screen = screens.build_chats(
+        lang, rows, total=4, page=0, pages=2, requests=1, rejected=2, undo=fake.CHAT_ID_NEW
+    )
+    return replace(screen, notice=TURNED_OFF(lang).format(t=fake.CHAT_TITLE_NEW))
+
+
+@sample(
+    "chats",
+    section=_SECTION,
+    title="Бот снова работает в чате",
+    nav="panel",
+    user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, fake.CHAT_TITLE_NEW),
+)
+def chats_after_undo(lang: Lang) -> Screen:
+    """What `handle_wl_on` shows: the chat is back in the list and nothing offers to undo."""
+    rows = _chat_rows(
+        (fake.CHAT_ID, fake.CHAT_TITLE, 148),
+        (fake.CHAT_ID_OTHER, fake.CHAT_TITLE_OTHER, 12),
+        (fake.CHAT_ID_NEW, fake.CHAT_TITLE_NEW, 0),
+    )
+    screen = screens.build_chats(lang, rows, total=5, page=0, pages=2, requests=1, rejected=2)
+    return replace(screen, notice=TURNED_ON(lang).format(t=fake.CHAT_TITLE_NEW))
 
 
 @sample("chats.empty", section=_SECTION, title="Ни одного чата", nav="panel")

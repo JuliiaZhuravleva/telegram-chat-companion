@@ -115,19 +115,20 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `adm_lang:` / `adm_lang_set:` | `lang` / `lang:new_lang` | language screen / save, then general settings in the new language |
 | `adm_close:` | `lang` | delete panel message |
 | `adm_wl:` / `adm_wl_chats:` | — | **retired** (the old whitelist submenu and its chat list); answered by the stale catch-all |
-| `adm_wl_rm_ask:` / `adm_wl_rm:` | `lang:chat_id:page` | confirm / set `enabled=false`, then the chat list at `page` |
+| `adm_wl_rm_ask:` / `adm_wl_rm:` | `lang:chat_id:page` | confirm (or say it is off already) / set `enabled=false` if it was on, then the chat list at `page`, with the undo row only after that change |
+| `adm_wl_on:` | `lang:chat_id:page` | the undo row: set `enabled=true`, then the chat list at `page` without it |
 | `adm_wl_pending:` | `lang:page` | requests, one per page |
 | `adm_wl_apr:` / `adm_wl_rej:` | `lang:attempt_id:page` | approve / reject from list |
 | `adm_approve:` / `adm_reject:` | `lang:attempt_id` | approve / reject from the notification card (`access_card.py`); byte-compatible forever |
 | `adm_wl_rejected:` | `lang:page` | rejected chats, one per page |
-| `adm_wl_restore:` | `lang:attempt_id:page` | back to `pending` |
+| `adm_wl_restore:` | `lang:attempt_id:page` | back to `pending`, then the rejected list with «🙏 Запросы доступа · N» on top |
 | `adm_wl_del_ask:` / `adm_wl_del:` | `lang:attempt_id:page` | confirm / hard delete |
 | `adm_stats:` | `lang:period` | statistics (`1h`/`24h`/`7d`) |
 | `adm_costs:` / `adm_costs_verify:` | `lang:period` | costs / OpenAI cross-check |
 | `adm_health:` | `lang[:now]` | last recorded check; `now` (🔁 Обновить) runs one first |
 | `adm_settings:` | `lang` | general settings |
 | `adm_notif:` / `adm_nstk:` / `adm_ntog:` | `lang` / `lang` / `lang:type` | notifications menu / sticker cycle / bool toggle |
-| `adm_pnl:` / `adm_pnl_menu:` | `lang:page` / `lang:chat_id` | chat picker / chat panel |
+| `adm_pnl:` / `adm_pnl_menu:` | `lang:page[:u]` / `lang:chat_id` | chat picker (`:u` — the short pages of the undo render) / chat panel |
 | `adm_pnl_tgl:` | `lang:chat_id:code` | generic bool toggle |
 | `adm_pnl_tol:` / `adm_pnl_tolcancel:` | `lang:chat_id` | tolerance prompt / cancel |
 | `adm_defs:` / `adm_defs_sec:` / `adm_defs_tgl:` | `lang:0` / `lang:section` / `lang:code` | the seven sections for all chats / one section / toggle, then that section again |
@@ -702,7 +703,11 @@ already forgotten redraws the rejected chats with `NOT_FOUND`.
 
 **The hub never runs a check.** `show_hub` resolves `AdminRepository` and
 `ResponseLogRepository` from `data` and reads `get_latest_health_check()`,
-`get_total_cost(24 h)` and `count_attempts("pending")`. Any failure there (no container, a
+`get_total_cost(24 h)` and `count_attempts("pending")`; a non-zero count puts
+`HUB_REQUESTS` («🙏 Запросы · N», `adm_wl_pending:{lang}:0`) beside «🗂 Чаты» on the first row
+(`_chats_row`) — the hub is at its five-row cap, so it shares that row rather than taking one,
+and gets its own short label because the chat list's «🙏 Запросы доступа · N» is over a
+two-button row's width. The Chats button no longer carries the count. Any failure there (no container, a
 database error) logs `hub_status_unavailable` and draws the hub without its status line — it
 is also the stale fallback's screen and must not fail itself. `HealthChecker.run_check_now()`
 is called from one place, `adm_health:{lang}:now`, after `callback.answer()` (a check takes
@@ -720,9 +725,37 @@ reads the chat's values fresh and so already shows it connected. `adm_wl_rej:` c
 `reject_attempt` and shows the next request, or `show_chats` once `count_attempts("pending")`
 is zero. `adm_approve:` / `adm_reject:` on the access card are A6's and untouched.
 
-**Turning a chat off** (`adm_wl_rm:`) is `chat_settings_repo.set_field(chat_id, "enabled",
-False)`, `_invalidate`, then `show_chats(callback, lang, page, notice=…)` — the page travels in
-the payload from the chat list.
+**Turning a chat off** (`adm_wl_rm_ask:` → `adm_wl_rm:` → `adm_wl_on:`). The question
+(`off_ask_screen`) picks its third line from what that chat really has: an admin's own private
+chat first (`chat_type == "private"` and `check_admin_direct` on its id — the middleware answers
+it whatever `enabled` says and it files no request, so it is told turning off only takes it out
+of the list), then `has_rejected_attempt` (a chat with any rejected attempt files no request and
+sends no card, so it is told to come back through «🚫 Отклонённые»), then
+`chat_type == "channel"` (posts never reach `AccessControlMiddleware`; only re-adding the bot
+files a request), else the ordinary path — a message files a request, one card per 30-minute
+cooldown. A chat whose `enabled` is false already (an approved card tapped after another admin
+turned it off) is told so instead of asked: no «🔌 Отключить», no «Вернуть сразу», only «⬅️ Чат»;
+and the chat's own screen draws «🔌 Отключить бота» only while the bot is on there.
+`adm_wl_rm:` reads the row first: missing → `CHAT_GONE`; off already → `ALREADY_OFF`, no write
+and no undo row, since «↩️ Вернуть» there would turn ON a chat that was off before the tap;
+otherwise `chat_settings_repo.set_field(chat_id, "enabled", False)`, `_invalidate`, then
+`show_chats(callback, lang, page, notice=TURNED_OFF, undo=chat_id)` (`TURNED_OFF_DM` for an
+admin's private chat) — the page travels in the payload. Read-then-write rather than one
+conditional UPDATE: two admins tapping at once both see an undo for a chat that was on, which is
+true for both. `undo` draws «↩️ Вернуть» (`orgs.UNDO`, the organizers' label) as the first row on
+that render only, and `chats_per_page(..., undo=True)` takes one chat off the page so the
+keyboard holds. `set_field` returning False (the row went between the read and the write)
+shows `CHAT_GONE` and no undo row, rather than a notice claiming the bot was turned off. `adm_wl_on:` re-reads the row: missing → `CHAT_GONE`;
+off → `set_field(…, True)` + `_invalidate`; already on → no write. Either way the list on the
+same page with `TURNED_ON` and no undo row. A garbled payload is `show_stale`.
+
+The approved access card reaches the same question: `card.access.ok` carries «🔌 Отключить»
+(`adm_wl_rm_ask:{lang}:{chat_id}:0`) beside «⚙️ Настройки чата». Its «⬅️ Не отключать» leads to
+the chat's screen, as from the chat — not back to the card, whose text is not redrawn. What
+turning off cannot take back: approval resolves every pending attempt for the chat
+(`approve_all_for_chat`), upserts `enabled`/title/type and redraws the card; nothing is posted
+to the group and no command menu is pushed, so the only outward effect is the bot working there
+from then on. Turning off moves only `enabled`; the attempt stays `approved`.
 
 **Language has one hub path.** `adm_lang_set:` saves and draws `settings` in the new language;
 the hub is drawn only by `show_hub`.
@@ -820,7 +853,7 @@ resolution paths exist and must stay consistent:
 Toggles always flip the **effective** value, never the raw column, so a chat that is on via
 the global default turns off on the first tap. `toggle_bool_field` performs the negation
 inside the `UPDATE` (`NOT COALESCE(col, $effective)`), which closes the double-tap race, and
-returns `None` when no row matched — the handler then shows the chat list with `_CHAT_GONE`
+returns `None` when no row matched — the handler then shows the chat list with `CHAT_GONE`
 rather than a success notice. Every write re-reads the chat (`_load_view`) before drawing, so the notice
 and the switch never show a value from before the write.
 
@@ -835,14 +868,15 @@ a single update (measured 2026-08-06). They become load-bearing if the scope mov
 `Scope.APP`. Then the one write site that does **not** invalidate must be fixed in the same
 commit: approving from the access card (`handle_approve_notification` → `approve_attempt`, both
 in `access_card.py`). Approving from the requests screen (`handle_wl_approve`) and turning a chat
-off (`handle_wl_remove`, both in `admin.py`) already call `_invalidate` after the write.
+off and back on (`handle_wl_remove`, `handle_wl_on`, all in `admin.py`) already call
+`_invalidate` after the write.
 Tracked as TD-046.
 
 ### A2.2 Screens, callbacks and entries
 
 | Callback | Payload | Screen |
 |---|---|---|
-| `adm_pnl:` | `lang:page` | `chats` / `chats.empty` |
+| `adm_pnl:` | `lang:page[:u]` | `chats` / `chats.empty` |
 | `adm_pnl_menu:` | `lang:chat_id` | `chat` |
 | `adm_pnl_grp:` | `lang:chat_id:section` | a section; `rules` hands over to `show_rules` (§A3) |
 | `adm_pnl_tgl:` | `lang:chat_id:code` | the code's own section (`SECTION_OF`), with a notice |
@@ -852,8 +886,14 @@ Tracked as TD-046.
 | `adm_pnl_sp*:` | `lang:chat_id[:rev]` | the instruction editor, then `behavior` |
 
 - **The list** is `AdminRepository.get_enabled_chats_page_by_activity(page, per_page)`, with
-  `count_attempts("pending" / "rejected")` for the entry row. `screens.chats_per_page` is 3
-  when that row is shown and 4 otherwise. A page past the end is fetched again as the last page.
+  `count_attempts("pending" / "rejected")` for the entry row. `screens.chats_per_page` is 4,
+  less one when the requests row is shown and one more right after a turn-off (the undo row);
+  the rejected button shares the bottom row with back and costs nothing. With requests, undo
+  and a pager the keyboard is six rows, the cap with a pager. The undo page is one chat shorter,
+  so its pager writes `adm_pnl:{lang}:{page}:u` (`SHORT_PAGES`): pages counted at the undo
+  render's size, which ▶ and ◀ keep, so no chat is skipped between that page and the next. The
+  marker draws no undo row; a fresh list from the hub has no marker and pages at its own size.
+  A page past the end is fetched again as the last page.
 - **Old group tokens** map through `sections.LEGACY_GROUPS` (`modules`, `kb` → memory,
   `rules` → the rules screen), so a button drawn before the redesign still lands somewhere real.
 - **Back is the tree parent**: a section → its chat, a chat → the list, the list → the hub.
@@ -884,7 +924,7 @@ Tracked as TD-046.
   non-bool code on the toggle, a preset outside 0..1 — go to `show_stale`. The two cancel
   handlers (`adm_pnl_tolcancel:`, `adm_pnl_spx:`) clear their own state first, so the way out
   never depends on the payload.
-- **A chat with no settings row** shows the list with `_CHAT_GONE` above it, whichever way it
+- **A chat with no settings row** shows the list with `CHAT_GONE` above it, whichever way it
   was reached: opening the chat or a section, a switch, the presets, a preset, a typed value
   (`_save_tolerance`), or the number prompt about to ask again. Nothing is written. Only the
   instruction editor (`adm_pnl_sp*:`) still answers `_NO_ROW` as an alert.
@@ -924,6 +964,18 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
   card. The list no longer writes it (`test_rules_handler.py` pins that), so an old list button
   toggles the rule and lands on its card. `RulesRepository.get_rules_page` gives the page and the
   total; a page past the end is clamped and fetched again.
+- **The card's stored form** is `ar_view:…:j`: «🧩 Как записано (JSON)» / «🧩 Скрыть запись
+  (JSON)» (`JSON_SHOW` / `JSON_HIDE`), plain words first and the format last. Shown, the
+  `<pre>` is preceded by one `JSON_CAPTION` line: what the text is, that the lines above give
+  the gist of it in words ("gist", not "the same": the words leave out exclusions, case
+  sensitivity and the target users), and that it cannot be edited — no panel step writes a
+  rule's config after it is created; `RulesRepository.update` is reached only through `toggle`
+  (`enabled`) — while a new rule can be made that way through «➕ Добавить» → «🧩 Настроить в
+  JSON» (`_CFG_BUTTON`, the same constant the type step draws). The `<pre>` is
+  `rule_record(rule)`: `{"type": …}` plus the config, plus `weight` when it is not 1 and
+  `mandatory` when true — the columns the JSON prompt reads back out — so the text pasted into
+  that prompt makes the same rule (`test_the_shown_record_pasted_back_makes_the_same_rule`).
+  Without `type` a pasted `user_specific` or `spam_detect` record became a keyword rule.
 - **The builder keeps its draft in FSM data** (`_DRAFT_KEYS`, all `rule_*`). Each step checks that
   the draft exists and belongs to the payload's chat; otherwise the tap is stale, never a rule
   made in another chat. `ar_add:` resets only the draft keys, in one mapping: `rule_chat_id` is
@@ -942,7 +994,9 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
 - **Validation**: words ≤ 20 × ≤ 64 characters; a typed reaction goes through
   `ReactionSelector.select()` and is stored in Telegram's spelling; a text ≤ 4096; the JSON
   prompt checks the type and action against `_VALID_RULE_TYPES` / `_VALID_RULE_ACTIONS` and a
-  `set_reaction` emoji, and pops `type`, `weight` and `mandatory` out of the config.
+  `set_reaction` emoji, refuses a `keyword_trigger` whose `keywords` is not a non-empty list of
+  non-blank strings (`CFG_NO_KEYWORDS`: the engine reads a missing field as `[]` and never fires,
+  and `""` matches every message), and pops `type`, `weight` and `mandatory` out of the config.
 - **The executor** (`services/rules/executor.py`) imports the screens lazily. `notify_admin` sends
   `rule_card` (`card.rule`) in `admin_settings.lang`, with the chat's title when the message
   carries one; its button is `ar_view:…:n`, which answers with a new message. `custom_response`
@@ -1195,7 +1249,8 @@ closes the cycle.
 
 **Access card.** `handlers/access_card.py` resolves the tap with `approve_attempt` /
 `reject_attempt` (shared with the panel's request list; both return `None` when the attempt is
-no longer `pending`) and redraws the card as `card.access.ok` / `card.access.no`. Whether the
+no longer `pending`) and redraws the card as `card.access.ok` (⚙️ Настройки чата · 🔌 Отключить)
+/ `card.access.no`. Whether the
 card was the "added" kind is read from its own heading (`cards.is_added_card`), because the
 attempt row does not record it. A card older than `TEXT_EDIT_WINDOW` (48 h) keeps its text and
 gets only the new markup. A double tap redraws to the real state with the "already resolved"

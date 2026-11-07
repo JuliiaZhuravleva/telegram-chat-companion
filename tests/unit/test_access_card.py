@@ -171,7 +171,11 @@ class TestApproveNotification:
         text = _sent_text(cb)
         assert text.splitlines()[0] == "<i>✓ Одобрено</i>"
         assert "Тестовый чат" in text, "the request stays readable under the status"
-        assert _sent_callbacks(cb) == ["adm_pnl_menu:ru:-100"]
+        assert _sent_callbacks(cb) == ["adm_pnl_menu:ru:-100", "adm_wl_rm_ask:ru:-100:0"]
+        markup = cb.message.edit_text.await_args.kwargs["reply_markup"]
+        assert [[b.text for b in row] for row in markup.inline_keyboard] == [
+            ["⚙️ Настройки чата", "🔌 Отключить"]
+        ], "the way back sits beside the way on, in one row"
         assert cb.answer.await_args.args[0] == "Одобрено"
 
     @pytest.mark.asyncio
@@ -197,7 +201,8 @@ class TestApproveNotification:
         cb.message.edit_text.assert_not_awaited()
         markup = cb.message.edit_reply_markup.await_args.kwargs["reply_markup"]
         assert [b.callback_data for row in markup.inline_keyboard for b in row] == [
-            "adm_pnl_menu:ru:-100"
+            "adm_pnl_menu:ru:-100",
+            "adm_wl_rm_ask:ru:-100:0",
         ]
 
     @pytest.mark.asyncio

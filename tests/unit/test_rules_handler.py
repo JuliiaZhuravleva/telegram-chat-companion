@@ -9,6 +9,7 @@ functions themselves, so a test fails on a wrong screen, not on wording.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 from collections.abc import Iterator
 from dataclasses import replace
@@ -426,6 +427,49 @@ class TestTheCard:
         expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_ON, show_json=True)
         assert _same(_shown(callback), expected)
         assert "<pre>" in _shown(callback)[0]
+
+    @pytest.mark.parametrize(
+        ("payload", "toggle", "goes_to"),
+        [
+            (f"ar_view:ru:{RULE_ID}:{CHAT_ID}", "🧩 Как записано (JSON)", ":j"),
+            (f"ar_view:ru:{RULE_ID}:{CHAT_ID}:j", "🧩 Скрыть запись (JSON)", f":{CHAT_ID}"),
+        ],
+    )
+    async def test_the_stored_form_says_what_it_is(
+        self, payload: str, toggle: str, goes_to: str
+    ) -> None:
+        """Plain words first, JSON last; shown, it is captioned with what it is
+        and with the one thing that can be done with such text."""
+        callback = await _tap(handlers.handle_rule_view, payload, _State(), _deps(_rule()))
+        text, markup = _shown(callback)
+
+        assert [[b.text for b in row] for row in markup.inline_keyboard] == [
+            ["⏸ На паузу", "🗑 Удалить"],
+            [toggle],
+            ["⬅️ Правила"],
+        ]
+        assert markup.inline_keyboard[1][0].callback_data.endswith(goes_to)
+        caption = (
+            "Это запись правила для бота; выше — главное из неё словами. Изменить правило "
+            "нельзя, можно создать новое: «➕ Добавить» → «🧩 Настроить в JSON»."
+        )
+        if payload.endswith(":j"):
+            lines = text.splitlines()
+            assert lines[lines.index(caption) + 1].startswith("<pre>")
+        else:
+            assert caption not in text
+            assert "<pre>" not in text
+
+    def test_the_caption_names_buttons_that_are_there(self) -> None:
+        """«➕ Добавить» → «🧩 Настроить в JSON»: the rule list's button, then the type step's."""
+        listed = screens.rules_screen(
+            "ru", chat_id=CHAT_ID, title="Чат", chat=_ON, rules=[screens.rule_view(_rule())]
+        )
+        add = [b.callback for row in listed.rows for b in row if b.label == "➕ Добавить"]
+        assert add == [f"ar_add:ru:{CHAT_ID}"]
+        kinds = screens.type_screen("ru", CHAT_ID)
+        cfg = [b.callback for row in kinds.rows for b in row if b.label == "🧩 Настроить в JSON"]
+        assert cfg == [f"ar_cfg:ru:{CHAT_ID}"]
 
     async def test_n_sends_it_as_a_new_message(self) -> None:
         """From the card a fired rule sends: that card stays as the record."""
@@ -1218,7 +1262,71 @@ async def _cfg(deps: dict[str, Any], rule_type: str | None = None) -> _State:
 class TestTheJsonPrompt:
     """An invalid action or set_reaction emoji is refused at creation: at
     evaluation time both are dropped with only a server-side log, so «Правило
-    создано» would mean a permanent, invisible no-op."""
+    создано» would mean a permanent, invisible no-op. So is a keyword rule with
+    no words: the engine reads ``keywords`` as ``[]`` and it never fires (and a
+    blank word, ``""``, matches every message)."""
+
+    async def test_a_keyword_rule_without_words_says_so_in_english(self) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+        await state.update_data(lang="en")
+        message = _typed('{"name": "x"}')
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert _sent(message)[0] == (
+            "A keyword rule needs a <code>keywords</code> field with a list of words, e.g. "
+            '<code>"keywords": ["hello"]</code>: without it the rule never fires. '
+            "Please try again."
+        )
+
+    async def test_another_type_needs_no_keywords(self) -> None:
+        """Control: the refusal is about the keyword type, not about the field."""
+        deps = _deps()
+        state = await _cfg(deps)
+
+        await handlers.handle_rule_config_input(
+            _typed('{"type": "spam_detect", "max_messages": 5}'), state, **_services(deps)
+        )
+
+        assert _created(deps)["rule_type"] == "spam_detect"
+
+    @pytest.mark.parametrize(
+        "row",
+        [
+            _rule(),
+            _rule(rule_type="spam_detect", config={"max_messages": 5}, weight=3, mandatory=True),
+            _rule(rule_type="user_specific", config={"user_ids": [11, 12], "action": "warn_user"}),
+        ],
+        ids=["keyword", "weighted-spam", "user-specific"],
+    )
+    async def test_the_shown_record_pasted_back_makes_the_same_rule(
+        self, row: dict[str, Any]
+    ) -> None:
+        """The caption says a rule is made anew from such text: pasted from the
+        default prompt (whose type is keywords), the shown record must make the
+        rule it shows, not a keyword rule with no words."""
+        card = await _tap(
+            handlers.handle_rule_view,
+            f"ar_view:ru:{RULE_ID}:{CHAT_ID}:j",
+            _State(),
+            _deps(row),
+        )
+        text = _shown(card)[0]
+        shown = html.unescape(text[text.index("<pre>") + 5 : text.index("</pre>")])
+        deps = _deps()
+        state = await _cfg(deps)
+
+        await handlers.handle_rule_config_input(_typed(shown), state, **_services(deps))
+
+        assert _created(deps) == {
+            "chat_id": CHAT_ID,
+            "rule_type": row["rule_type"],
+            "config": row["config"],
+            "weight": row["weight"],
+            "mandatory": row["mandatory"],
+        }
 
     async def test_a_valid_set_reaction_rule_is_created(self, retire: AsyncMock) -> None:
         deps = _deps()
@@ -1284,9 +1392,27 @@ class TestTheJsonPrompt:
             ('{"keywords": ["kw"], "action": "set_reacton"}', "<code>set_reacton</code>"),
             ('{"keywords": ["kw"], "action": "set_reaction", "emoji": "🚀"}', "emoji"),
             ('{"keywords": ["kw"], "action": "set_reaction", "emoji": 5}', "emoji"),
-            ('{"action": "<b>x</b>"}', "&lt;b&gt;x&lt;/b&gt;"),
+            ('{"keywords": ["kw"], "action": "<b>x</b>"}', "&lt;b&gt;x&lt;/b&gt;"),
+            ('{"action": "notify_admin"}', "нужно поле <code>keywords</code>"),
+            ('{"type": "keyword_trigger", "keywords": []}', "нужно поле <code>keywords</code>"),
+            ('{"keywords": "spam"}', "нужно поле <code>keywords</code>"),
+            ('{"keywords": ["spam", " "]}', "нужно поле <code>keywords</code>"),
+            ('{"keywords": [5]}', "нужно поле <code>keywords</code>"),
         ],
-        ids=["not-json", "not-a-dict", "type", "action", "emoji", "emoji-type", "escaped"],
+        ids=[
+            "not-json",
+            "not-a-dict",
+            "type",
+            "action",
+            "emoji",
+            "emoji-type",
+            "escaped",
+            "no-keywords",
+            "empty-keywords",
+            "keywords-a-string",
+            "blank-keyword",
+            "keyword-not-text",
+        ],
     )
     async def test_a_refused_rule_keeps_the_prompt(self, typed: str, says: str) -> None:
         deps = _deps()

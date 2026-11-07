@@ -1652,6 +1652,11 @@ async def handle_rule_config_input(
         )
         await _reject(message, state, "rule.cfg_bad", error, cancel_cb, lang)
         return
+    if rule_type == "keyword_trigger" and not _has_keywords(config):
+        await _reject(
+            message, state, "rule.cfg_bad", screens.CFG_NO_KEYWORDS(lang), cancel_cb, lang
+        )
+        return
 
     # Validate what the engine would otherwise drop silently at evaluation
     # time: an unknown action, or a set_reaction emoji outside Telegram's
@@ -1721,6 +1726,17 @@ def _quoted(value: object) -> str:
 
 _RULE_ID_WORST: Final = f"Rule #{2**63 - 1}"
 """What a reply's ``{rule_name}`` becomes for a rule with no name, at its longest."""
+
+
+def _has_keywords(config: Mapping[str, Any]) -> bool:
+    """A non-empty list of words that are text and not blank: what `_eval_keyword`
+    needs to fire at all, and never on everything (``""`` is in every text)."""
+    words = config.get("keywords")
+    return (
+        isinstance(words, list)
+        and bool(words)
+        and all(isinstance(w, str) and w.strip() for w in words)
+    )
 
 
 def _cfg_text_error(config: Mapping[str, Any], lang: str) -> str | None:

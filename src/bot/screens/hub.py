@@ -1,11 +1,14 @@
 """The admin panel's root screen (``hub``), its one delivery path `show_hub`, and
-the access-request screens the hub's "🗂 Чаты" leads to.
+the access-request screens: the hub's "🙏 Запросы · N" opens the requests
+directly, the chat list's own requests row leads to the same screen.
 
-The hub is four doors and a status line. The line reads what is already
-recorded — the last health check, the last 24 hours' spend, the number of
-waiting requests — and never runs a check: opening the panel must be cheap and
+The hub is four doors (five while requests wait) and a status line. The line reads what is already
+recorded — the last health check and the last 24 hours' spend — and never
+runs a check: opening the panel must be cheap and
 must not change what the next alert says. "🔁 Обновить" on the status screen is
-the one place a check is run on demand.
+the one place a check is run on demand. While requests wait, "🙏 Запросы · N"
+shares the first row with "🗂 Чаты": the hub is at its five-row cap, and the
+requests were one tap too deep behind a count on the chats button.
 
 `sample_hub` and `SAMPLE_HUB_EXEMPT` are shared: the stale fallback's
 registered sample (``samples/foundation.py``) is the hub under one extra line,
@@ -30,9 +33,11 @@ import structlog
 from aiogram.types import CallbackQuery, Message
 
 from src.bot.custom_emoji import fence
+from src.bot.screens.chat import REQUESTS
 from src.bot.screens.deps import resolve
-from src.bot.screens.i18n import Tr, plural_ru
+from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Button, Screen
+from src.bot.screens.orgs import UNDO
 from src.bot.screens.render import back, pager, show
 from src.bot.screens.routes import cb
 from src.bot.screens.status import verdict
@@ -50,6 +55,10 @@ TITLE = Tr("🛠 <b>Панель</b>", "🛠 <b>Panel</b>")
 
 _SPENT = Tr("💰 расход за сутки {v}", "💰 spent in 24 h {v}")
 _CHATS = Tr("🗂 Чаты", "🗂 Chats")
+HUB_REQUESTS: Final = Tr("🙏 Запросы · {n}", "🙏 Requests · {n}")
+"""The requests door on the hub. It shares a row with «🗂 Чаты», where a button
+gets 163.5 px: the chat list's «🙏 Запросы доступа · 12» is 169 px there and
+would be cut through its number, «🙏 Запросы · 999» is 117 px."""
 _STICKER_PACKS = Tr("📦 Паки стикеров", "📦 Sticker packs")
 _STATUS = Tr("📊 Состояние", "📊 Status")
 _SETTINGS = Tr("⚙️ Общие настройки", "⚙️ General settings")
@@ -62,13 +71,18 @@ def spend_label(value: Decimal | float) -> str:
     return f"${amount:.4f}" if Decimal(0) < amount < Decimal("0.01") else f"${amount:.2f}"
 
 
-def _chats_label(lang: str, pending: int) -> str:
+def _chats_row(lang: str, pending: int) -> tuple[Button, ...]:
+    """«🗂 Чаты», and «🙏 Запросы · N» beside it while requests wait.
+
+    The chats button keeps its place and its plain name either way; the
+    requests open their own screen in one tap instead of hiding as a count on
+    the chats button.
+    """
+    chats = Button(_CHATS(lang), callback=cb("adm_pnl:", lang, 0))
     if pending <= 0:
-        return _CHATS(lang)
-    if lang == "en":
-        return f"{_CHATS(lang)} · {pending} access request{'' if pending == 1 else 's'}"
-    word = plural_ru(pending, "запрос доступа", "запроса доступа", "запросов доступа")
-    return f"{_CHATS(lang)} · {pending} {word}"
+        return (chats,)
+    requests = Button(HUB_REQUESTS(lang).format(n=pending), callback=cb("adm_wl_pending:", lang, 0))
+    return (chats, requests)
 
 
 def build_hub(
@@ -99,7 +113,7 @@ def build_hub(
         notice=notice,
         notice_raw=notice_raw,
         rows=(
-            (Button(_chats_label(lg, pending), callback=cb("adm_pnl:", lg, 0)),),
+            _chats_row(lg, pending),
             (Button(_STICKER_PACKS(lg), callback=cb("adm_stk_sets:", lg, 0)),),
             (Button(_STATUS(lg), callback=cb("adm_health:", lg)),),
             (Button(_SETTINGS(lg), callback=cb("adm_settings:", lg)),),
@@ -304,14 +318,22 @@ def rejected_screen(
     total: int,
     *,
     notice: str | None = None,
+    requests: int = 0,
 ) -> Screen:
-    """One rejected chat per page, its title a link when Telegram can open it."""
+    """One rejected chat per page, its title a link when Telegram can open it.
+
+    ``requests``: the waiting requests, drawn as «🙏 Запросы доступа · N» on
+    top. The handler passes it right after «↩️ Вернуть в запросы», whose next
+    step («👍 Одобрить») is on that screen, one tap away instead of two.
+    """
+    top = (Button(REQUESTS(lang).format(n=requests), cb("adm_wl_pending:", lang, 0)),)
+    lead = (top,) if requests > 0 else ()
     if attempt is None or total <= 0:
         return Screen(
             id="rejected",
             text=f"{_REJECTED_TITLE(lang)}\n\n{_REJECTED_EMPTY(lang)}",
             notice=notice,
-            rows=(_back_to_chats(lang),),
+            rows=(*lead, _back_to_chats(lang)),
         )
     aid = int(attempt["id"])
     nav = pager(page, total, lambda p: cb("adm_wl_rejected:", lang, p))
@@ -328,6 +350,7 @@ def rejected_screen(
         ),
         notice=notice,
         rows=(
+            *lead,
             (
                 Button(_RESTORE(lang), callback=cb("adm_wl_restore:", lang, aid, page)),
                 Button(_FORGET(lang), callback=cb("adm_wl_del_ask:", lang, aid, page)),
@@ -365,20 +388,136 @@ def forget_ask_screen(lang: str, attempt: Mapping[str, Any], page: int) -> Scree
 # ---------------------------------------------------------------------------
 
 _OFF_TITLE = Tr("🔌 <b>Отключить бота здесь?</b>", "🔌 <b>Turn the bot off here?</b>")
-_OFF_BODY = Tr(
-    "Бот перестанет отвечать в этом чате. Настройки сохранятся.",
-    "The bot will stop answering in this chat. Its settings are kept.",
+_OFF_WHAT = Tr(
+    "Бот перестанет отвечать, и чат уйдёт из «🗂 Чаты». Настройки сохранятся.",
+    "The bot stops answering and the chat leaves «🗂 Chats». Its settings are kept.",
+)
+_OFF_NOW = Tr("Вернуть сразу — «{undo}» в списке.", "Back at once: «{undo}» in the list.")
+_OFF_LATER = Tr(
+    "Позже — когда в чате напишут, появится запрос доступа (не чаще раза в полчаса): одобрите его.",
+    "Later: when someone writes there, an access request appears (at most once per half "
+    "hour): approve it.",
+)
+_OFF_LATER_CHANNEL = Tr(
+    "Позже — уберите бота из канала и добавьте снова, появится запрос доступа (не чаще раза "
+    "в полчаса): одобрите его.",
+    "Later: remove the bot from the channel and add it again; an access request appears (at "
+    "most once per half hour): approve it.",
+)
+_OFF_LATER_REJECTED = Tr(
+    "Позже чат сам не попросит: его уже отклоняли. Верните его из «🚫 Отклонённые» в запросы "
+    "и одобрите.",
+    "Later it will not ask by itself: it was rejected before. Move it from «🚫 Rejected» back "
+    "to the requests and approve it.",
+)
+# An admin's own private chat: `AccessControlMiddleware` lets an admin's DM
+# through whatever ``enabled`` says, so "the bot stops answering" would be false.
+_OFF_TITLE_DM = Tr("🔌 <b>Отключить этот чат?</b>", "🔌 <b>Turn this chat off?</b>")
+_OFF_WHAT_DM = Tr(
+    "Это личный чат администратора: здесь бот отвечает всегда, включён чат или нет. "
+    "Отключение только уберёт его из «🗂 Чаты»; настройки сохранятся.",
+    "This is an admin's private chat: the bot always answers here, on or off. Turning it "
+    "off only takes it out of «🗂 Chats»; its settings are kept.",
+)
+_OFF_LATER_DM = Tr(
+    "Позже запроса не будет: из личного чата администратора он не приходит.",
+    "Later no request will come: an admin's private chat files none.",
+)
+# The chat is off already (another admin, an approved card tapped late): the
+# question would announce a change that is not one, and its «↩️ Вернуть» would
+# turn ON a chat that was off.
+_ALREADY_OFF_TITLE = Tr("🔌 <b>Бот здесь уже отключён</b>", "🔌 <b>The bot is already off here</b>")
+_ALREADY_OFF_TITLE_DM = Tr("🔌 <b>Этот чат уже отключён</b>", "🔌 <b>This chat is already off</b>")
+_ALREADY_OFF_WHAT = Tr(
+    "Бот здесь уже не отвечает, и в «🗂 Чаты» этого чата нет. Настройки сохранены.",
+    "The bot no longer answers here, and the chat is not in «🗂 Chats». Its settings are kept.",
+)
+_ALREADY_OFF_WHAT_DM = Tr(
+    "Это личный чат администратора: здесь бот отвечает всегда, а в «🗂 Чаты» этого чата уже "
+    "нет. Настройки сохранены.",
+    "This is an admin's private chat: the bot always answers here, and the chat is no longer "
+    "in «🗂 Chats». Its settings are kept.",
 )
 _OFF = Tr("🔌 Отключить", "🔌 Turn off")
 _STAY = Tr("⬅️ Не отключать", "⬅️ Keep it on")
 TURNED_OFF: Final = Tr("Бот отключён в чате «{t}»", "The bot is off in «{t}»")
+TURNED_OFF_DM: Final = Tr(
+    "Чат «{t}» убран из «🗂 Чаты», бот отвечает в нём, как раньше",
+    "«{t}» left «🗂 Chats»; the bot answers there as before",
+)
+ALREADY_OFF: Final = Tr(
+    "<i>Бот в чате «{t}» уже был отключён, ничего не изменилось.</i>",
+    "<i>The bot was already off in «{t}», nothing changed.</i>",
+)
+"""A ``notice_raw``: ``{t}`` is HTML-escaped by the caller. Begins with a
+letter, not ``✓``, like every line that reports no change."""
+TURNED_ON: Final = Tr("Бот снова работает в чате «{t}»", "The bot is back on in «{t}»")
 
 
-def off_ask_screen(lang: str, chat_id: int, title: str | None, page: int) -> Screen:
+def _off_later(lang: str, *, rejected: bool, channel: bool, admin_dm: bool = False) -> str:
+    """How the chat comes back later: true for the path each kind of chat really has.
+
+    An admin's private chat never files a request (the middleware answers it
+    whether it is on or not), so it is told so before anything else.
+
+    A chat with a rejected attempt on record files no request at all (the
+    middleware's ``has_rejected_attempt``, and the add path's check), even when
+    the rejection is older than the approval that enabled it -- so once off it
+    shows among the rejected and waits there. A channel's posts never reach the
+    access gate, so only adding the bot again files a request. Everyone else
+    files one with the next message after the 30-minute card cooldown.
+    """
+    if admin_dm:
+        return _OFF_LATER_DM(lang)
+    if rejected:
+        return _OFF_LATER_REJECTED(lang)
+    return (_OFF_LATER_CHANNEL if channel else _OFF_LATER)(lang)
+
+
+def off_ask_screen(
+    lang: str,
+    chat_id: int,
+    title: str | None,
+    page: int,
+    *,
+    rejected: bool = False,
+    channel: bool = False,
+    admin_dm: bool = False,
+    already_off: bool = False,
+) -> Screen:
+    """«Отключить бота здесь?»: what turning off does and the two ways back.
+
+    ``rejected``: the chat has a rejected attempt on record
+    (`AdminRepository.has_rejected_attempt`); ``channel``: its ``chat_type``;
+    ``admin_dm``: it is an admin's own private chat, where the bot answers
+    whether it is on or not. The handler reads all three, so the screen never
+    promises a request that the gate would swallow, nor a silence that the
+    middleware would not keep.
+
+    ``already_off``: ``enabled`` is false already. Then nothing is asked: the
+    screen says so, with the honest way back later and «⬅️ Чат», and no
+    «Вернуть сразу» line, since nothing is turned off here to undo.
+    """
     name = f"<b>{escape(fence(title))}</b>" if title else f"<code>{chat_id}</code>"
+    later = _off_later(lang, rejected=rejected, channel=channel, admin_dm=admin_dm)
+    if already_off:
+        heading = (_ALREADY_OFF_TITLE_DM if admin_dm else _ALREADY_OFF_TITLE)(lang)
+        what = (_ALREADY_OFF_WHAT_DM if admin_dm else _ALREADY_OFF_WHAT)(lang)
+        return Screen(
+            id="chat.off_ask",
+            text=f"{heading}\n\n{name}\n{what}\n{later}",
+            rows=((back("chat", cb("adm_pnl_menu:", lang, chat_id), lang),),),
+        )
+    body = "\n".join(
+        (
+            (_OFF_WHAT_DM if admin_dm else _OFF_WHAT)(lang),
+            _OFF_NOW(lang).format(undo=UNDO(lang)),
+            later,
+        )
+    )
     return Screen(
         id="chat.off_ask",
-        text=f"{_OFF_TITLE(lang)}\n\n{name}\n{_OFF_BODY(lang)}",
+        text=f"{(_OFF_TITLE_DM if admin_dm else _OFF_TITLE)(lang)}\n\n{name}\n{body}",
         rows=(
             (
                 Button(_OFF(lang), callback=cb("adm_wl_rm:", lang, chat_id, page)),

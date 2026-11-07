@@ -387,11 +387,17 @@ class TestChatRoot:
         assert "🔌 Отключить бота" in _labels(callback)
 
     async def test_says_when_the_bot_is_off_in_the_chat(self) -> None:
+        """And offers no «🔌 Отключить бота»: it would ask to do what is done, and
+        the «↩️ Вернуть» after it turned the chat ON (review, correctness F1)."""
         callback = _callback(f"adm_pnl_menu:ru:{CHAT_ID}")
 
         await _open_chat(callback, service=_service(enabled=False))
 
-        assert "Бот выключен в этом чате." in _edited(callback)[0]
+        text, rows = _edited(callback)
+        assert "Бот выключен в этом чате." in text
+        assert "🔌 Отключить бота" not in _labels(callback)
+        assert not [c for c in _flat(rows) if c.startswith("adm_wl_rm_ask:")]
+        assert rows[-1] == ["adm_pnl:ru:0"]
 
     async def test_a_chat_without_settings_falls_back_to_the_list(self) -> None:
         admin_repo = _admin_repo()

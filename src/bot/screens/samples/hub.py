@@ -103,6 +103,11 @@ def hub_bad(lang: Lang) -> Screen:
     return build_hub(lang, health={"status": "critical"}, spend=Decimal("1.27"), pending=3)
 
 
+@sample("hub", section="Панель", title="Запросов доступа больше сотни", nav="root")
+def hub_many(lang: Lang) -> Screen:
+    return build_hub(lang, health={"status": "healthy"}, spend=Decimal("0.0031"), pending=120)
+
+
 @sample("hub", section="Панель", title="База не ответила", nav="root")
 def hub_unknown(lang: Lang) -> Screen:
     return build_hub(lang, known=False)
@@ -147,6 +152,15 @@ def rejected_empty(lang: Lang) -> Screen:
     return rejected_screen(lang, None, 0, 0)
 
 
+@sample("rejected", section="Чаты", title="Возвращён в запросы", nav="panel", user_data=_PEOPLE)
+def rejected_after_restore(lang: Lang) -> Screen:
+    """What `handle_wl_restore` shows: the next rejected chat, and the requests one tap away."""
+    from src.bot.screens.hub import RESTORED
+
+    attempt = _attempt(lang, title=fake.CHAT_TITLE_OTHER)
+    return rejected_screen(lang, attempt, 0, 2, notice=RESTORED(lang), requests=12)
+
+
 @sample(
     "rejected.forget_ask",
     section="Чаты",
@@ -161,6 +175,61 @@ def forget_ask(lang: Lang) -> Screen:
 @sample("chat.off_ask", section="Чаты", title="Отключить бота", nav="prompt", user_data=_PEOPLE)
 def off_ask(lang: Lang) -> Screen:
     return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Отключить бота: чат когда-то отклоняли",
+    nav="prompt",
+    user_data=_PEOPLE,
+)
+def off_ask_rejected(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0, rejected=True)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Отключить бота: канал",
+    nav="prompt",
+    user_data=_PEOPLE,
+)
+def off_ask_channel(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0, channel=True)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Отключить бота: личный чат администратора",
+    nav="prompt",
+    user_data=_PEOPLE,
+)
+def off_ask_admin_dm(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.USER_ID, fake.PERSON, 0, admin_dm=True)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Бот уже отключён",
+    nav="panel",
+    user_data=_PEOPLE,
+)
+def off_ask_already_off(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0, already_off=True)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Уже отключён: личный чат администратора",
+    nav="panel",
+    user_data=_PEOPLE,
+)
+def off_ask_admin_dm_already_off(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.USER_ID, fake.PERSON, 0, admin_dm=True, already_off=True)
 
 
 # ---------------------------------------------------------------------------

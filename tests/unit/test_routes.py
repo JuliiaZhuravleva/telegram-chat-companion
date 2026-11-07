@@ -24,6 +24,7 @@ import pytest
 from aiogram.types import Message, ReplyKeyboardRemove
 
 from src.bot.handlers import router as main_router
+from src.bot.screens.chat import SHORT_PAGES
 from src.bot.screens.routes import (
     CALLBACK_LIMIT,
     LEGACY_SAMPLES,
@@ -70,7 +71,7 @@ the test proves the prefix leaves room for lang + chat id + a 16-byte token."""
 WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_menu:": (LANG,),
     "adm_close:": (LANG,),
-    "adm_pnl:": (LANG, PAGE),
+    "adm_pnl:": (LANG, PAGE, SHORT_PAGES),
     "adm_pnl_menu:": (LANG, CID),
     "adm_pnl_grp:": (LANG, CID, SECTION),
     "adm_pnl_tgl:": (LANG, CID, CODE),
@@ -88,6 +89,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_pnl_spx:": (LANG, CID),
     "adm_wl_rm_ask:": (LANG, CID, PAGE),
     "adm_wl_rm:": (LANG, CID, PAGE),
+    "adm_wl_on:": (LANG, CID, PAGE),
     "adm_wl_pending:": (LANG, PAGE),
     "adm_wl_apr:": (LANG, INT4, PAGE),
     "adm_wl_rej:": (LANG, INT4, PAGE),

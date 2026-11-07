@@ -13,6 +13,13 @@ a handler's filters match, so a guard in the body would swallow taps the stale
 catch-all should answer. A non-admin's tap, or a tap in a group, falls through
 to `src/bot/screens/stale.py`, which says why.
 
+Turning the bot off in one chat is ``adm_wl_rm_ask:`` (the question, reached
+from the chat's screen and from an approved access card) → ``adm_wl_rm:`` (the
+write, then the chat list with «↩️ Вернуть» on that render) → ``adm_wl_on:``
+(the way back: ``enabled`` true again, the list with a line saying so). Both
+the question and the write read ``enabled`` first: a chat that is off already
+is told so, and gets no «↩️ Вернуть» that would turn ON a chat that was off.
+
 Payloads carry the panel language first: ``adm_{action}:{lang}:{args…}``. A
 payload that cannot be parsed comes from a stale button: `show_stale` answers
 it with the hub and a line saying nothing changed. An object that is gone (a
@@ -23,9 +30,10 @@ handler shows the parent screen with a notice of its own.
 from __future__ import annotations
 
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from decimal import Decimal
+from html import escape
 from typing import Any
 
 import structlog
@@ -36,16 +44,19 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
 from src.bot.handlers.access_card import approve_attempt, reject_attempt
-from src.bot.handlers.admin_chat_panel import show_chat, show_chats
+from src.bot.handlers.admin_chat_panel import CHAT_GONE, show_chat, show_chats
 from src.bot.screens.deps import resolve
 from src.bot.screens.hub import (
     ALREADY_HANDLED,
+    ALREADY_OFF,
     APPROVED,
     FORGOTTEN,
     NOT_FOUND,
     REJECTED,
     RESTORED,
     TURNED_OFF,
+    TURNED_OFF_DM,
+    TURNED_ON,
     forget_ask_screen,
     off_ask_screen,
     rejected_screen,
@@ -75,6 +86,7 @@ from src.bot.screens.status import (
     stats_screen,
     status_screen,
 )
+from src.bot.utils import check_admin_direct
 from src.config import Settings
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -328,9 +340,11 @@ async def _show_rejected(
     page: int,
     *,
     notice: str | None = None,
+    requests: int = 0,
 ) -> None:
     attempt, page, total = await _one(admin_repo.get_rejected_attempts_page, page)
-    await show(callback, rejected_screen(lang, attempt, page, total, notice=notice))
+    screen = rejected_screen(lang, attempt, page, total, notice=notice, requests=requests)
+    await show(callback, screen)
 
 
 @_on("adm_wl_rejected:")
@@ -353,7 +367,8 @@ async def handle_wl_restore(
     admin_repo: FromDishka[AdminRepository],
     **kwargs: Any,
 ) -> None:
-    """Put a rejected chat back among the requests."""
+    """Put a rejected chat back among the requests, and offer them in one tap:
+    approving it is the step the admin came for."""
     args = _ints(callback, 2)
     if args is None:
         await show_stale(callback, _lang(callback), data=kwargs)
@@ -368,7 +383,8 @@ async def handle_wl_restore(
         await _show_rejected(callback, admin_repo, lang, page, notice=ALREADY_HANDLED(lang))
         return
     await admin_repo.update_attempt_status(attempt_id, "pending")
-    await _show_rejected(callback, admin_repo, lang, page, notice=RESTORED(lang))
+    requests = await admin_repo.count_attempts("pending")
+    await _show_rejected(callback, admin_repo, lang, page, notice=RESTORED(lang), requests=requests)
 
 
 @_on("adm_wl_del_ask:")
@@ -425,43 +441,130 @@ async def _invalidate(data: dict[str, Any], chat_id: int) -> None:
         logger.debug("chat_config_invalidate_skipped", chat_id=chat_id, exc_info=True)
 
 
-async def _chat_title(chat_settings_repo: ChatSettingsRepository, chat_id: int) -> str | None:
-    row = await chat_settings_repo.get(chat_id)
+def _title_of(row: Mapping[str, Any] | None) -> str | None:
     title = row.get("chat_title") if row else None
     return str(title) if title else None
+
+
+async def _is_admin_dm(
+    row: Mapping[str, Any] | None, chat_id: int, bot_config_repo: BotConfigRepository
+) -> bool:
+    """An admin's own private chat: `AccessControlMiddleware` answers it whether
+    ``enabled`` is on or not, so turning it off silences nothing."""
+    if row is None or row.get("chat_type") != "private":
+        return False
+    return await check_admin_direct(bot_config_repo, chat_id)
+
+
+def _is_off(row: Mapping[str, Any]) -> bool:
+    """``enabled`` is false already (the column is NOT NULL; a row without it is on)."""
+    return not row.get("enabled", True)
 
 
 @_on("adm_wl_rm_ask:")
 async def handle_wl_remove_ask(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
     **kwargs: Any,
 ) -> None:
+    """«Отключить бота здесь?», from the chat's screen or an approved access card.
+
+    The way back it describes depends on the chat: one with a rejected attempt
+    on record will never file a request, a channel files one only when the bot
+    is added again, an admin's own private chat never files one and is answered
+    either way. A chat already off is told so instead of asked (an approved
+    card tapped after another admin turned it off). All of it is read here,
+    where the real values are.
+    """
     args = _ints(callback, 2)
     if args is None:
         await show_stale(callback, _lang(callback), data=kwargs)
         return
     lang, (chat_id, page) = args
-    title = await _chat_title(chat_settings_repo, chat_id)
-    await show(callback, off_ask_screen(lang, chat_id, title, page))
+    row = await chat_settings_repo.get(chat_id)
+    rejected = await admin_repo.has_rejected_attempt(chat_id)
+    screen = off_ask_screen(
+        lang,
+        chat_id,
+        _title_of(row),
+        page,
+        rejected=rejected,
+        channel=row is not None and row.get("chat_type") == "channel",
+        admin_dm=await _is_admin_dm(row, chat_id, bot_config_repo),
+        already_off=row is not None and _is_off(row),
+    )
+    await show(callback, screen)
 
 
 @_on("adm_wl_rm:")
 async def handle_wl_remove(
     callback: CallbackQuery,
     chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
     **kwargs: Any,
 ) -> None:
-    """Turn the bot off in a chat (its settings stay) and show the chat list."""
+    """Turn the bot off in a chat (its settings stay) and show the chat list
+    with «↩️ Вернуть» for it, on this render only.
+
+    The undo is offered only for a change from on to off. A chat with no
+    settings row has nothing to turn off, and a chat already off was not
+    turned off here: the list says which, writes nothing and offers no undo,
+    since «↩️ Вернуть» would turn ON a chat that was off before the tap.
+
+    Read, then write, rather than one conditional UPDATE: two admins tapping
+    at once both see an undo for a chat that was on, which is true for both.
+    """
     args = _ints(callback, 2)
     if args is None:
         await show_stale(callback, _lang(callback), data=kwargs)
         return
     lang, (chat_id, page) = args
-    title = await _chat_title(chat_settings_repo, chat_id)
-    await chat_settings_repo.set_field(chat_id, "enabled", False)
+    row = await chat_settings_repo.get(chat_id)
+    if row is None:
+        await show_chats(callback, lang, page, notice_raw=CHAT_GONE(lang), data=kwargs)
+        return
+    title = _title_of(row) or str(chat_id)
+    if _is_off(row):
+        notice_raw = ALREADY_OFF(lang).format(t=escape(title))
+        await show_chats(callback, lang, page, notice_raw=notice_raw, data=kwargs)
+        return
+    if not await chat_settings_repo.set_field(chat_id, "enabled", False):
+        await show_chats(callback, lang, page, notice_raw=CHAT_GONE(lang), data=kwargs)
+        return
     await _invalidate(kwargs, chat_id)
-    notice = TURNED_OFF(lang).format(t=title or chat_id)
+    dm = await _is_admin_dm(row, chat_id, bot_config_repo)
+    notice = (TURNED_OFF_DM if dm else TURNED_OFF)(lang).format(t=title)
+    await show_chats(callback, lang, page, notice=notice, undo=chat_id, data=kwargs)
+
+
+@_on("adm_wl_on:")
+async def handle_wl_on(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    **kwargs: Any,
+) -> None:
+    """«↩️ Вернуть» after a turn-off: the bot answers in the chat again.
+
+    Only ``enabled`` moves, as the turn-off moved only ``enabled``, so the
+    settings are the ones it had. A chat that is already on (another admin,
+    an approval in between, a second tap) gets the same list and line with
+    nothing written; a chat with no settings row says so on the list.
+    """
+    args = _ints(callback, 2)
+    if args is None:
+        await show_stale(callback, _lang(callback), data=kwargs)
+        return
+    lang, (chat_id, page) = args
+    row = await chat_settings_repo.get(chat_id)
+    if row is None:
+        await show_chats(callback, lang, page, notice_raw=CHAT_GONE(lang), data=kwargs)
+        return
+    if not row.get("enabled"):
+        await chat_settings_repo.set_field(chat_id, "enabled", True)
+        await _invalidate(kwargs, chat_id)
+    notice = TURNED_ON(lang).format(t=_title_of(row) or chat_id)
     await show_chats(callback, lang, page, notice=notice, data=kwargs)
 
 

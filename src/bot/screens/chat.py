@@ -28,6 +28,7 @@ from src.bot.custom_emoji import fence
 from src.bot.screens.i18n import Tr
 from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, Screen
+from src.bot.screens.orgs import UNDO
 from src.bot.screens.render import back, cancel, pager
 from src.bot.screens.routes import cb
 from src.bot.screens.sections import Section, shows_common
@@ -176,7 +177,7 @@ _CHATS_EMPTY = Tr(
     "Пока ни одного чата. Добавьте бота в группу, сюда придёт запрос доступа.",
     "No chats yet. Add the bot to a group and its access request will show up here.",
 )
-_REQUESTS = Tr("🙏 Запросы доступа · {n}", "🙏 Access requests · {n}")
+REQUESTS: Final = Tr("🙏 Запросы доступа · {n}", "🙏 Access requests · {n}")
 _REJECTED = Tr("🚫 Отклонённые · {n}", "🚫 Rejected · {n}")
 
 _FIND_TITLE = Tr("🔎 <b>Поиск чата</b>", "🔎 <b>Find a chat</b>")
@@ -446,22 +447,41 @@ def _notes(view: ChatView, codes: Sequence[str], lang: str, *extra: str) -> str 
 # ---------------------------------------------------------------------------
 
 
-def chats_per_page(requests: int, rejected: int) -> int:
-    """Chats per page: one row fewer when the requests row is shown (rows cap).
+SHORT_PAGES: Final = "u"
+"""The last field of an ``adm_pnl:`` pager payload drawn on the undo render:
+the page it opens is counted at the undo render's size. Without it ▶ from that
+render (one chat fewer per page) opened an ordinary page whose first chat was
+one further on, so a chat between the two was on neither."""
 
-    ``rejected`` costs no row: that button shares the last row with the back
-    button. The parameter stays so the handler and the builder keep asking
-    the same question.
+
+def chats_per_page(requests: int, rejected: int, *, undo: bool = False) -> int:
+    """Chats per page: one row fewer for each extra row the list carries (rows cap).
+
+    The requests row and the «↩️ Вернуть» row after a turn-off each cost a chat,
+    so the worst page -- undo, requests, two chats, the pager and the last row --
+    is still four action rows, a pager and a back row. ``rejected`` costs no row:
+    that button shares the last row with the back button. Every input stays a
+    parameter so the handler and the builder keep asking the same question.
+
+    ``undo`` is the undo render's page size, and also every page its pager
+    reaches (`SHORT_PAGES`): the same offsets, so ▶ skips no chat.
     """
     del rejected
-    return 3 if requests else 4
+    return 4 - (1 if requests else 0) - (1 if undo else 0)
 
 
 def _requests_row(lang: str, requests: int) -> tuple[Button, ...] | None:
     """The waiting requests on a row of their own: «Запросы доступа · 12» needs it."""
     if not requests:
         return None
-    return (Button(_REQUESTS(lang).format(n=requests), cb("adm_wl_pending:", lang, 0)),)
+    return (Button(REQUESTS(lang).format(n=requests), cb("adm_wl_pending:", lang, 0)),)
+
+
+def _undo_row(lang: str, undo: int | None, page: int) -> tuple[Button, ...] | None:
+    """«↩️ Вернуть» for the chat just turned off: on that one render, never again."""
+    if undo is None:
+        return None
+    return (Button(UNDO(lang), cb("adm_wl_on:", lang, undo, page)),)
 
 
 def _chats_tail(lang: str, rejected: int) -> tuple[Button, ...]:
@@ -470,6 +490,13 @@ def _chats_tail(lang: str, rejected: int) -> tuple[Button, ...]:
     if not rejected:
         return (hub,)
     return (Button(_REJECTED(lang).format(n=rejected), cb("adm_wl_rejected:", lang, 0)), hub)
+
+
+def _chats_page(lang: str, page: int, *, short: bool) -> str:
+    """A chat list page, carrying `SHORT_PAGES` when it is counted at the undo size."""
+    if short:
+        return cb("adm_pnl:", lang, page, SHORT_PAGES)
+    return cb("adm_pnl:", lang, page)
 
 
 def _chats_count(lang: str, total: int, page: int, pages: int, shown: int, per_page: int) -> str:
@@ -493,16 +520,24 @@ def build_chats(
     pages: int,
     requests: int = 0,
     rejected: int = 0,
+    undo: int | None = None,
+    short: bool = False,
 ) -> Screen:
     """``chats`` (or ``chats.empty`` when nothing is connected).
 
     ``page`` is counted with `chats_per_page`, the same count the handler
     fetched the page with, so the body can say which chats the page lists.
+    ``undo`` is the chat just turned off: its «↩️ Вернуть» row comes first,
+    under the notice it takes back. ``short`` is a page reached from that
+    render's pager: it has no undo row, but keeps its page size, and its own
+    pager keeps the marker (`SHORT_PAGES`).
     """
+    short = short or undo is not None
+    redo = _undo_row(lang, undo, page)
     entry = _requests_row(lang, requests)
     tail = _chats_tail(lang, rejected)
     if total == 0:
-        empty_rows: tuple[tuple[Button, ...], ...] = (entry, tail) if entry else (tail,)
+        empty_rows = tuple(r for r in (redo, entry, tail) if r)
         return Screen(
             id="chats.empty", text=_text(_CHATS_TITLE(lang), _CHATS_EMPTY(lang)), rows=empty_rows
         )
@@ -514,15 +549,20 @@ def build_chats(
         count = int(chat.get("message_count_24h") or 0)
         label = fence(fit_label(title, f" · {count}"))
         listed.append((Button(label, cb("adm_pnl_menu:", lang, chat_id)),))
-    nav = pager(page, pages, lambda p: cb("adm_pnl:", lang, p))
-    rows = tuple(r for r in (entry, *listed, nav, tail) if r)
+    nav = pager(page, pages, lambda p: _chats_page(lang, p, short=short))
+    rows = tuple(r for r in (redo, entry, *listed, nav, tail) if r)
     return Screen(
         id="chats",
         text=_text(
             _CHATS_TITLE(lang),
             _CHATS_BODY(lang).format(
                 count=_chats_count(
-                    lang, total, page, pages, len(chats), chats_per_page(requests, rejected)
+                    lang,
+                    total,
+                    page,
+                    pages,
+                    len(chats),
+                    chats_per_page(requests, rejected, undo=short),
                 )
             ),
         ),
@@ -606,6 +646,13 @@ def build_chat(view: ChatView, lang: str) -> Screen:
 
     url = build_chat_url(view.chat_id, view.chat_type)
     link = f'<a href="{escape(url, quote=True)}">{_OPEN_CHAT(lang)}</a>' if url else None
+    # Only while the bot is on: on a chat that is off it offered to do what
+    # the status line says is done, and its «↩️ Вернуть» turned the chat ON.
+    off = (
+        (Button(_DISCONNECT(lang), cb("adm_wl_rm_ask:", lang, view.chat_id, 0)),)
+        if view.values.get("enabled", True)
+        else ()
+    )
     return Screen(
         id="chat",
         text=_text(
@@ -627,10 +674,7 @@ def build_chat(view: ChatView, lang: str) -> Screen:
             # Next to the way out, not in the section grid: among the sections'
             # nouns it read as a state to all five readers of round 4. It opens
             # a confirmation (`chat.off_ask`), so the bottom row is safe.
-            (
-                Button(_DISCONNECT(lang), cb("adm_wl_rm_ask:", lang, view.chat_id, 0)),
-                *_back_to_chats(lang),
-            ),
+            (*off, *_back_to_chats(lang)),
         ),
     )
 

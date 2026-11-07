@@ -173,10 +173,93 @@ class TestTurnOff:
         assert _payloads(screen) == [f"adm_wl_rm:en:{CHAT_ID}:3", f"adm_pnl_menu:en:{CHAT_ID}"]
         assert screen.rows[0][1].kind == "cancel"
 
-    def test_says_the_settings_are_kept_and_promises_nothing_else(self):
-        text = off_ask_screen("ru", CHAT_ID, "Test Chat", 0).text
+    @pytest.mark.parametrize(
+        ("lang", "labels"),
+        [("ru", [["🔌 Отключить", "⬅️ Не отключать"]]), ("en", [["🔌 Turn off", "⬅️ Keep it on"]])],
+    )
+    @pytest.mark.parametrize(
+        "variant", [{}, {"rejected": True}, {"channel": True}, {"admin_dm": True}]
+    )
+    def test_the_same_two_buttons_whatever_the_way_back(
+        self, lang: str, labels: list[list[str]], variant: dict[str, bool]
+    ):
+        screen = off_ask_screen(lang, CHAT_ID, "Test Chat", 0, **variant)
 
-        assert "Настройки сохранятся" in text
+        assert [[b.label for b in row] for row in screen.rows] == labels
+
+    @pytest.mark.parametrize(
+        ("variant", "later"),
+        [
+            ({}, "когда в чате напишут, появится запрос доступа (не чаще раза в полчаса)"),
+            ({"channel": True}, "уберите бота из канала и добавьте снова"),
+            ({"rejected": True}, "чат сам не попросит: его уже отклоняли"),
+            ({"rejected": True, "channel": True}, "чат сам не попросит"),
+        ],
+    )
+    def test_says_what_happens_and_the_two_ways_back(self, variant: dict[str, bool], later: str):
+        """Settings kept, the chat leaves the list, «↩️ Вернуть» at once, and the
+        later path that chat really has: a rejection on record wins over the kind."""
+        body = off_ask_screen("ru", CHAT_ID, "Test Chat", 0, **variant).text.splitlines()[3:]
+
+        assert len(body) == 3
+        assert "Настройки сохранятся" in body[0]
+        assert "«🗂 Чаты»" in body[0]
+        assert body[1] == "Вернуть сразу — «↩️ Вернуть» в списке."
+        assert later in body[2]
+
+    @pytest.mark.parametrize(
+        ("lang", "line"),
+        [
+            (
+                "ru",
+                "Позже чат сам не попросит: его уже отклоняли. "
+                "Верните его из «🚫 Отклонённые» в запросы и одобрите.",
+            ),
+            (
+                "en",
+                "Later it will not ask by itself: it was rejected before. "
+                "Move it from «🚫 Rejected» back to the requests and approve it.",
+            ),
+        ],
+    )
+    def test_the_rejected_way_back_names_the_screen_and_the_steps(self, lang: str, line: str):
+        """The old line named neither where the chat waits nor what to tap there."""
+        screen = off_ask_screen(lang, CHAT_ID, "Test Chat", 0, rejected=True)
+
+        assert screen.text.splitlines()[-1] == line
+
+    @pytest.mark.parametrize("variant", [{}, {"rejected": True}, {"channel": True}])
+    def test_an_admins_private_chat_promises_no_silence_and_no_request(
+        self, variant: dict[str, bool]
+    ):
+        """The middleware answers an admin's DM whatever ``enabled`` says, and a
+        DM files no request: both lines would be false there."""
+        screen = off_ask_screen("ru", CHAT_ID, "Test Chat", 0, admin_dm=True, **variant)
+        lines = screen.text.splitlines()
+
+        assert lines[0] == "🔌 <b>Отключить этот чат?</b>"
+        assert lines[3].startswith("Это личный чат администратора: здесь бот отвечает всегда")
+        assert "перестанет отвечать" not in screen.text
+        assert lines[4] == "Вернуть сразу — «↩️ Вернуть» в списке."
+        assert lines[5] == "Позже запроса не будет: из личного чата администратора он не приходит."
+
+    @pytest.mark.parametrize(
+        ("variant", "title"),
+        [
+            ({}, "🔌 <b>Бот здесь уже отключён</b>"),
+            ({"rejected": True}, "🔌 <b>Бот здесь уже отключён</b>"),
+            ({"admin_dm": True}, "🔌 <b>Этот чат уже отключён</b>"),
+        ],
+    )
+    def test_a_chat_already_off_is_told_not_asked(self, variant: dict[str, bool], title: str):
+        """No «🔌 Отключить», no «Вернуть сразу»: there is nothing to turn off or undo."""
+        screen = off_ask_screen("ru", CHAT_ID, "Test Chat", 4, already_off=True, **variant)
+
+        assert screen.text.splitlines()[0] == title
+        assert "Вернуть сразу" not in screen.text
+        assert _payloads(screen) == [f"adm_pnl_menu:ru:{CHAT_ID}"]
+        assert screen.rows[0][0].label == "⬅️ Чат"
+        assert screen.rows[0][0].kind == "back"
 
 
 # ---------------------------------------------------------------------------

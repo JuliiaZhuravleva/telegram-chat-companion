@@ -2,7 +2,11 @@
 
 Handles:
 - ``adm_pnl:``        — the chat list, most active first, with the requests
-  row on top when there are any (``show_chats``)
+  row on top when there are any (``show_chats``). Right after «🔌 Отключить»
+  (``admin.handle_wl_remove``) the same list carries «↩️ Вернуть» for that
+  chat on top, on that render only; ``adm_wl_on:`` (``admin.handle_wl_on``)
+  takes the turn-off back. That render's pager writes ``adm_pnl:{lang}:{p}:u``,
+  so the pages it leads to keep its size and ▶ skips no chat
 - ``adm_pnl_menu:``   — one chat's root screen (``show_chat``)
 - ``adm_pnl_grp:``    — one section of it; which setting lives where is
   ``screens.sections.SECTION_OF``. ``rules`` opens the rules area's own list,
@@ -91,7 +95,7 @@ logger = structlog.get_logger(__name__)
 router = Router(name="admin_chat_panel")
 
 _NOT_ADMIN = {"ru": "Нет доступа.", "en": "Access denied."}
-_CHAT_GONE: Final = Tr(
+CHAT_GONE: Final = Tr(
     "<i>Этого чата нет в настройках, ничего не изменилось. Вот подключённые чаты.</i>",
     "<i>This chat is not in the settings and nothing changed. Here are the connected chats.</i>",
 )
@@ -264,7 +268,7 @@ async def _show_chat(
     if view is None:
         if admin_repo is None:
             return await show(target, screens.build_panel_notfound(lang))
-        return await _show_chats(target, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        return await _show_chats(target, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
     return await show(target, _with_notice(screens.build_chat(view, lang), notice=notice))
 
 
@@ -312,17 +316,27 @@ async def _show_chats(
     notice: str | None = None,
     notice_raw: str | None = None,
     answered: bool = False,
+    undo: int | None = None,
+    short: bool = False,
 ) -> Message | None:
     requests = await admin_repo.count_attempts("pending")
     rejected = await admin_repo.count_attempts("rejected")
-    per_page = screens.chats_per_page(requests, rejected)
+    per_page = screens.chats_per_page(requests, rejected, undo=undo is not None or short)
     chats, total = await admin_repo.get_enabled_chats_page_by_activity(page, per_page)
     shown, pages, _ = page_slice(total, page, per_page)
     if shown != page:
         # An old button can carry a page the list no longer has.
         chats, total = await admin_repo.get_enabled_chats_page_by_activity(shown, per_page)
     screen = screens.build_chats(
-        lang, chats, total=total, page=shown, pages=pages, requests=requests, rejected=rejected
+        lang,
+        chats,
+        total=total,
+        page=shown,
+        pages=pages,
+        requests=requests,
+        rejected=rejected,
+        undo=undo,
+        short=short,
     )
     return await show(
         target, _with_notice(screen, notice=notice, notice_raw=notice_raw), answered=answered
@@ -335,13 +349,21 @@ async def show_chats(
     page: int = 0,
     *,
     notice: str | None = None,
+    notice_raw: str | None = None,
+    undo: int | None = None,
     data: Mapping[str, Any],
 ) -> Message | None:
-    """Show the list of connected chats, the same way the ``adm_pnl:`` button does."""
+    """Show the list of connected chats, the same way the ``adm_pnl:`` button does.
+
+    ``undo`` is a chat just turned off: the list then offers «↩️ Вернуть» for it,
+    and pages one chat shorter so the keyboard keeps its rows cap.
+    """
     admin_repo = await resolve(data, AdminRepository)
     await _close_number_prompt(state_of(data))
     await _close_chance_prompt(state_of(data))
-    return await _show_chats(target, _get_lang(lang), page, admin_repo, notice=notice)
+    return await _show_chats(
+        target, _get_lang(lang), page, admin_repo, notice=notice, notice_raw=notice_raw, undo=undo
+    )
 
 
 async def _show_section(
@@ -367,7 +389,13 @@ async def handle_chat_panel_picker(
     bot_config_repo: FromDishka[BotConfigRepository],
     **kwargs: Any,
 ) -> None:
-    """The chat list, page ``adm_pnl:{lang}:{page}`` (no page: the first)."""
+    """The chat list, page ``adm_pnl:{lang}:{page}`` (no page: the first).
+
+    A trailing ``:u`` (`screens.SHORT_PAGES`) is a page reached from the undo
+    render's pager: counted at that render's size, so ▶ lands on the chats
+    right after the ones it showed. Any other trailing field is ignored, as
+    before.
+    """
     if not await _guard(callback, bot_config_repo):
         return
     await _close_number_prompt(state_of(kwargs))
@@ -378,7 +406,8 @@ async def handle_chat_panel_picker(
     except ValueError:
         await show_stale(callback, lang, data=kwargs)
         return
-    await _show_chats(callback, lang, page, admin_repo)
+    short = parts[3:4] == [screens.SHORT_PAGES]
+    await _show_chats(callback, lang, page, admin_repo, short=short)
 
 
 @router.callback_query(F.data.startswith("adm_pnl_menu:"))
@@ -443,7 +472,7 @@ async def handle_chat_panel_group(
         chat_id, chat_settings_repo, bot_config_repo, chat_config_service, bot_is_admin=admin_live
     )
     if view is None:
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     await _show_section(callback, lang, view, section)
 
@@ -476,7 +505,7 @@ async def handle_chat_panel_toggle(
     double-tap cannot collapse two flips into one; the effective value only
     supplies the starting point for a NULL ("inherited") column. Re-renders
     the field's own section with a ``✓`` line naming what changed. A chat with
-    no settings row shows the list with `_CHAT_GONE`, as every panel screen does.
+    no settings row shows the list with `CHAT_GONE`, as every panel screen does.
     """
     if not await _guard(callback, bot_config_repo):
         return
@@ -493,7 +522,7 @@ async def handle_chat_panel_toggle(
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
         logger.warning("Toggle for a chat with no chat_settings row", chat_id=chat_id)
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
 
     parent = _HIDDEN_WHILE_OFF.get(field.code)
@@ -509,7 +538,7 @@ async def handle_chat_panel_toggle(
     new_value = await chat_settings_repo.toggle_bool_field(chat_id, field.key, effective)
     if new_value is None:
         logger.warning("Toggle affected no chat_settings row", chat_id=chat_id, field=field.key)
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     chat_config_service.invalidate(chat_id)
 
@@ -525,7 +554,7 @@ async def handle_chat_panel_toggle(
         chat_id, chat_settings_repo, bot_config_repo, chat_config_service, bot_is_admin=admin_live
     )
     if fresh is None:  # the row went away between the write and the read
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     if field.code == "rx" and new_value and fresh.bot_is_admin is False:
         screen = _with_notice(screens.build_reactions(fresh, lang), notice=notice)
@@ -561,7 +590,7 @@ async def handle_chat_panel_tolerance_prompt(
         return
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
 
     parts = (callback.data or "").split(":")
@@ -622,7 +651,7 @@ async def _save_tolerance(
 ) -> None:
     """Write ``tolerance_level`` and show the stickers section with the new value on top.
 
-    A write that matched no row shows the chat list with `_CHAT_GONE`, like
+    A write that matched no row shows the chat list with `CHAT_GONE`, like
     every other panel screen whose chat has gone.
     """
     written = await chat_settings_repo.set_field(chat_id, "tolerance_level", value)
@@ -634,7 +663,7 @@ async def _save_tolerance(
     )
     if view is None:
         logger.warning("Tolerance write affected no chat_settings row", chat_id=chat_id)
-        await _show_chats(target, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(target, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     notice = screens.TOLERANCE_SET(lang).format(value=screens.tolerance_label(value, lang))
     await show(target, _with_notice(screens.build_stickers(view, lang), notice=notice))
@@ -698,7 +727,7 @@ async def handle_chat_panel_tolerance_input(
         view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
         if view is None:
             await state.clear()
-            await _show_chats(message, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+            await _show_chats(message, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
             return
         sent = await show(message, screens.build_tolerance_input(view, lang, invalid=True))
         await state.update_data(tol_prompt_id=sent.message_id if sent is not None else None)
@@ -742,7 +771,7 @@ async def handle_chat_panel_tolerance_cancel(
         return
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     await _show_section(callback, lang, view, "stickers")
 
@@ -812,7 +841,7 @@ async def _save_chance(
     )
     if view is None:
         logger.warning("Percentage write affected no chat_settings row", chat_id=chat_id, key=key)
-        await _show_chats(target, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(target, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     await _show_chance_home(target, lang, view, code, notice=screens.chance_set(code, pct, lang))
 
@@ -846,7 +875,7 @@ async def handle_chat_panel_chance_prompt(
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
         await _close_chance_prompt(state)
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     if code is None:
         await _close_chance_prompt(state)
@@ -935,7 +964,7 @@ async def handle_chat_panel_chance_input(
         view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
         if view is None:
             await state.clear()
-            await _show_chats(message, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+            await _show_chats(message, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
             return
         sent = await show(message, screens.build_chance_input(view, code, lang, invalid=pct))
         await state.update_data(pct_prompt_id=sent.message_id if sent is not None else None)
@@ -980,7 +1009,7 @@ async def handle_chat_panel_chance_cancel(
         return
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     await _show_chance_home(callback, lang, view, code, notice=None)
 
@@ -1007,7 +1036,7 @@ async def handle_chat_panel_language_prompt(
         return
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
     if view is None:
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     await show(callback, screens.build_language_prompt(view, lang))
 
@@ -1045,7 +1074,7 @@ async def handle_chat_panel_language_set(
     )
     if view is None:
         logger.warning("Language write affected no chat_settings row", chat_id=chat_id)
-        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang))
         return
     notice = screens.language_set(code, lang)
     await show(callback, _with_notice(screens.build_behavior(view, lang), notice=notice))
@@ -1153,9 +1182,9 @@ async def _sp_draft_for(state: FSMContext, chat_id: int) -> tuple[dict[str, Any]
 async def _show_chat_gone(
     callback: CallbackQuery, lang: str, data: Mapping[str, Any], *, answered: bool
 ) -> None:
-    """The chat list under `_CHAT_GONE`: the editor's chat has no settings row."""
+    """The chat list under `CHAT_GONE`: the editor's chat has no settings row."""
     admin_repo = await resolve(data, AdminRepository)
-    await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang), answered=answered)
+    await _show_chats(callback, lang, 0, admin_repo, notice_raw=CHAT_GONE(lang), answered=answered)
 
 
 async def _show_behavior_with_notice(

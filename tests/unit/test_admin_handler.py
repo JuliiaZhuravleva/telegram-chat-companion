@@ -43,6 +43,7 @@ from src.bot.handlers.admin import (
     handle_wl_approve,
     handle_wl_delete,
     handle_wl_delete_ask,
+    handle_wl_on,
     handle_wl_pending,
     handle_wl_reject,
     handle_wl_rejected,
@@ -232,6 +233,7 @@ class TestFilters:
             ("adm_lang_set:ru:en", "admin.handle_language_set"),
             ("adm_wl_rm_ask:ru:-1009999999999:0", "admin.handle_wl_remove_ask"),
             ("adm_wl_rm:ru:-1009999999999:0", "admin.handle_wl_remove"),
+            ("adm_wl_on:ru:-1009999999999:0", "admin.handle_wl_on"),
             ("adm_wl_del_ask:ru:99999:0", "admin.handle_wl_delete_ask"),
             ("adm_wl_del:ru:99999:0", "admin.handle_wl_delete"),
             ("adm_health:ru:now", "admin.handle_health"),
@@ -347,8 +349,8 @@ class TestHub:
         response_log.get_total_cost.assert_awaited_once_with(timedelta(hours=24))
         admin_repo.count_attempts.assert_awaited_once_with("pending")
         checker.run_check_now.assert_not_awaited()
-        assert _markup(cb).inline_keyboard[0][0].text == "🗂 Чаты · 2 запроса доступа"
-        assert payloads[0] == "adm_pnl:ru:0"
+        assert [b.text for b in _markup(cb).inline_keyboard[0]] == ["🗂 Чаты", "🙏 Запросы · 2"]
+        assert payloads[:2] == ["adm_pnl:ru:0", "adm_wl_pending:ru:0"]
 
     @pytest.mark.asyncio
     async def test_show_hub_without_its_data_still_opens(self):
@@ -371,45 +373,57 @@ class TestHubRows:
             (
                 "ru",
                 [
-                    "🗂 Чаты · 1 запрос доступа",
-                    "📦 Паки стикеров",
-                    "📊 Состояние",
-                    "⚙️ Общие настройки",
-                    "✖️ Закрыть",
+                    ["🗂 Чаты", "🙏 Запросы · 1"],
+                    ["📦 Паки стикеров"],
+                    ["📊 Состояние"],
+                    ["⚙️ Общие настройки"],
+                    ["✖️ Закрыть"],
                 ],
             ),
             (
                 "en",
                 [
-                    "🗂 Chats · 1 access request",
-                    "📦 Sticker packs",
-                    "📊 Status",
-                    "⚙️ General settings",
-                    "✖️ Close",
+                    ["🗂 Chats", "🙏 Requests · 1"],
+                    ["📦 Sticker packs"],
+                    ["📊 Status"],
+                    ["⚙️ General settings"],
+                    ["✖️ Close"],
                 ],
             ),
         ],
     )
-    def test_rows(self, lang: str, labels: list[str]):
+    def test_rows(self, lang: str, labels: list[list[str]]):
+        """Waiting requests are one tap from the hub, beside the chats, not a count on them."""
         screen = build_hub(lang, health={"status": "healthy"}, spend=Decimal("0.04"), pending=1)
 
-        assert [row[0].label for row in screen.rows] == labels
-        assert all(len(row) == 1 for row in screen.rows)
-        assert [row[0].callback for row in screen.rows] == [
-            f"adm_pnl:{lang}:0",
-            f"adm_stk_sets:{lang}:0",
-            f"adm_health:{lang}",
-            f"adm_settings:{lang}",
-            f"adm_close:{lang}",
+        assert [[b.label for b in row] for row in screen.rows] == labels
+        assert [[b.callback for b in row] for row in screen.rows] == [
+            [f"adm_pnl:{lang}:0", f"adm_wl_pending:{lang}:0"],
+            [f"adm_stk_sets:{lang}:0"],
+            [f"adm_health:{lang}"],
+            [f"adm_settings:{lang}"],
+            [f"adm_close:{lang}"],
         ]
         assert screen.rows[-1][0].kind == "exit"
 
-    def test_no_requests_drops_the_count(self):
+    def test_no_requests_no_requests_button(self):
         screen = build_hub("ru", health=None, spend=Decimal(0), pending=0)
 
-        assert screen.rows[0][0].label == "🗂 Чаты"
+        assert [[b.label for b in row] for row in screen.rows] == [
+            ["🗂 Чаты"],
+            ["📦 Паки стикеров"],
+            ["📊 Состояние"],
+            ["⚙️ Общие настройки"],
+            ["✖️ Закрыть"],
+        ]
         assert "Проверок пока не было" in screen.text
         assert "$0.00" in screen.text
+
+    def test_many_requests_keep_their_number_whole(self):
+        """Three digits still fit half a row (R10 measures it on the ``hub_many`` sample)."""
+        screen = build_hub("ru", health=None, spend=Decimal(0), pending=120)
+
+        assert [b.label for b in screen.rows[0]] == ["🗂 Чаты", "🙏 Запросы · 120"]
 
     def test_sub_cent_spend_keeps_four_places(self):
         assert "$0.0031" in build_hub("en", spend=Decimal("0.0031")).text
@@ -647,6 +661,39 @@ class TestRejected:
         assert _edited(cb)[0].startswith("<i>✓ Запрос возвращён</i>")
 
     @pytest.mark.asyncio
+    async def test_after_a_restore_the_requests_are_one_tap_away(self):
+        """Approving the restored chat is the step the admin came for: the list
+        that holds it is the first row, counted after the write."""
+        cb = _make_callback(f"adm_wl_restore:ru:{ATTEMPT_ID}:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_attempt = AsyncMock(return_value=_attempt(status="rejected"))
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([_attempt()], 2))
+        admin_repo.count_attempts = AsyncMock(return_value=3)
+
+        await handle_wl_restore(cb, admin_repo)
+
+        assert admin_repo.method_calls.index(
+            call.update_attempt_status(ATTEMPT_ID, "pending")
+        ) < admin_repo.method_calls.index(call.count_attempts("pending"))
+        markup = _markup(cb)
+        assert markup is not None
+        first = markup.inline_keyboard[0]
+        assert [b.text for b in first] == ["🙏 Запросы доступа · 3"]
+        assert first[0].callback_data == "adm_wl_pending:ru:0"
+
+    @pytest.mark.asyncio
+    async def test_the_rejected_list_opened_plainly_has_no_requests_row(self):
+        """Control: the row belongs to the render after a restore, not to the list."""
+        cb = _make_callback("adm_wl_rejected:ru:0")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_rejected_attempts_page = AsyncMock(return_value=([_attempt()], 2))
+        admin_repo.count_attempts = AsyncMock(return_value=3)
+
+        await handle_wl_rejected(cb, admin_repo)
+
+        assert not [p for p in _edited(cb)[1] if p.startswith("adm_wl_pending:")]
+
+    @pytest.mark.asyncio
     async def test_restore_of_a_request_no_longer_rejected_writes_nothing(self):
         cb = _make_callback(f"adm_wl_restore:ru:{ATTEMPT_ID}:0")
         admin_repo = _make_admin_repo()
@@ -717,20 +764,88 @@ class TestRejected:
 # ---------------------------------------------------------------------------
 
 
+def _rejected_before(value: bool) -> AsyncMock:
+    repo = AsyncMock()
+    repo.has_rejected_attempt = AsyncMock(return_value=value)
+    return repo
+
+
+def _bot_config(*admin_ids: int) -> AsyncMock:
+    """`BotConfigRepository` whose ``admin_ids`` are these (the JSON-array form)."""
+    repo = AsyncMock()
+    repo.get = AsyncMock(return_value=list(admin_ids))
+    return repo
+
+
+def _settings(row: dict[str, Any] | None, *, written: bool = True) -> AsyncMock:
+    repo = AsyncMock()
+    repo.get = AsyncMock(return_value=row)
+    repo.set_field = AsyncMock(return_value=written)
+    return repo
+
+
+_ON = {"chat_title": "Test Chat", "chat_type": "supergroup", "enabled": True}
+
+
 class TestTurnOff:
     @pytest.mark.asyncio
     async def test_asks_first_and_writes_nothing(self):
         cb = _make_callback(f"adm_wl_rm_ask:ru:{CHAT_ID}:2")
         chat_settings_repo = AsyncMock()
-        chat_settings_repo.get = AsyncMock(return_value={"chat_title": "Test Chat"})
+        chat_settings_repo.get = AsyncMock(
+            return_value={"chat_title": "Test Chat", "chat_type": "supergroup"}
+        )
+        admin_repo = _rejected_before(False)
 
-        await handle_wl_remove_ask(cb, chat_settings_repo)
+        await handle_wl_remove_ask(cb, chat_settings_repo, admin_repo, _bot_config())
 
         text, payloads = _edited(cb)
-        assert "Отключить бота здесь?" in text
-        assert "Test Chat" in text
+        assert text.splitlines()[2:] == [
+            "<b>Test Chat</b>",
+            "Бот перестанет отвечать, и чат уйдёт из «🗂 Чаты». Настройки сохранятся.",
+            "Вернуть сразу — «↩️ Вернуть» в списке.",
+            "Позже — когда в чате напишут, появится запрос доступа (не чаще раза в полчаса): "
+            "одобрите его.",
+        ]
         assert payloads == [f"adm_wl_rm:ru:{CHAT_ID}:2", f"adm_pnl_menu:ru:{CHAT_ID}"]
+        admin_repo.has_rejected_attempt.assert_awaited_once_with(CHAT_ID)
         chat_settings_repo.set_field.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_chat_rejected_before_is_told_it_will_not_ask_again(self):
+        """An old rejection outlives the approval that enabled the chat: once off,
+        the gate's `has_rejected_attempt` swallows every request, so the screen
+        must not promise one."""
+        cb = _make_callback(f"adm_wl_rm_ask:ru:{CHAT_ID}:0")
+        chat_settings_repo = AsyncMock()
+        chat_settings_repo.get = AsyncMock(
+            return_value={"chat_title": "Test Chat", "chat_type": "supergroup"}
+        )
+
+        await handle_wl_remove_ask(cb, chat_settings_repo, _rejected_before(True), _bot_config())
+
+        text = _edited(cb)[0]
+        assert text.splitlines()[-1] == (
+            "Позже чат сам не попросит: его уже отклоняли. "
+            "Верните его из «🚫 Отклонённые» в запросы и одобрите."
+        )
+        assert "появится запрос доступа" not in text
+
+    @pytest.mark.asyncio
+    async def test_a_channel_is_told_to_add_the_bot_again(self):
+        """Channel posts never reach the access gate: only adding the bot files a request."""
+        cb = _make_callback(f"adm_wl_rm_ask:en:{CHAT_ID}:0")
+        chat_settings_repo = AsyncMock()
+        chat_settings_repo.get = AsyncMock(
+            return_value={"chat_title": "Test Channel", "chat_type": "channel"}
+        )
+
+        await handle_wl_remove_ask(cb, chat_settings_repo, _rejected_before(False), _bot_config())
+
+        assert _edited(cb)[0].splitlines()[-1] == (
+            "Later: remove the bot from the channel and add it again; an access request "
+            "appears (at most once per half hour): approve it."
+        )
 
     @pytest.mark.asyncio
     async def test_ask_without_a_title_names_the_id(self):
@@ -738,36 +853,139 @@ class TestTurnOff:
         chat_settings_repo = AsyncMock()
         chat_settings_repo.get = AsyncMock(return_value=None)
 
-        await handle_wl_remove_ask(cb, chat_settings_repo)
+        await handle_wl_remove_ask(cb, chat_settings_repo, _rejected_before(False), _bot_config())
 
         assert f"<code>{CHAT_ID}</code>" in _edited(cb)[0]
 
     @pytest.mark.asyncio
+    async def test_an_admins_own_private_chat_is_asked_honestly(self):
+        """`AccessControlMiddleware` answers an admin's DM whatever ``enabled``
+        says, and a DM files no request: neither ordinary line holds there."""
+        cb = _make_callback(f"adm_wl_rm_ask:ru:{USER_ID}:0")
+        row = {"chat_title": "Админ", "chat_type": "private", "enabled": True}
+        bot_config = _bot_config(USER_ID)
+
+        await handle_wl_remove_ask(cb, _settings(row), _rejected_before(False), bot_config)
+
+        lines = _edited(cb)[0].splitlines()
+        assert lines[0] == "🔌 <b>Отключить этот чат?</b>"
+        assert lines[3] == (
+            "Это личный чат администратора: здесь бот отвечает всегда, включён чат или нет. "
+            "Отключение только уберёт его из «🗂 Чаты»; настройки сохранятся."
+        )
+        assert lines[-1] == "Позже запроса не будет: из личного чата администратора он не приходит."
+        bot_config.get.assert_awaited_once_with("admin_ids")
+
+    @pytest.mark.asyncio
+    async def test_a_private_chat_of_a_non_admin_is_asked_as_any_chat(self):
+        """Positive control: the same private row, its id not among the admins."""
+        cb = _make_callback(f"adm_wl_rm_ask:ru:{USER_ID}:0")
+        row = {"chat_title": "Кто-то", "chat_type": "private", "enabled": True}
+
+        await handle_wl_remove_ask(cb, _settings(row), _rejected_before(False), _bot_config(1))
+
+        assert _edited(cb)[0].splitlines()[0] == "🔌 <b>Отключить бота здесь?</b>"
+        assert "Бот перестанет отвечать" in _edited(cb)[0]
+
+    @pytest.mark.asyncio
+    async def test_a_chat_already_off_is_told_so_with_no_turn_off_button(self):
+        cb = _make_callback(f"adm_wl_rm_ask:ru:{CHAT_ID}:2")
+
+        await handle_wl_remove_ask(
+            cb, _settings({**_ON, "enabled": False}), _rejected_before(False), _bot_config()
+        )
+
+        text, payloads = _edited(cb)
+        assert text.splitlines()[0] == "🔌 <b>Бот здесь уже отключён</b>"
+        assert "Вернуть сразу" not in text
+        assert payloads == [f"adm_pnl_menu:ru:{CHAT_ID}"]
+
+    @pytest.mark.asyncio
     async def test_turns_off_and_shows_the_chat_list(self):
         cb = _make_callback(f"adm_wl_rm:ru:{CHAT_ID}:2")
-        chat_settings_repo = AsyncMock()
-        chat_settings_repo.get = AsyncMock(return_value={"chat_title": "Test Chat"})
+        chat_settings_repo = _settings(_ON)
         service = MagicMock()
         data = {"dishka_container": _Container({ChatConfigService: service})}
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo, **data)
+            await handle_wl_remove(cb, chat_settings_repo, _bot_config(), **data)
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "enabled", False)
         service.invalidate.assert_called_once_with(CHAT_ID)
         chats.assert_awaited_once_with(
-            cb, "ru", 2, notice="Бот отключён в чате «Test Chat»", data=data
+            cb, "ru", 2, notice="Бот отключён в чате «Test Chat»", undo=CHAT_ID, data=data
         )
+
+    @pytest.mark.asyncio
+    async def test_a_chat_already_off_is_not_turned_off_again_and_offers_no_undo(self):
+        """An old ask screen tapped after another admin turned the chat off:
+        «↩️ Вернуть» here would turn ON a chat that was off before the tap."""
+        cb = _make_callback(f"adm_wl_rm:ru:{CHAT_ID}:1")
+        chat_settings_repo = _settings({**_ON, "chat_title": "A & B", "enabled": False})
+        service = MagicMock()
+        data = {"dishka_container": _Container({ChatConfigService: service})}
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_remove(cb, chat_settings_repo, _bot_config(), **data)
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        service.invalidate.assert_not_called()
+        chats.assert_awaited_once_with(
+            cb,
+            "ru",
+            1,
+            notice_raw="<i>Бот в чате «A &amp; B» уже был отключён, ничего не изменилось.</i>",
+            data=data,
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_admins_own_private_chat_is_not_reported_silent(self):
+        cb = _make_callback(f"adm_wl_rm:ru:{USER_ID}:0")
+        row = {"chat_title": "Админ", "chat_type": "private", "enabled": True}
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_remove(cb, _settings(row), _bot_config(USER_ID))
+
+        assert chats.call_args.kwargs["notice"] == (
+            "Чат «Админ» убран из «🗂 Чаты», бот отвечает в нём, как раньше"
+        )
+        assert chats.call_args.kwargs["undo"] == USER_ID
+
+    @pytest.mark.asyncio
+    async def test_a_chat_without_settings_is_not_reported_off(self):
+        """No row: nothing to turn off, so no write and nothing to undo."""
+        cb = _make_callback(f"adm_wl_rm:ru:{CHAT_ID}:0")
+        chat_settings_repo = _settings(None, written=False)
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        assert chats.call_args.kwargs.get("undo") is None
+        assert "notice" not in chats.call_args.kwargs
+        assert chats.call_args.kwargs["notice_raw"].startswith("<i>Этого чата нет в настройках")
+
+    @pytest.mark.asyncio
+    async def test_a_row_gone_between_the_read_and_the_write_is_not_reported_off(self):
+        """``set_field`` matched no row after the read found one."""
+        cb = _make_callback(f"adm_wl_rm:ru:{CHAT_ID}:0")
+        chat_settings_repo = _settings(_ON, written=False)
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
+
+        chat_settings_repo.set_field.assert_awaited_once()
+        assert chats.call_args.kwargs.get("undo") is None
+        assert chats.call_args.kwargs["notice_raw"].startswith("<i>Этого чата нет в настройках")
 
     @pytest.mark.asyncio
     async def test_turn_off_without_a_container_still_completes(self):
         """`invalidate` is defensive (the cache is request-scoped): its absence is no error."""
         cb = _make_callback(f"adm_wl_rm:en:{CHAT_ID}:0")
-        chat_settings_repo = AsyncMock()
-        chat_settings_repo.get = AsyncMock(return_value=None)
+        chat_settings_repo = _settings({"chat_type": "supergroup", "enabled": True})
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo)
+            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
 
         chat_settings_repo.set_field.assert_awaited_once()
         assert chats.call_args.kwargs["notice"] == f"The bot is off in «{CHAT_ID}»"
@@ -778,9 +996,72 @@ class TestTurnOff:
         chat_settings_repo = AsyncMock()
 
         with patch.object(A, "show_stale", new=AsyncMock()) as stale:
-            await handle_wl_remove(cb, chat_settings_repo)
+            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
 
         stale.assert_awaited_once()
+        chat_settings_repo.set_field.assert_not_awaited()
+
+
+class TestTurnBackOn:
+    """``adm_wl_on:`` — «↩️ Вернуть» after a turn-off."""
+
+    @pytest.mark.asyncio
+    async def test_turns_on_and_shows_the_list_without_an_undo(self):
+        cb = _make_callback(f"adm_wl_on:ru:{CHAT_ID}:1")
+        chat_settings_repo = AsyncMock()
+        chat_settings_repo.get = AsyncMock(
+            return_value={"chat_title": "Test Chat", "enabled": False}
+        )
+        service = MagicMock()
+        data = {"dishka_container": _Container({ChatConfigService: service})}
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_on(cb, chat_settings_repo, **data)
+
+        chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "enabled", True)
+        service.invalidate.assert_called_once_with(CHAT_ID)
+        chats.assert_awaited_once_with(
+            cb, "ru", 1, notice="Бот снова работает в чате «Test Chat»", data=data
+        )
+
+    @pytest.mark.asyncio
+    async def test_already_on_writes_nothing_and_says_the_same(self):
+        cb = _make_callback(f"adm_wl_on:en:{CHAT_ID}:0")
+        chat_settings_repo = AsyncMock()
+        chat_settings_repo.get = AsyncMock(return_value={"chat_title": None, "enabled": True})
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_on(cb, chat_settings_repo)
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        assert chats.call_args.kwargs["notice"] == f"The bot is back on in «{CHAT_ID}»"
+        assert "undo" not in chats.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_a_chat_without_settings_says_so(self):
+        cb = _make_callback(f"adm_wl_on:ru:{CHAT_ID}:0")
+        chat_settings_repo = AsyncMock()
+        chat_settings_repo.get = AsyncMock(return_value=None)
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_on(cb, chat_settings_repo)
+
+        chat_settings_repo.set_field.assert_not_awaited()
+        assert chats.call_args.kwargs["notice_raw"].startswith("<i>Этого чата нет в настройках")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "payload", ["adm_wl_on:ru:not-a-chat:0", "adm_wl_on:ru:-100", "adm_wl_on:ru"]
+    )
+    async def test_garbled_payload_is_stale_and_writes_nothing(self, payload: str):
+        cb = _make_callback(payload)
+        chat_settings_repo = AsyncMock()
+
+        with patch.object(A, "show_stale", new=AsyncMock()) as stale:
+            await handle_wl_on(cb, chat_settings_repo)
+
+        stale.assert_awaited_once()
+        chat_settings_repo.get.assert_not_awaited()
         chat_settings_repo.set_field.assert_not_awaited()
 
 

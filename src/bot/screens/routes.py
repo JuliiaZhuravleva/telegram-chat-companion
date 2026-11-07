@@ -104,6 +104,7 @@ ROUTES: Final[dict[str, Route]] = {
     "adm_pnl_spx:": Route("behavior", "kept"),
     "adm_wl_rm_ask:": Route("chat.off_ask", "kept"),
     "adm_wl_rm:": Route("chats", "kept"),
+    "adm_wl_on:": Route("chats", "new"),
     # ── requests, rejected, the access card ──
     "adm_wl_pending:": Route("requests", "kept"),
     "adm_wl_apr:": Route("chat", "kept"),
