@@ -133,6 +133,8 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `adm_defs:` / `adm_defs_sec:` / `adm_defs_tgl:` | `lang:0` / `lang:section` / `lang:code` | the seven sections for all chats / one section / toggle, then that section again |
 | `adm_kb:` / `adm_kb_menu:` / `adm_kb_toggle:` | — | retired: the KB picker and menu are gone, the switch lives in the chat's memory section |
 | `adm_kb_orgs:` / `adm_kb_org_rm:` / `adm_kb_org_undo:` | `lang:chat_id:page` / `lang:chat_id:user_id` / `lang:chat_id:user_id:position` | organizer list / remove at once / put back at `position` |
+| `adm_kb_org:` | `lang:chat_id:user_id` | one organizer's card (`org.card`); writes nothing. The list's name buttons carry it: until 2026-11 they carried `adm_kb_org_rm:`, which still removes |
+| `adm_kb_org_inv:` / `adm_kb_org_dm:` | `lang:chat_id:user_id` | make a one-person, seven-day invite link and show it (`org.invite`) / make another and send it to the person from the bot. Both re-check that the person is an organizer and not in the chat |
 | `adm_kb_org_list:` / `adm_kb_org_pick:` | `lang:chat_id:page` / `lang:chat_id:user_id` | participant list / add the tapped one |
 | `adm_kb_org_add:` | `lang:chat_id` | add prompt (new message, reply keyboard). The failure answer's own `adm_kb_org_x:` is gone: its «Отмена» is the reply keyboard's, and an old button reaches the catch-all |
 | `adm_react:` / `adm_react_menu:` / `adm_react_toggle:` | — | retired: the reactions switches are a section of the chat screen (§A2.2) |
@@ -966,8 +968,8 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
 
 Files: [src/bot/handlers/admin_kb.py](../src/bot/handlers/admin_kb.py) (reads and writes
 `chat_settings.kb_organizer_ids`, picks the screen),
-[src/bot/screens/orgs.py](../src/bot/screens/orgs.py) (the four screens as data: `orgs`,
-`org.list`, `org.add`, `org.fail`),
+[src/bot/screens/orgs.py](../src/bot/screens/orgs.py) (the six screens as data: `orgs`,
+`org.card`, `org.invite`, `org.list`, `org.add`, `org.fail`),
 [src/bot/keyboards/admin_kb.py](../src/bot/keyboards/admin_kb.py) (only what the handlers
 match: the picker's `request_id` and the reply labels). The `/remember` and `/kb` keyboards
 are in `keyboards/kb.py`, outside the panel. The prompt's state is described in §F.5.
@@ -976,6 +978,54 @@ are in `keyboards/kb.py`, outside the panel. The prompt's state is described in 
   `adm_kb_org_undo:` with the person's former index as a fourth field, so `↩️ Вернуть` puts
   them back in place. A second undo, or an undo after someone re-added them, writes nothing.
   The page shown after either is derived from the index (`orgs.page_of`), not from the payload.
+- **A tap on a name opens the card and writes nothing** (`adm_kb_org:` →
+  `handle_kb_organizer_card`). Removing is a button on the card; the list's name buttons
+  removed at once until 2026-11, and old ones in chats still do (`adm_kb_org_rm:` unchanged).
+  `test_admin_org_card.py` takes the callback off the list the handler really draws, so
+  pointing it back at the removal fails a test (`set_field` awaited).
+- **Membership is one `getChatMember`** (`_seen`): `kicked` → `removed`; `left`, or a
+  `restricted` member with `is_member=False` → `left`; a `member not found` Bad Request →
+  `never_joined`; any other failure → `unknown`, logged. `left` covers someone who never
+  joined as well (Telegram does not tell them apart), hence the card's neutral «Сейчас не в
+  чате». The same call feeds the list's « · не в чате» and the card's name, `@username` and
+  `t.me` link (only for a name matching `orgs.USERNAME_RE`, `{4,32}` because collectible
+  usernames can be four characters; anything else gets no button). Only a username from
+  *this* answer reaches the card: when Telegram names nobody (`never_joined`, `unknown`)
+  `_names` takes the name from the store but leaves `_Name.username` empty, since a stored
+  username may have been freed and re-taken and `t.me/{it}` would open a stranger. The
+  stored `@nick` still serves as the list's and the title's name (`orgs.display_name`
+  prefers it) — a label, not a link. The mention `tg://user?id=` lives in the text, never in
+  a URL button: `BUTTON_USER_PRIVACY_RESTRICTED` would reject the whole message.
+- **The card's role line follows the state**: `CARD_ROLE` for `in_chat` and `unknown`,
+  `CARD_ROLE_OUTSIDE` («…сможет, когда будет в чате.») for `orgs.ABSENT`, because
+  `/remember` only works from inside the group.
+- **The «участник <id>» fallback keeps the id in `<code>`** (`orgs.title_name`) in the card
+  and invite titles, outside the `<b>` so lint R5's plain-text title still holds, and the
+  card drops `CARD_ID` as a repeat. A bare 9-11 digit number in a message is autolinked by
+  Telegram as a phone number.
+- **The invite only for `left` and `never_joined`** (`orgs.INVITABLE`). A banned person is
+  refused at the door, so the card says the ban must be lifted; `unknown` might be someone
+  already inside. `_invite` re-asks Telegram on every tap, so an old `✉️` button for someone
+  who joined, was banned or cannot be looked up lands on the card with a line and makes no
+  link. `createChatInviteLink` gets `member_limit=1`, `expire_date` now + 7 days and a name
+  clipped to 32 UTF-16 units (`orgs.invite_link_name`). A failure matching
+  `CHAT_ADMIN_REQUIRED` / `not enough rights` returns the card with `orgs.NO_INVITE_RIGHT`;
+  any other is logged and said (`LINK_FAILED`). Nothing is written in any case.
+- **`🤖 Отправить от бота` is always offered and makes a fresh link.** Nothing stored says
+  whether the person ever opened a private chat with the bot, which Telegram requires before a
+  bot may write first, so the refusal is answered on the invite screen (`DM_FORBIDDEN`, naming
+  both causes — no chat with the bot, or blocked — and pointing to `📤 Переслать`). A refusal
+  is `_cannot_write_first`: a 403 (`TelegramForbiddenError`), or a 400 matching
+  `chat not found` / `PEER_ID_INVALID`, which is what Telegram answers for someone the bot has
+  never met (the same text `src/bot/commands.py` handles for a per-admin scope). Any other
+  failure is logged and said (`DM_FAILED`). The link shown before is not revoked: it expires
+  on its own.
+- **The invite link is a credential and is never logged.** Log events carry `chat_id` and
+  `user_id`; a failure's text goes through `_error_text` — Telegram's description or the class
+  name, the link in hand replaced by value and any invite-link shape by regex — and no
+  `exc_info` (structlog's `dict_tracebacks` renders frame locals, which hold the link). The
+  test captures every log entry over the made, sent, 403 and failed paths and checks none
+  carries a link, with a failure text that does quote one as the control.
 - **Names are looked up per page.** `_names` asks Telegram only for the people on the page
   being drawn, concurrently (`asyncio.gather` over `resolve_display_name`); a name already
   known from the event (a pick, a forward) is not asked again. A failed lookup falls back to

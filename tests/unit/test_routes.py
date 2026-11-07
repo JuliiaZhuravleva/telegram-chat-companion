@@ -116,6 +116,9 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "ar_b_rx:": (LANG, CID, ARG16),
     "ar_cfg:": (LANG, CID),
     "adm_kb_orgs:": (LANG, CID, PAGE),
+    "adm_kb_org:": (LANG, CID, UID),
+    "adm_kb_org_inv:": (LANG, CID, UID),
+    "adm_kb_org_dm:": (LANG, CID, UID),
     "adm_kb_org_rm:": (LANG, CID, UID),
     # The removed person's place in the list: nothing caps the list, so the
     # widest integer the other ids use.

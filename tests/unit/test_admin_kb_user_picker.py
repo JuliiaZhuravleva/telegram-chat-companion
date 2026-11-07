@@ -152,7 +152,7 @@ class TestAPickAddsTheOrganizer:
         assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
         assert isinstance(sends[1].reply_markup, InlineKeyboardMarkup)  # type: ignore[attr-defined]
         labels = [b.text for row in sends[1].reply_markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
-        assert "✖️ @anya" in labels, labels
+        assert "👤 @anya" in labels, labels
         assert await state.get_state() is None
 
     async def test_someone_outside_the_chat_is_added_with_a_warning(self) -> None:
@@ -220,7 +220,7 @@ class TestSomeoneNeverInTheGroup:
             "✓ @anya теперь организатор.\n⚠️ Сейчас этого человека в чате нет."
         )
         labels = [b.text for row in sends[1].reply_markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
-        assert labels[0] == "✖️ @anya · не в чате", labels
+        assert labels[0] == "👤 @anya · не в чате", labels
         assert "участник" not in sends[1].text  # type: ignore[attr-defined]
         assert store.remembered == [
             (GROUP_ID, PICKED_ID, {"first_name": "Аня", "last_name": "Ким", "username": "anya"})

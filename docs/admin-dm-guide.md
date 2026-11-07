@@ -460,10 +460,54 @@ chat picker any more.
 Facts saved by an organizer carry a lower authority than facts saved by a bot admin, which is
 what decides who wins when two facts contradict.
 
-The screen lists them three per page, each as **✖️ {name}**. A tap removes that person at
-once — no confirmation — and the screen answers «✓ {name} больше не организатор» with
-**↩️ Вернуть**, which puts them back where they were in the list. The page you were on is
-kept. An empty list says so, and that bot admins can always save facts.
+The screen lists them three per page, each as **👤 {name}**; someone Telegram says is not in
+the group carries « · не в чате», explained in a line under the list. A tap on a name opens
+that person's card and changes nothing. (Until 2026-11 the same tap removed the person at
+once, which is the mistake the card exists to prevent.) An empty list says so, and that bot
+admins can always save facts.
+
+**The card** («👤 {name} · {chat}») shows a mention of the person that opens their profile,
+their `@username` when Telegram gives one right now, the id, what Telegram says about them
+right now (one `getChatMember`: in the chat, not in the chat, never joined, removed and
+banned, or «Telegram не ответил») and what an organizer can do — for someone outside the
+group, as something they can do once inside («Сохранять факты командой /remember сможет,
+когда будет в чате.»). When no name was ever known, the title reads «участник» with the id
+in a copyable code span instead of a bare number (Telegram would turn that into a dead phone
+link), and the separate ID line is left out. Its buttons, at most four plus the way back:
+
+- **👤 Профиль** opens `t.me/{username}`; only for a valid username (4 to 32 letters, digits
+  or `_`) that Telegram gave just now. A username the bot remembered from earlier gets no
+  button and no `@username` beside the mention: it may since have been freed and taken by
+  someone else.
+- **✉️ Пригласить в чат**, only for someone who is not in the chat or never joined. A banned
+  person gets a line instead: a link will not let them in until the ban is lifted in the
+  group's settings. When Telegram did not answer, there is no invite either: the person may
+  well be inside.
+- **✖️ Убрать из организаторов** removes at once — no confirmation — and returns to the list
+  with «✓ {name} больше не организатор» and **↩️ Вернуть**, which puts them back where they
+  were.
+- **⬅️ Организаторы** goes back to the page the person is on.
+
+**The invite** («✉️ Приглашение · {name}») makes a fresh link for one person, valid for seven
+days, and shows it in a copyable line. It is named «Организатор · {name}» (cut to Telegram's 32
+characters), so the group's own list of invite links says what it was for.
+
+- **📤 Переслать** opens Telegram's share sheet with the link: the admin sends it to the
+  person from their own account, which always works.
+- **🤖 Отправить от бота** makes another fresh link and sends it to the person as a private
+  message from the bot, with the chat's name. Telegram lets a bot write first only to someone
+  who has opened a private chat with it and not blocked it; otherwise (including someone the
+  bot has never met) the screen says the bot cannot write first, names both causes, and
+  points to **📤 Переслать** — the link shown still works. Any other failure says Telegram
+  did not deliver it, and the link shown still works.
+- **⬅️ Организатор** goes back to the card.
+
+When the bot has no right to invite members (it is not a group admin, or lacks «Пригласительные
+ссылки»), the card comes back with a line saying that right is granted in the group's
+administrator settings and nothing else changed. The invite re-checks the person each time:
+if they joined meanwhile, the card says they are already in the chat and no link is made. A
+card or invite for someone removed from the organizers meanwhile returns to the list with
+«Этого человека уже нет среди организаторов.»
 
 **➕ Добавить** opens the chat's participants, four per page, most active first — the path
 that needs nothing from the admin's contacts. People already on the list carry **✓**; a tap
