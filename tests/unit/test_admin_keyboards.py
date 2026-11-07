@@ -134,8 +134,8 @@ class TestRequests:
         assert not any(p.startswith("adm_wl_pending:") for p in payloads)
 
     def test_the_count_is_one_based(self):
-        assert "Заявка 3 из 5" in requests_screen("ru", _attempt(), 2, 5).text
-        assert "Request 1 of 1" in requests_screen("en", _attempt(), 0, 1).text
+        assert "Запрос доступа 3 из 5" in requests_screen("ru", _attempt(), 2, 5).text
+        assert "Access request 1 of 1" in requests_screen("en", _attempt(), 0, 1).text
 
     def test_empty_is_only_back(self):
         assert _payloads(requests_screen("en", None, 0, 0)) == ["adm_pnl:en:0"]

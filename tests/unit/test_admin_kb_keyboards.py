@@ -122,17 +122,25 @@ class TestOrgsScreen:
             [("✖️ Аня", f"adm_kb_org_rm:ru:{CHAT_ID}:111")],
             [("✖️ Борис", f"adm_kb_org_rm:ru:{CHAT_ID}:222")],
             [("➕ Добавить", f"adm_kb_org_list:ru:{CHAT_ID}:0")],
-            [("⬅️ Память", f"adm_pnl_grp:ru:{CHAT_ID}:memory")],
+            [("⬅️ Чат", f"adm_pnl_menu:ru:{CHAT_ID}")],
         ]
         assert screen.text.startswith("👥 <b>Организаторы</b> · Чат\n\n")
-        assert "Нажатие на имя убирает человека." in screen.text
+
+    def test_the_line_says_a_tap_removes_at_once_and_undo_follows(self) -> None:
+        """Every reader was nervous about the tap and nobody knew ↩️ Вернуть
+        exists: it appears only after the tap, so the screen says so before."""
+        for lang in ("ru", "en"):
+            text = orgs.orgs_screen(lang, CHAT_ID, "Чат", PEOPLE).text
+            assert f"«{orgs.UNDO(lang)}»" in text, text
+        ru = orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE).text
+        assert "Нажатие на имя сразу убирает человека" in ru
 
     def test_empty_says_who_can_save_facts_anyway(self) -> None:
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", [])
 
         assert screen.text.endswith("Пока никого. Админы бота могут сохранять факты всегда.")
         assert "Нажатие на имя" not in screen.text
-        assert _labels(screen) == ["➕ Добавить", "⬅️ Память"]
+        assert _labels(screen) == ["➕ Добавить", "⬅️ Чат"]
 
     def test_undo_shares_the_add_row_and_carries_the_position(self) -> None:
         screen = orgs.orgs_screen(
@@ -178,6 +186,14 @@ class TestOrgsScreen:
         english = orgs.orgs_screen("en", CHAT_ID, "Chat", PEOPLE, absent={222})
         assert _labels(english)[1] == "✖️ Борис · not in chat"
 
+    def test_the_mark_is_explained_only_while_the_page_shows_it(self) -> None:
+        """All four readers guessed what «не в чате» means; the task "remove
+        the organizer who left" turns on it."""
+        line = orgs.ORGS_ABSENT("ru")
+        assert line in orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE, absent={222}).text
+        assert line not in orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE).text
+        assert line not in orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE, absent={999}).text
+
     def test_a_long_name_is_clipped_and_the_mark_survives(self) -> None:
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", [(1, "Ж" * 60)], absent={1})
 
@@ -198,7 +214,7 @@ class TestOrgsScreen:
         screen = orgs.orgs_screen("en", CHAT_ID, "Chat", PEOPLE, undo=(333, 0))
 
         assert screen.text.startswith("👥 <b>Organizers</b> · Chat")
-        assert _labels(screen)[-3:] == ["↩️ Undo", "➕ Add", "⬅️ Memory"]
+        assert _labels(screen)[-3:] == ["↩️ Undo", "➕ Add", "⬅️ Chat"]
         assert all(":en:" in cb for cb in _callbacks(screen))
 
 

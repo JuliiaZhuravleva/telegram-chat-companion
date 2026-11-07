@@ -65,8 +65,8 @@ _CHAT_SETTINGS: Final = Tr("⚙️ Настройки чата", "⚙️ Chat se
 _REJECTED_LIST: Final = Tr("🚫 Отклонённые", "🚫 Rejected")
 APPROVED: Final = Tr("Одобрено", "Approved")
 REJECTED: Final = Tr(
-    "Отклонено. Бот молчит в этом чате и больше не пришлёт от него заявок.",
-    "Rejected. The bot stays silent in this chat and sends no more requests from it.",
+    "Отклонено. Бот молчит в этом чате и больше не пришлёт от него запросов доступа.",
+    "Rejected. The bot stays silent in this chat and sends no more access requests from it.",
 )
 
 

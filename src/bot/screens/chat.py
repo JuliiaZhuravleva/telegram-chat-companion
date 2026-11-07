@@ -12,9 +12,6 @@ called the same on both (tested). ``FieldSpec.label`` is not shown on either.
 
 ``· общее`` next to a toggle is driven by `sections.shows_common` and nothing
 else — a legacy column always holds the chat's own value, so it never says it.
-One placement differs: the knowledge base shares its row with the organizers
-button, and «База знаний · общее» does not fit half a phone row, so the memory
-section says the inherited value in its footnote instead of on the button.
 """
 
 from __future__ import annotations
@@ -140,15 +137,18 @@ TOLERANCE_INVALID = Tr(
 )
 
 _CHATS_TITLE = Tr("🗂 <b>Чаты</b>", "🗂 <b>Chats</b>")
+_CHATS_COUNT = Tr("Подключено: {n}", "Connected: {n}")
+_CHATS_SHOWN = Tr(", показаны {first}–{last}", ", showing {first}–{last}")
+_CHATS_SHOWN_ONE = Tr(", показан {first}-й", ", showing no. {first}")
 _CHATS_BODY = Tr(
-    "Подключено: {n}. Рядом с названием — сообщений за сутки.",
-    "Connected: {n}. Next to each name: messages in 24 h.",
+    "{count}. Рядом с названием — сообщений за сутки.",
+    "{count}. Next to each name: messages in 24 h.",
 )
 _CHATS_EMPTY = Tr(
-    "Пока ни одного чата. Добавьте бота в группу, сюда придёт заявка.",
-    "No chats yet. Add the bot to a group and its request will show up here.",
+    "Пока ни одного чата. Добавьте бота в группу, сюда придёт запрос доступа.",
+    "No chats yet. Add the bot to a group and its access request will show up here.",
 )
-_REQUESTS = Tr("🙏 Заявки · {n}", "🙏 Requests · {n}")
+_REQUESTS = Tr("🙏 Запросы доступа · {n}", "🙏 Access requests · {n}")
 _REJECTED = Tr("🚫 Отклонённые · {n}", "🚫 Rejected · {n}")
 
 _FIND_TITLE = Tr("🔎 <b>Поиск чата</b>", "🔎 <b>Find a chat</b>")
@@ -177,7 +177,7 @@ _SUMMARY: Final[tuple[tuple[str, Tr], ...]] = (
 )
 _OPEN_CHAT = Tr("Открыть чат", "Open the chat")
 _RULES = Tr("📏 Правила · {n}", "📏 Rules · {n}")
-_DISCONNECT = Tr("🔌 Отключить", "🔌 Disconnect")
+_DISCONNECT = Tr("🔌 Отключить бота", "🔌 Turn the bot off")
 
 SECTION_TITLES: Final[dict[Section, Tr]] = {
     "behavior": Tr("🗣 Поведение", "🗣 Behavior"),
@@ -185,7 +185,7 @@ SECTION_TITLES: Final[dict[Section, Tr]] = {
     "voice": Tr("🎙 Голос и фото", "🎙 Voice and photos"),
     "stickers": Tr("🎨 Стикеры", "🎨 Stickers"),
     "reactions": Tr("😀 Реакции", "😀 Reactions"),
-    "community": Tr("👋 Сообщество", "👋 Community"),
+    "community": Tr("👋 Новички и уходы", "👋 Joining and leaving"),
 }
 """Section name on the chat root's button and, emoji kept, in its screen's title."""
 
@@ -218,14 +218,6 @@ _ORGANIZERS = Tr("👥 Организаторы · {n}", "👥 Organizers · {n}
 _KB_LINE = Tr(
     "База знаний — факты о чате, которые админы бота и организаторы записывают через /remember.",
     "Knowledge base: facts about the chat that the bot's admins and organizers save with /remember.",
-)
-_KB_COMMON_ON = Tr(
-    "База знаний включена в общих настройках.",
-    "The knowledge base is on in the settings for all chats.",
-)
-_KB_COMMON_OFF = Tr(
-    "База знаний выключена в общих настройках.",
-    "The knowledge base is off in the settings for all chats.",
 )
 
 _STICKER_CHANCE = Tr("Отвечает стикером: в {pct} % случаев", "Answers with a sticker: {pct} %")
@@ -369,17 +361,41 @@ def _notes(view: ChatView, codes: Sequence[str], lang: str, *extra: str) -> str 
 
 
 def chats_per_page(requests: int, rejected: int) -> int:
-    """Chats per page: one row fewer when the requests row is shown (rows cap)."""
-    return 3 if requests or rejected else 4
+    """Chats per page: one row fewer when the requests row is shown (rows cap).
+
+    ``rejected`` costs no row: that button shares the last row with the back
+    button. The parameter stays so the handler and the builder keep asking
+    the same question.
+    """
+    del rejected
+    return 3 if requests else 4
 
 
-def _entry_row(lang: str, requests: int, rejected: int) -> tuple[Button, ...] | None:
-    row: list[Button] = []
-    if requests:
-        row.append(Button(_REQUESTS(lang).format(n=requests), cb("adm_wl_pending:", lang, 0)))
-    if rejected:
-        row.append(Button(_REJECTED(lang).format(n=rejected), cb("adm_wl_rejected:", lang, 0)))
-    return tuple(row) or None
+def _requests_row(lang: str, requests: int) -> tuple[Button, ...] | None:
+    """The waiting requests on a row of their own: «Запросы доступа · 12» needs it."""
+    if not requests:
+        return None
+    return (Button(_REQUESTS(lang).format(n=requests), cb("adm_wl_pending:", lang, 0)),)
+
+
+def _chats_tail(lang: str, rejected: int) -> tuple[Button, ...]:
+    """The last row: the rejected chats, rarely opened, next to the way back."""
+    hub = back("hub", cb("adm_menu:", lang), lang)
+    if not rejected:
+        return (hub,)
+    return (Button(_REJECTED(lang).format(n=rejected), cb("adm_wl_rejected:", lang, 0)), hub)
+
+
+def _chats_count(lang: str, total: int, page: int, pages: int, shown: int, per_page: int) -> str:
+    """«Подключено: 5», plus which of them this page lists when there is more than one page."""
+    count = _CHATS_COUNT(lang).format(n=total)
+    if pages <= 1 or shown <= 0:
+        return count
+    first = page * per_page + 1
+    last = first + shown - 1
+    if first == last:
+        return count + _CHATS_SHOWN_ONE(lang).format(first=first)
+    return count + _CHATS_SHOWN(lang).format(first=first, last=last)
 
 
 def build_chats(
@@ -392,9 +408,13 @@ def build_chats(
     requests: int = 0,
     rejected: int = 0,
 ) -> Screen:
-    """``chats`` (or ``chats.empty`` when nothing is connected)."""
-    entry = _entry_row(lang, requests, rejected)
-    tail = (back("hub", cb("adm_menu:", lang), lang),)
+    """``chats`` (or ``chats.empty`` when nothing is connected).
+
+    ``page`` is counted with `chats_per_page`, the same count the handler
+    fetched the page with, so the body can say which chats the page lists.
+    """
+    entry = _requests_row(lang, requests)
+    tail = _chats_tail(lang, rejected)
     if total == 0:
         empty_rows: tuple[tuple[Button, ...], ...] = (entry, tail) if entry else (tail,)
         return Screen(
@@ -412,7 +432,14 @@ def build_chats(
     rows = tuple(r for r in (entry, *listed, nav, tail) if r)
     return Screen(
         id="chats",
-        text=_text(_CHATS_TITLE(lang), _CHATS_BODY(lang).format(n=total)),
+        text=_text(
+            _CHATS_TITLE(lang),
+            _CHATS_BODY(lang).format(
+                count=_chats_count(
+                    lang, total, page, pages, len(chats), chats_per_page(requests, rejected)
+                )
+            ),
+        ),
         rows=rows,
     )
 
@@ -481,7 +508,12 @@ def _status_line(view: ChatView, lang: str) -> str:
 
 
 def build_chat(view: ChatView, lang: str) -> Screen:
-    """The chat's root: what the bot does here, and its sections."""
+    """The chat's root: what the bot does here, its sections, and who may save facts.
+
+    The organizers sit here and not under memory: the people a task names
+    ("remove the organizer who left") are looked for at the chat, not in a
+    setting. Section labels pair by width: two halves, then three thirds.
+    """
 
     def section(name: Section) -> Button:
         return Button(SECTION_TITLES[name](lang), cb("adm_pnl_grp:", lang, view.chat_id, name))
@@ -496,9 +528,15 @@ def build_chat(view: ChatView, lang: str) -> Screen:
             link,
         ),
         rows=(
-            (section("behavior"), section("memory")),
-            (section("voice"), section("stickers")),
-            (section("reactions"), section("community")),
+            (section("behavior"), section("voice")),
+            (section("memory"), section("stickers"), section("reactions")),
+            (
+                section("community"),
+                Button(
+                    _ORGANIZERS(lang).format(n=view.organizers),
+                    cb("adm_kb_orgs:", lang, view.chat_id, 0),
+                ),
+            ),
             (
                 Button(_RULES(lang).format(n=view.rules), cb("ar_list:", lang, view.chat_id, 0)),
                 Button(_DISCONNECT(lang), cb("adm_wl_rm_ask:", lang, view.chat_id, 0)),
@@ -697,32 +735,21 @@ def build_sp_redo(chat_id: int, lang: str) -> Screen:
 
 
 def build_memory(view: ChatView, lang: str) -> Screen:
-    """The knowledge base's ``· общее`` is a footnote line: see the module docstring."""
-    codes = ("sm", "ch", "rag")
+    """Four switches, one row each; the organizers are on the chat's root."""
+    codes = ("sm", "ch", "rag", "kb")
     no_archive = None if view.on("sm") else _NO_ARCHIVE(lang)
-    kb_common = (
-        [(_KB_COMMON_ON if view.on("kb") else _KB_COMMON_OFF)(lang)]
-        if _marker(view, "kb", lang)
-        else []
-    )
     return Screen(
         id="memory",
         text=_text(
             _header("memory", view, lang),
             "\n".join(line for line in (TAP_TOGGLES(lang), _KB_LINE(lang), no_archive) if line),
-            _notes(view, codes, lang, *kb_common),
+            _notes(view, codes, lang),
         ),
         rows=(
             (_toggle(view, "sm", lang),),
             (_toggle(view, "ch", lang),),
             (_toggle(view, "rag", lang),),
-            (
-                _toggle(view, "kb", lang, marked=False),
-                Button(
-                    _ORGANIZERS(lang).format(n=view.organizers),
-                    cb("adm_kb_orgs:", lang, view.chat_id, 0),
-                ),
-            ),
+            (_toggle(view, "kb", lang),),
             _back_to_chat(view, lang),
         ),
     )

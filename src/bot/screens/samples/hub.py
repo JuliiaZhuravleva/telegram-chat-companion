@@ -88,12 +88,12 @@ def _attempt(lang: Lang, *, title: str | None = None) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@sample("hub", section="Панель", title="Одна заявка ждёт", nav="root")
+@sample("hub", section="Панель", title="Один запрос доступа ждёт", nav="root")
 def hub_pending(lang: Lang) -> Screen:
     return sample_hub(lang)
 
 
-@sample("hub", section="Панель", title="Заявок нет", nav="root")
+@sample("hub", section="Панель", title="Запросов доступа нет", nav="root")
 def hub_quiet(lang: Lang) -> Screen:
     return build_hub(lang, health={"status": "healthy"}, spend=Decimal("0.0031"), pending=0)
 
@@ -113,12 +113,14 @@ def hub_unknown(lang: Lang) -> Screen:
 # ---------------------------------------------------------------------------
 
 
-@sample("requests", section="Чаты", title="Несколько заявок", nav="panel", user_data=_PEOPLE)
+@sample(
+    "requests", section="Чаты", title="Несколько запросов доступа", nav="panel", user_data=_PEOPLE
+)
 def requests_many(lang: Lang) -> Screen:
     return requests_screen(lang, _attempt(lang), 0, 3)
 
 
-@sample("requests", section="Чаты", title="Одна заявка", nav="panel", user_data=_PEOPLE)
+@sample("requests", section="Чаты", title="Один запрос доступа", nav="panel", user_data=_PEOPLE)
 def requests_one(lang: Lang) -> Screen:
     return requests_screen(lang, _attempt(lang), 0, 1)
 
@@ -130,7 +132,7 @@ def requests_after_reject(lang: Lang) -> Screen:
     return requests_screen(lang, _attempt(lang), 1, 2, notice=REJECTED(lang))
 
 
-@sample("requests", section="Чаты", title="Заявок нет", nav="panel")
+@sample("requests", section="Чаты", title="Запросов доступа нет", nav="panel")
 def requests_empty(lang: Lang) -> Screen:
     return requests_screen(lang, None, 0, 0)
 
@@ -309,12 +311,12 @@ def settings(lang: Lang) -> Screen:
     return settings_screen(lang)
 
 
-@sample("notif", section="Настройки", title="Заявки приходят", nav="panel")
+@sample("notif", section="Настройки", title="Запросы доступа приходят", nav="panel")
 def notif_on(lang: Lang) -> Screen:
     return notif_screen(lang, {"sticker": "detailed", "unauthorized": True})
 
 
-@sample("notif", section="Настройки", title="Заявки не присылаются", nav="panel")
+@sample("notif", section="Настройки", title="Запросы доступа не присылаются", nav="panel")
 def notif_requests_off(lang: Lang) -> Screen:
     return notif_screen(lang, {"sticker": "off", "unauthorized": False})
 
