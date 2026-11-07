@@ -1,7 +1,7 @@
 """Rules samples: a chat's list, a rule's card, the builder, and what a fired rule sends.
 
 One sample per state that changes the buttons: the list on, off and inherited,
-empty, and paged under a weight mode; the card on, paused, just created while
+empty, and paged under a priority mode; the card on, paused, just created while
 the chat's rules are off, and with its JSON open; every builder step; and the
 two typed-answer errors (a builder step, the JSON prompt).
 """
@@ -21,12 +21,17 @@ from src.bot.screens.samples import fake
 _CID: Final = fake.CHAT_ID
 _TITLE: Final = fake.CHAT_TITLE
 WORDS: Final = ("реклама", "купи")
+"""The builder's words: the rule a reader is asked to make, so no list sample holds it."""
 WORDS_NAME: Final = ", ".join(WORDS)
+LIST_WORDS: Final = ("спойлер", "финал")
+"""A keyword rule the chat already has, unlike the one the builder makes."""
+LIST_NAME: Final = ", ".join(LIST_WORDS)
+LIST_WARN: Final = "Давайте без спойлеров"
 FLOOD_NAME: Final = "Много стикеров"
 WARN_TEXT: Final = "Давайте без спама"
 EXCERPT: Final = "тут реклама и ещё текст"
 SPAM_NAME: Final = "Сообщения: 20 за минуту"
-LONG_NAME: Final = "Ловит рекламу в каждом сообщении и пишет админу сразу"
+LONG_NAME: Final = "Следит за спойлерами к сериалам и пишет админу сразу"
 
 _ON: Final = r.ChatRules(enabled=True, common=False)
 _OFF_COMMON: Final = r.ChatRules(enabled=False, common=True)
@@ -37,11 +42,11 @@ _KEYWORDS: Final = r.RuleView(
     chat_id=_CID,
     rule_type="keyword_trigger",
     config={
-        "name": WORDS_NAME,
-        "keywords": list(WORDS),
+        "name": LIST_NAME,
+        "keywords": list(LIST_WORDS),
         "match_type": "contains",
         "action": "warn_user",
-        "warning_message": WARN_TEXT,
+        "warning_message": LIST_WARN,
     },
     trigger_count=4,
 )
@@ -76,7 +81,7 @@ _LONG: Final = r.RuleView(
     id=fake.RULE_ID + 3,
     chat_id=_CID,
     rule_type="keyword_trigger",
-    config={"name": LONG_NAME, "keywords": list(WORDS), "action": "notify_admin"},
+    config={"name": LONG_NAME, "keywords": list(LIST_WORDS), "action": "notify_admin"},
     weight=2,
 )
 
@@ -84,6 +89,9 @@ _USER_DATA: Final = (
     _TITLE,
     WORDS_NAME,
     *WORDS,
+    LIST_NAME,
+    *LIST_WORDS,
+    LIST_WARN,
     FLOOD_NAME,
     WARN_TEXT,
     EXCERPT,
@@ -127,7 +135,7 @@ def rules_empty(lang: Lang) -> Screen:
     return _list(lang, _ON)
 
 
-@_panel("rules", title="Правила: режим по весу, страницы")
+@_panel("rules", title="Правила: режим по приоритету, страницы")
 def rules_weighted(lang: Lang) -> Screen:
     return _list(lang, _WEIGHTED, _SPAM, _LONG, _KEYWORDS, page=0, pages=2)
 
@@ -195,7 +203,7 @@ def rule_created_off(lang: Lang) -> Screen:
     )
 
 
-@_panel("rule", title="Правило: режим по весу, JSON открыт")
+@_panel("rule", title="Правило: режим по приоритету, JSON открыт")
 def rule_json(lang: Lang) -> Screen:
     return r.rule_screen(lang, _SPAM, chat=_WEIGHTED, show_json=True)
 
