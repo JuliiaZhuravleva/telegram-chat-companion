@@ -92,7 +92,7 @@ CREATED: Final = Tr("Правило создано", "Rule created")
 DELETED: Final = Tr("Правило удалено", "Rule deleted")
 SPAM_NAME: Final = Tr("Сообщения: {n} за минуту", "Messages: {n} a minute")
 FLOOD_NAME: Final = Tr("Стикеры: {n} за минуту", "Stickers: {n} a minute")
-_NAME_CHARS: Final = 60
+_NAME_CHARS: Final = screens.NAME_CHARS
 """A rule's name is cut here, whoever wrote it: the name heads its card."""
 _SHOWN_WORD_CHARS: Final = 30
 """An over-long word is quoted back cut to this, so the error stays one line."""
@@ -1398,9 +1398,8 @@ def _split_words(text: str) -> list[str]:
 
 
 def _cap_name(name: str) -> str:
-    """A rule's name as stored: trimmed, and cut with ``…`` past `_NAME_CHARS`."""
-    name = name.strip()
-    return name if len(name) <= _NAME_CHARS else name[: _NAME_CHARS - 1].rstrip() + "…"
+    """A rule's name as stored: `screens.cap_name`, the cut its card and alert show."""
+    return screens.cap_name(name)
 
 
 def _words_name(words: list[str]) -> str:

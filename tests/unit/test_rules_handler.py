@@ -34,6 +34,7 @@ from src.models.chat_config import ChatConfig
 from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
 from src.services.rules.engine import RuleEngine
+from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
 CHAT_ID = -1009999999999  # invented
 OTHER_CHAT = -1008888888888  # invented
@@ -484,6 +485,34 @@ class TestTheCard:
         callback.message.edit_text.assert_not_awaited()
         expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_ON)
         assert _same(_sent(callback.message), expected)
+
+    @pytest.mark.parametrize(
+        ("handler", "payload"),
+        [
+            (handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}"),
+            (handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}:j"),
+            (handlers.handle_rule_delete_ask, f"ar_del_ask:ru:{RULE_ID}:{CHAT_ID}"),
+        ],
+        ids=["card", "json", "delete-ask"],
+    )
+    async def test_an_unnamed_rule_of_three_hundred_words_opens_in_place(
+        self, handler: Any, payload: str
+    ) -> None:
+        """A JSON rule bounds no word, and without a name it is named by all of
+        them: the head of its card and of the delete question ran past 4096, so
+        the tap no longer edited the screen but sent it again as several new
+        messages, the first of them nothing but the rule's words."""
+        words = [f"нецензурное{i:03d}" for i in range(300)]
+        assert parsed_length(", ".join(words)) > TELEGRAM_MESSAGE_LIMIT
+        rule = _rule(config={"keywords": words, "action": "notify_admin"})
+        callback = await _tap(handler, payload, _State(), _deps(rule))
+
+        callback.message.answer.assert_not_awaited()
+        text = _shown(callback)[0]
+        assert parsed_length(text) <= TELEGRAM_MESSAGE_LIMIT, parsed_length(text)
+        shown = screens.cap_name(", ".join(words))
+        assert shown == ", ".join(words)[: screens.NAME_CHARS - 1] + "…"
+        assert html.escape(shown, quote=False) in text
 
     async def test_a_config_stored_as_a_string_is_read(self) -> None:
         rule = _rule(config=json.dumps({"name": "json-rule", "keywords": ["x"]}))

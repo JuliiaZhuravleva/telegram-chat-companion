@@ -160,6 +160,20 @@ _ON: Final = Tr("работает", "on")
 _PAUSED: Final = Tr("на паузе", "paused")
 _NEW: Final = Tr("Новое правило:", "New rule:")
 _ELLIPSIS: Final = "…"
+NAME_CHARS: Final = 60
+"""A rule's name is cut here, whoever wrote it: it heads the rule's card and the
+alert every admin gets, and an unnamed JSON rule is named by all of its words."""
+
+
+def cap_name(name: str) -> str:
+    """A rule's name as stored and shown: trimmed, and cut with ``…`` past `NAME_CHARS`."""
+    name = name.strip()
+    return name if len(name) <= NAME_CHARS else name[: NAME_CHARS - 1].rstrip() + _ELLIPSIS
+
+
+def _clip(text: str) -> str:
+    """Someone's words as the alert quotes them: at most `_EXCERPT_CHARS`, then ``…``."""
+    return text if len(text) <= _EXCERPT_CHARS else text[:_EXCERPT_CHARS] + _ELLIPSIS
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +246,9 @@ def rule_name(rule: RuleView, lang: str) -> str:
         return name.strip()
     words = _str_list(rule.config.get("keywords"))
     if rule.rule_type == "keyword_trigger" and words:
-        return ", ".join(words)
+        # Capped like the builder's `_words_name`: a JSON rule has no word limit,
+        # and three hundred words made an alert Telegram refused for every admin.
+        return cap_name(", ".join(words))
     kind = _TYPE_NAMES.get(rule.rule_type)
     return kind(lang) if kind else f"#{rule.id}"
 
@@ -1238,14 +1254,15 @@ def error_screen(screen_id: str, text: str, cancel_cb: str, lang: str) -> Screen
 def _match_line(detail: str, lang: str) -> str | None:
     kind, _, rest = detail.partition(":")
     if kind in ("contains", "exact", "regex"):
-        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(rest)}"
+        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(_clip(rest))}"
     if kind == "user":
         _, _, keyword = rest.partition(",kw:")
-        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(keyword)}" if keyword else None
+        matched = Tr("Совпало", "Matched")(lang)
+        return f"{matched}: {escape(_clip(keyword))}" if keyword else None
     if kind == "stickers":
         count, _, limit = rest.partition("/")
         return Tr("Стикеров: {n}, порог {m}", "Stickers: {n}, limit {m}")(lang).format(
-            n=escape(count), m=escape(limit)
+            n=escape(_clip(count)), m=escape(_clip(limit))
         )
     if kind == "spam":
         what, _, numbers = rest.partition("=")
@@ -1255,8 +1272,8 @@ def _match_line(detail: str, lang: str) -> str | None:
             if what == "chars"
             else Tr("Сообщений: {n}, порог {m}", "Messages: {n}, limit {m}")
         )
-        return label(lang).format(n=escape(count), m=escape(limit))
-    return escape(detail) if detail else None
+        return label(lang).format(n=escape(_clip(count)), m=escape(_clip(limit)))
+    return escape(_clip(detail)) if detail else None
 
 
 def rule_card(
@@ -1278,7 +1295,7 @@ def rule_card(
     """
     where = f"<code>{chat_id_text(chat_id)}</code>"
     lines = [
-        f"📏 <b>{Tr('Сработало правило:', 'Rule fired:')(lang)}</b> {escape(name)}",
+        f"📏 <b>{Tr('Сработало правило:', 'Rule fired:')(lang)}</b> {escape(cap_name(name))}",
         "",
         f"{Tr('Чат', 'Chat')(lang)}: {escape(chat_title) + ' ' if chat_title else ''}{where}",
     ]
@@ -1291,8 +1308,7 @@ def rule_card(
     if match:
         lines.append(match)
     if excerpt:
-        cut = excerpt if len(excerpt) <= _EXCERPT_CHARS else excerpt[:_EXCERPT_CHARS] + _ELLIPSIS
-        lines.append(f"💬 {escape(cut)}")
+        lines.append(f"💬 {escape(_clip(excerpt))}")
     return Screen(
         id="card.rule",
         text="\n".join(lines),

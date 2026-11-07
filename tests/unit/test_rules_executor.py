@@ -11,7 +11,7 @@ from aiogram.types import InlineKeyboardMarkup, ReactionTypeEmoji
 from src.bot.screens import rules as screens
 from src.bot.screens.render import render_text, to_markup
 from src.models.rules import Rule, RuleAction, RuleType
-from src.services.rules.engine import RuleActionResult
+from src.services.rules.engine import RuleActionResult, RuleEngine
 from src.services.rules.executor import RuleActionExecutor
 from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
@@ -197,6 +197,122 @@ class TestNotifyAdmin:
         )
         # Should not raise
         await executor.execute(action, message=_make_message(), bot=bot)
+
+
+# ---------------------------------------------------------------------------
+# The alert fits one message
+# ---------------------------------------------------------------------------
+
+_WIDE = "😀"
+"""Two UTF-16 units each: Telegram's 4096 counts those, not characters."""
+
+_LONGEST_TITLE = (_WIDE + "&") * 64
+"""128 characters, Telegram's cap on a chat title; ``&`` is five bytes escaped."""
+
+
+def _worst_message(text: str) -> MagicMock:
+    """A message from the longest name and username Telegram allows, in the longest title."""
+    msg = _make_message(text=text, first_name=_WIDE * 64, username="u" * 32)
+    msg.sticker = None
+    msg.chat.title = _LONGEST_TITLE
+    return msg
+
+
+def _sent_texts(bot: AsyncMock) -> list[str]:
+    return [call.args[1] for call in bot.send_message.await_args_list]
+
+
+class TestTheAlertFitsOneMessage:
+    """``card.rule`` goes out in one ``send_message`` to every admin: past 4096
+    Telegram refuses it, the executor logs a warning, and no admin hears of the
+    rule at all. Its parts come from a JSON rule, which bounds no word, and from
+    whoever wrote in the chat."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    async def test_an_unnamed_rule_of_three_hundred_words_still_reaches_every_admin(
+        self, lang: str
+    ) -> None:
+        longest = _WIDE * 2000
+        words = [longest] + [f"{_WIDE * 6}&<{i:05d}>" for i in range(300)]
+        # The ingredients alone are over the limit: what follows is not vacuous.
+        assert parsed_length(escape(", ".join(words))) > TELEGRAM_MESSAGE_LIMIT
+        repo = AsyncMock()
+        repo.get_active_rules = AsyncMock(
+            return_value=[
+                {
+                    "id": 7,
+                    "chat_id": -1001,
+                    "rule_type": "keyword_trigger",
+                    "config": {"keywords": words, "action": "notify_admin"},
+                    "weight": 1,
+                    "mandatory": False,
+                    "enabled": True,
+                }
+            ]
+        )
+        # 4096 units, the longest message Telegram delivers.
+        msg = _worst_message(longest + "&" * 96)
+        actions = await RuleEngine(repo).evaluate(
+            chat_id=-1001, user_id=100, message=msg, rules_mode="all"
+        )
+        assert [a.action for a in actions] == [RuleAction.NOTIFY_ADMIN]
+        assert actions[0].params["match_detail"] == f"contains:{longest}"
+
+        executor = _make_executor("111,222", f'{{"lang": "{lang}"}}')
+        bot = AsyncMock()
+        for action in actions:
+            await executor.execute(action, message=msg, bot=bot)
+
+        sent = _sent_texts(bot)
+        assert len(sent) == 2
+        for text in sent:
+            assert parsed_length(text) <= TELEGRAM_MESSAGE_LIMIT, parsed_length(text)
+        shown = screens.cap_name(", ".join(words))
+        assert len(shown) == screens.NAME_CHARS
+        assert f"</b> {escape(shown)}\n" in sent[0], "the rule is still named by its words"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    @pytest.mark.parametrize(
+        ("config", "detail"),
+        [
+            ({"name": "Я&" * 3000}, "contains:x"),
+            ({}, "exact:" + "&" * 5000),
+            ({}, "regex:" + _WIDE * 3000),
+            ({}, "user:100,kw:" + _WIDE * 3000),
+            ({}, "stickers:" + "9" * 3000 + "/" + "9" * 3000),
+            ({}, "spam:chars=" + "9" * 3000 + "/" + "9" * 3000),
+            ({}, "spam:msgs=" + "9" * 3000 + "/" + "9" * 3000),
+            ({}, "something-else:" + "&" * 5000),
+        ],
+        ids=[
+            "stored-name",
+            "exact",
+            "regex",
+            "user-word",
+            "stickers",
+            "spam-chars",
+            "spam-messages",
+            "unknown",
+        ],
+    )
+    async def test_no_part_of_the_card_outgrows_it(
+        self, lang: str, config: dict, detail: str
+    ) -> None:
+        """A name written before names were cut, and every kind of match line."""
+        assert parsed_length(escape(config.get("name", detail))) > TELEGRAM_MESSAGE_LIMIT
+        executor = _make_executor("111", f'{{"lang": "{lang}"}}')
+        bot = AsyncMock()
+        action = RuleActionResult(
+            rule=_make_rule(rule_id=7, config={"keywords": ["x"], **config}),
+            action=RuleAction.NOTIFY_ADMIN,
+            params={"match_detail": detail},
+        )
+        await executor.execute(action, message=_worst_message(_WIDE * 2048), bot=bot)
+
+        (text,) = _sent_texts(bot)
+        assert parsed_length(text) <= TELEGRAM_MESSAGE_LIMIT, parsed_length(text)
 
 
 # ---------------------------------------------------------------------------
