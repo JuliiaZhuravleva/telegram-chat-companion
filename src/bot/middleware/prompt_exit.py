@@ -65,10 +65,12 @@ from src.bot.utils import safe_edit_text
 logger = structlog.get_logger(__name__)
 
 CLOSED = Tr(
-    "Вы открыли другой экран — ответа здесь больше не жду.",
-    "You opened another screen — no longer waiting for an answer here.",
+    "Вы нажали кнопку на другом экране — ответа здесь больше не жду.",
+    "You tapped a button on another screen — no longer waiting for an answer here.",
 )
-"""Plain text, not an aside: it is the one thing this message still says."""
+"""Plain text, not an aside: it is the one thing this message still says. Says
+the tap, not "you opened another screen": «Закрыть» ends a prompt too and opens
+nothing."""
 
 CLOSED_ID = "prompt.closed"
 

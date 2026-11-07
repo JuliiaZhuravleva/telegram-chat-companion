@@ -118,8 +118,12 @@ async def _open(screen_id: str, state: AdminStates | Any, lang: str = "ru") -> F
 @pytest.mark.parametrize(
     ("tap_lang", "closed", "home"),
     [
-        ("ru", "Вы открыли другой экран — ответа здесь больше не жду.", "⬅️ Стикеры"),
-        ("en", "You opened another screen — no longer waiting for an answer here.", "⬅️ Stickers"),
+        ("ru", "Вы нажали кнопку на другом экране — ответа здесь больше не жду.", "⬅️ Стикеры"),
+        (
+            "en",
+            "You tapped a button on another screen — no longer waiting for an answer here.",
+            "⬅️ Stickers",
+        ),
     ],
 )
 async def test_a_foreign_tap_closes_the_prompts_message(tap_lang: str, closed: str, home: str):
@@ -145,6 +149,7 @@ async def test_a_foreign_tap_closes_the_prompts_message(tap_lang: str, closed: s
 
 
 async def test_a_payload_without_a_language_closes_in_russian():
+    """«Закрыть» opens no screen: the closed line still has to be true for it."""
     fsm = await _open("tol.in", AdminStates.awaiting_setting_value, lang="en")
     bot = _bot()
     await deliver("callback_query", _tap("adm_close", OTHER_ID, bot), fsm, bot=bot)

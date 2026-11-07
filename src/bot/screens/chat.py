@@ -95,7 +95,7 @@ LABELS: Final[dict[str, Tr]] = {
     "rx": Tr("Реакции в чате", "Reactions in the chat"),
     "rh": Tr("Запоминать реакции людей", "Keep people's reactions"),
     "cm": Tr("Режим сообщества", "Community mode"),
-    "gf": Tr("Новичок", "Newcomer"),
+    "gf": Tr("Ждать сообщения", "Wait for a message"),
     "wb": Tr("Возврат", "Welcome back"),
     "fp": Tr("Прощание", "Farewell"),
     "fd": Tr("Уходы", "Departures"),
@@ -105,7 +105,11 @@ LABELS: Final[dict[str, Tr]] = {
 }
 """Toggle labels, by field code: every bool code a section shows, here and on the
 defaults screen. Short, because a phone fits about 17 characters on a full-width
-button and about 8 on a third."""
+button and about 8 on a third.
+
+A name says what the switch changes, never more: the greeting itself is the
+mode's, so its follower is «Ждать сообщения» (when the greeting comes) — under
+⚪ «Новичок» read "no greeting" while the bot greeted every newcomer on joining."""
 
 COMMON = Tr(" · общее", " · all")
 """The rules screen's suffix on its master switch. The chat sections no longer
@@ -276,8 +280,8 @@ COMMUNITY_LINES: Final[tuple[tuple[str, Tr], ...]] = (  # what each short label 
     (
         "gf",
         Tr(
-            "Новичок: здоровается на его первом сообщении, а не при входе",
-            "Newcomer: greets them on their first message, not on joining",
+            "Ждать сообщения: здоровается с новичком на его первом сообщении, а не при входе",
+            "Wait for a message: greets a newcomer on their first message, not on joining",
         ),
     ),
     ("wb", Tr("Возврат: пишет «с возвращением»", "Welcome back: says “welcome back”")),

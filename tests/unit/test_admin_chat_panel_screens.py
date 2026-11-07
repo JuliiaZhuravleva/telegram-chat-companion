@@ -211,8 +211,9 @@ class TestTheKnowledgeBaseSaysCommonInTheText:
 
     @pytest.mark.xfail(
         reason="build_memory passes ('sm', 'ch', 'rag') to _notes, without 'kb', and "
-        "reads _marker for its own kb line: the memory builder's owner adds 'kb'",
-        strict=False,
+        "reads _marker for its own kb line: the memory builder's owner adds 'kb' "
+        "and drops kb_common; strict, so the fix shows as XPASS and this marker goes",
+        strict=True,
     )
     @pytest.mark.parametrize("on", [True, False])
     def test_inherited_is_named_in_the_line(self, on: bool) -> None:
@@ -251,9 +252,35 @@ _COMBOS = [
 ]
 
 
+def _own(flags: dict[str, bool]) -> dict[str, bool]:
+    return {FIELDS_BY_CODE[code].key: on for code, on in flags.items()}
+
+
 def _community(flags: dict[str, bool], lang: str) -> str:
-    own = {FIELDS_BY_CODE[code].key: on for code, on in flags.items()}
+    own = _own(flags)
     return screens.build_community(_view(own, **own), lang).text
+
+
+_NAME_PROMISES: dict[str, str] = {
+    # name on the button -> the words that would say the bot does what it names
+    "Режим сообщества": "— здоровается",
+    "Ждать сообщения": "первом сообщении",
+    "Возврат": "«с возвращением»",
+    "Прощание": "прощается в чате",
+    "Уходы": "в личку, кто ушёл",
+    "Шутка": "шутит",
+    "Советы": "советы",
+    "Community mode": "— greets",
+    "Wait for a message": "first message",
+    "Welcome back": "“welcome back”",
+    "Farewell": "says goodbye",
+    "Departures": "message about who left",
+    "Joke": "jokes",
+    "Advice": "advice",
+    # The name the greeting switch had: under ⚪ it promised no greeting.
+    "Новичок": "с новичком",
+    "Newcomer": "a newcomer",
+}
 
 
 def _facts(flags: dict[str, bool]) -> dict[Any, bool]:
@@ -297,6 +324,25 @@ class TestTheCommunityTextSaysOnlyWhatIsOn:
         for flags in _COMBOS:
             said = "прощается в чате" in _community(flags, "ru")
             assert said is (flags["cm"] and flags["fp"]), flags
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_no_line_says_the_bot_does_what_an_off_switch_names(self, lang: str) -> None:
+        """A reader takes a switch's name for what it does: «⚪ Новичок» read
+        "no newcomer greeting" while the text rightly said the bot greets on
+        joining — and the only switch that stops greetings is the mode itself.
+        Read off the buttons drawn, for every combination, inherited or the
+        chat's own; a name missing from `_NAME_PROMISES` fails, so a renamed
+        switch has to say what its new name promises."""
+        for flags in _COMBOS:
+            own = _own(flags)
+            for row in (own, {}):
+                screen = screens.build_community(_view(row, **own), lang)
+                for label in _switches(screen).values():
+                    if not label.startswith("⚪ "):
+                        continue
+                    name = label.removeprefix("⚪ ")
+                    assert name in _NAME_PROMISES, f"say what «{name}» promises"
+                    assert _NAME_PROMISES[name] not in screen.text, (flags, name, screen.text)
 
     def test_the_greeting_line_readers_rely_on_is_kept(self) -> None:
         on = dict.fromkeys(_COMMUNITY_CODES, False) | {"cm": True, "gf": True}
