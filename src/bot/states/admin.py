@@ -184,6 +184,8 @@ _HOMES: dict[State, PromptHome | None] = {
     AdminStates.awaiting_system_prompt: PromptHome("behavior", "adm_pnl_grp:", ("behavior",)),
     AdminStates.awaiting_sticker_score: PromptHome("stk.card", "adm_stk_card:"),
     AdminStates.awaiting_kb_organizer: PromptHome("orgs", "adm_kb_orgs:", ("0",)),
+    # One state for three numbers (behavior's and two on «Как часто»): the chat they share.
+    AdminStates.awaiting_response_chance: PromptHome("chat", "adm_pnl_menu:"),
     # A rule builder's answers live in the state: with it gone, the list.
     AdminStates.awaiting_rule_config: _RULES_HOME,
     AdminStates.awaiting_rule_words: _RULES_HOME,

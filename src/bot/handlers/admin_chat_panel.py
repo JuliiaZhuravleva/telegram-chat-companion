@@ -222,17 +222,24 @@ def _with_notice(
     return dataclasses.replace(screen, notice=notice, notice_raw=notice_raw)
 
 
-async def _close_number_prompt(state: FSMContext | None) -> None:
-    """Going anywhere else in the panel closes the tolerance number prompt.
+_NUMBER_PROMPTS: Final = frozenset(
+    {AdminStates.awaiting_setting_value.state, AdminStates.awaiting_response_chance.state}
+)
 
-    ``tol.in`` is edited in place, so the admin can leave it by a button on any
-    older panel message; left armed, the state would read their next text as a
-    tolerance value. Only this prompt's state is cleared here. The instruction
+
+async def _close_number_prompt(state: FSMContext | None) -> None:
+    """Going anywhere else in the panel closes a number prompt: the tolerance
+    one or a percentage.
+
+    ``tol.in`` and ``chance.in`` are edited in place, so the admin can leave them
+    by a button on any older panel message, or by typing ``/panel``, which no
+    middleware sees as leaving; left armed, the state would read their next text
+    as a value. Only these prompts' states are cleared here. The instruction
     editor is not an exception: `PromptExitMiddleware` ends
     ``awaiting_system_prompt`` and its draft on any tap outside
     ``adm_pnl_sp:``/``spx:``/``spok:``/``spre:``, before this runs.
     """
-    if state is not None and await state.get_state() == AdminStates.awaiting_setting_value.state:
+    if state is not None and await state.get_state() in _NUMBER_PROMPTS:
         await state.clear()
 
 

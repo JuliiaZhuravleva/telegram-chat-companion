@@ -27,7 +27,6 @@ import pytest
 
 from src.bot.screens import rules, settings
 from src.bot.screens.chat import (
-    COMMON,
     COMMON_NOTE,
     COMMUNITY_LINES,
     LABELS,
@@ -35,10 +34,14 @@ from src.bot.screens.chat import (
     ChatView,
     config_values,
 )
+from src.bot.screens.i18n import Tr
 from src.bot.screens.samples import fake
 from src.bot.screens.settings import KEY_OF, SECTION_TOGGLES, defs_section_screen
 from src.bot.settings_fields import FIELDS_BY_CODE
 from src.models.chat_config import ChatConfig
+
+_OLD_SUFFIX = Tr(" · общее", " · all")
+"""What a button once added for an inherited value; it read as part of the state."""
 
 LANGS = ("ru", "en")
 GLYPHS = ("✅ ", "⚪ ")
@@ -93,7 +96,7 @@ def _panel(lang: str) -> dict[str, set[str]]:
 @pytest.mark.parametrize("lang", LANGS)
 def test_every_switch_on_both_screens_has_one_name(lang: str):
     defaults, panel = _defaults(lang), _panel(lang)
-    suffix = COMMON(lang)
+    suffix = _OLD_SUFFIX(lang)
 
     # Not vacuous: the walk saw every switch of the defaults screen, and every
     # one but the rules switch (the rules area draws its own) on the panel too.
@@ -152,15 +155,18 @@ def _switch(screen: Any) -> list[str]:
 def test_the_rules_switch_has_one_name_on_every_surface(lang: str, enabled: bool):
     (default,) = _switch(_defaults_rules(lang, enabled))
     name = _name(default)
-    suffix = COMMON(lang)
+    head = COMMON_NOTE(lang).split("{", 1)[0]
 
     seen: set[str] = set()
+    says_common: dict[bool, bool] = {}
     for common in (True, False):
-        for screen in _rules_area(lang, rules.ChatRules(enabled=enabled, common=common)):
+        area = _rules_area(lang, rules.ChatRules(enabled=enabled, common=common))
+        for screen in area:
             seen.update(_switch(screen))
-    # Not vacuous: both the inherited and the chat's own form were drawn.
-    assert {glyphed.endswith(suffix) for glyphed in seen} == {True, False}, seen
-    assert {_name(label) for label in seen} == {name, name + suffix}
+        says_common[common] = any(head in screen.text for screen in area)
+    # Not vacuous: both forms were drawn, and only the inherited one names its origin.
+    assert says_common == {True: True, False: False}
+    assert {_name(label) for label in seen} == {name}, seen
     assert {label[:1] for label in seen} == {default[:1]}, "the state glyph differs"
 
     notice = (rules.RULES_ON if enabled else rules.RULES_OFF)(lang)
@@ -170,19 +176,26 @@ def test_the_rules_switch_has_one_name_on_every_surface(lang: str, enabled: bool
 @pytest.mark.parametrize("lang", LANGS)
 @pytest.mark.parametrize("mode", ["highest_weight", "weighted_random"])
 def test_a_rules_mode_reads_the_same_on_the_chats_rules_and_on_the_defaults(lang: str, mode: str):
-    (line,) = settings._info_lines(lang, "rules", {"rules_mode": mode})
-    assert line in _defaults_rules(lang, True, mode).text
+    shown = settings._info_lines(lang, "rules", {"rules_mode": mode})
+    assert shown == [rules.mode_line(mode, lang), rules.several_line(mode, lang)]
     chat = rules.ChatRules(enabled=True, common=False, mode=mode)
-    assert line in _rules_area(lang, chat)[0].text.splitlines()
+    for line in shown:
+        assert line in _defaults_rules(lang, True, mode).text.splitlines()
+        assert line in _rules_area(lang, chat)[0].text.splitlines()
 
 
 @pytest.mark.parametrize("lang", LANGS)
 def test_every_mode_has_its_name_on_the_defaults(lang: str):
     """``all`` is shown on the defaults only (the chat's rules show weights only for the others)."""
     names = {
-        mode: _defaults_rules(lang, True, mode).text.splitlines()[-1]
+        mode: _defaults_rules(lang, True, mode).text.splitlines()[-2]
         for mode in ("all", *rules.MODES)
     }
+    # ...and under it, what acts when one message matches several rules.
+    assert all(
+        _defaults_rules(lang, True, mode).text.splitlines()[-1] == rules.several_line(mode, lang)
+        for mode in ("all", *rules.MODES)
+    )
     assert len(set(names.values())) == len(names), names
     assert all(line.startswith(names["all"].split(":")[0] + ": ") for line in names.values())
     assert "all" not in names["all"] and "highest_weight" not in names["highest_weight"]

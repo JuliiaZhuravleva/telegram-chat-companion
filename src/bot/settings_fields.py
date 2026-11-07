@@ -78,7 +78,7 @@ _GROUP_LABELS: dict[FieldGroup, dict[str, str]] = {
     FieldGroup.RULES: {"ru": "📏 Правила", "en": "📏 Rules"},
     FieldGroup.KB: {"ru": "📚 База знаний", "en": "📚 Knowledge Base"},
     FieldGroup.REACTIONS: {"ru": "😀 Реакции", "en": "😀 Reactions"},
-    FieldGroup.COMMUNITY: {"ru": "👋 Сообщество", "en": "👋 Community"},
+    FieldGroup.COMMUNITY: {"ru": "👋 Новички и уходы", "en": "👋 Joining and leaving"},
 }
 
 

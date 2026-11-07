@@ -304,14 +304,25 @@ class TestTheMasterSwitch:
         )
         deps["chat_config_service"].invalidate.assert_called_once_with(CHAT_ID)
 
-    async def test_an_inherited_value_is_labelled_common(self) -> None:
+    async def test_an_inherited_value_is_said_in_the_text_not_on_the_button(self) -> None:
         deps = _deps(enabled=False)
         deps["chat_settings_repo"].get = AsyncMock(
             return_value={"chat_id": CHAT_ID, "chat_title": TITLE, "rules_enabled": None}
         )
         callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:0", _State(), deps)
 
-        assert "⚪ Правила выключены · общее" in _labels(_shown(callback)[1])
+        text, markup = _shown(callback)
+        assert "⚪ Правила выключены" in _labels(markup)
+        assert "Как в общих настройках: Правила." in text
+
+    async def test_a_value_set_for_the_chat_names_no_origin(self) -> None:
+        deps = _deps(enabled=False)
+        deps["chat_settings_repo"].get = AsyncMock(
+            return_value={"chat_id": CHAT_ID, "chat_title": TITLE, "rules_enabled": False}
+        )
+        callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:0", _State(), deps)
+
+        assert "Как в общих настройках" not in _shown(callback)[0]
 
     async def test_from_a_card_redraws_the_card_saying_what_changed(self) -> None:
         deps = _deps(_rule(), enabled=False, stored=False)

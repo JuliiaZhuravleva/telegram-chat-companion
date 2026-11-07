@@ -233,7 +233,7 @@ TASK_LABELS: Final[Mapping[str, Tr]] = {
     "embedding": Tr("Эмбеддинги", "Embeddings"),
     "vision": Tr("Зрение", "Vision"),
     "transcription": Tr("Транскрипция", "Transcription"),
-    "community": Tr("Сообщество", "Community"),
+    "community": Tr("Новички и уходы", "Joining and leaving"),
 }
 
 

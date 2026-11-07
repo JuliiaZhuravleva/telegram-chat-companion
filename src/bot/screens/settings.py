@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from typing import Any, Final
 
 from src.bot.screens import rules
-from src.bot.screens.chat import COMMUNITY_LINES, LABELS, tolerance_label
+from src.bot.screens.chat import COMMUNITY_LEGEND, COMMUNITY_LINES, LABELS, tolerance_label
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import back
@@ -160,7 +160,7 @@ SECTION_NAMES: Final[Mapping[Section, tuple[str, Tr]]] = {
     "voice": ("🎙", Tr("Голос и фото", "Voice and photos")),
     "stickers": ("🎨", Tr("Стикеры", "Stickers")),
     "reactions": ("😀", Tr("Реакции", "Reactions")),
-    "community": ("👋", Tr("Сообщество", "Community")),
+    "community": ("👋", Tr("Новички и уходы", "Joining and leaving")),
     "rules": ("📏", Tr("Правила", "Rules")),
 }
 
@@ -245,10 +245,11 @@ def _info_lines(lang: str, section: Section, values: Mapping[str, Any]) -> list[
             _TOLERANCE(lang).format(v=_tolerance(values.get("tolerance_level"), lang)),
         ]
     if section == "rules":
-        return [rules.mode_line(str(values.get("rules_mode")), lang)]
+        mode = str(values.get("rules_mode"))
+        return [rules.mode_line(mode, lang), rules.several_line(mode, lang)]
     if section == "community":
         # The six followers sit two to a row, so the short words need saying out.
-        return ["\n".join(line(lang) for _, line in COMMUNITY_LINES)]
+        return ["\n".join([COMMUNITY_LEGEND(lang), *(line(lang) for _, line in COMMUNITY_LINES)])]
     return []
 
 

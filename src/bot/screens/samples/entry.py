@@ -140,7 +140,7 @@ def _applicant(lang: Lang, *, added: bool = False) -> cards.Applicant:
 @sample(
     "card.access",
     section="Карточки от бота",
-    title="Заявка: написали в чате",
+    title="Запрос доступа: написали в чате",
     nav="card",
     user_data=_PERSON_DATA,
 )
@@ -151,7 +151,7 @@ def access_asked(lang: Lang) -> Screen:
 @sample(
     "card.access",
     section="Карточки от бота",
-    title="Заявка: бота добавили",
+    title="Запрос доступа: бота добавили",
     nav="card",
     user_data=_PERSON_DATA,
 )
@@ -162,7 +162,7 @@ def access_added(lang: Lang) -> Screen:
 @sample(
     "card.access.ok",
     section="Карточки от бота",
-    title="Заявка одобрена",
+    title="Запрос доступа одобрен",
     nav="card",
     user_data=_PERSON_DATA,
 )
@@ -173,7 +173,7 @@ def access_ok(lang: Lang) -> Screen:
 @sample(
     "card.access.no",
     section="Карточки от бота",
-    title="Заявка отклонена",
+    title="Запрос доступа отклонён",
     nav="card",
     user_data=_PERSON_DATA,
 )

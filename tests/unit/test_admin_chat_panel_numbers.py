@@ -237,13 +237,14 @@ class TestStickerChances:
         setting that does nothing."""
         assert "Отвечает стикером" not in screens.build_stickers(_view(), "ru").text
 
-    def test_how_often_lists_both_chances_with_their_markers(self) -> None:
+    def test_how_often_lists_both_chances_and_says_their_origin_once(self) -> None:
         screen = screens.build_sticker_chances(_view(), "ru")
         assert screen.id == "chance.stickers"
         assert _all_labels(screen)[:2] == [
-            "🎲 Стикер на стикер · 50 % · общее",
-            "🎲 Стикер к фото · 30 % · общее",
+            "🎲 Стикер на стикер · 50 %",
+            "🎲 Стикер к фото · 30 %",
         ]
+        assert "Как в общих настройках: Стикер на стикер, Стикер к фото." in screen.text
         assert _payloads(screen)[:2] == [
             f"adm_pnl_pct:ru:{CID}:sx",
             f"adm_pnl_pct:ru:{CID}:ix",

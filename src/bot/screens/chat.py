@@ -111,9 +111,6 @@ A name says what the switch changes, never more: the greeting itself is the
 mode's, so its follower is «Ждать сообщения» (when the greeting comes) — under
 ⚪ «Новичок» read "no greeting" while the bot greeted every newcomer on joining."""
 
-COMMON = Tr(" · общее", " · all")
-"""The rules screen's suffix on its master switch. The chat sections no longer
-put it on a button: see `COMMON_NOTE`."""
 COMMON_NOTE = Tr("Как в общих настройках: {names}.", "As in the general settings: {names}.")
 """The one line that says which values on a screen come from the general settings."""
 _ALL_COMMON = Tr(
@@ -290,15 +287,20 @@ COMMUNITY_LINES: Final[tuple[tuple[str, Tr], ...]] = (  # what each short label 
     (
         "gf",
         Tr(
-            "Ждать сообщения: здоровается с новичком на его первом сообщении, а не при входе",
-            "Wait for a message: greets a newcomer on their first message, not on joining",
+            "Ждать сообщения: здороваться с новичком на его первом сообщении, а не при входе",
+            "Wait for a message: greet a newcomer on their first message, not on joining",
         ),
     ),
-    ("wb", Tr("Возврат: пишет «с возвращением»", "Welcome back: says “welcome back”")),
-    ("fp", Tr("Прощание: прощается в чате", "Farewell: says goodbye in the chat")),
-    ("fd", Tr("Уходы: присылает вам сводку", "Departures: sends you a summary")),
-    ("rj", Tr("Шутка: шутит, что ушедший вернётся", "Joke: jokes that the leaver will be back")),
-    ("aw", Tr("Советы: замечает непрошеные советы", "Advice: notices unsolicited advice")),
+    ("wb", Tr("Возврат: писать «с возвращением»", "Welcome back: say “welcome back”")),
+    ("fp", Tr("Прощание: прощаться в чате", "Farewell: say goodbye in the chat")),
+    ("fd", Tr("Уходы: присылать вам сводку", "Departures: send you a summary")),
+    ("rj", Tr("Шутка: шутить, что ушедший вернётся", "Joke: joke that the leaver will be back")),
+    ("aw", Tr("Советы: замечать непрошеные советы", "Advice: notice unsolicited advice")),
+)
+"""What each switch does when it is on: said as an action, not as a fact, so a
+line under a ⚪ switch does not claim the bot does it."""
+COMMUNITY_LEGEND: Final = Tr(
+    "Что делает переключатель, когда включён:", "What a switch does when on:"
 )
 _COMMUNITY_OFF = Tr(
     "Режим выключен: бот не здоровается, не прощается и не пишет вам об уходах.",
@@ -382,15 +384,6 @@ def _inherits(view: ChatView, code: str) -> bool:
     return shows_common(FIELDS_BY_CODE[code], view.row)
 
 
-def _marker(view: ChatView, code: str, lang: str) -> str:  # noqa: ARG001 — callers' shape
-    """What a button label adds for an inherited value: nothing.
-
-    The origin is the screen text's (`_notes`); a suffix on the button read as
-    the value. Kept, returning "", for the builders that still append it.
-    """
-    return ""
-
-
 def _toggle(view: ChatView, code: str, lang: str, *, marked: bool = True) -> Button:
     """A switch: ✅ or ⚪ and its name. ``marked`` is kept for its callers and
     changes nothing now — no button says where its value comes from."""
@@ -407,6 +400,15 @@ def _text(*blocks: str | None) -> str:
     return "\n\n".join(block for block in blocks if block)
 
 
+def _common_name(code: str) -> Tr:
+    """What `COMMON_NOTE` calls ``code``: its switch, its own name, or its percentage's."""
+    if code in _COMMON_NAMES:
+        return _COMMON_NAMES[code]
+    if code in LABELS:
+        return LABELS[code]
+    return CHANCES[code].name
+
+
 def _notes(view: ChatView, codes: Sequence[str], lang: str, *extra: str) -> str | None:
     """The footnote, in plain text: ``extra`` caveats, then which of ``codes``
     come from the general settings. Plain, not italic — these are the lines a
@@ -416,7 +418,7 @@ def _notes(view: ChatView, codes: Sequence[str], lang: str, *extra: str) -> str 
     if len(inherited) == len(codes) > 2:
         lines.append(_ALL_COMMON(lang))
     elif inherited:
-        names = ", ".join((_COMMON_NAMES.get(code) or LABELS[code])(lang) for code in inherited)
+        names = ", ".join(_common_name(code)(lang) for code in inherited)
         lines.append(COMMON_NOTE(lang).format(names=names))
     return "\n".join(lines) if lines else None
 
@@ -871,9 +873,7 @@ def build_stickers(view: ChatView, lang: str) -> Screen:
         lines = [_NO_STICKER_LEARNING(lang).format(sl=LABELS["sl"](lang))]
     tolerance = float(view.value("tol") or 0)
     codes = ("sl", "sr", "ic", "tol")
-    tol_label = _TOLERANCE_BUTTON(lang).format(value=tolerance_label(tolerance, lang)) + _marker(
-        view, "tol", lang
-    )
+    tol_label = _TOLERANCE_BUTTON(lang).format(value=tolerance_label(tolerance, lang))
     return Screen(
         id="chat.stickers",
         text=_text(_header("stickers", view, lang), "\n".join(lines), _notes(view, codes, lang)),
@@ -1000,7 +1000,7 @@ _CHANCE_CEILING = Tr(
 )
 _CHANCE_OFF = Tr(
     "«{name}» сейчас выключен: число начнёт действовать, когда вы его включите на экране «Стикеры».",
-    "“{name}” is off now: the number takes effect once you turn it on on the Stickers screen.",
+    "“{name}” is off now: the number takes effect once you enable it on the Stickers screen.",
 )
 _CHANCE_NO_LEARNING = Tr(
     "Пока на экране «Стикеры» выключено «{sl}», бот стикерами не отвечает, что бы здесь ни стояло.",
@@ -1082,8 +1082,7 @@ def build_sticker_chances(view: ChatView, lang: str) -> Screen:
     rows = tuple(
         (
             Button(
-                f"🎲 {CHANCES[code].name(lang)} · {_share(view, code, lang)} %"
-                + _marker(view, code, lang),
+                f"🎲 {CHANCES[code].name(lang)} · {_share(view, code, lang)} %",
                 cb("adm_pnl_pct:", lang, view.chat_id, code),
             ),
         )

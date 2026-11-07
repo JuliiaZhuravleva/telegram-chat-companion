@@ -161,13 +161,6 @@ class TestAButtonShowsTheValueAndTheTextItsOrigin:
         assert line.startswith("Как в общих настройках: "), section
         assert "<i>" not in line and "</i>" not in line, line
 
-    @pytest.mark.parametrize("section", ["behavior", "stickers"])
-    def test_what_cannot_be_changed_here_is_plain_text(self, section: str) -> None:
-        """«… меняются только в базе» is a caveat, not an aside: plain, one line."""
-        text = screens.SECTION_BUILDERS[section](_view(_null(*INHERITING_CODES)), "ru").text
-        (line,) = [part for part in text.split("\n") if "только в базе" in part]
-        assert "<i>" not in line and "</i>" not in line, line
-
     @pytest.mark.parametrize("lang", LANGS)
     def test_a_chat_that_set_its_own_values_has_no_line(self, lang: str) -> None:
         own = {FIELDS_BY_CODE[code].key: True for code in (*INHERITING_CODES, "kb")}
@@ -183,7 +176,7 @@ class TestAButtonShowsTheValueAndTheTextItsOrigin:
         (button,) = [
             b for row in screen.rows for b in row if (b.callback or "").startswith("adm_pnl_tol:")
         ]
-        assert screens.COMMON("ru") not in button.label, button.label
+        assert "общее" not in button.label, button.label
         assert "Откровенность" in _common_line(screen.text)
 
     def test_every_value_inherited_says_so_once(self) -> None:

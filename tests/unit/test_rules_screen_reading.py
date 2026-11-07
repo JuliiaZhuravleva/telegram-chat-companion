@@ -42,7 +42,7 @@ _SAMPLES: list[Sample] = [
 ]
 
 _OLD_WORD = re.compile(r"(?<!\w)(?:вес|веса|весу|весом|весе|весам|весами)(?!\w)", re.IGNORECASE)
-"""«вес» in any case form. English keeps "weight" (`rules.PRIORITY`)."""
+"""«вес» in any case form. English says "priority" too (`rules.PRIORITY`)."""
 
 
 def _words(screen: Screen) -> list[str]:

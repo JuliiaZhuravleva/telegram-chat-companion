@@ -19,6 +19,7 @@ from src.bot.handlers.admin_defaults import (
     handle_defaults_section,
     handle_defaults_toggle,
 )
+from src.bot.screens import rules
 from src.bot.screens.sections import SECTIONS
 from src.bot.screens.settings import SECTION_TOGGLES
 from src.bot.settings_fields import FieldType, new_fields
@@ -143,7 +144,9 @@ class TestSection:
             callback, _make_bot_config_repo({"rules_mode": "highest_weight"})
         )
 
-        assert "Mode: one rule, highest weight" in callback.message.edit_text.call_args.args[0]
+        assert (
+            rules.mode_line("highest_weight", "en") in callback.message.edit_text.call_args.args[0]
+        )
         assert list(_buttons(callback)) == ["adm_defs_tgl:en:re", "adm_defs:en:0"]
 
     @pytest.mark.asyncio

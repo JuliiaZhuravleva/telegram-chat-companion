@@ -264,7 +264,7 @@ BACK_NAMES: Final[dict[str, Tr]] = {
     "rules": Tr("Правила", "Rules"),
     "rule": Tr("Правило", "Rule"),
     "orgs": Tr("Организаторы", "Organizers"),
-    "requests": Tr("Заявки", "Requests"),
+    "requests": Tr("Запросы доступа", "Access requests"),
     "settings": Tr("Общие настройки", "General settings"),
     "defs": Tr("Для всех чатов", "All chats"),
     "status": Tr("Состояние", "Status"),

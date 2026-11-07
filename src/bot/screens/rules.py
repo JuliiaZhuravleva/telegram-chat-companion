@@ -16,7 +16,7 @@ from html import escape
 from typing import Any, Final
 
 from src.bot.custom_emoji import fence
-from src.bot.screens.chat import COMMON, LABELS
+from src.bot.screens.chat import COMMON_NOTE, LABELS
 from src.bot.screens.i18n import Tr, plural_ru
 from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
@@ -62,19 +62,19 @@ ACTIONS: Final = {
 }
 """Builder action token → rule action."""
 
-PRIORITY: Final = Tr("приоритет", "weight")
+PRIORITY: Final = Tr("приоритет", "priority")
 """A rule's ``weight``, by a word readers know: one name on every rules screen.
 
-Russian says «приоритет»: «вес» read as nothing to a reader who has not seen the
-JSON. English keeps "weight", which the defaults screen's mode line also says."""
+«вес» / "weight" read as nothing to a reader who has not seen the JSON, so both
+languages say priority; only the JSON hint names the field ``weight``."""
 MANDATORY: Final = Tr("обязательное", "required")
 """A ``mandatory`` rule: it acts whatever the mode (`RuleEngine.evaluate`)."""
 
 MODES: Final = {
-    "highest_weight": Tr("одно правило с наибольшим приоритетом", "one rule, highest weight"),
+    "highest_weight": Tr("одно правило с наибольшим приоритетом", "one rule, highest priority"),
     "weighted_random": Tr(
         "одно случайное правило: чем выше приоритет, тем вероятнее",
-        "one random rule, by weight",
+        "one random rule: the higher the priority, the likelier",
     ),
 }
 """Rules modes other than ``all``. Only these change what a rule's weight means."""
@@ -90,13 +90,13 @@ _SEVERAL: Final = {
         "Если сообщение подходит под несколько правил, срабатывают все обязательные "
         "и одно из остальных — с наибольшим приоритетом.",
         "If a message matches several rules, every required one acts, "
-        "and of the others only the one with the highest weight.",
+        "and of the others only the one with the highest priority.",
     ),
     "weighted_random": Tr(
         "Если сообщение подходит под несколько правил, срабатывают все обязательные "
         "и одно случайное из остальных: чем выше приоритет, тем вероятнее.",
         "If a message matches several rules, every required one acts, "
-        "and of the others one at random: the higher the weight, the likelier.",
+        "and of the others one at random: the higher the priority, the likelier.",
     ),
 }
 
@@ -146,7 +146,7 @@ class ChatRules:
 
     enabled: bool
     common: bool
-    """The value is inherited (``chat_settings.rules_enabled`` is NULL): label ``· общее``."""
+    """The value is inherited (``chat_settings.rules_enabled`` is NULL): `common_line` says so."""
     mode: str = "all"
 
 
@@ -278,9 +278,17 @@ def switch_name(enabled: bool, lang: str) -> str:
 
 
 def master_label(chat: ChatRules, lang: str) -> str:
-    """The switch for all of a chat's rules, with the panel's suffix when the value is the default."""
+    """The switch for all of a chat's rules: its mark and its state, nothing else."""
     glyph = "✅" if chat.enabled else "⚪"
-    return f"{glyph} {switch_name(chat.enabled, lang)}{COMMON(lang) if chat.common else ''}"
+    return f"{glyph} {switch_name(chat.enabled, lang)}"
+
+
+def common_line(chat: ChatRules, lang: str) -> str | None:
+    """Where the switch's value comes from, in plain text, as the chat sections say it.
+
+    A suffix on the button read as part of the state (``⚪ … · общее`` as "off
+    for everyone"); the origin goes in the text, once, or not at all."""
+    return COMMON_NOTE(lang).format(names=LABELS["re"](lang)) if chat.common else None
 
 
 def _row_parts(rule: RuleView, chat: ChatRules, lang: str) -> tuple[str, str, str]:
@@ -339,6 +347,9 @@ def rules_screen(
         lines.append(mode_line(chat.mode, lang))
     if listed:
         lines.append(several_line(chat.mode, lang))
+    common = common_line(chat, lang)
+    if common:
+        lines += ["", common]
 
     rows: list[tuple[Button, ...]] = [
         (Button(master_label(chat, lang), cb("ar_all:", lang, chat_id)),)
@@ -547,6 +558,9 @@ def rule_screen(
             )(lang),
             switch_hint(chat.enabled, lang),
         ]
+        common = common_line(chat, lang)
+        if common:
+            lines.append(common)
     if show_json:
         lines += ["", f"<pre>{config_json(rule.config)}</pre>"]
 
@@ -1010,7 +1024,8 @@ def cfg_screen(lang: str, chat_id: int, rule_type: str | None = None) -> Screen:
                 "{priority} (<code>weight</code>), {mandatory} правило "
                 "(<code>mandatory</code>). Пример:",
                 "For what the buttons do not cover: regular expressions, exclusions, "
-                "<code>weight</code>, a {mandatory} rule (<code>mandatory</code>). Example:",
+                "{priority} (<code>weight</code>), a {mandatory} rule (<code>mandatory</code>). "
+                "Example:",
             )(lang).format(priority=PRIORITY(lang), mandatory=MANDATORY(lang))
             + f"\n<code>{escape(_CFG_EXAMPLE(lang))}</code>\n\n{kind}\n{actions}"
         ),

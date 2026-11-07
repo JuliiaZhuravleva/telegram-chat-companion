@@ -313,7 +313,8 @@ class TestEveryWayOutRemovesTheKeyboard:
             "ru",
             chat_id=GROUP_ID,
             title=TITLE,
-            chat=screens.ChatRules(enabled=True, common=False),
+            # The row has no ``rules_enabled`` of its own: the value is inherited.
+            chat=screens.ChatRules(enabled=True, common=True),
             rules=[],
         )
         assert rules.text == render_text(expected)

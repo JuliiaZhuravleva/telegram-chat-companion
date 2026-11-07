@@ -539,7 +539,11 @@ class TestSections:
         reactions = _callback(f"adm_pnl_grp:ru:{CHAT_ID}:reactions")
         await _open_section(reactions, row, bot_config_repo=defaults, service=stale_cache)
 
-        assert "✅ База знаний · общее" in _labels(memory)
+        assert "✅ База знаний" in _labels(memory)
+        (common,) = [
+            line for line in _edited(memory)[0].split("\n") if line.startswith("Как в общих")
+        ]
+        assert "База знаний" in common
         assert "✅ Реакции в чате" in _labels(reactions)
         assert any(label.startswith("⚪ Запоминать реакции") for label in _labels(reactions))
 
@@ -1311,13 +1315,18 @@ _NAVIGATION = {
 
 
 class TestLeavingTheNumberPromptClosesIt:
-    """``tol.in`` is edited in place, so any older panel message still has
-    live buttons. Left armed, the state would read whatever the admin types
-    next — a chat's name, a word for /remember — as a tolerance value."""
+    """``tol.in`` and ``chance.in`` are edited in place, so any older panel
+    message still has live buttons. Left armed, the state would read whatever
+    the admin types next — a chat's name, a word for /remember — as a value."""
 
+    @pytest.mark.parametrize(
+        "armed",
+        [AdminStates.awaiting_setting_value, AdminStates.awaiting_response_chance],
+        ids=["tolerance", "percentage"],
+    )
     @pytest.mark.parametrize("go", _NAVIGATION.values(), ids=_NAVIGATION.keys())
-    async def test_the_number_prompt_is_closed(self, go: Any) -> None:
-        state = await _armed(AdminStates.awaiting_setting_value)
+    async def test_the_number_prompt_is_closed(self, go: Any, armed: Any) -> None:
+        state = await _armed(armed)
 
         await go(state)
 
