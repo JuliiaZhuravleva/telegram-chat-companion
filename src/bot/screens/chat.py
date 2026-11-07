@@ -10,8 +10,11 @@ Which setting lives in which section is ``sections.SECTION_OF``. `LABELS` and
 defaults for all chats (``screens/settings.py``) reads them too, so a switch is
 called the same on both (tested). ``FieldSpec.label`` is not shown on either.
 
-``· общее`` next to a toggle is driven by `sections.shows_common` and nothing
-else — a legacy column always holds the chat's own value, so it never says it.
+A button shows the value that is in force, and only that: ✅ or ⚪ and the
+name. Where the value comes from is said once, in plain text under the screen
+(«Как в общих настройках: …»), never on the button — «⚪ … · общее» read as
+"off, or not set?". Which values say it is `sections.shows_common` and nothing
+else: a legacy column always holds the chat's own value, so it never does.
 """
 
 from __future__ import annotations
@@ -92,7 +95,7 @@ LABELS: Final[dict[str, Tr]] = {
     "rx": Tr("Реакции в чате", "Reactions in the chat"),
     "rh": Tr("Запоминать реакции людей", "Keep people's reactions"),
     "cm": Tr("Режим сообщества", "Community mode"),
-    "gf": Tr("Новичок", "Newcomer"),
+    "gf": Tr("Ждать сообщения", "Wait for a message"),
     "wb": Tr("Возврат", "Welcome back"),
     "fp": Tr("Прощание", "Farewell"),
     "fd": Tr("Уходы", "Departures"),
@@ -102,13 +105,23 @@ LABELS: Final[dict[str, Tr]] = {
 }
 """Toggle labels, by field code: every bool code a section shows, here and on the
 defaults screen. Short, because a phone fits about 17 characters on a full-width
-button and about 8 on a third."""
+button and about 8 on a third.
+
+A name says what the switch changes, never more: the greeting itself is the
+mode's, so its follower is «Ждать сообщения» (when the greeting comes) — under
+⚪ «Новичок» read "no greeting" while the bot greeted every newcomer on joining."""
 
 COMMON = Tr(" · общее", " · all")
-COMMON_NOTE = Tr(
-    "«Общее» — значение из общих настроек.",
-    "“all” is the value set for all chats.",
+"""The rules screen's suffix on its master switch. The chat sections no longer
+put it on a button: see `COMMON_NOTE`."""
+COMMON_NOTE = Tr("Как в общих настройках: {names}.", "As in the general settings: {names}.")
+"""The one line that says which values on a screen come from the general settings."""
+_ALL_COMMON = Tr(
+    "Все значения на кнопках — как в общих настройках.",
+    "Every value on the buttons is as in the general settings.",
 )
+_COMMON_NAMES: Final[dict[str, Tr]] = {"tol": Tr("Откровенность", "Explicitness")}
+"""A name for `COMMON_NOTE` where the button is not a `LABELS` switch."""
 TAP_TOGGLES = Tr("Нажатие включает или выключает.", "A tap turns a setting on or off.")
 
 TOGGLED_ON = Tr("Включено: {label}", "On: {label}")
@@ -262,8 +275,8 @@ COMMUNITY_LINES: Final[tuple[tuple[str, Tr], ...]] = (  # what each short label 
     (
         "gf",
         Tr(
-            "Новичок: здоровается на его первом сообщении, а не при входе",
-            "Newcomer: greets them on their first message, not on joining",
+            "Ждать сообщения: здоровается с новичком на его первом сообщении, а не при входе",
+            "Wait for a message: greets a newcomer on their first message, not on joining",
         ),
     ),
     ("wb", Tr("Возврат: пишет «с возвращением»", "Welcome back: says “welcome back”")),
@@ -273,10 +286,34 @@ COMMUNITY_LINES: Final[tuple[tuple[str, Tr], ...]] = (  # what each short label 
     ("aw", Tr("Советы: замечает непрошеные советы", "Advice: notices unsolicited advice")),
 )
 _COMMUNITY_OFF = Tr(
-    "Режим выключен: бот не здоровается и не прощается.",
-    "The mode is off: the bot neither greets nor says goodbye.",
+    "Режим выключен: бот не здоровается, не прощается и не пишет вам об уходах.",
+    "The mode is off: the bot does not greet, say goodbye or tell you who left.",
 )
-_ADVICE_LINE = COMMUNITY_LINES[-1][1]
+_NOW = Tr("Сейчас бот:", "Right now the bot:")
+_GREETS_FIRST = Tr(
+    "здоровается с новичком на его первом сообщении, а не при входе",
+    "greets a newcomer on their first message, not on joining",
+)
+_GREETS_JOIN = Tr(
+    "здоровается с новичком сразу при входе", "greets a newcomer as soon as they join"
+)
+_WELCOMES_BACK = Tr(
+    "тех, кто вернулся, встречает словами «с возвращением»",
+    "meets those who come back with “welcome back”",
+)
+_SAYS_GOODBYE = Tr(
+    "прощается в чате с тем, кто ушёл сам",
+    "says goodbye in the chat to whoever left on their own",
+)
+_JOKES = Tr(
+    "над тем, кто уходит не в первый раз, шутит в чате, что он вернётся",
+    "jokes in the chat that someone leaving again will be back",
+)
+_TELLS_YOU = Tr("присылает вам в личку, кто ушёл", "sends you a direct message about who left")
+_WATCHES_ADVICE = Tr(
+    "замечает непрошеные советы в обсуждении канала и раз в день присылает вам сводку",
+    "spots unsolicited advice in a channel's discussion and sends you a daily summary",
+)
 
 COMMUNITY_SUBTOGGLES: Final = frozenset({"gf", "wb", "fp", "fd", "rj"})
 """Shown, and written, only while community mode is on. ``aw`` is not one of
@@ -325,18 +362,26 @@ def _header(section: Section, view: ChatView, lang: str) -> str:
     return f"{emoji} <b>{word}</b> · {escape(view.name)}"
 
 
-def _marker(view: ChatView, code: str, lang: str) -> str:
-    return COMMON(lang) if shows_common(FIELDS_BY_CODE[code], view.row) else ""
+def _inherits(view: ChatView, code: str) -> bool:
+    """The chat has no value of its own for ``code``: the general settings decide it."""
+    return shows_common(FIELDS_BY_CODE[code], view.row)
+
+
+def _marker(view: ChatView, code: str, lang: str) -> str:  # noqa: ARG001 — callers' shape
+    """What a button label adds for an inherited value: nothing.
+
+    The origin is the screen text's (`_notes`); a suffix on the button read as
+    the value. Kept, returning "", for the builders that still append it.
+    """
+    return ""
 
 
 def _toggle(view: ChatView, code: str, lang: str, *, marked: bool = True) -> Button:
-    """A switch; ``marked=False`` leaves ``· общее`` to the screen's text."""
+    """A switch: ✅ or ⚪ and its name. ``marked`` is kept for its callers and
+    changes nothing now — no button says where its value comes from."""
+    del marked
     mark = "✅" if view.on(code) else "⚪"
-    common = _marker(view, code, lang) if marked else ""
-    return Button(
-        f"{mark} {LABELS[code](lang)}{common}",
-        cb("adm_pnl_tgl:", lang, view.chat_id, code),
-    )
+    return Button(f"{mark} {LABELS[code](lang)}", cb("adm_pnl_tgl:", lang, view.chat_id, code))
 
 
 def _back_to_chat(view: ChatView, lang: str) -> tuple[Button, ...]:
@@ -348,11 +393,17 @@ def _text(*blocks: str | None) -> str:
 
 
 def _notes(view: ChatView, codes: Sequence[str], lang: str, *extra: str) -> str | None:
-    """The italic footnote: extra notes, plus the ``«Общее»`` key when a marker shows."""
+    """The footnote, in plain text: ``extra`` caveats, then which of ``codes``
+    come from the general settings. Plain, not italic — these are the lines a
+    reader must not miss, and italics are the first thing glare takes away."""
     lines = list(extra)
-    if any(_marker(view, code, lang) for code in codes):
-        lines.append(COMMON_NOTE(lang))
-    return f"<i>{' '.join(lines)}</i>" if lines else None
+    inherited = [code for code in codes if _inherits(view, code)]
+    if len(inherited) == len(codes) > 2:
+        lines.append(_ALL_COMMON(lang))
+    elif inherited:
+        names = ", ".join((_COMMON_NAMES.get(code) or LABELS[code])(lang) for code in inherited)
+        lines.append(COMMON_NOTE(lang).format(names=names))
+    return "\n".join(lines) if lines else None
 
 
 # ---------------------------------------------------------------------------
@@ -866,10 +917,38 @@ def build_reactions(view: ChatView, lang: str) -> Screen:
 # ── community ─────────────────────────────────────────────────────────────
 
 
+_COMMUNITY_FACTS: Final[tuple[tuple[str, Tr], ...]] = (
+    ("wb", _WELCOMES_BACK),
+    ("fp", _SAYS_GOODBYE),
+    ("rj", _JOKES),
+    ("fd", _TELLS_YOU),
+)
+"""Community parts that add a line of their own while they are on, in screen order."""
+
+
+def _community_now(view: ChatView, lang: str) -> str:
+    """What the bot does in this chat with these switches, and nothing it does not.
+
+    The toggles already name the parts; the text says only what is in force
+    and what their names leave out (when a greeting comes, that a removal gets
+    no goodbye, where the advice summary goes). A part that is off is not
+    described at all, so the text cannot read as a fact its toggle denies.
+    Behaviour as in ``services/community.py`` and ``services/advice/watcher.py``.
+    """
+    facts: list[Tr] = []
+    if view.on("cm"):
+        facts.append(_GREETS_FIRST if view.on("gf") else _GREETS_JOIN)
+        facts += [line for code, line in _COMMUNITY_FACTS if view.on(code)]
+    if view.on("aw"):
+        facts.append(_WATCHES_ADVICE)
+    now = "\n".join([_NOW(lang), *(f"— {fact(lang)}" for fact in facts)]) if facts else ""
+    return now if view.on("cm") else _text(_COMMUNITY_OFF(lang), now)
+
+
 def build_community(view: ChatView, lang: str) -> Screen:
+    body = _community_now(view, lang)
     if view.on("cm"):
         codes: tuple[str, ...] = ("cm", "gf", "wb", "fp", "fd", "rj", "aw")
-        body = "\n".join(line(lang) for _, line in COMMUNITY_LINES)
         rows: tuple[tuple[Button, ...], ...] = (
             (_toggle(view, "cm", lang),),
             (_toggle(view, "gf", lang), _toggle(view, "wb", lang)),
@@ -878,7 +957,6 @@ def build_community(view: ChatView, lang: str) -> Screen:
         )
     else:
         codes = ("cm", "aw")
-        body = f"{_COMMUNITY_OFF(lang)}\n{_ADVICE_LINE(lang)}"
         rows = ((_toggle(view, "cm", lang),), (_toggle(view, "aw", lang),))
     return Screen(
         id="community",

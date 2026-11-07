@@ -3,11 +3,13 @@
 The handler tests reach these builders through a mocked repository and check
 a label or two; the sample screens cover one view each. What only a builder
 call can pin is the shape across states: which switches a section hides,
-and which labels may say ``· общее``.
+which values the text says come from the general settings, and what the
+community text says is on.
 """
 
 from __future__ import annotations
 
+import itertools
 from typing import Any
 
 import pytest
@@ -90,7 +92,7 @@ class TestReactionsHideTheHistorySwitchWhileOff:
         assert set(_switches(screen)) == {"rx", "rh"}
 
 
-# ── · общее ──────────────────────────────────────────────────────────────
+# ── a value from the general settings ────────────────────────────────────
 
 
 _SECTIONS = ("behavior", "memory", "voice", "stickers")
@@ -104,52 +106,121 @@ def _all_switches(row: dict[str, Any], lang: str, **values: Any) -> dict[str, st
     return found
 
 
-class TestOnlyInheritingSwitchesSayCommon:
-    """A legacy column's NULL is not "inherited" (its DEFAULT fills new rows),
-    so its button never says ``· общее``; the inheriting switches on the same
-    screens, NULL in the same row, do — that is the control that the marker
-    is reachable at all."""
+def _all_texts(row: dict[str, Any], lang: str, **values: Any) -> str:
+    view = _view(row, **values)
+    return "\n".join(screens.SECTION_BUILDERS[s](view, lang).text for s in _SECTIONS)
+
+
+def _common_line(text: str) -> str:
+    """The one line of ``text`` that names values taken from the general settings."""
+    head = screens.COMMON_NOTE("ru").split("{", 1)[0]
+    lines = [line for line in text.split("\n") if line.startswith(head)]
+    assert len(lines) <= 1, lines
+    return lines[0] if lines else ""
+
+
+class TestAButtonShowsTheValueAndTheTextItsOrigin:
+    """``✅``/``⚪`` and the name are the whole button: «⚪ Искать по архиву чата ·
+    общее» read as "off, or not set?". Which values come from the general
+    settings is one plain line of the text. A legacy column's NULL is not
+    "inherited" (its DEFAULT fills new rows), so that line never names it; the
+    inheriting switches, NULL in the same row, are named — the control that
+    the line is reachable at all."""
 
     @pytest.mark.parametrize("lang", LANGS)
-    def test_legacy_nulls_are_unmarked_and_inheriting_nulls_are_marked(self, lang: str) -> None:
-        common = screens.COMMON(lang)
+    def test_no_button_says_where_its_value_comes_from(self, lang: str) -> None:
         labels = _all_switches(_null(*LEGACY_CODES, *INHERITING_CODES, "kb"), lang)
 
         assert set(LEGACY_CODES) | set(INHERITING_CODES) <= set(labels)
-        for code in LEGACY_CODES:
-            assert common not in labels[code], (code, labels[code])
-        for code in INHERITING_CODES:
-            assert labels[code].endswith(common), (code, labels[code])
+        for code, label in labels.items():
+            assert (
+                label == f"{'✅' if label.startswith('✅') else '⚪'} {screens.LABELS[code](lang)}"
+            )
 
     @pytest.mark.parametrize("lang", LANGS)
-    def test_a_chat_that_set_its_own_values_has_no_marker(self, lang: str) -> None:
+    def test_the_text_names_the_inheriting_switches_and_not_the_legacy_ones(
+        self, lang: str
+    ) -> None:
+        view = _view(_null(*LEGACY_CODES, *INHERITING_CODES))
+        for section in _SECTIONS:
+            screen = screens.SECTION_BUILDERS[section](view, lang)
+            on_screen = set(_switches(screen))
+            line = next(
+                (x for x in screen.text.split("\n") if x.startswith(_common_head(lang))), ""
+            )
+            for code in on_screen & set(INHERITING_CODES):
+                assert screens.LABELS[code](lang) in line, (section, code, line)
+            for code in on_screen & set(LEGACY_CODES):
+                assert screens.LABELS[code](lang) not in line, (section, code, line)
+
+    @pytest.mark.parametrize("section", _SECTIONS)
+    def test_the_line_is_plain_text_not_an_aside(self, section: str) -> None:
+        """Italics are what glare takes first; this caveat must survive it."""
+        view = _view(_null(*INHERITING_CODES))
+        line = _common_line(screens.SECTION_BUILDERS[section](view, "ru").text)
+        assert line.startswith("Как в общих настройках: "), section
+        assert "<i>" not in line and "</i>" not in line, line
+
+    @pytest.mark.parametrize("section", ["behavior", "stickers"])
+    def test_what_cannot_be_changed_here_is_plain_text(self, section: str) -> None:
+        """«… меняются только в базе» is a caveat, not an aside: plain, one line."""
+        text = screens.SECTION_BUILDERS[section](_view(_null(*INHERITING_CODES)), "ru").text
+        (line,) = [part for part in text.split("\n") if "только в базе" in part]
+        assert "<i>" not in line and "</i>" not in line, line
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_a_chat_that_set_its_own_values_has_no_line(self, lang: str) -> None:
         own = {FIELDS_BY_CODE[code].key: True for code in (*INHERITING_CODES, "kb")}
         own["tolerance_level"] = 0.5
 
-        labels = _all_switches({**_null(*LEGACY_CODES), **own}, lang)
+        text = _all_texts({**_null(*LEGACY_CODES), **own}, lang)
 
-        assert not [label for label in labels.values() if screens.COMMON(lang) in label]
+        assert _common_head(lang) not in text
+        assert "общих настройках" not in text and "general settings" not in text
+
+    def test_the_explicitness_button_is_named_in_the_line_not_on_the_button(self) -> None:
+        screen = screens.build_stickers(_view({}), "ru")
+        (button,) = [
+            b for row in screen.rows for b in row if (b.callback or "").startswith("adm_pnl_tol:")
+        ]
+        assert screens.COMMON("ru") not in button.label, button.label
+        assert "Откровенность" in _common_line(screen.text)
+
+    def test_every_value_inherited_says_so_once(self) -> None:
+        screen = screens.build_community(_view({}, community_enabled=True), "ru")
+        assert "Все значения на кнопках — как в общих настройках." in screen.text
+        assert "Как в общих настройках: " not in screen.text
 
 
-class TestTheKnowledgeBaseSaysCommonOnItsButton:
-    """With the organizers moved to the chat's root the switch has a row of
-    its own, so «· общее» goes on it like on every other switch."""
+def _common_head(lang: str) -> str:
+    return screens.COMMON_NOTE(lang).split("{", 1)[0]
+
+
+class TestTheKnowledgeBaseSaysCommonInTheText:
+    """The knowledge base has a row of its own since the organizers moved to the
+    chat's root; it says where its value comes from in the same line as every
+    other switch."""
 
     def test_the_switch_is_named_as_everywhere_else(self) -> None:
         assert screens.LABELS["kb"]("ru") == "База знаний"
 
     @pytest.mark.parametrize("on", [True, False])
-    def test_inherited_is_marked_on_the_button(self, on: bool) -> None:
+    def test_the_button_shows_the_value_alone(self, on: bool) -> None:
         screen = screens.build_memory(_view(_null("kb"), kb_enabled=on), "ru")
 
-        assert _switches(screen)["kb"] == f"{'✅' if on else '⚪'} База знаний · общее"
-        assert screens.COMMON_NOTE("ru") in screen.text
-        assert "общих настройках." not in screen.text.replace(screens.COMMON_NOTE("ru"), "")
+        assert _switches(screen)["kb"] == f"{'✅' if on else '⚪'} База знаний"
 
-    def test_set_for_the_chat_says_nothing_about_common(self) -> None:
+    @pytest.mark.parametrize("on", [True, False])
+    def test_inherited_is_named_in_the_line(self, on: bool) -> None:
+        screen = screens.build_memory(_view(_null("kb"), kb_enabled=on), "ru")
+
+        assert "База знаний" in _common_line(screen.text)
+
+    def test_set_for_the_chat_is_not_named(self) -> None:
         screen = screens.build_memory(_view({"kb_enabled": True}, kb_enabled=True), "ru")
 
         assert _switches(screen)["kb"] == "✅ База знаний"
+        assert "База знаний" not in _common_line(screen.text)
 
     @pytest.mark.parametrize("lang", LANGS)
     @pytest.mark.parametrize("on", [True, False])
@@ -282,3 +353,119 @@ class TestTheChatList:
     def test_rejected_chats_cost_no_chat_row(self) -> None:
         assert screens.chats_per_page(0, 0) == screens.chats_per_page(0, 3) == 4
         assert screens.chats_per_page(2, 0) == screens.chats_per_page(2, 3) == 3
+
+
+# ── what the community text says ──────────────────────────────────────────
+
+_COMMUNITY_CODES = ("cm", "gf", "wb", "fp", "fd", "rj", "aw")
+_COMBOS = [
+    dict(zip(_COMMUNITY_CODES, bits, strict=True))
+    for bits in itertools.product((False, True), repeat=len(_COMMUNITY_CODES))
+]
+
+
+def _own(flags: dict[str, bool]) -> dict[str, bool]:
+    return {FIELDS_BY_CODE[code].key: on for code, on in flags.items()}
+
+
+def _community(flags: dict[str, bool], lang: str) -> str:
+    own = _own(flags)
+    return screens.build_community(_view(own, **own), lang).text
+
+
+_NAME_PROMISES: dict[str, str] = {
+    # name on the button -> the words that would say the bot does what it names
+    "Режим сообщества": "— здоровается",
+    "Ждать сообщения": "первом сообщении",
+    "Возврат": "«с возвращением»",
+    "Прощание": "прощается в чате",
+    "Уходы": "в личку, кто ушёл",
+    "Шутка": "шутит",
+    "Советы": "советы",
+    "Community mode": "— greets",
+    "Wait for a message": "first message",
+    "Welcome back": "“welcome back”",
+    "Farewell": "says goodbye",
+    "Departures": "message about who left",
+    "Joke": "jokes",
+    "Advice": "advice",
+    # The name the greeting switch had: under ⚪ it promised no greeting.
+    "Новичок": "с новичком",
+    "Newcomer": "a newcomer",
+}
+
+
+def _facts(flags: dict[str, bool]) -> dict[Any, bool]:
+    """Each line the community text may say -> whether these switches make it true
+    (``services/community.py``: a part acts only while the mode is on; the advice
+    watcher reads only its own flag)."""
+    cm = flags["cm"]
+    return {
+        screens._COMMUNITY_OFF: not cm,
+        screens._GREETS_FIRST: cm and flags["gf"],
+        screens._GREETS_JOIN: cm and not flags["gf"],
+        screens._WELCOMES_BACK: cm and flags["wb"],
+        screens._SAYS_GOODBYE: cm and flags["fp"],
+        screens._JOKES: cm and flags["rj"],
+        screens._TELLS_YOU: cm and flags["fd"],
+        screens._WATCHES_ADVICE: flags["aw"],
+    }
+
+
+class TestTheCommunityTextSaysOnlyWhatIsOn:
+    """The toggles name the parts; the text says what is in force now. A line
+    describing a part whose toggle is off («Прощание: прощается в чате» under
+    ⚪ Прощание) reads as a fact the toggle denies."""
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_every_line_is_there_exactly_when_it_is_true(self, lang: str) -> None:
+        for flags in _COMBOS:
+            text = _community(flags, lang)
+            for line, true in _facts(flags).items():
+                assert (line(lang) in text) is true, (flags, line(lang), text)
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_no_line_repeats_a_toggles_name_as_a_heading(self, lang: str) -> None:
+        names = [screens.LABELS[code](lang) for code in _COMMUNITY_CODES]
+        for flags in _COMBOS:
+            for line in _community(flags, lang).split("\n"):
+                assert not any(line.startswith(f"{name}:") for name in names), (flags, line)
+
+    def test_farewell_in_the_chat_is_said_only_while_it_is_on(self) -> None:
+        """The round-3 reading, as a reader asks it: «попрощается ли бот в чате?»"""
+        for flags in _COMBOS:
+            said = "прощается в чате" in _community(flags, "ru")
+            assert said is (flags["cm"] and flags["fp"]), flags
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_no_line_says_the_bot_does_what_an_off_switch_names(self, lang: str) -> None:
+        """A reader takes a switch's name for what it does: «⚪ Новичок» read
+        "no newcomer greeting" while the text rightly said the bot greets on
+        joining — and the only switch that stops greetings is the mode itself.
+        Read off the buttons drawn, for every combination, inherited or the
+        chat's own; a name missing from `_NAME_PROMISES` fails, so a renamed
+        switch has to say what its new name promises."""
+        for flags in _COMBOS:
+            own = _own(flags)
+            for row in (own, {}):
+                screen = screens.build_community(_view(row, **own), lang)
+                for label in _switches(screen).values():
+                    if not label.startswith("⚪ "):
+                        continue
+                    name = label.removeprefix("⚪ ")
+                    assert name in _NAME_PROMISES, f"say what «{name}» promises"
+                    assert _NAME_PROMISES[name] not in screen.text, (flags, name, screen.text)
+
+    def test_the_greeting_line_readers_rely_on_is_kept(self) -> None:
+        on = dict.fromkeys(_COMMUNITY_CODES, False) | {"cm": True, "gf": True}
+        assert "на его первом сообщении, а не при входе" in _community(on, "ru")
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_every_label_fits_its_row(self, lang: str) -> None:
+        for flags in _COMBOS:
+            own = {FIELDS_BY_CODE[code].key: on for code, on in flags.items()}
+            for inherited in (own, {}):
+                screen = screens.build_community(_view(inherited, **own), lang)
+                for buttons in screen.rows:
+                    for b in buttons:
+                        assert label_width_px(b.label) <= clip_room(len(buttons)), b.label

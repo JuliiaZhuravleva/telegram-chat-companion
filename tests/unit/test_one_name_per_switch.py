@@ -7,8 +7,10 @@ and then looks at a chat cannot tell they are one setting. The walk below
 reads the labels off the BUTTONS each screen draws, not off the tables, so a
 screen that stopped reading `chat.LABELS` fails here.
 
-The one allowed difference is the per-chat ``· общее`` suffix: on a chat's
-panel it says the value comes from the defaults.
+No difference is allowed, not even for a value the chat takes from the
+defaults: its button reads exactly as the defaults screen's, and the text says
+where the value comes from («Как в общих настройках: …»). A suffix on the
+button («⚪ … · общее») read as "off, or not set?" and hid the value.
 
 The rules switch lives on the rules area's own screens, not on the panel, and
 says its state in one word after the panel's noun («Правила включены»). That
@@ -26,6 +28,7 @@ import pytest
 from src.bot.screens import rules, settings
 from src.bot.screens.chat import (
     COMMON,
+    COMMON_NOTE,
     COMMUNITY_LINES,
     LABELS,
     SECTION_BUILDERS,
@@ -96,13 +99,16 @@ def test_every_switch_on_both_screens_has_one_name(lang: str):
     # one but the rules switch (the rules area draws its own) on the panel too.
     assert set(defaults) == {code for rows in SECTION_TOGGLES.values() for r in rows for code in r}
     assert set(defaults) & set(panel) == set(defaults) - {"re"}
-    # ...and the inherited form was drawn, so the suffix branch below ran.
-    assert any(name.endswith(suffix) for names in panel.values() for name in names)
+    # ...and the inherited form was drawn: its text says so, its buttons do not.
+    head = COMMON_NOTE(lang).split("{", 1)[0]
+    inherited = _all_on({})
+    assert any(head in build(inherited, lang).text for build in SECTION_BUILDERS.values())
+    assert not any(suffix in name for names in panel.values() for name in names)
 
     differ = {
         code: (defaults[code], sorted(panel[code]))
         for code in set(defaults) & set(panel)
-        if not panel[code] <= {defaults[code], defaults[code] + suffix}
+        if panel[code] != {defaults[code]}
     }
     assert differ == {}
 

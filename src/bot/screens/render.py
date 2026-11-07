@@ -217,7 +217,13 @@ async def show_markup(
         parse_mode=parse_mode,
         disable_web_page_preview=disable_web_page_preview,
     )
-    note_screen(shown, screen_id, text if title_from is None else title_from, editable=editable)
+    note_screen(
+        shown,
+        screen_id,
+        text if title_from is None else title_from,
+        editable=editable,
+        markup=markup,
+    )
     return shown
 
 
