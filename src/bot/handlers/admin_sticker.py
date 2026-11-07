@@ -29,7 +29,7 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
@@ -65,6 +65,7 @@ from src.bot.screens.stickers import (
     facts_from_row,
     pack_key,
     pack_rows,
+    rescore_without_score,
 )
 from src.bot.states.admin import AdminStates, takes_a_sticker
 from src.bot.utils import check_admin_direct, safe_edit_reply_markup
@@ -105,16 +106,40 @@ async def _resolve_default_tolerance_level(bot_config_repo: BotConfigRepository)
 
 # Regex to extract file_unique_id from notification text (🆔 line)
 _STICKER_ID_RE = re.compile(r"🆔\s*([A-Za-z0-9_-]+)")
+_FUID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# The buttons every sticker card carries (`_card_rows`), each ``prefix:lang:fuid``.
+_CARD_BUTTON_PREFIXES = ("adm_stk_reanalyze:", "adm_stk_clr_ask:", "adm_stk_score:")
+
+
+def _fuid_from_buttons(markup: object) -> str | None:
+    """The sticker a card's own buttons point at, or None for any other keyboard."""
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return None
+    for row in markup.inline_keyboard:
+        for button in row:
+            data = button.callback_data or ""
+            if not data.startswith(_CARD_BUTTON_PREFIXES):
+                continue
+            fields = parse(data, 2)
+            if fields is not None and _FUID_RE.fullmatch(fields[1]):
+                return fields[1]
+    return None
 
 
 def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
-    """Try to extract file_unique_id from replied-to message text or caption."""
+    """The sticker a replied-to card is about, read off the message itself.
+
+    The fallback for a card whose record is missing: the 🆔 line in its text
+    or caption (a detailed card), else its buttons — a brief card has no 🆔
+    line, but every card's buttons carry the sticker's id.
+    """
     for content in (reply_msg.text, reply_msg.caption):
         if content:
             match = _STICKER_ID_RE.search(content)
             if match:
                 return match.group(1)
-    return None
+    return _fuid_from_buttons(reply_msg.reply_markup)
 
 
 def _lang_hint(callback: CallbackQuery) -> Lang:
@@ -236,6 +261,19 @@ async def _restore_score(
         return False
 
 
+async def _put_back(
+    sticker_repo: StickerRepository, fuid: str, prior_score: tuple[float, bool] | None
+) -> tuple[float | None, bool]:
+    """Restore the score a re-score dropped: ``(kept value, lost)``; ``(None, False)``
+    when there was none to restore."""
+    if prior_score is None:
+        return None, False
+    score, manual = prior_score
+    if await _restore_score(sticker_repo, fuid, score, manual):
+        return score, False
+    return None, True
+
+
 async def _sets_screen(
     lang: Lang,
     sticker_repo: StickerRepository,
@@ -341,7 +379,7 @@ async def handle_admin_sticker_reply(
     if not message.reply_to_message or not message.text:
         return
 
-    # Look up the card by reply (primary: DB, fallback: the 🆔 line)
+    # Look up the card by reply (primary: DB, fallback: the 🆔 line, then its buttons)
     notif = await sticker_repo.get_notification_by_reply(
         message.chat.id,
         message.reply_to_message.message_id,
@@ -354,6 +392,16 @@ async def handle_admin_sticker_reply(
         file_unique_id = _extract_file_unique_id_from_reply(message.reply_to_message)
 
     if not file_unique_id:
+        # Silence here would read as "the bot ignored my correction": this
+        # handler has already consumed the update (aiogram), so nobody else
+        # will answer it either.
+        logger.info(
+            "sticker reply matched no card",
+            reply_to=message.reply_to_message.message_id,
+            admin_id=message.from_user.id if message.from_user else None,
+        )
+        lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
+        await message.reply(render_text(build_stk_reply(lang, "unknown")), parse_mode="HTML")
         return
 
     logger.debug(
@@ -692,8 +740,21 @@ async def handle_sticker_explicitness_edit_prompt(
         await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
 
+    # A card opened from a pack sits under the sticker the bot sent for it, and
+    # the typed answer brings the card back as a NEW message: that card has to
+    # inherit the sticker, or leaving it strands the sticker in the DM. Not for
+    # a card that is a reply (a notification, the DM check) — its sticker is
+    # the admin's, and the new card, not being a reply, would delete it.
+    sticker_msg = 0
+    if isinstance(callback.message, Message) and callback.message.reply_to_message is None:
+        sticker_msg = (
+            await sticker_repo.get_card_sticker_msg(
+                callback.message.chat.id, callback.message.message_id
+            )
+            or 0
+        )
     await state.set_state(AdminStates.awaiting_sticker_score)
-    await state.update_data(exp_file_unique_id=fuid, exp_lang=lang)
+    await state.update_data(exp_file_unique_id=fuid, exp_lang=lang, exp_sticker_msg=sticker_msg)
     msg = await show(callback, build_stk_score_in(lang, facts))
     if msg is not None:
         await state.update_data(exp_prompt_id=msg.message_id)
@@ -773,7 +834,14 @@ async def handle_sticker_explicitness_input(
         return
     notice = NOTICE_SCORE(lang).format(v=f"{value:.2f}")
     msg = await show(message, build_stk_card(lang, facts, notice=notice))
-    await _remember(sticker_repo, msg, file_unique_id, admin_id)
+    sticker_msg_id = data.get("exp_sticker_msg")
+    await _remember(
+        sticker_repo,
+        msg,
+        file_unique_id,
+        admin_id,
+        sticker_msg_id=sticker_msg_id if isinstance(sticker_msg_id, int) else 0,
+    )
 
 
 @router.callback_query(
@@ -836,7 +904,8 @@ async def _analyse_into_card(
 
     ``prior_score`` (value, set by hand): the score that re-score had already
     dropped. On failure it is put back, and the error screen says whether
-    that worked.
+    that worked. So it is when the analysis succeeds without a usable score:
+    the card then says the score was not recalculated, never "recalculated".
     """
     await show(callback, build_stk_analyzing(lang), answered=True)
     reason: str | None
@@ -848,24 +917,43 @@ async def _analyse_into_card(
         logger.error("sticker re-analysis crashed", file_unique_id=fuid, exc_info=True)
         ok, reason = False, "internal"
     if not ok:
-        kept: float | None = None
-        lost = False
-        if prior_score is not None:
-            score, manual = prior_score
-            if await _restore_score(sticker_repo, fuid, score, manual):
-                kept = score
-            else:
-                lost = True
+        kept, lost = await _put_back(sticker_repo, fuid, prior_score)
         error = build_stk_error(
             lang, fuid, reason, dm=dm, score_kept=kept, score_lost=lost, retry_rescore=rescore
         )
         await show(callback, error, answered=True)
         return
-    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
-    if facts is None:
-        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang), answered=True)
+    # Everything after the analysis is guarded too: the placeholder is still
+    # on screen, without buttons, and the callback is already answered.
+    try:
+        facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+        notice_raw: str | None = None
+        if rescore and facts is not None and facts.score is None:
+            # The analysis ran but gave no usable score (the field omitted,
+            # cut off, or out of range): save_sticker kept the NULL the reset
+            # wrote, and an unscored sticker is never sent. Same as a failure.
+            kept, lost = await _put_back(sticker_repo, fuid, prior_score)
+            if kept is not None:
+                facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+            notice_raw = rescore_without_score(lang, kept=kept, lost=lost)
+            logger.warning(
+                "sticker re-score gave no score", file_unique_id=fuid, kept=kept, lost=lost
+            )
+        if facts is None:
+            await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang), answered=True)
+            return
+        card = build_stk_card(
+            lang,
+            facts,
+            notice=None if notice_raw is not None else notice,
+            notice_raw=notice_raw,
+        )
+        msg = await show(callback, card, answered=True)
+    except Exception:
+        logger.error("sticker card after analysis failed", file_unique_id=fuid, exc_info=True)
+        error = build_stk_error(lang, fuid, "internal", dm=dm, retry_rescore=rescore)
+        await show(callback, error, answered=True)
         return
-    msg = await show(callback, build_stk_card(lang, facts, notice=notice), answered=True)
     await _remember(sticker_repo, msg, fuid, callback.from_user.id)
 
 
@@ -925,10 +1013,11 @@ async def handle_sticker_explicitness_reset(
     empty score means the bot never sends the sticker — so the reset is
     followed by the one re-analysis that writes a fresh automatic score.
 
-    If that analysis fails, the score it replaced is put back: the reset alone
-    would leave the sticker unscored, i.e. never sent, behind an error screen
-    that says nothing about it. That screen's Retry comes back here: a plain
-    re-analysis would keep a score that was put back as set by hand.
+    If that analysis fails, or succeeds without a usable score, the score it
+    replaced is put back: the reset alone would leave the sticker unscored,
+    i.e. never sent, behind a screen that says nothing about it. The error
+    screen's Retry comes back here: a plain re-analysis would keep a score
+    that was put back as set by hand.
 
     Drops the score prompt for the same reason the preset buttons do: this row
     stays tappable on a score screen elsewhere in the chat. Only that state.
@@ -1137,10 +1226,16 @@ async def handle_admin_sticker_dm_analyze(
     # inherit an existing manual score+flag from its canonical row, so
     # this first-ever card for the file can legitimately already show
     # the "(вручную)" badge -- not a bug, see the ADR's own note.
-    learned = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
-    if learned is None:
-        await show(callback, build_stk_error(lang, fuid, None, dm=True), answered=True)
+    # Guarded like _analyse_into_card: the ⏳ placeholder has no buttons.
+    try:
+        learned = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+        if learned is None:
+            await show(callback, build_stk_error(lang, fuid, None, dm=True), answered=True)
+            return
+        card = build_stk_card(lang, learned, notice=NOTICE_LEARNED(lang))
+        msg = await show(callback, card, answered=True)
+    except Exception:
+        logger.error("sticker card after analysis failed", file_unique_id=fuid, exc_info=True)
+        await show(callback, build_stk_error(lang, fuid, "internal", dm=True), answered=True)
         return
-    card = build_stk_card(lang, learned, notice=NOTICE_LEARNED(lang))
-    msg = await show(callback, card, answered=True)
     await _remember(sticker_repo, msg, fuid, callback.from_user.id)

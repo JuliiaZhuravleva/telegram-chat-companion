@@ -656,7 +656,10 @@ sticker message with it, so the DM does not collect orphaned stickers.
   too); the answer arrives as the card in a new message and the prompt loses its
   **✖️ Отмена**, so no stale cancel is left behind; a wrong number asks again.
   *Пересчитать оценку* drops a hand-set value and runs one fresh analysis — a sticker with no
-  score is one the bot never sends, so the reset alone would silence it.
+  score is one the bot never sends, so the reset alone would silence it. If that analysis
+  comes back without a usable score, the old one is put back and the card says so:
+  "Модель не вернула оценку. Оценка осталась прежней: 0.30." (or that the score was reset,
+  when putting it back failed too).
 
 A sticker deleted meanwhile is not an error: the pack list opens with
 "Этого стикера уже нет в базе." A pack that is gone does the same with its own line.
@@ -684,8 +687,10 @@ the merge failed and the note was saved (re-run the analysis to use it), the mod
 because of the content (the score can be set by hand), or something else failed (try again).
 
 Once a card has turned into a list, a reply to that message is no longer a correction.
-Replying to *anything else* in the admin DM does nothing — the reply is consumed by this
-handler and quietly dropped when no sticker can be identified.
+A card whose record is lost is still recognised by its own buttons. A text reply to
+*anything else* in the admin DM gets "⚠️ Описание не обновлено" with "Не получилось понять,
+о каком стикере речь…": the reply is consumed by this handler, so silence would be the only
+answer it ever got.
 
 ### A5.5 The new-sticker notification
 
@@ -795,7 +800,7 @@ in the panel language, problem lines and hints included: "База данных 
 расшифровка ×5 (gemini), с 03.11 12:00 UTC (2 ч 5 мин)". Only the provider's own error text under a line
 stays as the provider wrote it.
 
-**Spend.** When the day's AI spend passes the daily limit (`bot_config.daily_spend_limit_usd`;
+**Spend.** When the day's AI spend (since 00:00 UTC) passes the daily limit (`bot_config.daily_spend_limit_usd`;
 no limit set means no card), every bot admin gets
 💰 **Дневной лимит расходов превышен** — how much, against what limit, and that the bot keeps
 answering — with **💰 Расходы** for the 24-hour view. **Once per UTC day**, however many replies
