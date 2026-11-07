@@ -222,6 +222,19 @@ class TestCostsFilters:
 # ---------------------------------------------------------------------------
 
 
+# What the admin reads when the check fails for a reason nobody mapped, and
+# when OpenAI answered but our own figure could not be read. Written out here
+# rather than imported, so a test asserts the copy and not a lookup.
+_UNEXPECTED = {
+    "ru": "Сверка не удалась из-за непредвиденной ошибки.",
+    "en": "The check failed with an unexpected error.",
+}
+_OURS_FAILED = {
+    "ru": "OpenAI ответил, но посчитать наши расходы за тот же период не удалось.",
+    "en": "OpenAI answered, but our own costs for the same period could not be read.",
+}
+
+
 @pytest.fixture(autouse=True)
 def _clear_verify_cooldown():
     """The cooldown is module state; leaking it across tests is a false pass."""
@@ -683,12 +696,17 @@ class TestHandleCostsVerify:
         assert "HTTP 500" in text
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("lang", ["ru", "en"])
     @pytest.mark.parametrize("failing", ["get_costs", "close"])
-    async def test_a_client_that_raises_shows_the_error_screen(self, failing: str):
-        """The query is answered before the call, so a raise must not end in silence."""
+    async def test_a_client_that_raises_shows_the_error_screen(self, failing: str, lang: str):
+        """The query is answered before the call, so a raise must not end in silence.
+
+        The admin reads the reason in their language; the exception's class
+        name belongs in the log, not on the screen.
+        """
         from structlog.testing import capture_logs
 
-        cb = _make_callback("adm_costs_verify:ru:24h")
+        cb = _make_callback(f"adm_costs_verify:{lang}:24h")
         repo = _make_response_log_repo()
         settings = _make_settings()
 
@@ -705,12 +723,86 @@ class TestHandleCostsVerify:
         instance.close.assert_awaited_once()
         cb.answer.assert_awaited_once_with()
         text = cb.message.edit_text.call_args.args[0]
-        assert "Unexpected error: RuntimeError" in text
+        assert _UNEXPECTED[lang] in text
+        assert "RuntimeError" not in text and "Unexpected error" not in text
         markup = cb.message.edit_text.call_args.kwargs["reply_markup"]
         callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-        assert callbacks[0] == "adm_costs_verify:ru:24h", "the error screen offers a retry"
+        assert callbacks[0] == f"adm_costs_verify:{lang}:24h", "the error screen offers a retry"
         repo.get_cost_by_provider.assert_not_awaited()
         failed = [e for e in logs if e["event"] == "costs_verify_failed"]
+        assert len(failed) == 1 and failed[0]["exc_info"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    async def test_the_real_clients_unexpected_error_is_localised(self, lang: str):
+        """The billing client itself folds a surprise into ``error_code="unexpected"``.
+
+        Driven through the real ``OpenAIBillingClient``: only its HTTP call is
+        replaced, so the code the screen receives is the one the client really
+        produces. The client's own English message, which names the exception
+        class, goes to the log and not to the admin.
+        """
+        import httpx
+        from structlog.testing import capture_logs
+
+        cb = _make_callback(f"adm_costs_verify:{lang}:24h")
+        repo = _make_response_log_repo()
+        settings = _make_settings()
+
+        with (
+            patch.object(httpx.AsyncClient, "get", AsyncMock(side_effect=RuntimeError("boom"))),
+            capture_logs() as logs,
+        ):
+            await handle_costs_verify(cb, repo, settings)
+
+        text = cb.message.edit_text.call_args.args[0]
+        assert _UNEXPECTED[lang] in text
+        assert "RuntimeError" not in text and "Unexpected error" not in text
+        markup = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert callbacks[0] == f"adm_costs_verify:{lang}:24h", "the error screen offers a retry"
+        refused = [e for e in logs if e["event"] == "costs_verify_refused"]
+        assert len(refused) == 1
+        assert refused[0]["code"] == "unexpected"
+        assert "RuntimeError" in refused[0]["error"]
+        repo.get_cost_by_provider.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    async def test_our_own_costs_failing_shows_the_error_screen(self, lang: str):
+        """OpenAI answered, then reading our own figure failed.
+
+        The query is answered before either call, so a database error here
+        must end on the error screen with a retry, not on a frozen screen.
+        """
+        from structlog.testing import capture_logs
+
+        from src.services.ai.billing import OpenAICostReport
+
+        cb = _make_callback(f"adm_costs_verify:{lang}:24h")
+        repo = _make_response_log_repo()
+        repo.get_cost_by_provider = AsyncMock(side_effect=OSError("connection reset"))
+        settings = _make_settings()
+
+        with patch("src.services.ai.billing.OpenAIBillingClient") as MockClient:
+            instance = AsyncMock()
+            instance.get_costs = AsyncMock(
+                return_value=OpenAICostReport(total_usd=Decimal("0.02"), buckets=[])
+            )
+            instance.close = AsyncMock()
+            MockClient.return_value = instance
+
+            with capture_logs() as logs:
+                await handle_costs_verify(cb, repo, settings)  # must not raise
+
+        cb.answer.assert_awaited_once_with()
+        text = cb.message.edit_text.call_args.args[0]
+        assert _OURS_FAILED[lang] in text
+        assert "OSError" not in text and "connection reset" not in text
+        markup = cb.message.edit_text.call_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert callbacks == [f"adm_costs_verify:{lang}:24h", f"adm_costs:{lang}:24h"]
+        failed = [e for e in logs if e["event"] == "costs_verify_ours_failed"]
         assert len(failed) == 1 and failed[0]["exc_info"] is True
 
     @pytest.mark.asyncio

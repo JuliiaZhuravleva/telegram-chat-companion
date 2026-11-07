@@ -333,8 +333,20 @@ MISSING_SETTING: Final[Mapping[str, Tr]] = {
 }
 
 BILLING_ERRORS: Final[Mapping[str, Tr]] = {
-    # Localised text per OpenAICostReport.error_code. Anything unmapped falls
-    # back to the client's own English message.
+    # Localised text per OpenAICostReport.error_code, plus the handler's own
+    # "ours_failed". Anything unmapped falls back to the client's own English
+    # message. No entry names an exception: the class goes to the log.
+    "unexpected": Tr(
+        "Сверка не удалась из-за непредвиденной ошибки. "
+        "Можно повторить, подробности — в логах бота.",
+        "The check failed with an unexpected error. Try again; details are in the bot logs.",
+    ),
+    "ours_failed": Tr(
+        "OpenAI ответил, но посчитать наши расходы за тот же период не удалось. "
+        "Можно повторить, подробности — в логах бота.",
+        "OpenAI answered, but our own costs for the same period could not be read. "
+        "Try again; details are in the bot logs.",
+    ),
     "no_billing_access": Tr(
         "OpenAI ответил 403: ключ есть, но он не админский ключ организации. "
         f'Нужен ключ отсюда: <a href="{ADMIN_KEYS_URL}">admin keys</a>.',

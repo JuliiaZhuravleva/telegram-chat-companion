@@ -289,6 +289,16 @@ def costs_error_raw(lang: Lang) -> Screen:
     return costs_error_screen(lang, "24h", code="http_error", error="OpenAI returned HTTP 502")
 
 
+@sample("costs.error", section="Состояние", title="Непредвиденная ошибка", nav="panel")
+def costs_error_unexpected(lang: Lang) -> Screen:
+    return costs_error_screen(lang, "24h", code="unexpected", error="Unexpected error")
+
+
+@sample("costs.error", section="Состояние", title="Свои расходы не прочитаны", nav="panel")
+def costs_error_ours(lang: Lang) -> Screen:
+    return costs_error_screen(lang, "24h", code="ours_failed", error="Own costs could not be read")
+
+
 # ---------------------------------------------------------------------------
 # settings, notif, lang, defs, defs.section
 # ---------------------------------------------------------------------------
