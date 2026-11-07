@@ -1123,12 +1123,10 @@ async def test_sticker_handler_learns_animated():
     sticker_service.learn.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_sticker_handler_notify_admins_threads_tolerance_level():
-    """A-1: notify_admins() receives the originating chat's own resolved
-    ChatConfig.tolerance_level (уровень приличия) -- this is the one DM
-    sticker card with a real chat in scope, unlike the catalog-browsing
-    cards in admin_sticker.py which fall back to the global default."""
+async def _notify_about_new_sticker(
+    *, tolerance_level: float, admin_lang: str | Exception
+) -> AsyncMock:
+    """Run a never-seen sticker through the chat handler; return ``notify_admins``."""
     from src.bot.handlers.media import handle_sticker_message
     from src.services.modules.sticker.models import StickerLearningResult
 
@@ -1141,7 +1139,7 @@ async def test_sticker_handler_notify_admins_threads_tolerance_level():
     sticker.is_video = False
     message.sticker = sticker
 
-    chat_config = _make_chat_config(tolerance_level=0.73)
+    chat_config = _make_chat_config(tolerance_level=tolerance_level)
     bot = _make_bot()
 
     sticker_service = MagicMock()
@@ -1165,6 +1163,10 @@ async def test_sticker_handler_notify_admins_threads_tolerance_level():
     message_repo.get_recent = AsyncMock(return_value=[])
 
     admin_repo = MagicMock()
+    if isinstance(admin_lang, Exception):
+        admin_repo.get_admin_language = AsyncMock(side_effect=admin_lang)
+    else:
+        admin_repo.get_admin_language = AsyncMock(return_value=admin_lang)
     admin_repo.get_notification_settings = AsyncMock(
         return_value={
             "sticker": "on",
@@ -1194,8 +1196,40 @@ async def test_sticker_handler_notify_admins_threads_tolerance_level():
             bot,
         )
 
-    sticker_service.notify_admins.assert_awaited_once()
-    assert sticker_service.notify_admins.call_args.kwargs["tolerance_level"] == 0.73
+    notify: AsyncMock = sticker_service.notify_admins
+    return notify
+
+
+@pytest.mark.asyncio
+async def test_sticker_handler_notify_admins_threads_tolerance_level():
+    """A-1: notify_admins() receives the originating chat's own resolved
+    ChatConfig.tolerance_level (уровень приличия) -- this is the one DM
+    sticker card with a real chat in scope, unlike the catalog-browsing
+    cards in admin_sticker.py which fall back to the global default."""
+    notify = await _notify_about_new_sticker(tolerance_level=0.73, admin_lang="ru")
+
+    notify.assert_awaited_once()
+    assert notify.call_args.kwargs["tolerance_level"] == 0.73
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admin_lang", ["en", "ru"])
+async def test_sticker_handler_notify_admins_in_the_admins_language(admin_lang: str):
+    """The new-sticker card is the admins' screen: it speaks the admin language
+    setting, not a hardcoded Russian (``notify_admins`` defaults to "ru")."""
+    notify = await _notify_about_new_sticker(tolerance_level=0.5, admin_lang=admin_lang)
+
+    notify.assert_awaited_once()
+    assert notify.call_args.kwargs["lang"] == admin_lang
+
+
+@pytest.mark.asyncio
+async def test_sticker_handler_notifies_in_the_default_when_the_language_is_unreadable():
+    """A failed read of the admin language costs the language, not the card."""
+    notify = await _notify_about_new_sticker(tolerance_level=0.5, admin_lang=RuntimeError("db"))
+
+    notify.assert_awaited_once()
+    assert notify.call_args.kwargs["lang"] == "ru"
 
 
 @pytest.mark.asyncio

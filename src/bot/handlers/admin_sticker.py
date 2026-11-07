@@ -7,7 +7,9 @@ Handles:
 - An admin sending a sticker straight to the bot → catalogue check: known →
   the card, unknown → one "🔍 Разобрать" button. Registered here (not in
   handlers/media.py) so router order (handlers/__init__.py) makes it run
-  before media.py's silent auto-learn for the admin's own DM.
+  before media.py's silent auto-learn for the admin's own DM. Only with no
+  prompt open: a sticker sent into another screen's prompt is that prompt's
+  answer, and in this module's own score prompt it gets a hint instead.
 
 Every card the bot shows about a sticker — opened from a pack, after a
 re-analysis, after a score change, the DM check, the bot's own notification —
@@ -214,6 +216,24 @@ async def _disarm(state: FSMContext) -> None:
     """
     if await state.get_state() == AdminStates.awaiting_sticker_score.state:
         await state.clear()
+
+
+async def _restore_score(
+    sticker_repo: StickerRepository, fuid: str, score: float, manual: bool
+) -> bool:
+    """Put back the score a failed re-score had already dropped; False when that failed.
+
+    A re-score resets the score before it analyses, and an unscored sticker is
+    never sent — so a failed analysis must not leave it that way.
+    """
+    try:
+        if manual:
+            return await sticker_repo.set_manual_explicitness_score(fuid, score)
+        await sticker_repo.update_explicitness_score(fuid, score)
+        return True
+    except Exception:
+        logger.error("sticker score not restored", file_unique_id=fuid, exc_info=True)
+        return False
 
 
 async def _sets_screen(
@@ -614,12 +634,13 @@ async def handle_sticker_explicitness_preset(
     closing paragraph) -- the button already fixes a known-valid value, so
     no FSM input is needed. The card comes back with a line saying so.
 
-    It still has to *clear* the FSM, though: an older score screen elsewhere
-    in the chat keeps its preset buttons live. An admin who opens the "type a
-    number" prompt and then taps a preset instead would leave
+    It still has to drop the score prompt, though: an older score screen
+    elsewhere in the chat keeps its preset buttons live. An admin who opens the
+    "type a number" prompt and then taps a preset instead would leave
     ``awaiting_sticker_score`` set, and the next plain DM text — a description
     correction, say — would be eaten by the score-input handler (which also
-    outranks ``handle_admin_sticker_reply``'s ``StateFilter(None)``).
+    outranks ``handle_admin_sticker_reply``'s ``StateFilter(None)``). Only that
+    state (`_disarm`): another screen's prompt stays open.
     """
     fields = parse(callback.data, 3)
     index = int(fields[2]) if fields is not None and fields[2].isdigit() else -1
@@ -629,7 +650,7 @@ async def handle_sticker_explicitness_preset(
     lang, fuid = lang_of(fields[0]), fields[1]
     value = PRESETS[index]
 
-    await state.clear()
+    await _disarm(state)
     if not await sticker_repo.set_manual_explicitness_score(fuid, value):
         await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
@@ -682,6 +703,7 @@ async def handle_sticker_explicitness_edit_prompt(
     AdminStates.awaiting_sticker_score,
     F.chat.type == "private",
     ~F.text.startswith("/"),
+    ~F.caption.startswith("/"),
 )
 async def handle_sticker_explicitness_input(
     message: Message,
@@ -701,6 +723,9 @@ async def handle_sticker_explicitness_input(
 
     Each answer is one new message: the repeated prompt, or the card. The
     previous prompt loses its ✖️ so only one live way out exists.
+
+    A sticker, a photo or any other answer without text is not a wrong number:
+    the prompt comes back saying the number goes in as text, and how to leave.
     """
     data = await state.get_data()
     file_unique_id = data.get("exp_file_unique_id")
@@ -715,6 +740,7 @@ async def handle_sticker_explicitness_input(
         await state.clear()
         return
 
+    not_text = message.text is None
     raw = (message.text or "").strip().replace(",", ".")
     value: float | None
     try:
@@ -730,7 +756,8 @@ async def handle_sticker_explicitness_input(
             gone = await _sets_screen(lang, sticker_repo, notice_raw=GONE_STICKER(lang))
             await show(message, gone)
             return
-        msg = await show(message, build_stk_score_in(lang, facts, invalid=True))
+        again = build_stk_score_in(lang, facts, invalid=True, not_text=not_text)
+        msg = await show(message, again)
         if msg is not None:
             await state.update_data(exp_prompt_id=msg.message_id)
         return
@@ -763,14 +790,16 @@ async def handle_sticker_explicitness_cancel(
     """Escape hatch for ``awaiting_sticker_score`` -- the input handler
     keeps the state set on invalid input (reject-not-clamp), so cancelling
     must be reachable without typing a valid float. The prompt turns back
-    into the score screen it came from.
+    into the score screen it came from. Only this prompt's state is dropped
+    (`_disarm`): a stale ✖️ tapped while another screen's prompt is open
+    leaves that prompt alone.
     """
     fields = parse(callback.data, 2)
     if fields is None:
         await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
     lang, fuid = lang_of(fields[0]), fields[1]
-    await state.clear()
+    await _disarm(state)
     facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
     if facts is None:
         await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
@@ -793,15 +822,44 @@ async def _analyse_into_card(
     *,
     notice: str,
     dm: bool = False,
+    rescore: bool = False,
+    prior_score: tuple[float, bool] | None = None,
 ) -> None:
     """Run one re-analysis behind the ⏳ placeholder, then the card or the error.
 
-    The callback must already be answered: the vision call takes seconds.
+    The callback must already be answered: the vision call takes seconds. An
+    unexpected exception is an error screen too — the placeholder has no
+    buttons, so leaving it would strand the admin.
+
+    ``rescore``: this analysis is the second half of a re-score, so the error
+    screen's Retry repeats the re-score, not a bare re-analysis.
+
+    ``prior_score`` (value, set by hand): the score that re-score had already
+    dropped. On failure it is put back, and the error screen says whether
+    that worked.
     """
     await show(callback, build_stk_analyzing(lang), answered=True)
-    result = await sticker_service.reanalyze(bot, fuid)
-    if not result.ok:
-        await show(callback, build_stk_error(lang, fuid, result.reason, dm=dm), answered=True)
+    reason: str | None
+    try:
+        result = await sticker_service.reanalyze(bot, fuid)
+        reason = None if result.ok else result.reason
+        ok = result.ok
+    except Exception:
+        logger.error("sticker re-analysis crashed", file_unique_id=fuid, exc_info=True)
+        ok, reason = False, "internal"
+    if not ok:
+        kept: float | None = None
+        lost = False
+        if prior_score is not None:
+            score, manual = prior_score
+            if await _restore_score(sticker_repo, fuid, score, manual):
+                kept = score
+            else:
+                lost = True
+        error = build_stk_error(
+            lang, fuid, reason, dm=dm, score_kept=kept, score_lost=lost, retry_rescore=rescore
+        )
+        await show(callback, error, answered=True)
         return
     facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
     if facts is None:
@@ -867,16 +925,28 @@ async def handle_sticker_explicitness_reset(
     empty score means the bot never sends the sticker — so the reset is
     followed by the one re-analysis that writes a fresh automatic score.
 
-    Clears the FSM for the same reason the preset buttons do: this row stays
-    tappable on a score screen elsewhere in the chat.
+    If that analysis fails, the score it replaced is put back: the reset alone
+    would leave the sticker unscored, i.e. never sent, behind an error screen
+    that says nothing about it. That screen's Retry comes back here: a plain
+    re-analysis would keep a score that was put back as set by hand.
+
+    Drops the score prompt for the same reason the preset buttons do: this row
+    stays tappable on a score screen elsewhere in the chat. Only that state.
     """
     fields = parse(callback.data, 2)
     if fields is None:
         await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
     lang, fuid = lang_of(fields[0]), fields[1]
-    await state.clear()
-    if not await sticker_repo.reset_explicitness_to_auto(fuid):
+    await _disarm(state)
+    row = await sticker_repo.get_by_file_unique_id(fuid)
+    prior: tuple[float, bool] | None = None
+    if row is not None and row.get("explicitness_score") is not None:
+        prior = (
+            float(row["explicitness_score"]),
+            bool(row.get("explicitness_is_manual") or False),
+        )
+    if row is None or not await sticker_repo.reset_explicitness_to_auto(fuid):
         await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
     await callback.answer()
@@ -890,13 +960,20 @@ async def handle_sticker_explicitness_reset(
         admin_repo,
         bot_config_repo,
         notice=NOTICE_RESCORED(lang),
+        rescore=True,
+        prior_score=prior,
     )
 
 
 # ── Admin sends a sticker straight to the bot ───────────────────────────
 
 
-@router.message(F.sticker, F.chat.type == "private", IsAdmin())
+# StateFilter(None): this router runs before every other FSM-owning router, so
+# without it a sticker sent as the answer to another screen's prompt (the rules
+# reaction prompt, say) would be taken for a catalogue check. In this module's
+# own score prompt `handle_sticker_explicitness_input`, registered above, has
+# already answered it.
+@router.message(F.sticker, F.chat.type == "private", IsAdmin(), StateFilter(None))
 async def handle_admin_sticker_check(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],
@@ -1008,7 +1085,14 @@ async def handle_admin_sticker_dm_analyze(
         await show(callback, build_stk_error(lang, fuid, "download", dm=True), answered=True)
         return
 
-    learning_result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+    try:
+        learning_result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+    except Exception:
+        logger.error(
+            "handle_admin_sticker_dm_analyze: learn crashed", file_unique_id=fuid, exc_info=True
+        )
+        await show(callback, build_stk_error(lang, fuid, "internal", dm=True), answered=True)
+        return
 
     # Best-effort sticker-set registration so the admin panel's "browse by
     # set" stays consistent for manually-checked stickers too — parity with

@@ -285,6 +285,13 @@ def score_in_bad(lang: Lang) -> Screen:
     return build_stk_score_in(lang, STICKER, invalid=True)
 
 
+@sample(
+    "stk.score_in", section=_S, title="Своё число: не текст", nav="prompt", user_data=(DESCRIPTION,)
+)
+def score_in_not_text(lang: Lang) -> Screen:
+    return build_stk_score_in(lang, STICKER, invalid=True, not_text=True)
+
+
 # ── stk.clear_ask / stk.analyzing / stk.error ──────────────────────────
 
 
@@ -325,6 +332,21 @@ def error_empty(lang: Lang) -> Screen:
 @sample("stk.error", section=_S, title="Ошибка: отказ из-за содержания", nav="panel")
 def error_filter(lang: Lang) -> Screen:
     return build_stk_error(lang, fake.FUID, "content_filter")
+
+
+@sample("stk.error", section=_S, title="Ошибка: сбой бота", nav="panel")
+def error_internal(lang: Lang) -> Screen:
+    return build_stk_error(lang, fake.FUID, "internal")
+
+
+@sample("stk.error", section=_S, title="Пересчёт не удался: оценка прежняя", nav="panel")
+def error_rescore_kept(lang: Lang) -> Screen:
+    return build_stk_error(lang, fake.FUID, "vision", score_kept=0.25, retry_rescore=True)
+
+
+@sample("stk.error", section=_S, title="Пересчёт не удался: оценка сброшена", nav="panel")
+def error_rescore_lost(lang: Lang) -> Screen:
+    return build_stk_error(lang, fake.FUID, "internal", score_lost=True, retry_rescore=True)
 
 
 @sample("stk.error", section=_S, title="Ошибка в личке", nav="card")
