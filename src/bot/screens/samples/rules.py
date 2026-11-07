@@ -149,6 +149,30 @@ def rule_gone(lang: Lang) -> Screen:
     return r.gone_screen(lang, chat_id=_CID, title=_TITLE, chat=_ON, rules=(_KEYWORDS, _FLOOD))
 
 
+@_panel("rules", title="Правила: все выключены с карточки")
+def rules_switched_off(lang: Lang) -> Screen:
+    return r.rules_screen(
+        lang,
+        chat_id=_CID,
+        title=_TITLE,
+        chat=r.ChatRules(enabled=False, common=False),
+        rules=(_KEYWORDS, _FLOOD),
+        notice=r.RULES_OFF(lang),
+    )
+
+
+@_panel("rule.gone", title="Правила: включены, а правила уже нет")
+def rule_gone_switched(lang: Lang) -> Screen:
+    return r.gone_screen(
+        lang,
+        chat_id=_CID,
+        title=_TITLE,
+        chat=_ON,
+        rules=(_KEYWORDS, _FLOOD),
+        notice=r.RULES_ON(lang),
+    )
+
+
 # ---------------------------------------------------------------------------
 # rule, rule.del_ask
 # ---------------------------------------------------------------------------
@@ -176,7 +200,19 @@ def rule_json(lang: Lang) -> Screen:
     return r.rule_screen(lang, _SPAM, chat=_WEIGHTED, show_json=True)
 
 
-@_panel("rule.del_ask", title="Удалить правило?")
+@_panel("rule", title="Правило: правила чата включены с карточки")
+def rule_switched_on(lang: Lang) -> Screen:
+    return r.rule_screen(lang, _KEYWORDS, chat=_ON, notice=r.RULES_ON(lang))
+
+
+@_panel(
+    "rule.del_ask",
+    title="Удалить правило?",
+    exempt={
+        "R4": "the way back from a delete question says what it does to the rule "
+        "(«Не удалять»); it still goes to the rule's card"
+    },
+)
 def rule_del_ask(lang: Lang) -> Screen:
     return r.delete_ask_screen(lang, _KEYWORDS)
 
@@ -225,14 +261,25 @@ _PEOPLE: Final = (
 )
 
 
-@_prompt("rule.who", title="Новое правило: чьи сообщения")
+_FIND_EXEMPT: Final = {
+    "R9": "«Найти в Telegram» names the app whose own search the button opens; "
+    "no Russian word says which search it is",
+}
+
+
+@_prompt("rule.who", title="Новое правило: чьи сообщения", exempt=_FIND_EXEMPT)
 def rule_who(lang: Lang) -> Screen:
     return r.who_screen(lang, _CID, _PEOPLE, page=0, pages=3)
 
 
-@_prompt("rule.who", title="Новое правило: в чате никто не писал")
+@_prompt("rule.who", title="Новое правило: в чате никто не писал", exempt=_FIND_EXEMPT)
 def rule_who_empty(lang: Lang) -> Screen:
     return r.who_screen(lang, _CID, ())
+
+
+@_prompt("rule.who_find", title="Новое правило: поиск в Telegram", exempt=_FIND_EXEMPT)
+def rule_who_find(lang: Lang) -> Screen:
+    return r.who_find_screen(lang)
 
 
 @_prompt("rule.flood", title="Новое правило: сколько стикеров")
@@ -260,6 +307,16 @@ def rule_text_custom(lang: Lang) -> Screen:
     return r.text_screen(lang, _CID, WORDS_NAME, action="custom_response")
 
 
+@_prompt("rule.text", title="Новое правило: ответ не поместится с именем", exempt=_ERROR_EXEMPT)
+def rule_text_too_long(lang: Lang) -> Screen:
+    return r.error_screen(
+        "rule.text",
+        r.text_too_long(lang, 62, filled=True),
+        cb("ar_list:", lang, _CID, 0),
+        lang,
+    )
+
+
 @_prompt("rule.react", title="Новое правило: реакция")
 def rule_react(lang: Lang) -> Screen:
     return r.react_screen(lang, _CID, WORDS_NAME)
@@ -277,7 +334,7 @@ def rule_cfg(lang: Lang) -> Screen:
 
 @_prompt("rule.cfg_bad", title="Новое правило: это не JSON", exempt=_ERROR_EXEMPT)
 def rule_cfg_bad(lang: Lang) -> Screen:
-    return r.error_screen("rule.cfg_bad", r.CFG_NOT_JSON(lang), cb("ar_add:", lang, _CID), lang)
+    return r.error_screen("rule.cfg_bad", r.CFG_NOT_JSON(lang), cb("ar_list:", lang, _CID, 0), lang)
 
 
 # ---------------------------------------------------------------------------

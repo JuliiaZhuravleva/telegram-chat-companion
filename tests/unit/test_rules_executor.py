@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import escape
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from src.bot.screens.render import render_text, to_markup
 from src.models.rules import Rule, RuleAction, RuleType
 from src.services.rules.engine import RuleActionResult
 from src.services.rules.executor import RuleActionExecutor
+from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -305,6 +307,106 @@ class TestCustomResponse:
         await executor.execute(action, message=msg, bot=bot)
 
         msg.reply.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# One Telegram message: 4096 UTF-16 units of what is actually sent
+# ---------------------------------------------------------------------------
+
+_ASTRAL_NAME = "😀" * 64
+"""The longest first name Telegram allows, each character two UTF-16 units."""
+
+
+def _sent(msg: MagicMock) -> str:
+    msg.reply.assert_awaited_once()
+    assert msg.reply.call_args.kwargs == {"parse_mode": None}
+    text = msg.reply.call_args.args[0]
+    assert isinstance(text, str)
+    return text
+
+
+class TestOneMessage:
+    """The executor swallows every exception, so a send Telegram would reject
+    is silent here; what is asserted is the text handed to ``reply``."""
+
+    @pytest.mark.asyncio
+    async def test_a_reply_that_a_long_name_pushes_over_the_limit_is_cut_to_fit(self) -> None:
+        """Typed as 3990 characters it fit; with a 64-emoji name it is 4118 units."""
+        msg = _make_message(first_name=_ASTRAL_NAME)
+        template = "{first_name} " + "я" * 3990
+        action = RuleActionResult(
+            rule=_make_rule(config={"name": "r", "response_template": template}),
+            action=RuleAction.CUSTOM_RESPONSE,
+            params={"response_template": template},
+        )
+
+        await _make_executor().execute(action, message=msg, bot=AsyncMock())
+
+        text = _sent(msg)
+        assert parsed_length(escape(text, quote=False)) <= TELEGRAM_MESSAGE_LIMIT
+        assert text.startswith(_ASTRAL_NAME + " яяя")
+        assert text.endswith("…")
+
+    @pytest.mark.asyncio
+    async def test_a_reply_that_fits_is_sent_whole(self) -> None:
+        msg = _make_message(first_name=_ASTRAL_NAME)
+        template = "{first_name} " + "я" * 3967  # 128 + 1 + 3967 = 4096 units exactly
+        action = RuleActionResult(
+            rule=_make_rule(config={"response_template": template}),
+            action=RuleAction.CUSTOM_RESPONSE,
+            params={},
+        )
+
+        await _make_executor().execute(action, message=msg, bot=AsyncMock())
+
+        assert _sent(msg) == _ASTRAL_NAME + " " + "я" * 3967
+
+    @pytest.mark.asyncio
+    async def test_an_old_over_long_warning_is_cut_not_dropped(self) -> None:
+        """A rule saved before the builder checked lengths: 2049 emoji are 4098 units."""
+        msg = _make_message()
+        warning = "😀" * 2049
+        action = RuleActionResult(
+            rule=_make_rule(config={"warning_message": warning}),
+            action=RuleAction.WARN_USER,
+            params={"warning_message": warning},
+        )
+
+        await _make_executor().execute(action, message=msg, bot=AsyncMock())
+
+        text = _sent(msg)
+        assert parsed_length(escape(text, quote=False)) <= TELEGRAM_MESSAGE_LIMIT
+        assert text == "😀" * 2047 + "…"
+
+    @pytest.mark.asyncio
+    async def test_a_name_is_never_read_as_a_placeholder(self) -> None:
+        """Sequential replacing filled ``{first_name}`` first and then read the
+        name itself for ``{rule_name}``."""
+        msg = _make_message(first_name="{rule_name}", username="{first_name}")
+        action = RuleActionResult(
+            rule=_make_rule(config={"name": "R", "response_template": "{first_name}/{username}"}),
+            action=RuleAction.CUSTOM_RESPONSE,
+            params={},
+        )
+
+        await _make_executor().execute(action, message=msg, bot=AsyncMock())
+
+        assert _sent(msg) == "{rule_name}/{first_name}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [["Привет"], {"t": "Привет"}, 7])
+    async def test_a_text_field_that_is_not_text_counts_as_none(self, bad: object) -> None:
+        """Hand-written JSON: a list went to ``reply`` and Telegram refused it."""
+        msg = _make_message()
+        action = RuleActionResult(
+            rule=_make_rule(config={"warning_message": bad}),
+            action=RuleAction.WARN_USER,
+            params={"warning_message": bad},
+        )
+
+        await _make_executor().execute(action, message=msg, bot=AsyncMock())
+
+        assert _sent(msg) == screens.WARN_FALLBACK("ru")
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,8 @@ Callback routes (all DM-only, admin-only):
 - ``ar_b_type:{lang}:{chat_id}:{k|u|f|s}[:{page}]`` — words, a person, stickers, messages
 - ``ar_b_match:{lang}:{chat_id}:{c|e}``       — a word inside a message or the word alone
 - ``ar_b_who:{lang}:{chat_id}:{user_id}``     — whose messages
+- ``ar_b_find:{lang}:{chat_id}``              — whose messages, found with Telegram's
+  own person search: a new message with a reply keyboard (``request_users``)
 - ``ar_b_n:{lang}:{chat_id}:{n}``             — how many a minute is too many
 - ``ar_b_act:{lang}:{chat_id}:{n|w|c|r|ri}``  — what the rule does
 - ``ar_b_txt:{lang}:{chat_id}:{i}``           — a ready warning text
@@ -25,6 +27,12 @@ Callback routes (all DM-only, admin-only):
 The builder keeps its answers in FSM data (``rule_*`` keys) and asks for typed
 input in four states (`_RULE_STATES`). A payload a handler cannot parse, or a
 builder step whose draft is gone or belongs to another chat, is a stale button.
+
+The person search is the one reply keyboard here. It has no state of its own:
+``rule_finding`` in FSM data marks it open, and its picks carry
+``REQUEST_IDS.RULE_WHO``, so the knowledge base's picker never takes them. Every
+way out of it (a pick, «✖️ Отмена», a stale pick, ``/cancel``) takes the
+keyboard away.
 """
 
 from __future__ import annotations
@@ -37,17 +45,19 @@ from typing import Any, Final
 import structlog
 from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Filter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 from dishka.integrations.aiogram import FromDishka
 
+from src.bot.custom_emoji import bare_label
 from src.bot.filters.admin import IsAdmin
 from src.bot.screens import rules as screens
 from src.bot.screens.deps import resolve, state_of
 from src.bot.screens.i18n import Tr, lang_of
 from src.bot.screens.model import Screen
-from src.bot.screens.render import page_slice, show
-from src.bot.screens.routes import cb, parse
+from src.bot.screens.render import CANCEL, page_slice, show
+from src.bot.screens.routes import REQUEST_IDS, cb, parse
 from src.bot.screens.sections import shows_common
 from src.bot.screens.stale import show_stale
 from src.bot.settings_fields import FIELDS_BY_CODE
@@ -59,6 +69,8 @@ from src.database.repositories.rules import RulesRepository
 from src.models.rules import _VALID_RULE_ACTIONS, _VALID_RULE_TYPES, RuleAction
 from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
+from src.services.rules.reply_text import sent_length, worst_length
+from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT
 
 logger = structlog.get_logger(__name__)
 
@@ -74,9 +86,14 @@ DELETED: Final = Tr("Правило удалено", "Rule deleted")
 SPAM_NAME: Final = Tr("Сообщения: {n} за минуту", "Messages: {n} a minute")
 FLOOD_NAME: Final = Tr("Стикеры: {n} за минуту", "Stickers: {n} a minute")
 _NAME_CHARS: Final = 60
-"""A rule built from words is named by them, cut here: the name heads its card."""
+"""A rule's name is cut here, whoever wrote it: the name heads its card."""
 _SHOWN_WORD_CHARS: Final = 30
 """An over-long word is quoted back cut to this, so the error stays one line."""
+NOT_CREATED: Final = Tr(
+    "<i>Правило не создано: начните заново.</i>",
+    "<i>The rule was not created: please start again.</i>",
+)
+"""Over the list when a typed last answer finds its draft incomplete (no ✓: nothing was done)."""
 
 _RULE_STATES: Final = frozenset(
     {
@@ -99,8 +116,11 @@ _DRAFT_KEYS: Final = (
     "rule_action",
     "rule_people",
     "rule_prompt_id",
+    "rule_finding",
 )
-"""The builder's answers in FSM data, set to None when a new rule starts."""
+"""The builder's answers in FSM data, set to None when a new rule starts.
+
+``rule_finding`` is the chat id while the person search (``rule.who_find``) is open."""
 
 _STATE_SETTERS: Final[Mapping[str, str]] = {
     "handle_type_selected": (
@@ -230,6 +250,7 @@ async def _list(
     chat_config_service: ChatConfigService,
     chat_settings_repo: ChatSettingsRepository,
     notice: str | None = None,
+    notice_raw: str | None = None,
     gone: bool = False,
 ) -> Screen:
     """The chat's rules on ``page`` (clamped into range), or ``rule.gone`` over it."""
@@ -242,7 +263,14 @@ async def _list(
     rules = [screens.rule_view(row) for row in rows]
     if gone:
         return screens.gone_screen(
-            lang, chat_id=chat_id, title=title, chat=chat, rules=rules, page=clamped, pages=pages
+            lang,
+            chat_id=chat_id,
+            title=title,
+            chat=chat,
+            rules=rules,
+            page=clamped,
+            pages=pages,
+            notice=notice,
         )
     return screens.rules_screen(
         lang,
@@ -253,6 +281,7 @@ async def _list(
         page=clamped,
         pages=pages,
         notice=notice,
+        notice_raw=notice_raw,
     )
 
 
@@ -355,7 +384,7 @@ async def handle_rules_all(
     NULL-aware like the panel's toggles: an inherited value flips from what the
     chat actually does, and the flip happens inside the UPDATE, so a double tap
     is two flips. With a rule id the tap came from that rule's card, which is
-    redrawn; otherwise the list is.
+    redrawn; otherwise the list is. Either one says what the tap did.
     """
     if await _denied(callback, kwargs):
         return
@@ -377,6 +406,7 @@ async def handle_rules_all(
         await show_stale(callback, lang, data=kwargs, state=state)
         return
     chat_config_service.invalidate(chat_id)
+    notice = (screens.RULES_ON if stored else screens.RULES_OFF)(lang)
 
     row = await rules_repo.get(rule_id) if rule_id is not None else None
     if row is not None:
@@ -385,6 +415,7 @@ async def handle_rules_all(
             screens.rule_view(row),
             chat_config_service=chat_config_service,
             chat_settings_repo=chat_settings_repo,
+            notice=notice,
         )
     else:
         screen = await _list(
@@ -394,6 +425,7 @@ async def handle_rules_all(
             rules_repo=rules_repo,
             chat_config_service=chat_config_service,
             chat_settings_repo=chat_settings_repo,
+            notice=notice,
             gone=rule_id is not None,
         )
     await show(callback, screen)
@@ -835,9 +867,127 @@ async def handle_builder_who(
         return
     people = draft.get("rule_people")
     shown = people.get(str(user_id)) if isinstance(people, dict) else None
-    name = shown if isinstance(shown, str) and shown else str(user_id)
+    name = _cap_name(shown if isinstance(shown, str) and shown else str(user_id))
     await state.update_data(rule_user=user_id, rule_name=name)
     await show(callback, screens.action_screen(lang, chat_id, name))
+
+
+@router.callback_query(F.data.startswith("ar_b_find:"))
+async def handle_builder_find(
+    callback: CallbackQuery,
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """Whose messages, found with Telegram's person search: anyone, not only who wrote.
+
+    A new message, since a reply keyboard can only be sent. The picker above
+    loses its buttons, so the search's «✖️ Отмена» is the one way out.
+    """
+    if await _denied(callback, kwargs):
+        return
+    await _leave_config_prompt(state, keep_draft=True)
+    lang, chat_id, _ = _builder_args(callback, 2)
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    if chat_id is None or draft is None or draft.get("rule_type") != "user_specific":
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await state.update_data(rule_finding=chat_id, lang=lang)
+    await show(callback, screens.who_find_screen(lang))
+    if isinstance(callback.message, Message):
+        try:
+            await safe_edit_reply_markup(callback.message, reply_markup=None)
+        except TelegramAPIError as exc:
+            logger.info("rule_who_keyboard_kept", error=str(exc))
+
+
+class _Finding(Filter):
+    """The rules person search is open: ``rule_finding`` holds its chat id."""
+
+    async def __call__(self, _event: Message, state: FSMContext | None = None) -> bool:
+        if state is None:
+            return False
+        finding = (await state.get_data()).get("rule_finding")
+        return isinstance(finding, int) and not isinstance(finding, bool)
+
+
+_CANCEL_LABELS: Final = frozenset(bare_label(CANCEL(lang)) for lang in ("ru", "en"))
+
+
+async def _leave_find(message: Message, line: str) -> None:
+    """Take the search keyboard away on a short line of its own (a message
+    carrying ``ReplyKeyboardRemove`` cannot carry inline buttons too)."""
+    await message.answer(line, parse_mode=None, reply_markup=ReplyKeyboardRemove())
+
+
+@router.message(
+    F.users_shared,
+    F.users_shared.request_id == REQUEST_IDS.RULE_WHO,
+    F.chat.type == "private",
+    IsAdmin(),
+)
+async def handle_builder_found(message: Message, state: FSMContext) -> None:
+    """The person picked in Telegram's search: the rule's person, then what it does.
+
+    Matched in any state by its own ``request_id``, ahead of everything that
+    would read a message with no text. A pick from a search that is no longer
+    open (the rule was finished, cancelled or restarted) is answered as stale.
+    """
+    shared = message.users_shared
+    data = await state.get_data()
+    lang = lang_of(data.get("lang"))
+    finding = data.get("rule_finding")
+    chat_id = finding if isinstance(finding, int) and not isinstance(finding, bool) else None
+    draft = await _draft(state, chat_id) if chat_id is not None else None
+    if (
+        shared is None
+        or not shared.users
+        or draft is None
+        or draft.get("rule_type") != "user_specific"
+        or chat_id is None
+    ):
+        logger.info("rule_who_pick_stale", has_search=chat_id is not None)
+        await state.update_data(rule_finding=None)
+        await _leave_find(message, screens.WHO_STALE(lang))
+        return
+    person = shared.users[0]
+    name = _cap_name(screens.Person(person.user_id, person.first_name, person.username).display)
+    await state.update_data(rule_user=person.user_id, rule_name=name, rule_finding=None)
+    await _leave_find(message, screens.WHO_PICKED(lang).format(name=name))
+    await show(message, screens.action_screen(lang, chat_id, name))
+
+
+@router.message(
+    _Finding(),
+    F.chat.type == "private",
+    F.forward_origin.is_(None),
+    F.text.func(lambda text: bare_label(text) in _CANCEL_LABELS),
+    IsAdmin(),
+)
+async def handle_builder_find_cancel(
+    message: Message,
+    state: FSMContext,
+    rules_repo: FromDishka[RulesRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+) -> None:
+    """«✖️ Отмена» under the person search: no rule, the keyboard goes, the chat's rules."""
+    data = await state.get_data()
+    lang = lang_of(data.get("lang"))
+    chat_id = data.get("rule_finding")
+    await state.update_data(**dict.fromkeys(_DRAFT_KEYS))
+    await _leave_find(message, screens.WHO_CANCELLED(lang))
+    if isinstance(chat_id, int):
+        await show(
+            message,
+            await _list(
+                lang,
+                chat_id,
+                0,
+                rules_repo=rules_repo,
+                chat_config_service=chat_config_service,
+                chat_settings_repo=chat_settings_repo,
+            ),
+        )
 
 
 @router.callback_query(F.data.startswith("ar_b_n:"))
@@ -1155,9 +1305,27 @@ def _split_words(text: str) -> list[str]:
     return words
 
 
-def _words_name(words: list[str]) -> str:
-    name = ", ".join(words)
+def _cap_name(name: str) -> str:
+    """A rule's name as stored: trimmed, and cut with ``…`` past `_NAME_CHARS`."""
+    name = name.strip()
     return name if len(name) <= _NAME_CHARS else name[: _NAME_CHARS - 1].rstrip() + "…"
+
+
+def _words_name(words: list[str]) -> str:
+    return _cap_name(", ".join(words))
+
+
+def _too_long(text: str, *, template: bool, rule_name: str, lang: str) -> str | None:
+    """Why ``text`` cannot be a rule's warning or reply, or None when it fits.
+
+    Measured as Telegram counts the message it becomes: a reply with the
+    longest name Telegram allows put in, a warning as it is.
+    """
+    plain = sent_length(text)
+    worst = worst_length(text, rule_name=rule_name) if template else plain
+    if worst <= TELEGRAM_MESSAGE_LIMIT:
+        return None
+    return screens.text_too_long(lang, worst - TELEGRAM_MESSAGE_LIMIT, filled=worst > plain)
 
 
 @router.message(
@@ -1230,11 +1398,14 @@ async def handle_rule_text_input(
     if not text:
         await _reject(message, state, "rule.text", screens.TEXT_EMPTY(lang), cancel_cb, lang)
         return
-    if len(text) > screens.MAX_TEXT_CHARS:
-        error = screens.TEXT_TOO_LONG(lang).format(n=screens.MAX_TEXT_CHARS)
+    template = action == RuleAction.CUSTOM_RESPONSE.value
+    error = _too_long(
+        text, template=template, rule_name=str(data.get("rule_name") or ""), lang=lang
+    )
+    if error is not None:
         await _reject(message, state, "rule.text", error, cancel_cb, lang)
         return
-    key = "warning_message" if action == RuleAction.WARN_USER.value else "response_template"
+    key = "response_template" if template else "warning_message"
     await _finish_typed(
         message,
         state,
@@ -1263,7 +1434,11 @@ async def handle_rule_react_input(
     chat_config_service: FromDishka[ChatConfigService],
     chat_settings_repo: FromDishka[ChatSettingsRepository],
 ) -> None:
-    """One emoji, typed; only Telegram's reaction set is accepted."""
+    """One emoji, typed or as a sticker's; only Telegram's reaction set is accepted.
+
+    A sticker counts as the emoji it stands for (``sticker.emoji``), checked
+    exactly like a typed one.
+    """
     data = await state.get_data()
     lang = lang_of(data.get("lang"))
     chat_id = data.get("rule_chat_id")
@@ -1271,7 +1446,11 @@ async def handle_rule_react_input(
         logger.warning("rule_prompt_without_chat", state=await state.get_state())
         await state.clear()
         return
-    emoji = ReactionSelector.select(_typed(message) or None)
+    raw = _typed(message)
+    sticker_emoji = getattr(getattr(message, "sticker", None), "emoji", None)
+    if not raw and isinstance(sticker_emoji, str):
+        raw = sticker_emoji.strip()
+    emoji = ReactionSelector.select(raw or None)
     if emoji is None:
         cancel_cb = cb("ar_b_act:", lang, chat_id, "r")
         await _reject(message, state, "rule.react_in", screens.EMOJI_BAD(lang), cancel_cb, lang)
@@ -1303,10 +1482,28 @@ async def _finish_typed(
     chat_config_service: ChatConfigService,
     chat_settings_repo: ChatSettingsRepository,
 ) -> None:
-    """Save the rule from a typed last answer; the prompt above loses its Cancel."""
+    """Save the rule from a typed last answer; the prompt above loses its Cancel.
+
+    The draft is claimed (state and data cleared) before the write, so a second
+    copy of the answer finds no draft and cannot make a second rule. A draft
+    with a step missing makes no rule and says so over the chat's list.
+    """
     await state.clear()
     if _config_for(data) is None:
         logger.warning("rule_draft_incomplete", chat_id=chat_id, rule_type=data.get("rule_type"))
+        await show(
+            message,
+            await _list(
+                lang,
+                chat_id,
+                0,
+                rules_repo=rules_repo,
+                chat_config_service=chat_config_service,
+                chat_settings_repo=chat_settings_repo,
+                notice_raw=NOT_CREATED(lang),
+            ),
+        )
+        await _retire_prompt(message, data.get("rule_prompt_id"))
         return
     await _create(
         message,
@@ -1348,7 +1545,7 @@ async def handle_rule_config_input(
         logger.warning("rule_prompt_without_chat", state=await state.get_state())
         await state.clear()
         return
-    cancel_cb = cb("ar_add:", lang, chat_id)
+    cancel_cb = cb("ar_list:", lang, chat_id, 0)
 
     try:
         config = json.loads(message.text or "")
@@ -1360,9 +1557,11 @@ async def handle_rule_config_input(
 
     stated = config.pop("type", None)
     rule_type = stated if stated is not None else data.get("rule_type") or "keyword_trigger"
-    if rule_type not in _VALID_RULE_TYPES:
+    # A list or an object is unhashable: membership in the frozenset would
+    # raise TypeError, and the admin would see nothing at all.
+    if not isinstance(rule_type, str) or rule_type not in _VALID_RULE_TYPES:
         error = screens.CFG_BAD_TYPE(lang).format(
-            t=escape(str(rule_type)),
+            t=_quoted(rule_type),
             valid=", ".join(f"<code>{t}</code>" for t in screens.KINDS.values()),
         )
         await _reject(message, state, "rule.cfg_bad", error, cancel_cb, lang)
@@ -1373,9 +1572,9 @@ async def handle_rule_config_input(
     # reaction set, both yield "Rule created" and a permanent no-op whose
     # only trace is a server-side log line.
     action = config.get("action")
-    if action is not None and action not in _VALID_RULE_ACTIONS:
+    if action is not None and (not isinstance(action, str) or action not in _VALID_RULE_ACTIONS):
         error = screens.CFG_BAD_ACTION(lang).format(
-            action=escape(str(action)),
+            action=_quoted(action),
             valid=", ".join(f"<code>{a}</code>" for a in RuleAction),
         )
         await _reject(message, state, "rule.cfg_bad", error, cancel_cb, lang)
@@ -1387,9 +1586,18 @@ async def handle_rule_config_input(
                 message, state, "rule.cfg_bad", screens.CFG_BAD_EMOJI(lang), cancel_cb, lang
             )
             return
+    text_error = _cfg_text_error(config, lang)
+    if text_error is not None:
+        await _reject(message, state, "rule.cfg_bad", text_error, cancel_cb, lang)
+        return
+    if "name" in config:
+        config["name"] = _cap_name(config["name"])
 
     weight = config.pop("weight", 1)
     mandatory = config.pop("mandatory", False)
+    # Claimed before the write, like the builder: a second copy of this
+    # message finds no draft (`rule_chat_id` is gone) and makes no second rule.
+    await state.clear()
     rule_id = await rules_repo.create(
         chat_id=chat_id,
         rule_type=str(rule_type),
@@ -1398,7 +1606,6 @@ async def handle_rule_config_input(
         mandatory=mandatory,
     )
     logger.info("rule_created", chat_id=chat_id, rule_id=rule_id, rule_type=rule_type, via="json")
-    await state.clear()
     rule = screens.RuleView(
         id=int(rule_id),
         chat_id=chat_id,
@@ -1416,3 +1623,35 @@ async def handle_rule_config_input(
     )
     await show(message, screen)
     await _retire_prompt(message, data.get("rule_prompt_id"))
+
+
+def _quoted(value: object) -> str:
+    """A JSON value quoted back in an error: as written, cut to one line, escaped."""
+    shown = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    if len(shown) > _SHOWN_WORD_CHARS:
+        shown = shown[:_SHOWN_WORD_CHARS] + "…"
+    return escape(shown)
+
+
+_RULE_ID_WORST: Final = f"Rule #{2**63 - 1}"
+"""What a reply's ``{rule_name}`` becomes for a rule with no name, at its longest."""
+
+
+def _cfg_text_error(config: Mapping[str, Any], lang: str) -> str | None:
+    """Why the JSON's name, warning or reply cannot be used, or None.
+
+    Each must be text; a warning or reply must also fit one Telegram message
+    once sent (`_too_long`), the reply with its ``{rule_name}`` as it will read.
+    """
+    for key in ("name", "warning_message", "response_template"):
+        if key in config and not isinstance(config[key], str):
+            return screens.CFG_NOT_TEXT(lang).format(key=key)
+    name = config.get("name")
+    rule_name = _cap_name(name) if isinstance(name, str) else _RULE_ID_WORST
+    for key, template in (("warning_message", False), ("response_template", True)):
+        text = config.get(key)
+        if isinstance(text, str):
+            error = _too_long(text, template=template, rule_name=rule_name, lang=lang)
+            if error is not None:
+                return error
+    return None

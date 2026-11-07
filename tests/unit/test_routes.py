@@ -93,6 +93,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "ar_b_type:": (LANG, CID, RULE_TYPE),
     "ar_b_match:": (LANG, CID, ARG16),
     "ar_b_who:": (LANG, CID, ARG16),
+    "ar_b_find:": (LANG, CID),
     "ar_b_n:": (LANG, CID, ARG16),
     "ar_b_act:": (LANG, CID, ARG16),
     "ar_b_txt:": (LANG, CID, ARG16),
