@@ -28,7 +28,7 @@ from typing import Final, Literal
 
 from src.bot.custom_emoji import fence
 from src.bot.screens.i18n import Tr
-from src.bot.screens.lint import budget, label_width_px
+from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
 from src.bot.screens.render import CANCEL, back, pager
 from src.bot.screens.routes import REQUEST_IDS, cb
@@ -37,14 +37,11 @@ ORGS_PER_PAGE: Final = 3
 """Three names, the pager, the add row and the back row: the six-row cap with a pager."""
 LIST_PER_PAGE: Final = 4
 """Four names, the pager and one shared last row (``✏️ Нет в списке`` + back)."""
-NAME_PX: Final = budget(1) * 0.9
-"""Width a name button's label is clipped to: 90 % of a full row.
-
-The width estimate is a per-script average. Rendered at 390 px, long mixed
-Cyrillic and Latin names clipped to the full row still overflowed by up to
-20 px, and fit from 92 %. A name made of one wide letter repeated (``ммм…``)
-overflows at any margin; Telegram's client then cuts it itself.
-"""
+NAME_PX: Final = clip_room(1)
+"""Width a name button's label is clipped to: a full row, less the estimator's
+error bound. The estimate is measured against the renderer per letter, so a
+long mixed Cyrillic and Latin name no longer needs a margin of its own; a script
+missing from the table reads wide and is cut early, never late."""
 
 Reason = Literal["not_found", "hidden", "elsewhere", "channel"]
 

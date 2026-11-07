@@ -26,7 +26,7 @@ from typing import Any, Final
 
 from src.bot.custom_emoji import fence
 from src.bot.screens.i18n import Tr, plural_ru
-from src.bot.screens.lint import budget, label_width_px
+from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import back, cancel, pager
 from src.bot.screens.routes import cb
@@ -295,15 +295,9 @@ them: the advice watcher reads only its own flag (``services/advice/watcher.py``
 # ---------------------------------------------------------------------------
 
 
-_FIT_MARGIN: Final = 0.92
-"""`label_width_px` reads lowercase Cyrillic about 7 % narrower than the phone-width
-render draws it (a long title estimated at 338 px rendered at 361 px), so a title is
-cut against 92 % of the row's budget, not all of it."""
-
-
 def fit_label(title: str, suffix: str, per_row: int = 1) -> str:
     """``title + suffix`` cut at the title's end so the suffix stays visible on a phone."""
-    limit = budget(per_row) * _FIT_MARGIN
+    limit = clip_room(per_row)
     if label_width_px(title + suffix) <= limit:
         return title + suffix
     cut = title

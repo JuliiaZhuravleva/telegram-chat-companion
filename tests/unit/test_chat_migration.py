@@ -402,3 +402,19 @@ class TestHandlerIsFilteredNotBodyGuarded:
         ]
         assert len(registered) == 1, "migration handler must be registered on dp.message"
         assert registered[0].filters, "must be filtered at registration, not in the body"
+
+
+@pytest.mark.asyncio
+async def test_the_migration_log_counts_the_organizer_names_moved() -> None:
+    """The move is visible in production logs, next to the other counts."""
+    migration_repo = AsyncMock()
+    migration_repo.migrate = AsyncMock(
+        return_value=MigrationOutcome(status="migrated", members_moved=2, organizer_names_moved=3)
+    )
+    with capture_logs() as logs:
+        await handle_chat_migration(
+            _make_message(chat_id=OLD_ID, to_id=NEW_ID, from_id=None), migration_repo, MagicMock()
+        )
+    (line,) = [e for e in logs if str(e.get("event", "")).startswith("Chat migrated")]
+    assert line["organizer_names_moved"] == 3
+    assert line["members_moved"] == 2

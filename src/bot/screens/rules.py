@@ -18,7 +18,7 @@ from typing import Any, Final
 from src.bot.custom_emoji import fence
 from src.bot.screens.chat import COMMON, LABELS
 from src.bot.screens.i18n import Tr, plural_ru
-from src.bot.screens.lint import budget, label_width_px
+from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
 from src.bot.screens.render import CANCEL, back, cancel, pager
 from src.bot.screens.routes import REQUEST_IDS, cb
@@ -171,18 +171,9 @@ def rule_name(rule: RuleView, lang: str) -> str:
     return kind(lang) if kind else f"#{rule.id}"
 
 
-_ESTIMATE_SLACK: Final = 1.12
-"""How much wider a browser draws a label than ``label_width_px`` says.
-
-The estimator reads lowercase Cyrillic about 9% narrow: a list row it put at
-341 px of the 342 px budget rendered at 370 px and was cut by the client. So a
-label cut here is cut to the budget shrunk by this factor, not to the budget.
-"""
-
-
 def _room(n: int) -> float:
     """Estimated width a cut label may take when its row holds ``n`` buttons."""
-    return budget(n) / _ESTIMATE_SLACK
+    return clip_room(n)
 
 
 def fit(text: str, width: float) -> str:

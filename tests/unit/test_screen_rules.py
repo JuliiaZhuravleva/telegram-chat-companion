@@ -735,14 +735,6 @@ CLIPPED_NAME = "Очень длинное название тестового ч
 CLIP_SLACK_PX = 20.0
 """How far short of its budget a clipped label may stop: the estimator's 2 px,
 the widest letter the cut removed, and a space ``rstrip`` drops."""
-_OLD_MARGIN = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "the clipper still shrinks its budget for the old estimator, which read Cyrillic "
-        "narrow; once it clips to the budget less 2 px, delete this mark"
-    ),
-)
 
 
 def _clip_chat() -> str:
@@ -760,9 +752,9 @@ def _clip_orgs() -> str:
 @pytest.mark.parametrize(
     "clip",
     [
-        pytest.param(_clip_chat, id="chat", marks=_OLD_MARGIN),
-        pytest.param(_clip_rules, id="rules", marks=_OLD_MARGIN),
-        pytest.param(_clip_orgs, id="orgs", marks=_OLD_MARGIN),
+        pytest.param(_clip_chat, id="chat"),
+        pytest.param(_clip_rules, id="rules"),
+        pytest.param(_clip_orgs, id="orgs"),
     ],
 )
 def test_r10_a_clipped_label_uses_its_row(clip):

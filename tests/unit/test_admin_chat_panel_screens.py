@@ -14,7 +14,7 @@ import pytest
 
 from src.bot.screens import chat as screens
 from src.bot.screens.chat import ChatView, config_values
-from src.bot.screens.lint import budget, label_width_px
+from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Screen
 from src.bot.settings_fields import FIELDS_BY_CODE
 from src.models.chat_config import ChatConfig
@@ -169,6 +169,6 @@ class TestTheKnowledgeBaseSaysCommonInTheText:
         screen = screens.build_memory(_view(row, organizers=12, kb_enabled=on), lang)
 
         for buttons in screen.rows:
-            limit = budget(len(buttons)) * screens._FIT_MARGIN
+            limit = clip_room(len(buttons))
             for b in buttons:
                 assert label_width_px(b.label) <= limit, (b.label, label_width_px(b.label))

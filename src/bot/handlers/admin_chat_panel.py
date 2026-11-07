@@ -63,7 +63,7 @@ from src.bot.screens.render import page_slice, render_text, show, to_markup
 from src.bot.screens.sections import SECTION_OF, Section, section_of_token
 from src.bot.screens.stale import show_stale
 from src.bot.settings_fields import FieldType, field_by_code
-from src.bot.states.admin import AdminStates
+from src.bot.states.admin import AdminStates, note_screen
 from src.bot.utils import check_admin_direct, is_bot_chat_admin
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -774,7 +774,9 @@ async def _send_split(target: Message, screen: Screen) -> list[Message]:
     A prompt is verbatim user text and may exceed 4096 on its own, so it goes
     through ``split_html`` (CLAUDE.md: a rejected send is no message at all).
     Not `show`: it returns the last piece only, and a newer preview has to
-    delete every piece of the older ones.
+    delete every piece of the older ones. The last piece carries the buttons, so
+    it is the one noted as the prompt's message (`note_screen`): a tap elsewhere
+    that ends the prompt then marks it closed, as `show` would.
     """
     pieces = split_html(render_text(screen))
     reply_markup = to_markup(screen)
@@ -786,7 +788,18 @@ async def _send_split(target: Message, screen: Screen) -> list[Message]:
                 piece, parse_mode="HTML", reply_markup=reply_markup if last else None
             )
         )
+    if sent:
+        note_screen(sent[-1], screen.id, screen.text)
     return sent
+
+
+async def _reply_refused(message: Message, refused: Screen) -> None:
+    """Send the refusal as a reply to the part it refuses, noted like any prompt screen."""
+    note_screen(
+        await message.reply(render_text(refused), reply_markup=to_markup(refused)),
+        refused.id,
+        refused.text,
+    )
 
 
 def _parse_rev(callback: CallbackQuery) -> int | None:
@@ -922,7 +935,7 @@ async def handle_chat_panel_sp_input(
             # A part was already refused: anything added now would sit after a
             # hole, and a preview of it would look complete.
             refused = screens.build_sp_refused(chat_id, rev, lang)
-            await message.reply(render_text(refused), reply_markup=to_markup(refused))
+            await _reply_refused(message, refused)
             return
 
         # Telegram turns **bold** and backticks into entities and drops the markers;
@@ -936,7 +949,7 @@ async def handle_chat_panel_sp_input(
             # incomplete from here on, so Save goes away until «Start over».
             await state.update_data(sp_overflow=True)
             refused = screens.build_sp_refused(chat_id, rev, lang, length=len(draft))
-            await message.reply(render_text(refused), reply_markup=to_markup(refused))
+            await _reply_refused(message, refused)
             return
 
         # The previous preview showed a shorter draft; its «Save» would now

@@ -243,6 +243,18 @@ def budget(n: int) -> float:
     return (ROW_WIDTH_PX - ROW_GAP_PX * (n - 1)) / n - BUTTON_PADDING_PX
 
 
+CLIP_MARGIN_PX: Final = 2.0
+"""How far inside its row's budget a label cut at run time stops: the bound the
+measured table holds the estimator to (it reads at most 2 px narrow)."""
+
+
+def clip_room(n: int) -> float:
+    """Width a label cut at run time (a chat title, a name) may take when its row
+    holds ``n`` buttons. Every clipper uses this, so none of them keeps its own
+    margin for an estimator error that no longer exists."""
+    return budget(n) - CLIP_MARGIN_PX
+
+
 # ---------------------------------------------------------------------------
 # Routing (R7): walk an aiogram router tree the way the dispatcher does
 # ---------------------------------------------------------------------------

@@ -259,3 +259,69 @@ def test_title_line():
     assert title_line("<b>a &amp; b</b> <i>x") == "a &amp; b x"
     long = title_line("<b>" + "я" * 300 + "</b>")
     assert long.endswith("…") and len(long) == 200
+
+
+# ---------------------------------------------------------------------------
+# The instruction editor sends its screens itself (a prompt may need several
+# messages), not through show(): its prompt messages are closed all the same.
+# ---------------------------------------------------------------------------
+
+
+def _long_preview() -> Screen:
+    from src.bot.screens import chat as chat_screens
+    from src.bot.screens.samples.fake import CHAT_ID
+
+    return chat_screens.build_sp_preview(CHAT_ID, "слово " * 1500, 7, "ru")
+
+
+@pytest.mark.parametrize(
+    "screen",
+    [
+        pytest.param(lambda: _sample("sp.prompt"), id="sp.prompt"),
+        pytest.param(lambda: _sample("sp.preview"), id="sp.preview"),
+        pytest.param(_long_preview, id="sp.preview-split"),
+    ],
+)
+async def test_the_instruction_editors_message_is_closed(screen: Any):
+    """The piece with the buttons — the last one — is the message closed."""
+    from src.bot.handlers.admin_chat_panel import _send_split
+
+    shown = screen()
+    sent = await _send_split(_tap("adm_menu:ru", PROMPT_ID, _bot()).message, shown)
+    if shown.id == "sp.preview" and len(shown.text) > 4096:
+        assert len(sent) > 1, "the long preview goes out in several messages"
+
+    bot = _bot()
+    fsm = FakeState(AdminStates.awaiting_system_prompt)
+    await deliver("callback_query", _tap("adm_menu:ru", OTHER_ID, bot), fsm, bot=bot)
+
+    assert await fsm.get_state() is None
+    (edit,) = _edits(bot)
+    assert (edit.chat_id, edit.message_id) == (ADMIN_ID, sent[-1].message_id)
+    assert edit.text.endswith("<i>Ввод закрыт.</i>")
+    assert edit.reply_markup is None
+
+
+async def test_the_instruction_editors_refusal_is_closed():
+    """A refused part is answered by a reply; that reply is the prompt's message now."""
+    from src.bot.handlers.admin_chat_panel import _reply_refused
+
+    send_bot = _bot()
+    part = Message(
+        message_id=PROMPT_ID,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        text="часть инструкции",
+    ).as_(send_bot)
+    await _reply_refused(part, _sample("sp.refused"))
+    (reply,) = [c.args[0] for c in send_bot.await_args_list]
+    assert isinstance(reply, SendMessage)
+
+    bot = _bot()
+    fsm = FakeState(AdminStates.awaiting_system_prompt)
+    await deliver("callback_query", _tap("adm_menu:ru", OTHER_ID, bot), fsm, bot=bot)
+
+    (edit,) = _edits(bot)
+    assert edit.message_id == _SENT_ID
+    assert edit.text.endswith("<i>Ввод закрыт.</i>")
