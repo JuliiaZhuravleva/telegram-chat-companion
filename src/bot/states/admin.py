@@ -1,6 +1,6 @@
 """FSM states for the admin panel: the buttons each prompt calls its own, the
-screens it shows and the message showing it now, and the prompts that take a
-sticker as their answer."""
+screens it shows, the screen its message goes back to once it is closed, the
+message showing it now, and the prompts that take a sticker as their answer."""
 
 import html
 import re
@@ -155,6 +155,49 @@ _PROMPT_SCREEN_IDS: Final[frozenset[str]] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class PromptHome:
+    """Where a prompt's message sends the admin once a tap elsewhere closed it.
+
+    The button is ``{prefix}{lang}:{key}`` and then `tail`; ``key`` is the id the
+    prompt's own buttons carry after their language (the chat's, the sticker's
+    for the score prompt), read off them on delivery (`note_screen`). The
+    screen it opens needs nothing from the FSM: the prompt is over by then.
+    """
+
+    screen_id: str
+    prefix: str
+    tail: tuple[str, ...] = ()
+
+
+_RULES_HOME = PromptHome("rules", "ar_list:", ("0",))
+
+_HOMES: dict[State, PromptHome | None] = {
+    AdminStates.awaiting_setting_value: PromptHome("chat.stickers", "adm_pnl_grp:", ("stickers",)),
+    AdminStates.awaiting_system_prompt: PromptHome("behavior", "adm_pnl_grp:", ("behavior",)),
+    AdminStates.awaiting_sticker_score: PromptHome("stk.card", "adm_stk_card:"),
+    AdminStates.awaiting_kb_organizer: PromptHome("orgs", "adm_kb_orgs:", ("0",)),
+    # A rule builder's answers live in the state: with it gone, the list.
+    AdminStates.awaiting_rule_config: _RULES_HOME,
+    AdminStates.awaiting_rule_words: _RULES_HOME,
+    AdminStates.awaiting_rule_text: _RULES_HOME,
+    AdminStates.awaiting_rule_react: _RULES_HOME,
+    AdminStates.awaiting_rule_who: _RULES_HOME,
+    # Declared, never set: no screen asks for them.
+    AdminStates.awaiting_sticker_edit: None,
+    AdminStates.awaiting_sticker: None,
+}
+
+PROMPT_HOMES: Final[Mapping[str, PromptHome | None]] = MappingProxyType(
+    {_key(state): home for state, home in _HOMES.items()}
+)
+"""State → the screen its closed message offers to go back to (``None``: the panel).
+
+The routes test requires a row for every state, and drives every prompt
+screen's closed message through the real router with no state at all.
+"""
+
+
+@dataclass(frozen=True, slots=True)
 class PromptMessage:
     """The message a prompt screen was last delivered into."""
 
@@ -165,6 +208,9 @@ class PromptMessage:
     """The screen's title line (`title_line`); empty for an error reply."""
     editable: bool
     """False for a message sent with a reply keyboard: Telegram refuses to edit those."""
+    home_key: str | None = None
+    """The id its `PromptHome` button needs, off the screen's own buttons; None
+    when they carry none (a reply keyboard): the closed message offers the panel."""
 
 
 # Process-local, one entry per chat: the FSM storage is `MemoryStorage` (what
@@ -205,20 +251,41 @@ def title_line(text: str) -> str:
     return html.escape(plain, quote=False)
 
 
-def note_screen(message: object, screen_id: str, text: str, *, editable: bool = True) -> None:
+def _home_key(markup: object) -> str | None:
+    """The id a prompt's inline buttons carry after their language
+    (``prefix:lang:{id}…``), from the first button that has one."""
+    for row in getattr(markup, "inline_keyboard", None) or ():
+        for button in row:
+            parts = (getattr(button, "callback_data", None) or "").split(":")
+            if len(parts) > 2 and parts[2]:
+                return parts[2]
+    return None
+
+
+def note_screen(
+    message: object,
+    screen_id: str,
+    text: str,
+    *,
+    editable: bool = True,
+    markup: object = None,
+) -> None:
     """Record that ``message`` now shows ``screen_id`` (called by every delivery).
 
     A prompt screen becomes its chat's record; any other screen delivered into
     the recorded message means that message no longer asks for input, and the
     record goes. Anything without integer ids (a test double) is ignored.
+    ``markup`` is what was sent; without it, the keyboard Telegram returned on
+    ``message`` — either gives the id the closed message's button needs.
     """
     chat_id = getattr(getattr(message, "chat", None), "id", None)
     message_id = getattr(message, "message_id", None)
     if not isinstance(chat_id, int) or not isinstance(message_id, int):
         return
     if screen_id in _PROMPT_SCREEN_IDS:
+        sent = markup if markup is not None else getattr(message, "reply_markup", None)
         _ON_SCREEN[chat_id] = PromptMessage(
-            chat_id, message_id, screen_id, title_line(text), editable
+            chat_id, message_id, screen_id, title_line(text), editable, _home_key(sent)
         )
         return
     held = _ON_SCREEN.get(chat_id)

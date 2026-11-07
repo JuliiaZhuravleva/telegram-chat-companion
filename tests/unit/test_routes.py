@@ -40,6 +40,7 @@ from src.bot.screens.routes import (
 from src.bot.screens.sections import SECTIONS
 from src.bot.settings_fields import FIELDS_BY_CODE
 from src.bot.states.admin import (
+    PROMPT_HOMES,
     PROMPT_OWN_TAPS,
     PROMPT_SCREENS,
     STICKER_ANSWERS,
@@ -562,6 +563,20 @@ def test_every_prompt_state_lists_its_screens():
     """`PROMPT_SCREENS` (next to the allowlists in states/admin.py) is the one list
     of the screens a prompt shows: the middleware closes the message showing one."""
     assert set(PROMPT_SCREENS) == set(_ALL_STATES)
+
+
+def test_every_prompt_state_has_a_home():
+    """`PROMPT_HOMES` names where a closed prompt's message leads back: a row for
+    every state, and a screen for every state that shows one. Its button is built
+    from the prompt's own key, so its prefix must take ``lang:key`` first and land
+    where the row says (the closed-message test routes each one for real)."""
+    assert set(PROMPT_HOMES) == set(_ALL_STATES)
+    for state, screens in PROMPT_SCREENS.items():
+        home = PROMPT_HOMES[state]
+        assert (home is not None) is bool(screens), state
+        if home is not None:
+            data = cb(home.prefix, "ru", WORST_CASE[home.prefix][1], *home.tail)
+            assert target_of(data, "prompt.closed") == home.screen_id, (state, data)
 
 
 _SET_STATE = re.compile(r"set_state\(\s*AdminStates\.(\w+)")

@@ -1,11 +1,13 @@
-"""A prompt ended by a tap elsewhere reads closed: its message says «Ввод закрыт.».
+"""A prompt ended by a tap elsewhere reads closed, and leads back to its screen.
 
 `PromptExitMiddleware` clears a prompt when the admin taps a button that is not
 the prompt's own. Without more, the message that asked for the input still asks
 — title, instruction, buttons — and the answer the admin then types reaches the
-bot as an ordinary message. These tests drive the real router (``deliver``)
-after a real `show()` put the prompt on screen, and read what the bot was asked
-to send.
+bot as an ordinary message. So the message is edited to its title, a plain line
+saying no answer is awaited there (`CLOSED`), and one button back to the screen
+the prompt belongs to. These tests drive the real router (``deliver``) after a
+real `show()` put the prompt on screen, read what the bot was asked to send, and
+route that button with no FSM state at all.
 """
 
 from __future__ import annotations
@@ -19,13 +21,23 @@ import pytest
 import structlog
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import EditMessageText, SendMessage, TelegramMethod
-from aiogram.types import CallbackQuery, Chat, Message, User
+from aiogram.types import (
+    CallbackQuery,
+    Chat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+    User,
+)
 
 import src.bot.states.admin as admin_states
+from src.bot.middleware.prompt_exit import CLOSED, CLOSED_ID
 from src.bot.screens.model import Screen
-from src.bot.screens.registry import load_all
+from src.bot.screens.registry import Sample, load_all
 from src.bot.screens.render import show, show_markup
-from src.bot.states.admin import AdminStates, title_line
+from src.bot.screens.routes import CALLBACK_LIMIT, target_of
+from src.bot.screens.samples import fake
+from src.bot.states.admin import PROMPT_HOMES, PROMPT_SCREENS, AdminStates, title_line
 from tests.unit.screen_routing import ADMIN_ID, FakeState, deliver
 
 PROMPT_ID = 10
@@ -40,17 +52,22 @@ def _no_prompt_on_screen() -> Iterator[None]:
     admin_states._ON_SCREEN.clear()
 
 
-def _bot() -> AsyncMock:
-    """A bot whose sends come back as real messages (ids from 40), edits as True."""
+def _bot(*, echo: bool = True) -> AsyncMock:
+    """A bot whose sends come back as real messages (ids from 40), edits as True.
+
+    Telegram returns a sent message with its inline keyboard; ``echo=False`` is a
+    message that came back without one."""
     sent = iter(range(_SENT_ID, _SENT_ID + 100))
 
     async def answer(method: TelegramMethod[Any], *_: object, **__: object) -> object:
         if isinstance(method, SendMessage):
+            markup = method.reply_markup
             return Message(
                 message_id=next(sent),
                 date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
                 chat=Chat(id=int(method.chat_id), type="private"),
                 text=method.text,
+                reply_markup=markup if echo and isinstance(markup, InlineKeyboardMarkup) else None,
             )
         return True
 
@@ -83,6 +100,15 @@ def _edits(bot: AsyncMock) -> list[EditMessageText]:
     return [c.args[0] for c in bot.await_args_list if isinstance(c.args[0], EditMessageText)]
 
 
+def _home(edit: EditMessageText) -> InlineKeyboardButton:
+    """The closed message's one button: one row, one button, nothing else."""
+    markup = edit.reply_markup
+    assert isinstance(markup, InlineKeyboardMarkup), markup
+    (row,) = markup.inline_keyboard
+    (button,) = row
+    return button
+
+
 async def _open(screen_id: str, state: AdminStates | Any, lang: str = "ru") -> FakeState:
     """Put ``screen_id`` on message `PROMPT_ID` as its area does, the prompt armed."""
     await show(_tap(f"adm_menu:{lang}", PROMPT_ID, _bot()), _sample(screen_id, lang))
@@ -90,12 +116,17 @@ async def _open(screen_id: str, state: AdminStates | Any, lang: str = "ru") -> F
 
 
 @pytest.mark.parametrize(
-    ("tap_lang", "closed"),
-    [("ru", "<i>Ввод закрыт.</i>"), ("en", "<i>Input closed.</i>")],
+    ("tap_lang", "closed", "home"),
+    [
+        ("ru", "Вы открыли другой экран — ответа здесь больше не жду.", "⬅️ Стикеры"),
+        ("en", "You opened another screen — no longer waiting for an answer here.", "⬅️ Stickers"),
+    ],
 )
-async def test_a_foreign_tap_closes_the_prompts_message(tap_lang: str, closed: str):
+async def test_a_foreign_tap_closes_the_prompts_message(tap_lang: str, closed: str, home: str):
     """The language is the tapped payload's: a Russian prompt left by an English
-    menu button is closed in English."""
+    menu button is closed in English. The line is plain text (glare takes italics
+    first), and the one button goes back to the stickers section the tolerance
+    prompt belongs to."""
     fsm = await _open("tol.in", AdminStates.awaiting_setting_value, lang="ru")
     title = title_line(_sample("tol.in", "ru").text)
     assert "<b>" in title, "the tolerance prompt has a bold title"
@@ -107,8 +138,10 @@ async def test_a_foreign_tap_closes_the_prompts_message(tap_lang: str, closed: s
     (edit,) = _edits(bot)
     assert (edit.chat_id, edit.message_id) == (ADMIN_ID, PROMPT_ID)
     assert edit.text == f"{title}\n{closed}"
-    assert edit.reply_markup is None
     assert edit.parse_mode == "HTML"
+    button = _home(edit)
+    assert button.text == home
+    assert button.callback_data == f"adm_pnl_grp:{tap_lang}:{fake.CHAT_ID}:stickers"
 
 
 async def test_a_payload_without_a_language_closes_in_russian():
@@ -116,7 +149,8 @@ async def test_a_payload_without_a_language_closes_in_russian():
     bot = _bot()
     await deliver("callback_query", _tap("adm_close", OTHER_ID, bot), fsm, bot=bot)
     (edit,) = _edits(bot)
-    assert edit.text.endswith("\n<i>Ввод закрыт.</i>")
+    assert edit.text.endswith(f"\n{CLOSED('ru')}")
+    assert _home(edit).text == "⬅️ Стикеры"
 
 
 async def test_an_own_tap_leaves_the_prompts_message():
@@ -164,7 +198,7 @@ async def test_the_title_is_the_screens_not_its_notice():
     bot = _bot()
     await deliver("callback_query", _tap("adm_menu:ru", OTHER_ID, bot), fsm, bot=bot)
     (edit,) = _edits(bot)
-    assert edit.text == f"{title_line(screen.text)}\n<i>Ввод закрыт.</i>"
+    assert edit.text == f"{title_line(screen.text)}\n{CLOSED('ru')}"
     assert "<b>" in edit.text
 
 
@@ -185,7 +219,9 @@ async def test_an_error_reply_closes_without_repeating_send_again():
     bot = _bot()
     await deliver("callback_query", _tap("adm_menu:ru", OTHER_ID, bot), fsm, bot=bot)
     (edit,) = _edits(bot)
-    assert edit.text == "<i>Ввод закрыт.</i>"
+    assert edit.text == CLOSED("ru")
+    assert _home(edit).text == "⬅️ Правила"
+    assert _home(edit).callback_data == f"ar_list:ru:{fake.CHAT_ID}:0"
 
 
 async def test_a_prompt_behind_a_reply_keyboard_is_left_and_logged():
@@ -298,8 +334,9 @@ async def test_the_instruction_editors_message_is_closed(screen: Any):
     assert await fsm.get_state() is None
     (edit,) = _edits(bot)
     assert (edit.chat_id, edit.message_id) == (ADMIN_ID, sent[-1].message_id)
-    assert edit.text.endswith("<i>Ввод закрыт.</i>")
-    assert edit.reply_markup is None
+    assert edit.text.endswith(CLOSED("ru"))
+    assert _home(edit).text == "⬅️ Поведение"
+    assert _home(edit).callback_data == f"adm_pnl_grp:ru:{fake.CHAT_ID}:behavior"
 
 
 async def test_the_instruction_editors_refusal_is_closed():
@@ -324,4 +361,82 @@ async def test_the_instruction_editors_refusal_is_closed():
 
     (edit,) = _edits(bot)
     assert edit.message_id == _SENT_ID
-    assert edit.text.endswith("<i>Ввод закрыт.</i>")
+    assert edit.text.endswith(CLOSED("ru"))
+    assert _home(edit).text == "⬅️ Поведение"
+
+
+async def test_a_message_that_came_back_without_its_buttons_offers_the_panel():
+    """No id to go back with (Telegram returned the message bare): the one
+    button is the panel's, never a dead end and never a guessed chat."""
+    from src.bot.handlers.admin_chat_panel import _reply_refused
+
+    send_bot = _bot(echo=False)
+    part = Message(
+        message_id=PROMPT_ID,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        text="часть инструкции",
+    ).as_(send_bot)
+    await _reply_refused(part, _sample("sp.refused"))
+
+    bot = _bot()
+    fsm = FakeState(AdminStates.awaiting_system_prompt)
+    await deliver("callback_query", _tap("adm_menu:ru", OTHER_ID, bot), fsm, bot=bot)
+
+    (edit,) = _edits(bot)
+    assert (_home(edit).text, _home(edit).callback_data) == ("⬅️ Панель", "adm_menu:ru")
+
+
+# ---------------------------------------------------------------------------
+# Every prompt screen, the ones added later included: its closed message leads
+# back, and the way back works with no FSM state.
+# ---------------------------------------------------------------------------
+
+
+def _prompt_samples() -> list[Any]:
+    samples = load_all()
+    return [
+        pytest.param(state, item, id=f"{state.rsplit(':', 1)[-1]}/{item.screen_id}/{item.title}")
+        for state, screen_ids in PROMPT_SCREENS.items()
+        for screen_id in screen_ids
+        for item in samples[screen_id]
+    ]
+
+
+def _key_of(prefix: str) -> str:
+    """The id a home of ``prefix`` carries in every sample: the sticker's, or the chat's."""
+    return fake.FUID if prefix == "adm_stk_card:" else str(fake.CHAT_ID)
+
+
+@pytest.mark.parametrize(("state", "item"), _prompt_samples())
+async def test_every_prompt_screen_closes_with_one_way_back(state: str, item: Sample):
+    screen = item.build("ru")
+    opener = _bot()
+    await show(_tap("adm_menu:ru", PROMPT_ID, opener), screen)
+    fsm = FakeState(state)
+
+    bot = _bot()
+    with structlog.testing.capture_logs() as logs:
+        await deliver("callback_query", _tap("adm_menu:ru", OTHER_ID, bot), fsm, bot=bot)
+    assert await fsm.get_state() is None
+
+    if screen.reply is not None:
+        # Telegram refuses to edit a message with a reply keyboard: left, logged.
+        assert _edits(bot) == []
+        assert any(e.get("reason") == "reply keyboard" for e in logs), logs
+        return
+
+    (edit,) = _edits(bot)
+    assert edit.text.endswith(CLOSED("ru"))
+    button = _home(edit)
+    home = PROMPT_HOMES[state]
+    assert home is not None, f"{state} shows {item.screen_id} but has no home"
+    data = button.callback_data or ""
+    assert button.text.startswith("⬅️ ") and button.text != "⬅️ Панель", button.text
+    assert len(data.encode()) <= CALLBACK_LIMIT, data
+    assert target_of(data, CLOSED_ID) == home.screen_id, data
+    assert data.split(":")[2] == _key_of(home.prefix), data
+
+    handler = await deliver("callback_query", _tap(data, OTHER_ID, _bot()), FakeState())
+    assert handler is not None and not handler.startswith("stale."), (data, handler)
