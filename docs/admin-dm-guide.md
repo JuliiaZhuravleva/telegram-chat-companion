@@ -199,7 +199,8 @@ The screen says so in one line («Бот молчит в этих чатах и 
 admin will not hear from that chat again until the record is dealt with:
 
 - **↩️ Вернуть в запросы / Back to requests** puts it back among the requests — notifications
-  resume. «✓ Заявка возвращена».
+  resume. «✓ Запрос возвращён», and that render carries **🙏 Запросы доступа · N** on top: the
+  list where the chat now waits for «👍 Одобрить», one tap away.
 - **🗑 Забыть / Forget** asks first, then removes the record permanently: the chat becomes an
   unknown chat again, and its next message produces a fresh request and a fresh notification.
   «✓ Отказ забыт». «⬅️ Не забывать» returns to the same page.
@@ -214,20 +215,32 @@ to come back:
 
 1. the bot stops answering there and the chat leaves «🗂 Чаты»; its settings are kept;
 2. right away, «↩️ Вернуть» on the list brings it back;
-3. later, the way that chat really has:
+3. later, the way that chat really has (the first that applies):
+   - an admin's own private chat — the bot answers an admin there whether the chat is on or
+     not, and such a chat files no request: the question is «Отключить этот чат?», it says that
+     turning off only takes the chat out of «🗂 Чаты», and the notice after it is «✓ Чат «…»
+     убран из «🗂 Чаты», бот отвечает в нём, как раньше»;
    - a group or a private chat — someone writes there, an access request appears (at most one
      every half hour — the cooldown that also spaces the cards), and approving it brings the bot back;
    - a channel — posts never reach the whitelist gate, so only removing the bot and adding it
      again files a request;
    - a chat with **any rejected attempt on record**, even an old one from before it was
      approved — it never asks again by itself (§A1.2, a rejection is a block) and lands in
-     «🚫 Отклонённые»; the way back is «↩️ Вернуть в запросы», then «👍 Одобрить». The screen
-     says so instead of promising a request that will not come.
+     «🚫 Отклонённые»; the way back is «↩️ Вернуть в запросы» there, then «👍 Одобрить» among
+     the requests. The screen says so («Верните его из «🚫 Отклонённые» в запросы и одобрите»)
+     instead of promising a request that will not come.
+
+A chat that is off already — an approved card tapped after another admin turned it off — is
+told so instead of asked («Бот здесь уже отключён»), with the same "later" line and only
+«⬅️ Чат»; the chat's own screen shows «🔌 Отключить бота» only while the bot is on there. An old
+question tapped after that writes nothing and offers no «↩️ Вернуть» (it would turn the chat
+*on*): «Бот в чате «…» уже был отключён, ничего не изменилось».
 
 Settings, history and knowledge base all survive; the switch is `enabled=false`, nothing more,
 and the approved attempt stays approved. Confirming shows the chat list (its first page — both
 entry points carry page 0) with «✓ Бот отключён в чате «…»» and **↩️ Вернуть** as the top row — on that
-render only; that page holds one chat fewer so the keyboard does not grow. «↩️ Вернуть» sets
+render only; that page holds one chat fewer so the keyboard does not grow, and ▶ from it keeps
+pages of that size, so no chat is skipped on the way to the next one. «↩️ Вернуть» sets
 `enabled=true` again and redraws the list with «✓ Бот снова работает в чате «…»» and no undo
 row. Tapped when the chat is already on (twice, or after another admin), it writes nothing and
 says the same; a chat whose settings row is gone is answered with «Этого чата нет в
@@ -352,14 +365,15 @@ and telling them apart is the single most important thing in the panel.
 message count for the last 24 hours. Waiting access requests get a row of their own on top,
 `🙏 Запросы доступа · N`, and the page holds one chat fewer; `🚫 Отклонённые · N` shares the
 bottom row with «⬅️ Панель». Right after «🔌 Отключить» the undo row `↩️ Вернуть` goes on top
-too, and that page holds one chat fewer again (§A1.2), so the keyboard never grows. With no chats at all the screen says how a chat gets here (add the bot
+too, and that page holds one chat fewer again (§A1.2), so the keyboard never grows; ▶ and ◀
+from there keep that page size, so paging on skips no chat. With no chats at all the screen says how a chat gets here (add the bot
 to a group, a request arrives) and still shows that row when a request is waiting.
 
 **One chat** opens on a short screen: the chat's name and id, one status line (the bot on or
 off there, and what calls it), a link that opens the chat, then six section buttons —
 🗣 Поведение, 🧠 Память, 🎙 Голос и фото, 🎨 Стикеры, 😀 Реакции, 👋 Сообщество — plus
-`📏 Правила · N` (the rules list, §A3.1) and `🔌 Отключить` (remove the chat from the
-whitelist, §A1.2). Every section has exactly one back button, to this screen; this screen's
+`📏 Правила · N` (the rules list, §A3.1) and `🔌 Отключить бота` (remove the chat from the
+whitelist, §A1.2; shown only while the bot is on there). Every section has exactly one back button, to this screen; this screen's
 back button goes to the chat list.
 
 | Section | Switches | Shown, not switched here |
@@ -446,9 +460,11 @@ A small per-chat rules engine. 📏 Правила on a chat's screen opens that
   row only under a weight mode, the only place it means anything.
 - A row shows ✅/⏸ and the rule's name and opens the rule's card: what sets it off and what it
   does in words, how often it fired, and **🧩 Как записано (JSON)**, which shows the rule as
-  the bot stores it under one line saying what that is: the lines above give the gist of the
-  same rule in words, the stored form cannot be edited, and a new rule can be written that way
-  through «➕ Добавить» → «🧩 Настроить в JSON». **🧩 Скрыть запись (JSON)** hides it again.
+  the bot stores it — its `type`, its config, and `weight` / `mandatory` when they are not the
+  defaults — under one line saying what that is: the lines above give the gist of the same rule
+  in words, a rule cannot be edited, and a new one can be made from such text through
+  «➕ Добавить» → «🧩 Настроить в JSON»; pasted there unchanged, it makes the same rule.
+  **🧩 Скрыть запись (JSON)** hides it again.
 - **On the card**: ⏸ На паузу / ▶ Возобновить, and 🗑 Удалить, which asks first and cannot be
   undone. While the chat's rules are off the card says so and carries the same switch.
 - **➕ Новое правило** builds a rule with buttons:
@@ -464,8 +480,9 @@ A small per-chat rules engine. 📏 Правила on a chat's screen opens that
   the question open; ✖️ Отмена leaves it.
 - **🧩 Настроить в JSON** in the builder takes the whole rule as a JSON object, for what the buttons do not
   cover (regular expressions, exclusions, weight). The type goes in a `type` field, `weight` and
-  `mandatory` are read out of the object. An unknown type or action, and a reaction Telegram
-  would refuse, are refused here — otherwise the rule would be created and silently never act.
+  `mandatory` are read out of the object. An unknown type or action, a reaction Telegram
+  would refuse, and a keyword rule without a `keywords` list of words, are refused here —
+  otherwise the rule would be created and silently never act.
   The rest of the config is not checked. Cancel returns to the builder's first step.
 
 What a rule does in the chat:

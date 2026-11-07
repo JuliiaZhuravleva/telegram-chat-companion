@@ -46,16 +46,17 @@ _JSON_SHOWN_CHARS: Final = 3000
 JSON_SHOW: Final = Tr("🧩 Как записано (JSON)", "🧩 As stored (JSON)")
 JSON_HIDE: Final = Tr("🧩 Скрыть запись (JSON)", "🧩 Hide the record (JSON)")
 JSON_CAPTION: Final = Tr(
-    "Так бот хранит это правило; строки выше — главное из него словами. Изменить его так "
-    "нельзя, а новое правило так задаётся: «{add}» → «{cfg}».",
-    "This is how the bot stores the rule; the lines above give the gist in words. It cannot "
-    "be edited this way, but a new rule can be written like this: «{add}» → «{cfg}».",
+    "Это запись правила для бота; выше — главное из неё словами. Изменить правило нельзя, "
+    "можно создать новое: «{add}» → «{cfg}».",
+    "This is the bot's record of the rule; the lines above give the gist in words. A rule "
+    "cannot be edited, only made anew: «{add}» → «{cfg}».",
 )
 """The line above a rule's ``<pre>``. "The gist", not "the same": the words
 leave out fields the engine reads (``exclude_users``, ``case_sensitive``,
-``target_users``…), and the JSON leaves out priority and "required", which
-are columns. No path edits a stored rule's config; the JSON prompt only
-creates one."""
+``target_users``…). The record is `rule_record`: the type, the config, and
+the weight and "required" columns when they are not the defaults, so pasted
+into the JSON prompt it makes the same rule. No path edits a stored rule's
+config; the JSON prompt only creates one."""
 _EXCERPT_CHARS: Final = 100
 _CAUGHT_CHARS: Final = 200
 
@@ -546,8 +547,30 @@ def _fired(n: int, lang: str) -> str:
     return f"Сработало: {n} {plural_ru(n, 'раз', 'раза', 'раз')}"
 
 
+_COLUMNS: Final = ("type", "weight", "mandatory")
+"""The record's keys that are ``custom_rules`` columns, not config: the JSON
+prompt pops each of them before it stores the rest as the config."""
+
+
+def rule_record(rule: RuleView) -> dict[str, Any]:
+    """The rule as the JSON prompt reads it: ``type`` first, then the config,
+    then ``weight`` and ``mandatory`` when they are not the defaults (1, false).
+
+    Without ``type`` the prompt opened from «🧩 Настроить в JSON» took the paste
+    for keywords, and a user or flood rule came back as a keyword rule with no
+    words, which never fires.
+    """
+    record: dict[str, Any] = {"type": rule.rule_type}
+    record.update((k, v) for k, v in rule.config.items() if k not in _COLUMNS)
+    if rule.weight != 1:
+        record["weight"] = rule.weight
+    if rule.mandatory:
+        record["mandatory"] = True
+    return record
+
+
 def config_json(config: Mapping[str, Any]) -> str:
-    """The stored config, pretty-printed and escaped for ``<pre>``, cut to fit a message."""
+    """A record, pretty-printed and escaped for ``<pre>``, cut to fit a message."""
     raw = json.dumps(dict(config), ensure_ascii=False, indent=2, default=str)
     if len(raw) > _JSON_SHOWN_CHARS:
         raw = raw[: _JSON_SHOWN_CHARS - 1] + _ELLIPSIS
@@ -596,7 +619,7 @@ def rule_screen(
             lines.append(common)
     if show_json:
         caption = JSON_CAPTION(lang).format(add=_ADD(lang), cfg=_CFG_BUTTON(lang))
-        lines += ["", caption, f"<pre>{config_json(rule.config)}</pre>"]
+        lines += ["", caption, f"<pre>{config_json(rule_record(rule))}</pre>"]
 
     rows: list[tuple[Button, ...]] = []
     if not chat.enabled:
@@ -1121,6 +1144,15 @@ def text_too_long(lang: str, over: int, *, filled: bool = False) -> str:
     return f"{head} Shorten it by {over} {unit} and send again."
 
 
+CFG_NO_KEYWORDS: Final = Tr(
+    "В правиле на слова нужно поле <code>keywords</code> со списком слов, например "
+    '<code>"keywords": ["привет"]</code>: без него правило не сработает. Попробуйте ещё раз.',
+    "A keyword rule needs a <code>keywords</code> field with a list of words, e.g. "
+    '<code>"keywords": ["hello"]</code>: without it the rule never fires. Please try again.',
+)
+"""The engine's `_eval_keyword` reads ``keywords`` and nothing else: no list, an
+empty one, or an empty word (``""`` is in every text) is a rule that never
+fires, or fires on everything."""
 CFG_NOT_TEXT: Final = Tr(
     "Поле <code>{key}</code> должно быть текстом. Попробуйте ещё раз.",
     "The <code>{key}</code> field must be text. Please try again.",

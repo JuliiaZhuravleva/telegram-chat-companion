@@ -5,7 +5,8 @@ Handles:
   row on top when there are any (``show_chats``). Right after «🔌 Отключить»
   (``admin.handle_wl_remove``) the same list carries «↩️ Вернуть» for that
   chat on top, on that render only; ``adm_wl_on:`` (``admin.handle_wl_on``)
-  takes the turn-off back
+  takes the turn-off back. That render's pager writes ``adm_pnl:{lang}:{p}:u``,
+  so the pages it leads to keep its size and ▶ skips no chat
 - ``adm_pnl_menu:``   — one chat's root screen (``show_chat``)
 - ``adm_pnl_grp:``    — one section of it; which setting lives where is
   ``screens.sections.SECTION_OF``. ``rules`` opens the rules area's own list,
@@ -316,10 +317,11 @@ async def _show_chats(
     notice_raw: str | None = None,
     answered: bool = False,
     undo: int | None = None,
+    short: bool = False,
 ) -> Message | None:
     requests = await admin_repo.count_attempts("pending")
     rejected = await admin_repo.count_attempts("rejected")
-    per_page = screens.chats_per_page(requests, rejected, undo=undo is not None)
+    per_page = screens.chats_per_page(requests, rejected, undo=undo is not None or short)
     chats, total = await admin_repo.get_enabled_chats_page_by_activity(page, per_page)
     shown, pages, _ = page_slice(total, page, per_page)
     if shown != page:
@@ -334,6 +336,7 @@ async def _show_chats(
         requests=requests,
         rejected=rejected,
         undo=undo,
+        short=short,
     )
     return await show(
         target, _with_notice(screen, notice=notice, notice_raw=notice_raw), answered=answered
@@ -386,7 +389,13 @@ async def handle_chat_panel_picker(
     bot_config_repo: FromDishka[BotConfigRepository],
     **kwargs: Any,
 ) -> None:
-    """The chat list, page ``adm_pnl:{lang}:{page}`` (no page: the first)."""
+    """The chat list, page ``adm_pnl:{lang}:{page}`` (no page: the first).
+
+    A trailing ``:u`` (`screens.SHORT_PAGES`) is a page reached from the undo
+    render's pager: counted at that render's size, so ▶ lands on the chats
+    right after the ones it showed. Any other trailing field is ignored, as
+    before.
+    """
     if not await _guard(callback, bot_config_repo):
         return
     await _close_number_prompt(state_of(kwargs))
@@ -397,7 +406,8 @@ async def handle_chat_panel_picker(
     except ValueError:
         await show_stale(callback, lang, data=kwargs)
         return
-    await _show_chats(callback, lang, page, admin_repo)
+    short = parts[3:4] == [screens.SHORT_PAGES]
+    await _show_chats(callback, lang, page, admin_repo, short=short)
 
 
 @router.callback_query(F.data.startswith("adm_pnl_menu:"))

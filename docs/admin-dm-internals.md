@@ -115,20 +115,20 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `adm_lang:` / `adm_lang_set:` | `lang` / `lang:new_lang` | language screen / save, then general settings in the new language |
 | `adm_close:` | `lang` | delete panel message |
 | `adm_wl:` / `adm_wl_chats:` | — | **retired** (the old whitelist submenu and its chat list); answered by the stale catch-all |
-| `adm_wl_rm_ask:` / `adm_wl_rm:` | `lang:chat_id:page` | confirm / set `enabled=false`, then the chat list at `page` with the undo row |
+| `adm_wl_rm_ask:` / `adm_wl_rm:` | `lang:chat_id:page` | confirm (or say it is off already) / set `enabled=false` if it was on, then the chat list at `page`, with the undo row only after that change |
 | `adm_wl_on:` | `lang:chat_id:page` | the undo row: set `enabled=true`, then the chat list at `page` without it |
 | `adm_wl_pending:` | `lang:page` | requests, one per page |
 | `adm_wl_apr:` / `adm_wl_rej:` | `lang:attempt_id:page` | approve / reject from list |
 | `adm_approve:` / `adm_reject:` | `lang:attempt_id` | approve / reject from the notification card (`access_card.py`); byte-compatible forever |
 | `adm_wl_rejected:` | `lang:page` | rejected chats, one per page |
-| `adm_wl_restore:` | `lang:attempt_id:page` | back to `pending` |
+| `adm_wl_restore:` | `lang:attempt_id:page` | back to `pending`, then the rejected list with «🙏 Запросы доступа · N» on top |
 | `adm_wl_del_ask:` / `adm_wl_del:` | `lang:attempt_id:page` | confirm / hard delete |
 | `adm_stats:` | `lang:period` | statistics (`1h`/`24h`/`7d`) |
 | `adm_costs:` / `adm_costs_verify:` | `lang:period` | costs / OpenAI cross-check |
 | `adm_health:` | `lang[:now]` | last recorded check; `now` (🔁 Обновить) runs one first |
 | `adm_settings:` | `lang` | general settings |
 | `adm_notif:` / `adm_nstk:` / `adm_ntog:` | `lang` / `lang` / `lang:type` | notifications menu / sticker cycle / bool toggle |
-| `adm_pnl:` / `adm_pnl_menu:` | `lang:page` / `lang:chat_id` | chat picker / chat panel |
+| `adm_pnl:` / `adm_pnl_menu:` | `lang:page[:u]` / `lang:chat_id` | chat picker (`:u` — the short pages of the undo render) / chat panel |
 | `adm_pnl_tgl:` | `lang:chat_id:code` | generic bool toggle |
 | `adm_pnl_tol:` / `adm_pnl_tolcancel:` | `lang:chat_id` | tolerance prompt / cancel |
 | `adm_defs:` / `adm_defs_sec:` / `adm_defs_tgl:` | `lang:0` / `lang:section` / `lang:code` | the seven sections for all chats / one section / toggle, then that section again |
@@ -724,17 +724,26 @@ reads the chat's values fresh and so already shows it connected. `adm_wl_rej:` c
 is zero. `adm_approve:` / `adm_reject:` on the access card are A6's and untouched.
 
 **Turning a chat off** (`adm_wl_rm_ask:` → `adm_wl_rm:` → `adm_wl_on:`). The question
-(`off_ask_screen`) picks its third line from what that chat really has: `has_rejected_attempt`
-first (a chat with any rejected attempt files no request and sends no card, so it is told to
-come back through «🚫 Отклонённые»), then `chat_type == "channel"` (posts never reach
-`AccessControlMiddleware`; only re-adding the bot files a request), else the ordinary path —
-a message files a request, one card per 30-minute cooldown. `adm_wl_rm:` is
-`chat_settings_repo.set_field(chat_id, "enabled", False)`, `_invalidate`, then
-`show_chats(callback, lang, page, notice=TURNED_OFF, undo=chat_id)` — the page travels in the
-payload. `undo` draws «↩️ Вернуть» (`orgs.UNDO`, the organizers' label) as the first row on that
-render only, and `chats_per_page(..., undo=True)` takes one chat off the page so the keyboard
-holds. `set_field` returning False (no row) shows `CHAT_GONE` and no undo row, rather than a
-notice claiming the bot was turned off. `adm_wl_on:` re-reads the row: missing → `CHAT_GONE`;
+(`off_ask_screen`) picks its third line from what that chat really has: an admin's own private
+chat first (`chat_type == "private"` and `check_admin_direct` on its id — the middleware answers
+it whatever `enabled` says and it files no request, so it is told turning off only takes it out
+of the list), then `has_rejected_attempt` (a chat with any rejected attempt files no request and
+sends no card, so it is told to come back through «🚫 Отклонённые»), then
+`chat_type == "channel"` (posts never reach `AccessControlMiddleware`; only re-adding the bot
+files a request), else the ordinary path — a message files a request, one card per 30-minute
+cooldown. A chat whose `enabled` is false already (an approved card tapped after another admin
+turned it off) is told so instead of asked: no «🔌 Отключить», no «Вернуть сразу», only «⬅️ Чат»;
+and the chat's own screen draws «🔌 Отключить бота» only while the bot is on there.
+`adm_wl_rm:` reads the row first: missing → `CHAT_GONE`; off already → `ALREADY_OFF`, no write
+and no undo row, since «↩️ Вернуть» there would turn ON a chat that was off before the tap;
+otherwise `chat_settings_repo.set_field(chat_id, "enabled", False)`, `_invalidate`, then
+`show_chats(callback, lang, page, notice=TURNED_OFF, undo=chat_id)` (`TURNED_OFF_DM` for an
+admin's private chat) — the page travels in the payload. Read-then-write rather than one
+conditional UPDATE: two admins tapping at once both see an undo for a chat that was on, which is
+true for both. `undo` draws «↩️ Вернуть» (`orgs.UNDO`, the organizers' label) as the first row on
+that render only, and `chats_per_page(..., undo=True)` takes one chat off the page so the
+keyboard holds. `set_field` returning False (the row went between the read and the write)
+shows `CHAT_GONE` and no undo row, rather than a notice claiming the bot was turned off. `adm_wl_on:` re-reads the row: missing → `CHAT_GONE`;
 off → `set_field(…, True)` + `_invalidate`; already on → no write. Either way the list on the
 same page with `TURNED_ON` and no undo row. A garbled payload is `show_stale`.
 
@@ -865,7 +874,7 @@ Tracked as TD-046.
 
 | Callback | Payload | Screen |
 |---|---|---|
-| `adm_pnl:` | `lang:page` | `chats` / `chats.empty` |
+| `adm_pnl:` | `lang:page[:u]` | `chats` / `chats.empty` |
 | `adm_pnl_menu:` | `lang:chat_id` | `chat` |
 | `adm_pnl_grp:` | `lang:chat_id:section` | a section; `rules` hands over to `show_rules` (§A3) |
 | `adm_pnl_tgl:` | `lang:chat_id:code` | the code's own section (`SECTION_OF`), with a notice |
@@ -879,7 +888,10 @@ Tracked as TD-046.
   less one when the requests row is shown and one more right after a turn-off (the undo row);
   the rejected button shares the bottom row with back and costs nothing. With requests, undo
   and a pager the keyboard is six rows, the cap with a pager. The undo page is one chat shorter,
-  so ▶ from it starts one chat later than the ordinary next page would. A page past the end is fetched again as the last page.
+  so its pager writes `adm_pnl:{lang}:{page}:u` (`SHORT_PAGES`): pages counted at the undo
+  render's size, which ▶ and ◀ keep, so no chat is skipped between that page and the next. The
+  marker draws no undo row; a fresh list from the hub has no marker and pages at its own size.
+  A page past the end is fetched again as the last page.
 - **Old group tokens** map through `sections.LEGACY_GROUPS` (`modules`, `kb` → memory,
   `rules` → the rules screen), so a button drawn before the redesign still lands somewhere real.
 - **Back is the tree parent**: a section → its chat, a chat → the list, the list → the hub.
@@ -954,10 +966,14 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
   (JSON)» (`JSON_SHOW` / `JSON_HIDE`), plain words first and the format last. Shown, the
   `<pre>` is preceded by one `JSON_CAPTION` line: what the text is, that the lines above give
   the gist of it in words ("gist", not "the same": the words leave out exclusions, case
-  sensitivity and the target users, and the JSON leaves out `rule_type`, `weight` and
-  `mandatory`, which are columns), and that it cannot be edited — no panel step writes a rule's config after it is
-  created; `RulesRepository.update` is reached only through `toggle` (`enabled`) — while a new rule can be written that way through «➕
-  Добавить» → «🧩 Настроить в JSON» (`_CFG_BUTTON`, the same constant the type step draws).
+  sensitivity and the target users), and that it cannot be edited — no panel step writes a
+  rule's config after it is created; `RulesRepository.update` is reached only through `toggle`
+  (`enabled`) — while a new rule can be made that way through «➕ Добавить» → «🧩 Настроить в
+  JSON» (`_CFG_BUTTON`, the same constant the type step draws). The `<pre>` is
+  `rule_record(rule)`: `{"type": …}` plus the config, plus `weight` when it is not 1 and
+  `mandatory` when true — the columns the JSON prompt reads back out — so the text pasted into
+  that prompt makes the same rule (`test_the_shown_record_pasted_back_makes_the_same_rule`).
+  Without `type` a pasted `user_specific` or `spam_detect` record became a keyword rule.
 - **The builder keeps its draft in FSM data** (`_DRAFT_KEYS`, all `rule_*`). Each step checks that
   the draft exists and belongs to the payload's chat; otherwise the tap is stale, never a rule
   made in another chat. `ar_add:` resets only the draft keys, in one mapping: `rule_chat_id` is
@@ -976,7 +992,9 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
 - **Validation**: words ≤ 20 × ≤ 64 characters; a typed reaction goes through
   `ReactionSelector.select()` and is stored in Telegram's spelling; a text ≤ 4096; the JSON
   prompt checks the type and action against `_VALID_RULE_TYPES` / `_VALID_RULE_ACTIONS` and a
-  `set_reaction` emoji, and pops `type`, `weight` and `mandatory` out of the config.
+  `set_reaction` emoji, refuses a `keyword_trigger` whose `keywords` is not a non-empty list of
+  non-blank strings (`CFG_NO_KEYWORDS`: the engine reads a missing field as `[]` and never fires,
+  and `""` matches every message), and pops `type`, `weight` and `mandatory` out of the config.
 - **The executor** (`services/rules/executor.py`) imports the screens lazily. `notify_admin` sends
   `rule_card` (`card.rule`) in `admin_settings.lang`, with the chat's title when the message
   carries one; its button is `ar_view:…:n`, which answers with a new message. `custom_response`

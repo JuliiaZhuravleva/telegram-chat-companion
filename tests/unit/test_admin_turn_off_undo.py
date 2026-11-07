@@ -8,6 +8,9 @@ The next tap is the payload read off that message, never one typed into the test
 Ways back covered here: «↩️ Вернуть» on the list right after «🔌 Отключить»
 (``adm_wl_on:``), «🔌 Отключить» on an approved access card (the same question
 the chat's screen asks), and «🙏 Запросы · N» on the hub (the requests in one tap).
+Also what must NOT offer a way back: a chat that was off before the tap, whose
+«↩️ Вернуть» would turn it on, and ▶ from the undo render, which must not skip
+a chat (`SHORT_PAGES`).
 """
 
 from __future__ import annotations
@@ -19,14 +22,15 @@ import pytest
 
 from src.bot.handlers import admin as A
 from src.bot.screens import cards
-from src.bot.screens.chat import build_chats, chats_per_page
+from src.bot.screens.chat import SHORT_PAGES, build_chats, chats_per_page
 from src.bot.screens.hub import build_hub
 from src.bot.screens.lint import check_screen
 from src.bot.screens.routes import ROUTES, cb
 from src.bot.screens.samples import fake
 from src.database.repositories.admin import AdminRepository
+from src.database.repositories.bot_config import BotConfigRepository
 from src.services.chat_config import ChatConfigService
-from tests.unit.screen_routing import FakeState, admin_tap, deliver, first_match
+from tests.unit.screen_routing import ADMIN_ID, FakeState, admin_tap, deliver, first_match
 
 # Invented values only (the repository is public): the samples' fakes, plus the
 # test suite's long-standing -1001234567890 for the fifth chat.
@@ -54,6 +58,14 @@ class _Settings:
         return True
 
 
+class _BotConfig:
+    """`BotConfigRepository.get` for ``admin_ids``: the tapping admin is the one admin."""
+
+    async def get(self, key: str) -> Any:
+        assert key == "admin_ids", key
+        return [ADMIN_ID]
+
+
 class _Admin:
     """The `AdminRepository` reads the chat list, the hub and the requests make."""
 
@@ -61,6 +73,7 @@ class _Admin:
         self._settings = settings
         self._counts = {"pending": pending, "rejected": rejected}
         self.rejected_before = False
+        self.fetched: list[tuple[int, int]] = []
 
     async def count_attempts(self, status: str) -> int:
         return self._counts[status]
@@ -71,6 +84,7 @@ class _Admin:
     async def get_enabled_chats_page_by_activity(
         self, page: int, per_page: int = 10
     ) -> tuple[list[dict[str, Any]], int]:
+        self.fetched.append((page, per_page))
         on = [r for r in self._settings.rows.values() if r.get("enabled")]
         return on[page * per_page : (page + 1) * per_page], len(on)
 
@@ -121,10 +135,14 @@ def _world(*, enabled: bool = True) -> tuple[_Settings, _Admin, MagicMock, dict[
     settings = _Settings(rows)
     admin = _Admin(settings)
     service = MagicMock(spec=ChatConfigService)
+    bot_config = _BotConfig()
     data = {
         "chat_settings_repo": settings,
         "admin_repo": admin,
-        "dishka_container": _Container({AdminRepository: admin, ChatConfigService: service}),
+        "bot_config_repo": bot_config,
+        "dishka_container": _Container(
+            {AdminRepository: admin, ChatConfigService: service, BotConfigRepository: bot_config}
+        ),
     }
     return settings, admin, service, data
 
@@ -257,6 +275,145 @@ def test_the_longest_undo_payload_fits_telegram() -> None:
     assert len(payload.encode()) <= 64
 
 
+# ── a chat that was off before the tap ─────────────────────────────────────
+
+
+async def test_the_question_on_a_chat_already_off_asks_nothing() -> None:
+    """An approved card tapped after another admin turned the chat off."""
+    settings, _, _, data = _world(enabled=False)
+
+    ask = await _tap(cb("adm_wl_rm_ask:", "ru", CHAT_ID, 0), data)
+
+    text = _text(ask)
+    assert text.splitlines()[0] == "🔌 <b>Бот здесь уже отключён</b>"
+    assert "Вернуть сразу" not in text
+    assert "Позже — когда в чате напишут, появится запрос доступа" in text
+    assert _labels(ask) == [["⬅️ Чат"]], "no «🔌 Отключить»: there is nothing to turn off"
+    assert first_match(_payload(ask, "⬅️ Чат")) == "admin_chat_panel.handle_chat_panel_menu"
+    assert settings.writes == []
+
+
+async def test_turning_off_a_chat_already_off_writes_nothing_and_offers_no_undo() -> None:
+    """The old ask screen still in the chat, tapped late: «↩️ Вернуть» would turn it ON."""
+    settings, _, service, data = _world(enabled=False)
+
+    off = await _tap(cb("adm_wl_rm:", "ru", CHAT_ID, 0), data)
+
+    assert settings.writes == []
+    assert settings.rows[CHAT_ID]["enabled"] is False
+    service.invalidate.assert_not_called()
+    assert _text(off).splitlines()[0] == (
+        f"<i>Бот в чате «{TITLE}» уже был отключён, ничего не изменилось.</i>"
+    )
+    assert "↩️ Вернуть" not in sum(_labels(off), [])
+    assert _labels(off)[1] == ["Чат 1 · 10"], "an ordinary page: three chats under the requests"
+
+
+async def test_the_already_off_notice_escapes_the_title() -> None:
+    """``notice_raw`` is trusted HTML: the title is data, so it is escaped by hand."""
+    settings, _, _, data = _world(enabled=False)
+    settings.rows[CHAT_ID]["chat_title"] = "<b>x</b> & y"
+
+    off = await _tap(cb("adm_wl_rm:", "en", CHAT_ID, 0), data)
+
+    assert _text(off).splitlines()[0] == (
+        "<i>The bot was already off in «&lt;b&gt;x&lt;/b&gt; &amp; y», nothing changed.</i>"
+    )
+
+
+# ── an admin's own private chat ────────────────────────────────────────────
+
+
+def _admin_dm(settings: _Settings, *, enabled: bool = True) -> None:
+    settings.rows[ADMIN_ID] = {
+        "chat_id": ADMIN_ID,
+        "chat_title": "Админ",
+        "chat_type": "private",
+        "enabled": enabled,
+        "message_count_24h": 3,
+    }
+
+
+async def test_an_admins_private_chat_is_not_promised_silence() -> None:
+    """`AccessControlMiddleware` answers an admin's DM whatever ``enabled`` says."""
+    settings, _, _, data = _world()
+    _admin_dm(settings)
+
+    ask = await _tap(cb("adm_wl_rm_ask:", "ru", ADMIN_ID, 0), data)
+
+    lines = _text(ask).splitlines()
+    assert lines[0] == "🔌 <b>Отключить этот чат?</b>"
+    assert lines[3].startswith("Это личный чат администратора: здесь бот отвечает всегда")
+    assert "Бот перестанет отвечать" not in _text(ask)
+    assert lines[-1] == "Позже запроса не будет: из личного чата администратора он не приходит."
+    off = await _tap(_payload(ask, "🔌 Отключить"), data)
+
+    assert settings.rows[ADMIN_ID]["enabled"] is False
+    assert _text(off).splitlines()[0] == (
+        "<i>✓ Чат «Админ» убран из «🗂 Чаты», бот отвечает в нём, как раньше</i>"
+    )
+    assert _payload(off, "↩️ Вернуть") == f"adm_wl_on:ru:{ADMIN_ID}:0"
+
+
+async def test_a_private_chat_of_someone_else_is_an_ordinary_chat() -> None:
+    """Positive control for the DM variant: the same row, a user who is not an admin."""
+    settings, _, _, data = _world()
+    _admin_dm(settings)
+    other = ADMIN_ID + 1
+    settings.rows[other] = {**settings.rows.pop(ADMIN_ID), "chat_id": other}
+
+    ask = await _tap(cb("adm_wl_rm_ask:", "ru", other, 0), data)
+
+    assert _text(ask).splitlines()[0] == "🔌 <b>Отключить бота здесь?</b>"
+    assert "Бот перестанет отвечать" in _text(ask)
+
+
+async def test_an_admins_private_chat_already_off_says_both() -> None:
+    settings, _, _, data = _world()
+    _admin_dm(settings, enabled=False)
+
+    ask = await _tap(cb("adm_wl_rm_ask:", "en", ADMIN_ID, 0), data)
+
+    lines = _text(ask).splitlines()
+    assert lines[0] == "🔌 <b>This chat is already off</b>"
+    assert lines[3].startswith("This is an admin's private chat: the bot always answers here")
+    assert _labels(ask) == [["⬅️ Chat"]]
+
+
+# ── paging from the undo render ────────────────────────────────────────────
+
+
+async def test_next_from_the_undo_render_skips_no_chat() -> None:
+    """The undo page holds two chats; ▶ must open chats 3–4, not 4–6."""
+    settings, admin, _, data = _world()
+    off = await _tap(cb("adm_wl_rm:", "ru", CHAT_ID, 0), data)
+    assert admin.fetched[-1] == (0, 2)
+    nxt = _payload(off, "▶")
+    assert nxt == f"adm_pnl:ru:1:{SHORT_PAGES}"
+    assert first_match(nxt) == "admin_chat_panel.handle_chat_panel_picker"
+
+    page = await _tap(nxt, data)
+
+    assert admin.fetched[-1] == (1, 2), "the same page size as the render it came from"
+    assert "↩️ Вернуть" not in sum(_labels(page), [])
+    assert _labels(page)[1:3] == [["Чат 3 · 8"], ["Чат 4 · 7"]]
+    assert "показаны 3–4" in _text(page)
+    back_to_first = _payload(page, "◀")
+    assert back_to_first == f"adm_pnl:ru:0:{SHORT_PAGES}", "the marker survives the walk"
+    first = await _tap(back_to_first, data)
+    assert _labels(first)[1:3] == [["Чат 1 · 10"], ["Чат 2 · 9"]]
+
+
+async def test_an_ordinary_page_has_no_marker() -> None:
+    """Positive control: the list opened from the hub pages at its own size."""
+    _, admin, _, data = _world()
+
+    shown = await _tap(cb("adm_pnl:", "ru", 0), data)
+
+    assert admin.fetched[-1] == (0, 3)
+    assert _payload(shown, "▶") == "adm_pnl:ru:1"
+
+
 @pytest.mark.parametrize("page", [0, 1])
 def test_the_undo_page_keeps_the_rows_cap(page: int) -> None:
     """Undo + requests + rejected + pager: the fullest the list gets."""
@@ -271,6 +428,10 @@ def test_the_undo_page_keeps_the_rows_cap(page: int) -> None:
 
     assert len(screen.rows) == 6
     assert screen.rows[0][0].label == "↩️ Вернуть"
+    assert screen.rows[0][0].callback == f"adm_wl_on:ru:{CHAT_ID}:{page}"
+    assert len(screen.rows[2:-2]) == per_page
+    if page == 1:
+        assert "показаны 3–4" in screen.text
     assert check_screen(screen, None, "ru") == []
 
 

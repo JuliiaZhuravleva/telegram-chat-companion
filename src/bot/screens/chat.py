@@ -447,6 +447,13 @@ def _notes(view: ChatView, codes: Sequence[str], lang: str, *extra: str) -> str 
 # ---------------------------------------------------------------------------
 
 
+SHORT_PAGES: Final = "u"
+"""The last field of an ``adm_pnl:`` pager payload drawn on the undo render:
+the page it opens is counted at the undo render's size. Without it ▶ from that
+render (one chat fewer per page) opened an ordinary page whose first chat was
+one further on, so a chat between the two was on neither."""
+
+
 def chats_per_page(requests: int, rejected: int, *, undo: bool = False) -> int:
     """Chats per page: one row fewer for each extra row the list carries (rows cap).
 
@@ -455,6 +462,9 @@ def chats_per_page(requests: int, rejected: int, *, undo: bool = False) -> int:
     is still four action rows, a pager and a back row. ``rejected`` costs no row:
     that button shares the last row with the back button. Every input stays a
     parameter so the handler and the builder keep asking the same question.
+
+    ``undo`` is the undo render's page size, and also every page its pager
+    reaches (`SHORT_PAGES`): the same offsets, so ▶ skips no chat.
     """
     del rejected
     return 4 - (1 if requests else 0) - (1 if undo else 0)
@@ -482,6 +492,13 @@ def _chats_tail(lang: str, rejected: int) -> tuple[Button, ...]:
     return (Button(_REJECTED(lang).format(n=rejected), cb("adm_wl_rejected:", lang, 0)), hub)
 
 
+def _chats_page(lang: str, page: int, *, short: bool) -> str:
+    """A chat list page, carrying `SHORT_PAGES` when it is counted at the undo size."""
+    if short:
+        return cb("adm_pnl:", lang, page, SHORT_PAGES)
+    return cb("adm_pnl:", lang, page)
+
+
 def _chats_count(lang: str, total: int, page: int, pages: int, shown: int, per_page: int) -> str:
     """«Подключено: 5», plus which of them this page lists when there is more than one page."""
     count = _CHATS_COUNT(lang).format(n=total)
@@ -504,14 +521,18 @@ def build_chats(
     requests: int = 0,
     rejected: int = 0,
     undo: int | None = None,
+    short: bool = False,
 ) -> Screen:
     """``chats`` (or ``chats.empty`` when nothing is connected).
 
     ``page`` is counted with `chats_per_page`, the same count the handler
     fetched the page with, so the body can say which chats the page lists.
     ``undo`` is the chat just turned off: its «↩️ Вернуть» row comes first,
-    under the notice it takes back.
+    under the notice it takes back. ``short`` is a page reached from that
+    render's pager: it has no undo row, but keeps its page size, and its own
+    pager keeps the marker (`SHORT_PAGES`).
     """
+    short = short or undo is not None
     redo = _undo_row(lang, undo, page)
     entry = _requests_row(lang, requests)
     tail = _chats_tail(lang, rejected)
@@ -528,7 +549,7 @@ def build_chats(
         count = int(chat.get("message_count_24h") or 0)
         label = fence(fit_label(title, f" · {count}"))
         listed.append((Button(label, cb("adm_pnl_menu:", lang, chat_id)),))
-    nav = pager(page, pages, lambda p: cb("adm_pnl:", lang, p))
+    nav = pager(page, pages, lambda p: _chats_page(lang, p, short=short))
     rows = tuple(r for r in (redo, entry, *listed, nav, tail) if r)
     return Screen(
         id="chats",
@@ -541,7 +562,7 @@ def build_chats(
                     page,
                     pages,
                     len(chats),
-                    chats_per_page(requests, rejected, undo=undo is not None),
+                    chats_per_page(requests, rejected, undo=short),
                 )
             ),
         ),
@@ -625,6 +646,13 @@ def build_chat(view: ChatView, lang: str) -> Screen:
 
     url = build_chat_url(view.chat_id, view.chat_type)
     link = f'<a href="{escape(url, quote=True)}">{_OPEN_CHAT(lang)}</a>' if url else None
+    # Only while the bot is on: on a chat that is off it offered to do what
+    # the status line says is done, and its «↩️ Вернуть» turned the chat ON.
+    off = (
+        (Button(_DISCONNECT(lang), cb("adm_wl_rm_ask:", lang, view.chat_id, 0)),)
+        if view.values.get("enabled", True)
+        else ()
+    )
     return Screen(
         id="chat",
         text=_text(
@@ -646,10 +674,7 @@ def build_chat(view: ChatView, lang: str) -> Screen:
             # Next to the way out, not in the section grid: among the sections'
             # nouns it read as a state to all five readers of round 4. It opens
             # a confirmation (`chat.off_ask`), so the bottom row is safe.
-            (
-                Button(_DISCONNECT(lang), cb("adm_wl_rm_ask:", lang, view.chat_id, 0)),
-                *_back_to_chats(lang),
-            ),
+            (*off, *_back_to_chats(lang)),
         ),
     )
 

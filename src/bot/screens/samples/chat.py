@@ -145,11 +145,15 @@ def chats_after_turn_off(lang: Lang) -> Screen:
     """What `handle_wl_remove` shows: four chats left on, the fifth just turned off.
 
     The undo row takes one chat's place, so with a requests row the page holds two.
+    Four chats are built and the page size cuts them, as the handler's fetch
+    does: a page size that grew back would show here as a row too many.
     """
     per_page = screens.chats_per_page(1, 2, undo=True)
     rows = _chat_rows(
         (fake.CHAT_ID, fake.CHAT_TITLE, 148),
         (fake.CHAT_ID_OTHER, fake.CHAT_TITLE_OTHER, 12),
+        (fake.CHAT_ID_SHORT, fake.CHAT_TITLE_EN, 7),
+        (fake.CHAT_ID_SHORT - 1, fake.CHAT_TITLE + " 2", 0),
     )[:per_page]
     screen = screens.build_chats(
         lang, rows, total=4, page=0, pages=2, requests=1, rejected=2, undo=fake.CHAT_ID_NEW
