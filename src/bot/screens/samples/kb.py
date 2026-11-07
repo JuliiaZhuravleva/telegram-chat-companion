@@ -39,11 +39,23 @@ _PEOPLE: Final = (
     # The long name as the buttons show it, clipped to the row: still user data.
     orgs.clip(f"✖️ {_LONG}", orgs.NAME_PX).removeprefix("✖️ "),
     orgs.clip(_LONG, orgs.NAME_PX),
+    # ...and clipped shorter, to leave room for the « · не в чате» mark.
+    *(
+        orgs.organizer_label(_LONG, lang, absent=True)
+        .removeprefix("✖️ ")
+        .removesuffix(orgs.NOT_IN_CHAT(lang))
+        for lang in ("ru", "en")
+    ),
 )
 
 _ADD_EXEMPT: Final = {
     "R9": "«Найти в Telegram» names the app whose own search the button opens; "
     "no Russian word says which search it is",
+}
+
+_FAIL_EXEMPT: Final = {
+    "R3": "the prompt's ✖️ Отмена is the reply keyboard still under the input, sent "
+    "with the prompt; an inline one here as well showed two «✖️ Отмена»",
 }
 
 
@@ -77,6 +89,12 @@ def orgs_removed(lang: Lang) -> Screen:
         notice=orgs.REMOVED(lang).format(n=fake.PERSON_OTHER),
         undo=(fake.USER_ID_OTHER, 1),
     )
+
+
+@sample("orgs", section="Чаты", title="Один не в чате", nav="panel", user_data=_PEOPLE)
+def orgs_not_in_chat(lang: Lang) -> Screen:
+    people = [(fake.USER_ID, fake.PERSON), (_THIRD_ID, _THIRD), (_FOURTH_ID, _LONG)]
+    return orgs.orgs_screen(lang, _CID, fake.CHAT_TITLE, people, absent={_THIRD_ID, _FOURTH_ID})
 
 
 @sample("orgs", section="Чаты", title="Добавлен", nav="panel", user_data=_PEOPLE)
@@ -133,25 +151,49 @@ def org_add(lang: Lang) -> Screen:
     return orgs.org_add_screen(lang, fake.CHAT_TITLE, _CID)
 
 
-@sample("org.fail", section="Чаты", title="Не нашёл в чате", nav="prompt", user_data=_PEOPLE)
+@sample(
+    "org.fail",
+    section="Чаты",
+    title="Не нашёл в чате",
+    nav="prompt",
+    user_data=_PEOPLE,
+    exempt=_FAIL_EXEMPT,
+)
 def org_fail_not_found(lang: Lang) -> Screen:
     return orgs.org_fail_screen(lang, _CID, fake.CHAT_TITLE, "not_found")
 
 
 @sample(
-    "org.fail", section="Чаты", title="Автор скрыт приватностью", nav="prompt", user_data=_PEOPLE
+    "org.fail",
+    section="Чаты",
+    title="Автор скрыт приватностью",
+    nav="prompt",
+    user_data=_PEOPLE,
+    exempt=_FAIL_EXEMPT,
 )
 def org_fail_hidden(lang: Lang) -> Screen:
     return orgs.org_fail_screen(lang, _CID, fake.CHAT_TITLE, "hidden")
 
 
 @sample(
-    "org.fail", section="Чаты", title="@username не из этого чата", nav="prompt", user_data=_PEOPLE
+    "org.fail",
+    section="Чаты",
+    title="@username не из этого чата",
+    nav="prompt",
+    user_data=_PEOPLE,
+    exempt=_FAIL_EXEMPT,
 )
 def org_fail_elsewhere(lang: Lang) -> Screen:
     return orgs.org_fail_screen(lang, _CID, fake.CHAT_TITLE, "elsewhere")
 
 
-@sample("org.fail", section="Чаты", title="Переслано из канала", nav="prompt", user_data=_PEOPLE)
+@sample(
+    "org.fail",
+    section="Чаты",
+    title="Переслано из канала",
+    nav="prompt",
+    user_data=_PEOPLE,
+    exempt=_FAIL_EXEMPT,
+)
 def org_fail_channel(lang: Lang) -> Screen:
     return orgs.org_fail_screen(lang, _CID, fake.CHAT_TITLE, "channel")

@@ -13,6 +13,7 @@ handlers registered in the wrong order.
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -64,8 +65,35 @@ def _sends(bot: AsyncMock) -> list[object]:
 
 
 def _member(status: str) -> object:
-    user = User(id=PICKED_ID, is_bot=False, first_name="Аня")
+    """The person picked, as ``getChatMember`` returns them when they are known."""
+    user = User(id=PICKED_ID, is_bot=False, first_name="Аня", last_name="Ким", username="anya")
     return ChatMemberLeft(user=user) if status == "left" else ChatMemberMember(user=user)
+
+
+def _not_a_member(error: str) -> TelegramBadRequest:
+    """``getChatMember`` about someone who was never in the group, in Telegram's words."""
+    return TelegramBadRequest(
+        method=GetChatMember(chat_id=GROUP_ID, user_id=PICKED_ID), message=error
+    )
+
+
+class _Store:
+    """The organizer-name store, recording what an add remembered."""
+
+    remembered: list[tuple[Any, ...]]
+
+    def __init__(self, pool: object) -> None:
+        assert pool is POOL, "the handler did not hand its injected pool to the store"
+
+    async def remember(self, chat_id: int, user_id: int, **parts: str | None) -> bool:
+        self.remembered.append((chat_id, user_id, parts))
+        return True
+
+    async def names(self, chat_id: int, user_ids: object) -> dict[int, object]:
+        return {}
+
+
+POOL = object()
 
 
 def _bot_answering(bot: AsyncMock, member: object | Exception) -> AsyncMock:
@@ -172,6 +200,39 @@ class TestAPickAddsTheOrganizer:
 
 
 @pytest.mark.usefixtures("admin")
+class TestSomeoneNeverInTheGroup:
+    """Telegram's picker offers anyone, and ``getChatMember`` then has no name."""
+
+    @pytest.mark.parametrize(
+        "error", ["Bad Request: member not found", "Bad Request: PARTICIPANT_ID_INVALID"]
+    )
+    async def test_is_added_named_marked_and_remembered(
+        self, error: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = type("S", (_Store,), {"remembered": []})
+        monkeypatch.setattr(admin_kb, "OrganizerNameRepository", store, raising=False)
+        msg, data, bot = _make_message()
+        data["pool"] = POOL
+        lookup = _bot_answering(bot, _not_a_member(error))
+        state = await _parked_in_prompt()
+
+        await _propagate(_with_pick(msg), data, state)
+
+        lookup.assert_awaited()
+        assert _written_ids(data) == [PICKED_ID]
+        sends = _sends(bot)
+        assert sends[0].text == (  # type: ignore[attr-defined]
+            "✓ Аня Ким (@anya) теперь организатор.\n⚠️ Сейчас этого человека в чате нет."
+        )
+        labels = [b.text for row in sends[1].reply_markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
+        assert labels[0] == "✖️ @anya · не в чате", labels
+        assert "участник" not in sends[1].text  # type: ignore[attr-defined]
+        assert store.remembered == [
+            (GROUP_ID, PICKED_ID, {"first_name": "Аня", "last_name": "Ким", "username": "anya"})
+        ]
+
+
+@pytest.mark.usefixtures("admin")
 class TestAStalePickWritesNothing:
     async def test_without_the_prompt_state(self) -> None:
         """The keyboard outlives its prompt behind the input's keyboard icon."""
@@ -228,6 +289,26 @@ class TestTheLabels:
         assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
         assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
         assert isinstance(sends[1].reply_markup, InlineKeyboardMarkup)  # type: ignore[attr-defined]
+
+    async def test_cancel_from_someone_no_longer_an_admin_shows_no_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Removed from the bot admins while the prompt was open: the prompt and
+        its keyboard go, and the organizer list (with its names) is not shown."""
+        monkeypatch.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=False))
+        msg, data, bot = _make_message(text="✖️ Отмена")
+        lookup = _bot_answering(bot, _member("member"))
+        state = await _parked_in_prompt()
+
+        await _propagate(msg, data, state)
+
+        assert await state.get_state() is None
+        sends = _sends(bot)
+        assert len(sends) == 1, [s.text for s in sends]  # type: ignore[attr-defined]
+        assert sends[0].text == CANCELLED  # type: ignore[attr-defined]
+        assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
+        lookup.assert_not_awaited()
+        data["chat_settings_repo"].get.assert_not_awaited()  # type: ignore[attr-defined]
 
     async def test_the_picker_label_as_text_keeps_the_prompt_open(self) -> None:
         """Only a client that cannot show the picker sends its label as text."""

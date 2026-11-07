@@ -129,7 +129,6 @@ ROUTES: Final[dict[str, Route]] = {
     "adm_kb_org_list:": Route("org.list", "kept"),
     "adm_kb_org_pick:": Route("orgs", "kept"),
     "adm_kb_org_add:": Route("org.add", "kept"),
-    "adm_kb_org_x:": Route("orgs", "new"),
     # ── stickers ──
     "adm_stk_sets:": Route("stk.sets", "kept"),
     "adm_stk_pk:": Route("stk.set", "new"),
