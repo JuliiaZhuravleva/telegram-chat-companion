@@ -339,5 +339,6 @@ def community_on(lang: Lang) -> Screen:
     user_data=_TITLES,
 )
 def community_inherited(lang: Lang) -> Screen:
-    """Every part paired and marked ``· общее``: the widest the pairs get."""
+    """Every part from the general settings: the one line that says so, and the
+    facts of a chat where the newcomer greeting comes on joining."""
     return screens.build_community(_view(community_enabled=True), lang)
