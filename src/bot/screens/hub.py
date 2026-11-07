@@ -452,6 +452,27 @@ ALREADY_OFF: Final = Tr(
 """A ``notice_raw``: ``{t}`` is HTML-escaped by the caller. Begins with a
 letter, not ``✓``, like every line that reports no change."""
 TURNED_ON: Final = Tr("Бот снова работает в чате «{t}»", "The bot is back on in «{t}»")
+# What «↩️ Вернуть» says when it writes nothing, each a ``notice_raw`` with
+# ``{t}`` HTML-escaped by the caller. The undo is a tap on an old render, so the
+# chat may have been rejected or lost the bot since; turning it on then would
+# override the admin's own refusal, or the re-consent a bot added again files.
+UNDO_REJECTED: Final = Tr(
+    "<i>Чат «{t}» отклонили после отключения, ничего не изменилось. Чтобы вернуть бота, "
+    "перенесите чат из «🚫 Отклонённые» в запросы и одобрите.</i>",
+    "<i>«{t}» was rejected after the bot was turned off there, nothing changed. To bring "
+    "the bot back, move the chat from «🚫 Rejected» back to the requests and approve it.</i>",
+)
+UNDO_BOT_GONE: Final = Tr(
+    "<i>Бота уже нет в чате «{t}», ничего не изменилось. Чтобы вернуть, снова добавьте его "
+    "в чат.</i>",
+    "<i>The bot is no longer in «{t}», nothing changed. To bring it back, add it to the chat "
+    "again.</i>",
+)
+UNDO_UNCHECKED: Final = Tr(
+    "<i>Не получилось проверить, что бот ещё в чате «{t}», ничего не изменилось. "
+    "Попробуйте «{undo}» ещё раз.</i>",
+    "<i>Could not check that the bot is still in «{t}», nothing changed. Try «{undo}» again.</i>",
+)
 
 
 def _off_later(lang: str, *, rejected: bool, channel: bool, admin_dm: bool = False) -> str:

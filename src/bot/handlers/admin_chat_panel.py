@@ -317,6 +317,7 @@ async def _show_chats(
     notice_raw: str | None = None,
     answered: bool = False,
     undo: int | None = None,
+    undo_rejected: bool = False,
     short: bool = False,
 ) -> Message | None:
     requests = await admin_repo.count_attempts("pending")
@@ -336,6 +337,7 @@ async def _show_chats(
         requests=requests,
         rejected=rejected,
         undo=undo,
+        undo_rejected=undo_rejected,
         short=short,
     )
     return await show(
@@ -351,18 +353,28 @@ async def show_chats(
     notice: str | None = None,
     notice_raw: str | None = None,
     undo: int | None = None,
+    undo_rejected: bool = False,
     data: Mapping[str, Any],
 ) -> Message | None:
     """Show the list of connected chats, the same way the ``adm_pnl:`` button does.
 
     ``undo`` is a chat just turned off: the list then offers «↩️ Вернуть» for it,
     and pages one chat shorter so the keyboard keeps its rows cap.
+    ``undo_rejected``: that chat had a rejected attempt before the turn-off
+    (`screens.REJECTED_BEFORE`).
     """
     admin_repo = await resolve(data, AdminRepository)
     await _close_number_prompt(state_of(data))
     await _close_chance_prompt(state_of(data))
     return await _show_chats(
-        target, _get_lang(lang), page, admin_repo, notice=notice, notice_raw=notice_raw, undo=undo
+        target,
+        _get_lang(lang),
+        page,
+        admin_repo,
+        notice=notice,
+        notice_raw=notice_raw,
+        undo=undo,
+        undo_rejected=undo_rejected,
     )
 
 
@@ -686,6 +698,7 @@ async def _drop_prompt_keyboard(bot: Bot | None, chat_id: int, message_id: objec
 @router.message(
     AdminStates.awaiting_setting_value,
     F.chat.type == "private",
+    F.text,
     ~F.text.startswith("/"),
 )
 async def handle_chat_panel_tolerance_input(
@@ -703,7 +716,10 @@ async def handle_chat_panel_tolerance_input(
     needed. Either way the earlier prompt loses its Cancel. Commands pass
     through (``~F.text.startswith("/")``), and the prompt's Cancel clears the
     state — without both, this state would eat every admin command until a
-    valid number arrived (2026-08-07 review).
+    valid number arrived (2026-08-07 review). Non-text messages do not match
+    at all (``F.text``): ``~F.text.startswith("/")`` alone is true for a voice
+    note or a photo, whose ``text`` is None, and the prompt answered them with
+    "not a number" instead of letting them reach `media`.
     """
     data = await state.get_data()
     chat_id = data.get("tol_chat_id")
@@ -929,6 +945,7 @@ async def handle_chat_panel_chance_set(
 @router.message(
     AdminStates.awaiting_response_chance,
     F.chat.type == "private",
+    F.text,
     ~F.text.startswith("/"),
 )
 async def handle_chat_panel_chance_input(
@@ -943,7 +960,8 @@ async def handle_chat_panel_chance_input(
 
     In range, it is saved and its screen follows as a new message; otherwise
     the prompt comes again under what was wrong, the limit's reason included.
-    Either way the earlier prompt loses its Cancel. Commands pass through.
+    Either way the earlier prompt loses its Cancel. Commands pass through;
+    non-text messages do not match at all (``F.text``, as the tolerance prompt).
     """
     data = await state.get_data()
     chat_id = data.get("pct_chat_id")

@@ -10,13 +10,21 @@ Every value is invented (``fake.py``).
 from __future__ import annotations
 
 from dataclasses import replace
+from html import escape
 from typing import Any, Final
 
 from src.bot.screens import chat as screens
 from src.bot.screens.chat import ChatView, config_values, fit_label
-from src.bot.screens.hub import TURNED_OFF, TURNED_ON
+from src.bot.screens.hub import (
+    TURNED_OFF,
+    TURNED_ON,
+    UNDO_BOT_GONE,
+    UNDO_REJECTED,
+    UNDO_UNCHECKED,
+)
 from src.bot.screens.i18n import Lang
 from src.bot.screens.model import Screen
+from src.bot.screens.orgs import UNDO
 from src.bot.screens.registry import sample
 from src.bot.screens.samples import fake
 from src.models.chat_config import ChatConfig
@@ -177,6 +185,61 @@ def chats_after_undo(lang: Lang) -> Screen:
     )
     screen = screens.build_chats(lang, rows, total=5, page=0, pages=2, requests=1, rejected=2)
     return replace(screen, notice=TURNED_ON(lang).format(t=fake.CHAT_TITLE_NEW))
+
+
+def _late_undo(lang: Lang, notice_raw: str, *, offer_again: bool = False) -> Screen:
+    """What `handle_wl_on` shows when «↩️ Вернуть» is tapped after the chat changed."""
+    rows = _chat_rows(
+        (fake.CHAT_ID, fake.CHAT_TITLE, 148),
+        (fake.CHAT_ID_OTHER, fake.CHAT_TITLE_OTHER, 12),
+    )
+    screen = screens.build_chats(
+        lang,
+        rows,
+        total=4,
+        page=0,
+        pages=2,
+        requests=1,
+        rejected=2,
+        undo=fake.CHAT_ID_NEW if offer_again else None,
+        undo_rejected=offer_again,
+    )
+    return replace(screen, notice_raw=notice_raw)
+
+
+@sample(
+    "chats",
+    section=_SECTION,
+    title="«↩️ Вернуть» после отклонения: ничего не изменилось",
+    nav="panel",
+    user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, fake.CHAT_TITLE_NEW),
+)
+def chats_undo_after_reject(lang: Lang) -> Screen:
+    return _late_undo(lang, UNDO_REJECTED(lang).format(t=escape(fake.CHAT_TITLE_NEW)))
+
+
+@sample(
+    "chats",
+    section=_SECTION,
+    title="«↩️ Вернуть», а бота уже нет в чате",
+    nav="panel",
+    user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, fake.CHAT_TITLE_NEW),
+)
+def chats_undo_bot_gone(lang: Lang) -> Screen:
+    return _late_undo(lang, UNDO_BOT_GONE(lang).format(t=escape(fake.CHAT_TITLE_NEW)))
+
+
+@sample(
+    "chats",
+    section=_SECTION,
+    title="«↩️ Вернуть», а Telegram не ответил: кнопка остаётся",
+    nav="panel",
+    user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, fake.CHAT_TITLE_NEW),
+)
+def chats_undo_unchecked(lang: Lang) -> Screen:
+    """The undo is offered again, with the mark of a rejection older than the turn-off."""
+    notice_raw = UNDO_UNCHECKED(lang).format(t=escape(fake.CHAT_TITLE_NEW), undo=UNDO(lang))
+    return _late_undo(lang, notice_raw, offer_again=True)
 
 
 @sample("chats.empty", section=_SECTION, title="Ни одного чата", nav="panel")

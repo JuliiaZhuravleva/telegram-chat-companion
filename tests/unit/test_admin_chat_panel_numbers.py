@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,7 +21,7 @@ import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message
+from aiogram.types import Chat, Message, PhotoSize, User, Voice
 
 import src.bot.handlers.admin_chat_panel as panel
 from src.bot.screens import chat as screens
@@ -37,7 +38,14 @@ from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.rules import RulesRepository
 from src.models.chat_config import ChatConfig
 from src.services.chat_config import ChatConfigService
-from tests.unit.screen_routing import FakeState, admin_tap, admin_text, deliver, first_match
+from tests.unit.screen_routing import (
+    ADMIN_ID,
+    FakeState,
+    admin_tap,
+    admin_text,
+    deliver,
+    first_match,
+)
 from tests.unit.test_admin_chat_panel_handler import (
     CHAT_GONE,
     CHAT_ID,
@@ -366,6 +374,52 @@ async def test_a_typed_number_in_the_prompt_is_its_answer() -> None:
     assert await deliver("message", msg, FakeState(ARMED_STATE)) == (
         PANEL + "handle_chat_panel_chance_input"
     )
+
+
+NUMBER_PROMPTS = [
+    (AdminStates.awaiting_response_chance, "handle_chat_panel_chance_input"),
+    (AdminStates.awaiting_setting_value, "handle_chat_panel_tolerance_input"),
+]
+
+
+def _admin_dm(**content: Any) -> Message:
+    """A message in the admin's DM with no text: a voice note or a photo."""
+    return Message(
+        message_id=2,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        **content,
+    ).as_(AsyncMock())
+
+
+@pytest.mark.parametrize(("armed", "handler"), NUMBER_PROMPTS, ids=["chance", "tolerance"])
+async def test_each_number_prompt_takes_a_typed_number(armed: Any, handler: str) -> None:
+    """The control for the one below: the same prompt does take text."""
+    msg, _ = admin_text("5")
+    assert await deliver("message", msg, FakeState(armed)) == PANEL + handler
+
+
+@pytest.mark.parametrize(
+    ("content", "handler"),
+    [
+        ({"voice": Voice(file_id="v1", file_unique_id="vu1", duration=12)}, "handle_voice_message"),
+        (
+            {"photo": [PhotoSize(file_id="p1", file_unique_id="pu1", width=10, height=10)]},
+            "handle_photo_message",
+        ),
+    ],
+    ids=["voice", "photo"],
+)
+@pytest.mark.parametrize("armed", [a for a, _ in NUMBER_PROMPTS], ids=["chance", "tolerance"])
+async def test_a_voice_note_or_a_photo_is_not_the_prompts_answer(
+    armed: Any, content: dict[str, Any], handler: str
+) -> None:
+    """Their ``text`` is None, which ``~F.text.startswith("/")`` alone lets through:
+    the prompt took them and answered "not a number"."""
+    taken = await deliver("message", _admin_dm(**content), FakeState(armed))
+
+    assert taken == "media." + handler
 
 
 @pytest.mark.parametrize(

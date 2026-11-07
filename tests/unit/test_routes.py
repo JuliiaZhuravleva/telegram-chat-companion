@@ -24,7 +24,7 @@ import pytest
 from aiogram.types import Message, ReplyKeyboardRemove
 
 from src.bot.handlers import router as main_router
-from src.bot.screens.chat import SHORT_PAGES
+from src.bot.screens.chat import REJECTED_BEFORE, SHORT_PAGES
 from src.bot.screens.routes import (
     CALLBACK_LIMIT,
     LEGACY_SAMPLES,
@@ -89,7 +89,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_pnl_spx:": (LANG, CID),
     "adm_wl_rm_ask:": (LANG, CID, PAGE),
     "adm_wl_rm:": (LANG, CID, PAGE),
-    "adm_wl_on:": (LANG, CID, PAGE),
+    "adm_wl_on:": (LANG, CID, PAGE, REJECTED_BEFORE),
     "adm_wl_pending:": (LANG, PAGE),
     "adm_wl_apr:": (LANG, INT4, PAGE),
     "adm_wl_rej:": (LANG, INT4, PAGE),

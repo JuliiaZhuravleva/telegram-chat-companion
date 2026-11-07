@@ -453,6 +453,13 @@ the page it opens is counted at the undo render's size. Without it ▶ from that
 render (one chat fewer per page) opened an ordinary page whose first chat was
 one further on, so a chat between the two was on neither."""
 
+REJECTED_BEFORE: Final = "r"
+"""The last field of an ``adm_wl_on:`` undo payload when the chat already had a
+rejected attempt on record at the turn-off. The undo writes nothing for a chat
+rejected AFTER the turn-off (a request filed while it was off and rejected from
+a card), and ``has_rejected_attempt`` alone cannot tell that from a rejection
+older than the approval that enabled the chat: the payload remembers which."""
+
 
 def chats_per_page(requests: int, rejected: int, *, undo: bool = False) -> int:
     """Chats per page: one row fewer for each extra row the list carries (rows cap).
@@ -477,10 +484,19 @@ def _requests_row(lang: str, requests: int) -> tuple[Button, ...] | None:
     return (Button(REQUESTS(lang).format(n=requests), cb("adm_wl_pending:", lang, 0)),)
 
 
-def _undo_row(lang: str, undo: int | None, page: int) -> tuple[Button, ...] | None:
-    """«↩️ Вернуть» for the chat just turned off: on that one render, never again."""
+def _undo_row(
+    lang: str, undo: int | None, page: int, *, rejected: bool
+) -> tuple[Button, ...] | None:
+    """«↩️ Вернуть» for the chat just turned off: on that one render, never again.
+
+    ``rejected``: the chat had a rejected attempt before the turn-off, so the
+    payload carries `REJECTED_BEFORE` and the undo does not mistake it for one
+    rejected since.
+    """
     if undo is None:
         return None
+    if rejected:
+        return (Button(UNDO(lang), cb("adm_wl_on:", lang, undo, page, REJECTED_BEFORE)),)
     return (Button(UNDO(lang), cb("adm_wl_on:", lang, undo, page)),)
 
 
@@ -521,6 +537,7 @@ def build_chats(
     requests: int = 0,
     rejected: int = 0,
     undo: int | None = None,
+    undo_rejected: bool = False,
     short: bool = False,
 ) -> Screen:
     """``chats`` (or ``chats.empty`` when nothing is connected).
@@ -528,12 +545,13 @@ def build_chats(
     ``page`` is counted with `chats_per_page`, the same count the handler
     fetched the page with, so the body can say which chats the page lists.
     ``undo`` is the chat just turned off: its «↩️ Вернуть» row comes first,
-    under the notice it takes back. ``short`` is a page reached from that
+    under the notice it takes back, marked `REJECTED_BEFORE` when
+    ``undo_rejected``. ``short`` is a page reached from that
     render's pager: it has no undo row, but keeps its page size, and its own
     pager keeps the marker (`SHORT_PAGES`).
     """
     short = short or undo is not None
-    redo = _undo_row(lang, undo, page)
+    redo = _undo_row(lang, undo, page, rejected=undo_rejected)
     entry = _requests_row(lang, requests)
     tail = _chats_tail(lang, rejected)
     if total == 0:
