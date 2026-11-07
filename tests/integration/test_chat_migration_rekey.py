@@ -30,6 +30,7 @@ import pytest_asyncio
 
 from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.member_state import ChatMemberStateRepository
+from src.database.repositories.organizer_names import KnownName, OrganizerNameRepository
 from src.database.repositories.rules import RulesRepository
 
 OLD_ID = -1009999991001
@@ -46,7 +47,13 @@ async def clean_ids(db_pool: asyncpg.Pool) -> AsyncIterator[None]:
     """
 
     async def _purge() -> None:
-        for table in ("custom_rules", "chat_facts", "chat_settings", "chat_member_state"):
+        for table in (
+            "custom_rules",
+            "chat_facts",
+            "chat_settings",
+            "chat_member_state",
+            "kb_organizer_names",
+        ):
             await db_pool.execute(
                 f"DELETE FROM {table} WHERE chat_id = ANY($1::bigint[])",  # noqa: S608
                 [OLD_ID, NEW_ID],
@@ -195,3 +202,85 @@ class TestMemberStateFollowsTheChat:
             NEW_ID,
         )
         assert status == "member", "the newer state under the new id must win"
+
+
+class TestOrganizerNamesFollowTheChat:
+    """`kb_organizer_names` must travel with `kb_organizer_ids` (migration 038).
+
+    The ids live in `chat_settings`, which moves. A name left on the old id
+    turns every organizer in the moved list into «участник <id>» for as long
+    as Telegram cannot name them (someone who left, or a lookup that failed).
+    """
+
+    async def _old_chat_with_a_name(self, db_pool: asyncpg.Pool) -> OrganizerNameRepository:
+        await db_pool.execute(
+            "INSERT INTO chat_settings (chat_id, chat_title, chat_type, kb_organizer_ids) "
+            "VALUES ($1, 'rekey probe', 'group', '[201, 202]'::jsonb)",
+            OLD_ID,
+        )
+        names = OrganizerNameRepository(db_pool)
+        assert await names.remember(OLD_ID, 201, first_name="Аня", username="anya_probe")
+        return names
+
+    async def test_the_names_move_with_the_organizer_ids(
+        self, db_pool: asyncpg.Pool, clean_ids: None
+    ) -> None:
+        names = await self._old_chat_with_a_name(db_pool)
+        assert (await names.names(OLD_ID, [201]))[201].username == "anya_probe"
+
+        outcome = await ChatMigrationRepository(db_pool).migrate(OLD_ID, NEW_ID)
+
+        assert outcome.status == "migrated"
+        assert outcome.organizer_names_moved == 1
+        ids = await db_pool.fetchval(
+            "SELECT kb_organizer_ids FROM chat_settings WHERE chat_id = $1", NEW_ID
+        )
+        assert "201" in str(ids), "precondition: the organizer ids moved"
+        assert await names.names(NEW_ID, [201]) == {
+            201: KnownName(first_name="Аня", last_name=None, username="anya_probe")
+        }
+        left = await db_pool.fetchval(
+            "SELECT count(*) FROM kb_organizer_names WHERE chat_id = $1", OLD_ID
+        )
+        assert left == 0, "a copy left on the old id is a name nobody reads"
+
+    async def test_a_newer_name_on_the_old_id_replaces_an_older_one_on_the_new_id(
+        self, db_pool: asyncpg.Pool, clean_ids: None
+    ) -> None:
+        names = await self._old_chat_with_a_name(db_pool)
+        await db_pool.execute(
+            "INSERT INTO kb_organizer_names (chat_id, user_id, first_name, updated_at) "
+            "VALUES ($1, 201, 'Старое', $2)",
+            NEW_ID,
+            datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+        outcome = await ChatMigrationRepository(db_pool).migrate(OLD_ID, NEW_ID)
+
+        assert outcome.status == "migrated"
+        assert outcome.settings_moved == 1, "a name on the new id must not abort the move"
+        assert outcome.organizer_names_moved == 1
+        assert (await names.names(NEW_ID, [201]))[201] == KnownName(
+            first_name="Аня", last_name=None, username="anya_probe"
+        )
+
+    async def test_a_newer_name_already_on_the_new_id_is_kept(
+        self, db_pool: asyncpg.Pool, clean_ids: None
+    ) -> None:
+        names = await self._old_chat_with_a_name(db_pool)
+        await db_pool.execute(
+            "INSERT INTO kb_organizer_names (chat_id, user_id, first_name, updated_at) "
+            "VALUES ($1, 201, 'Новое', now() + interval '1 hour')",
+            NEW_ID,
+        )
+
+        outcome = await ChatMigrationRepository(db_pool).migrate(OLD_ID, NEW_ID)
+
+        assert outcome.status == "migrated"
+        assert outcome.settings_moved == 1
+        assert outcome.organizer_names_moved == 0, "the older name did not replace anything"
+        assert (await names.names(NEW_ID, [201]))[201].first_name == "Новое"
+        left = await db_pool.fetchval(
+            "SELECT count(*) FROM kb_organizer_names WHERE chat_id = $1", OLD_ID
+        )
+        assert left == 0, "the superseded name does not linger on the old id"

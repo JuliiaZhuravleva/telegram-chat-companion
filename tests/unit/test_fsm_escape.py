@@ -127,6 +127,12 @@ def _make_message(
         "bot_config_repo": AsyncMock(),
         "admin_repo": _admin_repo(),
         "message_repo": AsyncMock(),
+        # The KB organizer handlers name people through it; nobody is stored.
+        "organizer_names": AsyncMock(
+            names=AsyncMock(return_value={}),
+            remember=AsyncMock(return_value=True),
+            remember_seen=AsyncMock(return_value=False),
+        ),
         "knowledge_repo": AsyncMock(),
         "sticker_repo": MagicMock(),
         "sticker_service": AsyncMock(),
@@ -755,6 +761,7 @@ class TestDemotionDoesNotStrandTheOrganizerPrompt:
                 data["bot_config_repo"],  # type: ignore[arg-type]
                 data["message_repo"],  # type: ignore[arg-type]
                 state,  # type: ignore[arg-type]
+                data["organizer_names"],  # type: ignore[arg-type]
             )
 
         assert state.clear_calls == 1

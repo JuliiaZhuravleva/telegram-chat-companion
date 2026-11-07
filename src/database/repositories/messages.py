@@ -467,6 +467,9 @@ class MessageRepository:
         only available index. Returns ``None`` if this chat's history has no
         record of that username (caller should then check
         ``username_seen_elsewhere`` to phrase the right not-found copy).
+
+        ``created_at`` is nullable (imported history), and ``DESC`` alone puts
+        NULL first: an undated row would beat every dated one.
         """
         return await self._pool.fetchrow(
             """
@@ -476,7 +479,7 @@ class MessageRepository:
               AND user_id IS NOT NULL
               AND username IS NOT NULL
               AND LOWER(username) = LOWER($2)
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC NULLS LAST, id DESC
             LIMIT 1
             """,
             chat_id,

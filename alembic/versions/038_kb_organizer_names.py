@@ -24,8 +24,13 @@ This is not a setting. It is kept out of the ChatConfig merge, so the
 
 Removing an organizer leaves the row: `↩️ Вернуть` must bring the name back. It also
 means a row can outlive the organizer. The rows are a few per chat and hold names
-the bot was given when they were added. A group->supergroup upgrade leaves them on
-the old id, like every chat-keyed table here (`ChatMigrationRepository`).
+the bot was given when they were added.
+
+A group->supergroup upgrade moves the rows to the new id together with the
+organizer ids (`ChatMigrationRepository.migrate`): the ids are a `chat_settings`
+column, which moves, and a name left on the old id would turn the moved list
+back into «участник <id>». History-like tables stay behind on an upgrade; this one
+is the opposite case, a name nothing can rebuild.
 """
 
 from __future__ import annotations
