@@ -449,6 +449,11 @@ def _quote(text: str, limit: int = _CAUGHT_CHARS) -> str:
     return f"«{escape(text)}»"
 
 
+CONTAINS_HOW: Final = Tr("где угодно, даже внутри слова", "anywhere, even inside a word")
+"""What ``contains`` catches. It is a substring test, «кот» in «который» too, and
+«слово внутри сообщения» read as a whole word to the admin who picked it."""
+
+
 def catches(rule: RuleView, lang: str) -> str:
     """What sets a rule off, in words."""
     cfg = rule.config
@@ -459,7 +464,7 @@ def catches(rule: RuleView, lang: str) -> str:
             "regex": Tr("регулярное выражение", "regular expression"),
         }.get(
             str(cfg.get("match_type", "contains")),
-            Tr("слово внутри сообщения", "a word inside a message"),
+            CONTAINS_HOW,
         )
         return f"{_quote(words)} — {how(lang)}"
     if rule.rule_type == "user_specific":
@@ -726,11 +731,17 @@ def words_screen(lang: str, chat_id: int) -> Screen:
 
 
 def match_screen(lang: str, chat_id: int, words: Sequence[str]) -> Screen:
-    """``rule.match``: a word anywhere in a message, or the message being just the word."""
+    """``rule.match``: the word anywhere in a message, or the message being just the word.
+
+    "Anywhere" is the engine's ``contains`` (`CONTAINS_HOW`), and the button and
+    its example say it reaches inside a word: «Слово внутри сообщения» read as a
+    whole word, and a warning then landed on whoever wrote «который» for «кот».
+    """
     first = words[0] if words else ""
     example = Tr(
-        "Слово внутри: «тут {w} и ещё текст»\nТолько слово: «{w}»",
-        "Word inside: “there is {w} and more text”\nWord alone: “{w}”",
+        "Где угодно: «тут {w} и ещё текст», даже внутри слова: «за{w}ка»\nТолько слово: «{w}»",
+        "Anywhere: “there is {w} and more text”, even inside a word: “super{w}s”\n"
+        "Word alone: “{w}”",
     )(lang).format(w=escape(first))
     return Screen(
         id="rule.match",
@@ -742,7 +753,7 @@ def match_screen(lang: str, chat_id: int, words: Sequence[str]) -> Screen:
         rows=(
             (
                 Button(
-                    Tr("Слово внутри сообщения", "Word inside a message")(lang),
+                    Tr("Где угодно, даже внутри слова", "Anywhere, even inside a word")(lang),
                     cb("ar_b_match:", lang, chat_id, "c"),
                 ),
             ),

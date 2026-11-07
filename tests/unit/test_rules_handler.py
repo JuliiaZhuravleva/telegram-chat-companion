@@ -33,6 +33,7 @@ from src.database.repositories.rules import RulesRepository
 from src.models.chat_config import ChatConfig
 from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
+from src.services.rules.engine import RuleEngine
 
 CHAT_ID = -1009999999999  # invented
 OTHER_CHAT = -1008888888888  # invented
@@ -725,6 +726,49 @@ class TestBuilderKeywords:
         assert text.startswith("<i>✓ Правило создано</i>\n\n")
         assert f"ar_tog:ru:{RULE_ID}:{CHAT_ID}:0" in _datas(markup)
         assert all(state.data[k] is None for k in handlers._DRAFT_KEYS), "the draft is spent"
+
+    @pytest.mark.parametrize(
+        ("lang", "inside", "longer"),
+        [("ru", "внутри слова", "«закотка»"), ("en", "inside a word", "“superкотs”")],
+    )
+    async def test_the_anywhere_button_says_it_reaches_inside_a_word(
+        self, lang: str, inside: str, longer: str
+    ) -> None:
+        """The engine's ``contains`` is a substring test: the rule the first
+        button makes for «кот» fires on «который», so the button, its example
+        and the card say the word is caught even inside another word."""
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:{lang}:{CHAT_ID}:k", state, deps)
+        typed = _typed("кот")
+        await handlers.handle_rule_words_input(typed, state)
+        text, markup = _sent(typed)
+        assert f"{inside}: {longer}" in text, "the example shows the word inside another"
+        anywhere = [
+            b.callback_data for row in markup.inline_keyboard for b in row if inside in b.text
+        ]
+        assert len(anywhere) == 1, _labels(markup)
+
+        await _tap(handlers.handle_builder_match, anywhere[0], state, deps)
+        callback = await _tap(
+            handlers.handle_builder_action, f"ar_b_act:{lang}:{CHAT_ID}:n", state, deps
+        )
+
+        created = _created(deps)
+        repo = MagicMock(spec=RulesRepository)
+        repo.get_active_rules = AsyncMock(
+            return_value=[{"id": RULE_ID, "chat_id": CHAT_ID, **created, "enabled": True}]
+        )
+        repo.record_trigger = AsyncMock()
+        fired = await RuleEngine(repo).evaluate(
+            chat_id=CHAT_ID,
+            user_id=7,
+            message=MagicMock(text="который час?", caption=None, sticker=None),
+            rules_mode="all",
+        )
+        assert [a.rule.id for a in fired] == [RULE_ID], "«кот» inside «который» fires"
+        assert f"«кот» — {screens.CONTAINS_HOW(lang)}" in _shown(callback)[0]
+        assert inside in screens.CONTAINS_HOW(lang)
 
     async def test_a_long_list_of_words_is_named_by_its_start(self) -> None:
         words = [f"слово{i:02d}" for i in range(15)]

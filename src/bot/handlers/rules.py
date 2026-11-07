@@ -12,7 +12,7 @@ Callback routes (all DM-only, admin-only):
 - ``ar_del:{lang}:{rule_id}[:{chat_id}]``      — delete it, back to the list
 - ``ar_add:{lang}:{chat_id}``                 — the builder's first step: what sets it off
 - ``ar_b_type:{lang}:{chat_id}:{k|u|f|s}[:{page}]`` — words, a person, stickers, messages
-- ``ar_b_match:{lang}:{chat_id}:{c|e}``       — a word inside a message or the word alone
+- ``ar_b_match:{lang}:{chat_id}:{c|e}``       — the word anywhere, even inside a word, or alone
 - ``ar_b_who:{lang}:{chat_id}:{user_id}``     — whose messages
 - ``ar_b_find:{lang}:{chat_id}``              — whose messages, found with Telegram's
   own person search: a new message with a reply keyboard (``request_users``)
@@ -844,7 +844,7 @@ async def handle_builder_match(
     state: FSMContext,
     **kwargs: Any,
 ) -> None:
-    """A word inside a message, or the message being only the word."""
+    """The word anywhere in a message (even inside a longer word), or only the word."""
     if await _denied(callback, kwargs):
         return
     await _leave_config_prompt(state, keep_draft=True)
