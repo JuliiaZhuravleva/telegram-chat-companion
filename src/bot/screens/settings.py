@@ -93,8 +93,9 @@ def next_sticker_mode(settings: Mapping[str, Any]) -> str:
 def notif_screen(lang: str, settings: Mapping[str, Any]) -> Screen:
     """Two controls. The jailbreak, blacklist and fallback switches are not shown.
 
-    Their stored values still apply; hiding them only stops the screen from
-    offering switches nobody needs once the health alerts cover the same ground.
+    Nothing sends those notices any more, so their stored values are read by
+    nobody (only the defaults in ``AdminRepository`` still name them); the
+    health alerts cover the same ground.
     """
     requests_on = bool(settings.get("unauthorized", True))
     text = _NOTIF_TEXT(lang)

@@ -729,8 +729,9 @@ async def handle_sticker_notification_cycle(
 
 
 # The one on/off notification the screen offers. The others (jailbreak,
-# blacklist, AI fallback) keep their stored values and are no longer shown, so
-# a payload naming one of them comes from an old button and is stale.
+# blacklist, AI fallback) are no longer sent and their stored values are read
+# by nothing, so a payload naming one of them comes from an old button and is
+# stale.
 _PANEL_TOGGLES = frozenset({"unauthorized"})
 
 
