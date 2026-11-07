@@ -20,7 +20,8 @@ R7  no callback writes a ``retired`` or ``compat`` prefix (always checked), and
     every other callback reaches a live handler (needs the router, see ``route``)
 R8  Russian copy: "вы", no singular imperatives, no nag words
 R9  English copy has no Cyrillic, Russian labels no Latin words, outside user data
-R10 a label fits its share of a 390 px phone row
+R10 a label fits its share of a 390 px phone row, as our design renderer draws
+    it: the widths are calibrated against that renderer, not every Telegram client
 R11 a toggle starts with its state glyph; a link button never does
 R12 HTML tags are balanced and known, and the text fits 4096 UTF-16 units
 R13 a DM panel screen is recognised by ``custom_emoji`` as a screen
@@ -112,51 +113,106 @@ CANCEL_LABELS: Final = frozenset({"✖️ Отмена", "✖️ Cancel"})
 # ---------------------------------------------------------------------------
 # Width estimator (R10)
 # ---------------------------------------------------------------------------
+#
+# Calibrated against our renderer, the design tool that draws a screen at
+# 390 px, not against every Telegram client. There a button is 14 px weight-500
+# text in `Roboto, 'Helvetica Neue', Arial` with 6 px of padding each side, a row
+# is 354 px wide with 3 px gaps, and a label is cut when the button's scrollWidth
+# exceeds its clientWidth. Roboto is not installed where it runs, so Chromium
+# draws HelveticaNeue-Medium and Apple Color Emoji, and every number below was
+# measured there. A phone draws with its own font, so "fits" means "fits the
+# mock"; the two R10 controls are labels checked on a real phone, and the mock
+# agrees with the phone on both.
 
-_ZERO_WIDTH: Final = frozenset({0xFE0F, 0x200D, 0x200B, 0x200C, 0x2060, 0x2061, 0x2062, 0x2063})
-_NARROW_PUNCT: Final = frozenset(".,:;·'\"!?")
+_ZWJ: Final = 0x200D
+_VS16: Final = "\ufe0f"
+_ZERO_WIDTH: Final = frozenset(
+    {0xFE0F, 0x200B, 0x200C, 0x2060, 0x2061, 0x2062, 0x2063, 0x20E3, *range(0x1F3FB, 0x1F400)}
+)
+"""Drawn into a neighbour: variation selectors, invisible marks, the keycap ring, skin tones."""
+_FLAG_LETTERS: Final = range(0x1F1E6, 0x1F200)
+"""Regional indicators: two of them draw one flag."""
+EMOJI_FROM: Final = 0x2190
+EMOJI_PX: Final = 18.0
+"""Every colour emoji measured 18.0 px. A character from U+2190 up, or any one
+followed by VS16, counts as one. The mock draws ``⏸ ▶ ◀ ✓`` as text, 8.8–14 px,
+so a label holding one reads up to 9 px wide; a phone draws them as emoji."""
+OTHER_PX: Final = 14.0
+"""A character missing from the table: one em, as wide as ``… — %``."""
 ROW_WIDTH_PX: Final = 354
-"""Usable keyboard width on a 390 px phone (render.py ``.k``, 14 px Roboto)."""
+"""Keyboard width on a 390 px phone (the renderer's ``.kb``)."""
+ROW_GAP_PX: Final = 3
+BUTTON_PADDING_PX: Final = 12
 
-
-def _char_px(ch: str) -> float:
-    cp = ord(ch)
-    if cp in _ZERO_WIDTH:
-        return 0.0
-    if cp >= 0x2190:
-        return 17.5
-    if ch == " ":
-        return 3.6
-    if ch in _NARROW_PUNCT:
-        return 3.8
-    if ch.isdigit():
-        return 7.8
-    if "А" <= ch <= "я" or ch in "Ёё":
-        return 9.6 if ch.isupper() else 7.6
-    if "A" <= ch <= "Z":
-        return 9.2
-    if "a" <= ch <= "z":
-        return 7.0
-    return 7.0
+# Measured advance in px of each character, grouped by width: ``x{ch}x`` minus
+# ``xx``, so kerning against a neighbour is in it. A space alone measures 0 (the
+# browser trims it), which is why the advance is taken between two letters.
+# fmt: off
+_ADVANCES: Final[tuple[tuple[float, str], ...]] = (
+    (1.94, " "), (2.8, " "),
+    (3.11, "|"), (3.38, "`ijl"), (3.89, " !'(),.:;I‘’·\xa0"),
+    (4.14, "[]{}"), (4.41, "f"), (4.66, "t"), (4.92, "/\\r"),
+    (5.17, "*"), (5.44, "-"), (5.59, "°"), (5.92, "г"),
+    (6.22, '"„“”'), (6.48, "«»"), (6.73, "т"),
+    (7.0, "_z–•"), (7.27, "svyу"), (7.52, "Jkxкх"), (7.56, "з"), (7.63, "ья"), (7.67, "в"),
+    (7.78, "#$0123456789?aceаесэё₽€§"), (7.89, "ч"),
+    (8.03, "Lhnu"), (8.27, "З"), (8.3, "FTgoГТбо"), (8.39, "+<=>^~×±"), (8.53, "У"),
+    (8.55, "Vbdpqийнпр"), (8.81, "EZЕЁ"), (8.95, "ъ"),
+    (9.0, "л"), (9.06, "&SXYХ"), (9.09, "ц"), (9.33, "APАБРЬЯ"), (9.41, "Ч"), (9.59, "KК"),
+    (9.64, "м"), (9.67, "д"), (9.86, "BRВ"),
+    (10.11, "CDHNUИЙНПСЭ"), (10.3, "Л"), (10.44, "ФЪ"), (10.55, "Ц"), (10.63, "G"),
+    (10.64, "OQО"), (10.89, "w"),
+    (11.0, "ы"), (11.2, "@"), (11.31, "Д"), (11.39, "ю"), (11.67, "ж"),
+    (12.17, "m"), (12.44, "MМ"), (12.48, "ш"),
+    (13.02, "щ"), (13.22, "W"), (13.23, "Ы"), (13.73, "ф"),
+    (14.0, "%—…"), (14.53, "Ю"), (14.7, "Ш"),
+    (15.3, "Ж"), (15.45, "Щ"), (15.58, "№"),
+)
+# fmt: on
+_ADVANCE_PX: Final[dict[str, float]] = {ch: px for px, chars in _ADVANCES for ch in chars}
 
 
 def label_width_px(label: str) -> float:
-    """Estimated rendered width of a button label's text, padding excluded.
+    """Rendered width of a button label's text in px, padding excluded.
 
-    Calibrated (assumed values) against two labels only — see the two R10
-    controls in the rules test. Three-per-row rows are not calibrated; the
-    rendered PNG is the arbiter there.
+    The sum of measured advances (``_ADVANCES``, ``EMOJI_PX``, ``OTHER_PX``); a
+    ZWJ sequence and a flag count as one emoji. Over every label the panel draws
+    it is at most 0.2 px narrow, and wide by at most 9.2 px, only on ``⏸ ▶ ◀ ✓``;
+    the rules test holds a measured table that keeps it so.
     """
-    return sum(_char_px(ch) for ch in label)
+    total = 0.0
+    joined = False
+    flag_open = False
+    for i, ch in enumerate(label):
+        cp = ord(ch)
+        if cp == _ZWJ:
+            joined = True
+            continue
+        if cp in _ZERO_WIDTH:
+            continue
+        emoji = cp >= EMOJI_FROM or label[i + 1 : i + 2] == _VS16
+        if joined and emoji:  # drawn into the emoji before the joiner
+            joined = False
+            continue
+        joined = False
+        if cp in _FLAG_LETTERS:
+            flag_open = not flag_open
+            if not flag_open:  # the second letter of a flag
+                continue
+        else:
+            flag_open = False
+        total += EMOJI_PX if emoji else _ADVANCE_PX.get(ch, OTHER_PX)
+    return total
 
 
 def budget(n: int) -> float:
-    """Text width a label may take when it shares a row with ``n - 1`` others.
+    """Widest label text that is not cut when the row holds ``n`` buttons.
 
-    ``(354 − 4·(n−1)) / n − 12``: row width minus the 4 px gaps, split evenly,
-    minus the button's own 12 px padding.
+    ``(354 − 3·(n−1)) / n − 12``: the keyboard less its 3 px gaps, split evenly,
+    less the button's 12 px padding — 342, 163.5 and 104 px. Searching the
+    renderer for the first width it cuts gives 342.03, 163.53 and 104.03.
     """
-    return (ROW_WIDTH_PX - 4 * (n - 1)) / n - 12
+    return (ROW_WIDTH_PX - ROW_GAP_PX * (n - 1)) / n - BUTTON_PADDING_PX
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +441,7 @@ def check_screen(
         for b in row:
             width = label_width_px(b.label)
             if width > limit:
-                found.append(f"R10: {b.label!r} ≈{width:.0f}px > {limit:.0f}px")
+                found.append(f"R10: {b.label!r} ≈{width:.1f}px > {limit:.1f}px")
 
     # R11 ------------------------------------------------------------------
     for _, _, b in buttons:

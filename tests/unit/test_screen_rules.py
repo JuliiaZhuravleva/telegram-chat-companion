@@ -615,26 +615,96 @@ def test_r9_user_data_is_exempt():
 
 
 def test_r10_calibration_controls():
-    """The two labels the estimator was calibrated against: one that truncates
-    on a 390 px phone in a two-button row, and one that does not."""
+    """The two labels checked on a real phone: one that truncates in a
+    two-button row on a 390 px screen, and one that does not."""
     wide = label_width_px("🌍 Глобальные настройки")
     narrow = label_width_px("🔔 Уведомления")
     assert wide > budget(2), f"≈{wide:.0f}px must be flagged: it truncates on a phone"
     assert narrow <= budget(2), f"≈{narrow:.0f}px must pass"
     pair = _panel((_act("🌍 Глобальные настройки"), _act("🔔 Уведомления")))
     assert _flags(pair, "R10") == [
-        f"R10: '🌍 Глобальные настройки' ≈{wide:.0f}px > {budget(2):.0f}px"
+        f"R10: '🌍 Глобальные настройки' ≈{wide:.1f}px > {budget(2):.1f}px"
     ]
 
 
+RENDERED_LABEL_PX = MappingProxyType(
+    {
+        "🌍 Глобальные настройки": 183.8,
+        "🔔 Уведомления": 115.05,
+        "Очень длинное название тестового чата, кото…": 333.12,
+        "Очень Длинное Имя Участника Чата Кото…": 301.2,
+        "📏 Ловит рекламу в каждом соо… · on · weight 2": 331.66,
+        "⚪ Сворачивать расшифровки · общее": 270.84,
+        "📏 Сообщения: 20 за минуту · on · required": 290.08,
+        "🔞 Explicitness: 0.5, normal · all": 205.55,
+        "✅ Sticker for a sticker · all": 173.64,
+        "✅ Video notes": 98.55,
+        "✏️ Своё число": 101.2,
+        "✖️ Закрыть": 79.39,
+        "⬅️ Чат": 45.83,
+        "🇬🇧 English": 69.11,
+        "🇷🇺 Русский": 78.7,
+        "👨‍👩‍👧 🇷🇺": 39.91,
+        "@anon_user": 78.38,
+        "⁣• 0.25": 38.14,
+        "• 24 hours": 66.92,
+        "1/3": 20.5,
+        "1 2 3 4 5": 54.5,
+        "0123456789": 77.84,
+        ".,:;·'\"!?": 41.25,
+        "«»—–%+()/#@_&…": 118.14,
+        "WWW MMM": 80.89,
+        "iii lll": 24.14,
+        "ШЩЖ ЮЫМ": 89.58,
+        "ггг ррр": 47.33,
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ": 245.64,
+        "abcdefghijklmnopqrstuvwxyz": 189.2,
+        "АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ": 345.7,
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюя": 291.34,
+        "⏸ На паузу": 72.94,
+        "▶ Возобновить": 105.98,
+        "✓ Тест @test_user": 119.69,
+    }
+)
+"""Text width in px of each label as our renderer draws it.
+
+Measured in Chromium with the design tool's button CSS (14 px weight 500, the
+font it falls back to, Apple Color Emoji), from the panel's own labels and a
+few strings that pull the classes apart: wide and narrow letters of each
+script, digits, spaces, punctuation, a flag, a ZWJ sequence, VS16. A mean
+width per class cannot hold ``WWW MMM`` and ``iii lll`` both within 2 px — which
+is why the estimator adds up measured advances instead. Re-measure if the
+renderer's CSS or font changes."""
+
+TEXT_DRAWN_SYMBOLS = ("⏸", "▶", "◀", "✓")
+"""Drawn as text glyphs by the renderer (8.8–14 px), as emoji by a phone (18 px)."""
+
+
+@pytest.mark.parametrize(("label", "rendered"), sorted(RENDERED_LABEL_PX.items()))
+def test_r10_estimate_tracks_the_renderer(label: str, rendered: float):
+    """Never more than 2 px narrow, which would pass a label the phone cuts;
+    and close above, so a label that fits is not refused."""
+    estimate = label_width_px(label)
+    over = 10.0 if any(s in label for s in TEXT_DRAWN_SYMBOLS) else 2.0
+    assert rendered - 2.0 <= estimate <= rendered + over, (label, estimate, rendered)
+
+
+RENDERER_CUTS_ABOVE = MappingProxyType({1: 342.03, 2: 163.53, 3: 104.03})
+"""Widest text a button in an n-button row draws whole, found by bisection in
+the renderer (scrollWidth > clientWidth is a cut, as the design tool counts it)."""
+
+
+@pytest.mark.parametrize(("n", "cut_above"), sorted(RENDERER_CUTS_ABOVE.items()))
+def test_r10_budget_is_where_the_renderer_starts_to_cut(n: int, cut_above: float):
+    assert cut_above - 0.1 <= budget(n) <= cut_above
+
+
 def test_r10_budget_formula():
-    """``(354 − 4·(n−1)) / n − 12``: a 354 px keyboard, 4 px gaps, the button's
-    12 px padding. These numbers are computed from the formula, not copied from prose:
-    a hand computation of 165 / 105.3 has circulated and is wrong — do not
-    "fix" the code to match it."""
+    """``(354 − 3·(n−1)) / n − 12``: the renderer's 354 px keyboard, its 3 px
+    gaps, the button's 12 px padding. An older 4 px gap gave 163 and 103.3."""
     assert budget(1) == 342
-    assert budget(2) == 163
-    assert budget(3) == pytest.approx(103.33, abs=0.01)
+    assert budget(2) == 163.5
+    assert budget(3) == 104
 
 
 def test_r11_state_glyphs():
