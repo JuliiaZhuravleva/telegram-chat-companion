@@ -480,6 +480,7 @@ async def handle_rule_view(
             rules_repo=rules_repo,
             chat_config_service=chat_config_service,
             chat_settings_repo=chat_settings_repo,
+            new_message=flag == "n",
         )
         return
     screen = await _card(
@@ -502,11 +503,13 @@ async def _show_gone(
     rules_repo: RulesRepository,
     chat_config_service: ChatConfigService,
     chat_settings_repo: ChatSettingsRepository,
+    new_message: bool = False,
 ) -> None:
     """The rule a button points at is gone: its chat's list says so.
 
     An old button that carries no chat id cannot say which list; that one is
-    a stale button and gets the hub.
+    a stale button and gets the hub. ``new_message`` is the alert card's
+    button: the list goes under it, and the card stays the record of what fired.
     """
     if chat_id is None:
         await show_stale(callback, lang, data=data, state=state)
@@ -522,6 +525,7 @@ async def _show_gone(
             chat_settings_repo=chat_settings_repo,
             gone=True,
         ),
+        new_message=new_message,
     )
 
 
@@ -1639,7 +1643,8 @@ async def handle_rule_config_input(
     cancel_cb = cb("ar_list:", lang, chat_id, 0)
 
     try:
-        config = json.loads(message.text or "")
+        # A file or photo carries its words as a caption: the JSON may be there.
+        config = json.loads(message.text or message.caption or "")
         if not isinstance(config, dict):
             raise ValueError  # noqa: TRY301
     except ValueError:

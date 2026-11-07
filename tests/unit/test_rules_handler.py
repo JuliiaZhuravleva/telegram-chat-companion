@@ -21,7 +21,7 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State
 from aiogram.methods import EditMessageReplyMarkup
-from aiogram.types import Chat, Message
+from aiogram.types import Chat, Document, Message, PhotoSize, User
 
 from src.bot.handlers import rules as handlers
 from src.bot.screens import rules as screens
@@ -35,6 +35,7 @@ from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
 from src.services.rules.engine import RuleEngine
 from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
+from tests.unit.screen_routing import ADMIN_ID, deliver
 
 CHAT_ID = -1009999999999  # invented
 OTHER_CHAT = -1008888888888  # invented
@@ -513,6 +514,28 @@ class TestTheCard:
         shown = screens.cap_name(", ".join(words))
         assert shown == ", ".join(words)[: screens.NAME_CHARS - 1] + "…"
         assert html.escape(shown, quote=False) in text
+
+    async def test_the_alert_cards_button_on_a_deleted_rule_leaves_the_card(self) -> None:
+        """The card a fired rule sends stays the record of what fired: once the
+        rule is gone its button put the chat's list over that card, who wrote
+        what and all, instead of under it."""
+        card = screens.rule_card(
+            "ru",
+            rule_id=RULE_ID,
+            chat_id=CHAT_ID,
+            name="spam-words",
+            chat_title=None,
+            first_name="Alice",
+            username=None,
+            match_detail="contains:spam",
+            excerpt="buy spam",
+        )
+        (button,) = [b for row in card.rows for b in row]
+        callback = await _tap(handlers.handle_rule_view, button.callback, _State(), _deps(None))
+
+        callback.message.edit_text.assert_not_awaited()
+        expected = screens.gone_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
+        assert _same(_sent(callback.message), expected)
 
     async def test_a_config_stored_as_a_string_is_read(self) -> None:
         rule = _rule(config=json.dumps({"name": "json-rule", "keywords": ["x"]}))
@@ -1455,6 +1478,35 @@ class TestTheJsonPrompt:
         )
 
         deps["rules_repo"].create.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "attached",
+        [
+            {"document": Document(file_id="d", file_unique_id="du", file_name="rule.json")},
+            {"photo": [PhotoSize(file_id="p", file_unique_id="pu", width=90, height=90)]},
+        ],
+        ids=["document", "photo"],
+    )
+    async def test_the_json_in_a_caption_is_the_rule(self, attached: dict[str, Any]) -> None:
+        """A file or a photo carries its words as a caption: valid JSON there
+        was answered «Невалидный JSON», because only the text was read."""
+        deps = _deps()
+        state = await _cfg(deps)
+        message = Message(
+            message_id=900,
+            date=datetime(2026, 11, 1, tzinfo=UTC),
+            chat=Chat(id=ADMIN_ID, type="private"),
+            from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+            caption='{"keywords": ["spam"], "action": "warn_user"}',
+            **attached,
+        ).as_(AsyncMock())
+
+        # aiogram's own filters pick the handler: no media handler takes it first.
+        assert await deliver("message", message, state) == "rules.handle_rule_config_input"
+        await deliver("message", message, state, call=True, **_services(deps))
+
+        config = _created(deps)["config"]
+        assert (config["keywords"], config["action"]) == (["spam"], "warn_user")
 
     @pytest.mark.parametrize(
         ("typed", "says"),
