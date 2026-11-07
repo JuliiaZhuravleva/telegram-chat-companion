@@ -369,8 +369,9 @@ async def _show_card(callback: CallbackQuery, screen: Screen, chat_id: int, user
     without such settings was not tried), and ``tg://openmessage`` was tried on
     one phone only. Only an error that names a
     button or a URL is answered this way: any other would fail the bare card
-    just the same, so it propagates like every screen's. The query was answered
-    by the first try and is not answered again.
+    just the same, so it propagates like every screen's. A try that raised has
+    not answered the query (``render`` answers only once a screen is out), so
+    the retry answers it, once.
     """
     try:
         await show(callback, screen)
@@ -384,7 +385,7 @@ async def _show_card(callback: CallbackQuery, screen: Screen, chat_id: int, user
             user_id=user_id,
             error=exc.message,
         )
-        await show(callback, bare, answered=True)
+        await show(callback, bare)
 
 
 async def _names(

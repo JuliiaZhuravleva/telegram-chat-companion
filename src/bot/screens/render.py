@@ -4,6 +4,9 @@ This is the ONLY place that builds aiogram markup for redesigned screens, and
 `show()` is the only delivery path: edit the message the button sits on when
 that is possible, send a new message when it is not, and answer the callback
 query exactly once either way — an unanswered query keeps the button spinning.
+The answer comes AFTER the screen is delivered: Telegram takes one answer per
+query, so a delivery that raises must leave it unanswered for the global error
+handler's alert, or the tap ends in silence.
 """
 
 from __future__ import annotations
@@ -253,7 +256,12 @@ async def _deliver(
         )
 
     callback: CallbackQuery = target  # type: ignore[assignment]  # narrowed by _is_callback
-    if not answered:
+
+    async def answer() -> None:
+        # Only once the screen is out: a delivery that raised leaves the query to
+        # the error handler's alert, which a first answer here would have silenced.
+        if answered:
+            return
         if toast is None and not alert:
             await callback.answer()
         else:
@@ -263,6 +271,7 @@ async def _deliver(
     if anchor is None:
         # An inline-mode query: there is no message to edit or reply under.
         logger.warning("screen_without_message", screen_id=screen_id)
+        await answer()
         return None
 
     too_long = parsed_length(text) > TELEGRAM_MESSAGE_LIMIT
@@ -282,9 +291,10 @@ async def _deliver(
             # or a photo): the screen still has to appear somewhere.
             logger.info("screen_edit_fallback", screen_id=screen_id, error=str(exc))
         else:
+            await answer()
             return anchor
 
-    return await _send_new(
+    sent = await _send_new(
         anchor,
         text,
         markup,
@@ -292,6 +302,8 @@ async def _deliver(
         parse_mode=parse_mode,
         disable_web_page_preview=disable_web_page_preview,
     )
+    await answer()
+    return sent
 
 
 async def show(
@@ -305,11 +317,12 @@ async def show(
 ) -> Message | None:
     """Deliver a screen.
 
-    * CallbackQuery: answer the query once (``toast``, ``show_alert=alert``)
-      unless ``answered=True`` — a handler that runs a long operation answers
-      first and says so — then edit the button's message in place. An edit
+    * CallbackQuery: edit the button's message in place, then answer the query
+      once (``toast``, ``show_alert=alert``) unless ``answered=True`` — a
+      handler that runs a long operation answers first and says so. An edit
       Telegram refuses for any reason other than "not modified" falls back to a
-      new message; so does an inaccessible message.
+      new message; so does an inaccessible message. A screen that could not be
+      delivered leaves the query unanswered, for the error handler's alert.
     * Message target, ``new_message=True``, or a screen with a reply keyboard
       or ``remove_reply``: always a new message (a reply keyboard cannot be
       edited into an existing message).
