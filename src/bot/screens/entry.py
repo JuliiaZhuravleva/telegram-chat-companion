@@ -238,7 +238,7 @@ def group_added(lang: Lang) -> Screen:
 # /summary
 # ---------------------------------------------------------------------------
 
-_SUMMARY_TITLE: Final = Tr("📋 <b>Саммари чата</b>", "📋 <b>Chat summary</b>")
+_SUMMARY_NAME: Final = Tr("Саммари чата", "Chat summary")
 _SUMMARY_INVALID: Final = Tr(
     "🤔 Не понял количество сообщений. Выберите или напишите <code>/summary 300</code>: "
     "от {min} до {max}.",
@@ -253,11 +253,22 @@ def _messages(lang: Lang, n: int) -> str:
     return f"{n} message" if n == 1 else f"{n} messages"
 
 
+def summary_heading(lang: Lang, count: int, *, bold: tuple[str, str] = ("<b>", "</b>")) -> str:
+    """``📋 <b>Саммари чата</b> · 2 сообщения``: the one source of the summary's heading.
+
+    ``bold`` is the markup around the name. The summary service writes its
+    heading in Markdown (``("**", "**")``) because it is converted together with
+    the model's text; the words, the count and the layout come from here either way.
+    """
+    opening, closing = bold
+    return f"📋 {opening}{_SUMMARY_NAME(lang)}{closing} · {_messages(lang, count)}"
+
+
 def summary_result(lang: Lang, *, count: int, body_html: str) -> Screen:
     """A summary: the heading names the count, the body is the model's (escaped) HTML."""
     return Screen(
         id="summary.result",
-        text=f"{_SUMMARY_TITLE(lang)} · {_messages(lang, count)}\n\n{body_html}",
+        text=f"{summary_heading(lang, count)}\n\n{body_html}",
     )
 
 
