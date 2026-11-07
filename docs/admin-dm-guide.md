@@ -473,18 +473,25 @@ when Telegram gives one right now, the id, what Telegram says about them right n
 can do once inside («Сохранять факты командой /remember сможет, когда будет в чате.»). For
 someone who never joined, Telegram's membership answer carries no name; the bot then asks
 for their private chat with it (`getChat`), which names anyone who has ever opened the bot,
-and only after that falls back to the name it remembered. When no name was ever known, the
+and only after that falls back to the name it remembered. It asks the same when Telegram
+answers the membership question with any other refusal (for instance after the bot was
+removed from the group), but not when Telegram did not answer at all. When no name was ever known, the
 title reads «участник» with the id in a copyable code span instead of a bare number
 (Telegram would turn that into a dead phone link), and the body does not repeat the name or
-the id. Its buttons, at most four plus the way back:
+the id. More generally, the body has a name line only when it adds something to the title:
+the first and last name when the title shows a username, and a username Telegram gave just
+now. Its buttons, at most four plus the way back:
 
 - **💬 Написать лично**, first on every card: it opens the private chat with the person.
   It goes to `t.me/{username}` for a valid username (4 to 32 letters, digits or `_`) that
   Telegram gave just now, and otherwise by id (`tg://openmessage?user_id=…`), which on the
   phone opened the chat even with someone the bot had never seen (2026-11-07; Telegram
-  Desktop and Web not tried). A username the bot remembered from earlier is never linked
-  and gets no `@username` beside the name: it may since have been freed and taken by
-  someone else. The name itself is not a link: Telegram silently drops a `tg://user`
+  Desktop and Web not tried). A username the bot remembered from earlier is never the button's
+  target and gets no `@username` beside the name: it may since have been freed and taken by
+  someone else. Where it is the name, the card and invite titles show it as «участник» with
+  the `@username` in a code span, so that Telegram does not turn it into a mention of
+  whoever holds it now (inferred from how Telegram treats bot text, not measured on this
+  card). The notices after a remove or an undo still show it as plain text. The name itself is not a link: Telegram silently drops a `tg://user`
   mention for people the bot cannot see, so it worked on some cards and not others. Should
   Telegram ever refuse the button, the card arrives without it and the bot logs a warning.
 - **✉️ Пригласить в чат**, only for someone who is not in the chat or never joined. A banned

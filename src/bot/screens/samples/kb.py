@@ -275,8 +275,9 @@ def org_card_never_joined(lang: Lang) -> Screen:
     # Telegram answers "member not found" with no user, and getChat «chat not
     # found» (they never opened the bot): the name comes from the store,
     # @username and all, but that username gets no t.me link and no «· @nick»:
-    # it may have been freed and taken by someone else since. 💬 Написать
-    # лично goes by id (tg://openmessage).
+    # it may have been freed and taken by someone else since. The title shows
+    # it as «участник <code>@nick</code>», a label Telegram does not turn into
+    # a mention. 💬 Написать лично goes by id (tg://openmessage).
     return _card(lang, "never_joined", name=fake.USERNAME, username=None)
 
 
@@ -336,6 +337,7 @@ def _invite(lang: Lang, *, notice: str | None = None, notice_raw: str | None = N
         _LINK,
         notice=notice,
         notice_raw=notice_raw,
+        username=_NICK,  # live, as for a person who left: what the handler passes
     )
 
 

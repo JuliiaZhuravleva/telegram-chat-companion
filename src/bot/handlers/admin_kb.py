@@ -44,9 +44,10 @@ someone. The store is ``OrganizerNameRepository`` from Dishka
 (``RepositoryProvider``). The same single ``getChatMember`` (``_seen``) also
 gives the card its membership state, so the list's `` · не в чате`` and the
 card's state line cannot disagree either. When that call names nobody — the
-person never joined — ``getChat`` on their id is the second live source: it
-names anyone who has opened the bot (measured 2026-11-07), and says «chat not
-found» for everyone else. A stored ``@username`` may still name someone, but
+person never joined, or Telegram answered with another error, a 400 or a 403
+(not a timeout, a 429 or a 5xx) — ``getChat`` on their id is the second live
+source: it names anyone who has opened the bot (measured 2026-11-07), and says
+«chat not found» for everyone else. A stored ``@username`` may still name someone, but
 only one Telegram gives now becomes the card's ``t.me`` link (``💬 Написать
 лично``): a freed username can belong to another person months later. Without
 one the link goes by id, ``tg://openmessage?user_id=`` (`orgs.person_url`),
@@ -72,7 +73,14 @@ from typing import Any, NamedTuple
 import structlog
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus, ChatType
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -218,6 +226,11 @@ _NOT_A_MEMBER = re.compile(r"member not found|PARTICIPANT_ID_INVALID", re.IGNORE
 # expected answer for most organizers who never joined, so not a failure.
 _NO_PRIVATE_CHAT = re.compile(r"chat not found", re.IGNORECASE)
 
+# Failures of `getChatMember` that are no answer about the person: no reply at
+# all, "too many requests", Telegram's own trouble. Every other Bot API error is
+# an answer that named nobody, so `getChat` is worth one call.
+_NO_ANSWER = (TelegramNetworkError, TelegramRetryAfter, TelegramServerError)
+
 # Telegram's codes for a button it will not take (``BUTTON_USER_INVALID``,
 # ``BUTTON_USER_PRIVACY_RESTRICTED``, ``BUTTON_URL_INVALID``) and for a bad URL.
 # Case-sensitive on purpose: the codes are upper case, and a lower-case "url"
@@ -261,16 +274,23 @@ async def _seen(bot: Bot | None, chat_id: int, user_id: int) -> _Seen:
     A restricted person who is not a member reads as ``left``: a link lets them
     back in, restrictions and all.
 
-    When Telegram answers with an error, it named nobody, and ``getChat`` is
-    asked for the name (`_private`). Not after a timeout or another failure to
-    get an answer at all: the second call would only wait again.
+    When Telegram answers with an error — a 400 or a 403 alike (say, the bot
+    was removed from the group) — it named nobody, and ``getChat`` is asked for
+    the name (`_private`): the person's own chat with the bot does not depend
+    on the group. Not after `_NO_ANSWER`, nor a failure outside the Bot API:
+    the second call would only wait or be refused again.
     """
     if bot is None:
         return _Seen("unknown")
     try:
         member = await bot.get_chat_member(chat_id, user_id)
-    except TelegramBadRequest as exc:
-        if _NOT_A_MEMBER.search(exc.message or ""):
+    except _NO_ANSWER as exc:
+        logger.warning(
+            "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
+        )
+        return _Seen("unknown")
+    except TelegramAPIError as exc:
+        if isinstance(exc, TelegramBadRequest) and _NOT_A_MEMBER.search(exc.message or ""):
             return await _private(bot, chat_id, user_id, "never_joined")
         logger.warning(
             "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
@@ -343,8 +363,11 @@ async def _show_card(callback: CallbackQuery, screen: Screen, chat_id: int, user
     A refused button takes the whole message with it, as an edit and as a new
     message alike (``render.show`` tries both), so one bad link would leave the
     organizer with no card at all. The link is the most likely part to be
-    refused: ``tg://user`` buttons were, for everyone (measured 2026-11-07), and
-    ``tg://openmessage`` was tried on one phone only. Only an error that names a
+    refused: ``tg://user`` buttons were for both people tried (measured
+    2026-11-07 — one the bot had never seen, ``BUTTON_USER_INVALID``; one it had,
+    with privacy settings, ``BUTTON_USER_PRIVACY_RESTRICTED``; a seen person
+    without such settings was not tried), and ``tg://openmessage`` was tried on
+    one phone only. Only an error that names a
     button or a URL is answered this way: any other would fail the bare card
     just the same, so it propagates like every screen's. The query was answered
     by the first try and is not answered again.
@@ -882,6 +905,7 @@ async def _invite(
         link.url,
         notice=notice,
         notice_raw=notice_raw,
+        username=person.username,
     )
     await show(callback, screen)
 

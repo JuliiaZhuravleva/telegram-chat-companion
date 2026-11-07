@@ -16,14 +16,21 @@ pointed back at ``adm_kb_org_rm:`` it fails (the mutation control in the PR).
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Iterator
+import re
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.methods import CreateChatInviteLink, GetChat, GetChatMember, SendMessage
 from aiogram.types import (
     AcceptedGiftTypes,
@@ -67,6 +74,20 @@ RIGHTS_ERRORS = [
     "Bad Request: CHAT_ADMIN_REQUIRED",
 ]
 
+NO_USER: dict[str, Callable[[GetChatMember], Exception]] = {
+    # Telegram answered and named nobody: «user not found» (the bot never met the
+    # id: says nothing about membership) and a 403 (INFERRED from the Bot API's
+    # usual answer to a bot removed from the group; not measured here).
+    "no_user": lambda m: TelegramBadRequest(method=m, message="Bad Request: user not found"),
+    "forbidden": lambda m: TelegramForbiddenError(
+        method=m, message="Forbidden: bot was kicked from the supergroup chat"
+    ),
+    # No answer about the person at all: asking again would only wait again.
+    "retry": lambda m: TelegramRetryAfter(method=m, message="Too Many Requests", retry_after=5),
+    "server": lambda m: TelegramServerError(method=m, message="Internal Server Error"),
+}
+"""``getChatMember`` failures besides «member not found» and a timeout, by status."""
+
 
 # ---------------------------------------------------------------------------
 # Doubles
@@ -89,8 +110,9 @@ class Telegram:
     ``status`` is what ``getChatMember`` says about the organizer: ``member``,
     ``restricted`` (restricted and still a member), ``restricted_out``
     (restricted, ``is_member`` false), ``administrator``, ``creator``,
-    ``left``, ``kicked``, ``never`` (Telegram's "member not found") or
-    ``unknown`` (a network failure: nothing is known). ``private`` is what
+    ``left``, ``kicked``, ``never`` (Telegram's "member not found"), one of
+    `NO_USER` (another answer naming nobody, or a 429/5xx) or ``unknown`` (a
+    network failure: nothing is known). ``private`` is what
     ``getChat`` on the person's id gives — ``(first, last, username)`` of a
     private chat, which Telegram has only for someone who opened the bot —
     else it fails with ``chat_error`` («chat not found», as measured).
@@ -133,6 +155,8 @@ class Telegram:
             return ChatMemberMember(user=other)
         if self.status == "never":
             raise TelegramBadRequest(method=method, message=MEMBER_NOT_FOUND)
+        if self.status in NO_USER:
+            raise NO_USER[self.status](method)
         if self.status == "unknown":
             raise TelegramNetworkError(method=method, message="timeout")
         user = User(
@@ -430,6 +454,18 @@ BY_ID = f"tg://openmessage?user_id={ORG}"
 URL button with it is accepted for a person the bot has seen and for one it
 has never seen, and on Julia's phone a tap opened the private chat in both."""
 
+STORED_TITLE = f"👤 <b>участник</b> <code>@{NICK}</code> · {TITLE}\n"
+"""A remembered username in a title: in ``<code>``, after «участник» like the id
+fallback. Bare, Telegram would make ``@nick`` a mention of whoever holds the
+name today (INFERRED: it auto-detects mentions in bot text as it does phone
+numbers; not measured for this card)."""
+
+
+def _outside_code(text: str) -> str:
+    """``text`` without its ``<code>`` spans, where Telegram detects no entity."""
+    return re.sub(r"<code>.*?</code>", "", text)
+
+
 CARD_STATES = [
     # status, username (Telegram's, or for never/unknown the store's), labels,
     # state line, role line. The person link is first in every state.
@@ -467,11 +503,17 @@ async def test_the_card_per_membership_state(
     live = username is not None and status not in ("never", "unknown")
     if live:
         assert card.target(WRITE) == f"https://t.me/{username}"
+        assert card.text.startswith(f"👤 <b>@{username}</b> · {TITLE}\n")
         assert f"\n{fake.PERSON} · @{username}\n" in card.text
     else:
         assert card.target(WRITE) == BY_ID, "a stored username never becomes a t.me link"
         assert " · @" not in card.text, "no @nick beside the name without a live one"
         assert not any("t.me/" in to for _, to in card.buttons), card.buttons
+        assert "@" not in _outside_code(card.text), "a stored @nick is never bare text"
+        if username is not None:
+            assert card.text.startswith(STORED_TITLE), "control: the stored @nick is shown"
+    # One name line, never the title's name twice (a plain-text copy does nothing).
+    assert card.text.count(fake.PERSON) == 1, card.text
     if INVITE in labels:
         assert card.target(INVITE) == _inv()
 
@@ -521,6 +563,45 @@ async def test_with_no_name_ever_known_the_id_is_in_code_and_said_once(
     assert invite.text.startswith(f"✉️ <b>Приглашение</b> · участник <code>{ORG}</code>\n")
 
 
+async def test_the_body_does_not_repeat_the_titles_name() -> None:
+    """Without a live username the title already says «Тест Тестов»; a second,
+    plain-text «Тест Тестов» in the body says nothing more (before 2026-11-07 it
+    was the ``tg://user`` mention, a link with a job). The id line stays. The
+    control is a live username, whose line adds ``· @nick``."""
+    card = await _tap(_card(), Telegram("member", username=None))
+
+    first, *body = card.text.split("\n")
+    assert first == f"👤 <b>{fake.PERSON}</b> · {TITLE}"
+    assert body[:3] == ["", f"ID: <code>{ORG}</code>", ""], body
+
+    live = await _tap(_card(), Telegram("member"))
+    assert live.text.split("\n")[2] == f"{fake.PERSON} · @{NICK}", "control"
+
+
+async def test_a_remembered_username_is_never_bare_text_on_the_card_or_the_invite() -> None:
+    """A stored ``@nick`` may belong to someone else by now. The button already
+    never goes to it; the title and the invite now show it in ``<code>`` too,
+    where Telegram detects no mention (lint R5 keeps a bold word before it, the
+    same «участник» as the id fallback). A stored-only username (no first name
+    remembered) is not repeated in the body either. Controls: the same person
+    with a live username keeps ``<b>@nick</b>`` and a bare ``@nick`` in the
+    invite, which link to the person who holds it now."""
+    only_nick = Store({ORG: KnownName(None, None, NICK)})
+    card = await _tap(_card(), Telegram("never"), store=only_nick)
+    assert card.text.startswith(STORED_TITLE)
+    assert "@" not in _outside_code(card.text), card.text
+    assert f"\n\n{NEVER}\n" in card.text and f"ID: <code>{ORG}</code>" in card.text
+
+    invite = await _tap(_inv(), Telegram("never"), store=only_nick)
+    assert invite.text.startswith(f"✉️ <b>Приглашение</b> · участник <code>@{NICK}</code>\n")
+    assert "@" not in _outside_code(invite.text.split("\n")[0])
+
+    live_card = await _tap(_card(), Telegram("left"))
+    assert live_card.text.startswith(f"👤 <b>@{NICK}</b> · {TITLE}\n"), "control"
+    live_invite = await _tap(_inv(), Telegram("left"))
+    assert live_invite.text.startswith(f"✉️ <b>Приглашение</b> · @{NICK}\n"), "control"
+
+
 async def test_back_returns_to_the_page_the_person_is_on() -> None:
     ids = [100 + i for i in range(orgs.ORGS_PER_PAGE)] + [ORG]
     card = await _tap(_card(), Telegram(), ids=ids)
@@ -541,16 +622,35 @@ GET_CHAT_FAILED = "Organizer name: getChat failed"
 
 async def test_get_chat_is_asked_only_when_get_chat_member_named_nobody() -> None:
     """``getChatMember`` names everyone it answers for. ``getChat`` is asked only
-    when Telegram answered with an error and no user; a timeout is not asked
-    twice, since there was no answer and a second call would only wait again."""
-    refused = Telegram("never", private=(OTHER_FIRST, OTHER_LAST, FRESH))
-    await _tap(_card(), refused)
-    assert refused.chats == [ORG], "control: the double is asked when nobody was named"
+    when Telegram answered with an error and no user — a 400 or a 403 alike;
+    not after a timeout, a 429 or a 5xx, since there was no answer about the
+    person and a second call would only wait or be refused again."""
+    for status in ("never", "no_user", "forbidden"):
+        refused = Telegram(status, private=(OTHER_FIRST, OTHER_LAST, FRESH))
+        await _tap(_card(), refused)
+        assert refused.chats == [ORG], f"control: asked when nobody was named ({status})"
 
-    for status in ("member", "left", "kicked", "unknown"):
+    for status in ("member", "left", "kicked", "unknown", "retry", "server"):
         bot = Telegram(status, private=(OTHER_FIRST, OTHER_LAST, FRESH))
         await _tap(_card(), bot)
         assert bot.chats == [], status
+
+
+@pytest.mark.parametrize(("status", "line"), [("no_user", SILENT), ("forbidden", SILENT)])
+async def test_any_answer_that_named_nobody_gets_the_get_chat_name(status: str, line: str) -> None:
+    """«user not found» and a 403 say nothing about membership (``unknown``), but
+    they are answers: ``getChat`` still names a person who opened the bot, and
+    its username still makes the ``t.me`` link. Before the review the 403 went
+    without it, to the stored name and a link by id."""
+    store = Store({ORG: KnownName(FIRST, LAST, NICK)})
+    bot = Telegram(status, private=(OTHER_FIRST, OTHER_LAST, FRESH))
+    card = await _tap(_card(), bot, store=store)
+
+    assert bot.chats == [ORG]
+    assert card.text.startswith(f"👤 <b>@{FRESH}</b> · {TITLE}\n")
+    assert f"\n{fake.PERSON_OTHER} · @{FRESH}\n" in card.text
+    assert card.target(WRITE) == f"https://t.me/{FRESH}"
+    assert line in card.text and INVITE not in card.labels, "Telegram did not say: no invite"
 
 
 async def test_get_chat_names_the_person_and_its_username_makes_the_link() -> None:
@@ -585,7 +685,7 @@ async def test_a_failed_get_chat_falls_through_to_the_stored_name() -> None:
             card = await _tap(_card(), bot, store=store)
 
         assert bot.chats == [ORG], error
-        assert card.text.startswith(f"👤 <b>@{NICK}</b> · {TITLE}\n"), error
+        assert card.text.startswith(STORED_TITLE), error
         assert card.target(WRITE) == BY_ID, "the stored username is never linked"
         found = [e for e in logs if e["event"] == GET_CHAT_FAILED]
         assert len(found) == warned, (error, logs)
@@ -630,12 +730,20 @@ def _sent_labels(call: Any) -> list[str]:
     return [b.text for row in markup.inline_keyboard for b in row]
 
 
+URL_REFUSED = "Bad Request: wrong HTTP URL specified"
+"""A refusal that names the URL with no ``BUTTON_`` code: what the ``\\bURL\\b``
+half of `_LINK_REFUSED` is for. Not captured from Telegram for a button — no
+such refusal was seen on 2026-11-07 — so this pins the pattern, not a wording."""
+ENTITY_ERROR = 'Bad Request: can\'t parse entities: unsupported start tag "url" at byte offset 0'
+
+
 @pytest.mark.parametrize(
     "error",
     [
         "Bad Request: BUTTON_USER_INVALID",
         "Bad Request: BUTTON_USER_PRIVACY_RESTRICTED",
         "Bad Request: BUTTON_URL_INVALID",
+        URL_REFUSED,
     ],
 )
 async def test_a_refused_person_link_is_dropped_and_the_card_still_arrives(
@@ -663,8 +771,12 @@ async def test_a_refused_person_link_is_dropped_and_the_card_still_arrives(
 
 async def test_an_unchanged_card_is_not_a_refusal(drawn: list[Screen]) -> None:
     """«message is not modified» (the same card tapped twice) means the card is
-    already there: nothing is sent again and nothing is logged. The control is a
-    refusal through the same doubles, in this test."""
+    already there: nothing is sent again and nothing is logged. What stops it is
+    ``render``'s ``safe_edit_text``, which swallows that error before the guard
+    could see it — so this covers the delivery path end to end, not the guard's
+    reading of the text (that is
+    `test_the_guard_answers_a_refused_link_only`). The control is a refusal
+    through the same doubles, in this test."""
     refusing = _refusing("Bad Request: BUTTON_USER_INVALID")
     with capture_logs() as logs:
         await _tap(_card(), Telegram("never"), edit=refusing, answer=_refusing("BUTTON_X"))
@@ -698,17 +810,50 @@ async def test_another_error_is_not_answered_by_dropping_the_link(drawn: list[Sc
     assert [e["event"] for e in logs].count(REFUSED) == 1, "control: a refusal is seen"
 
     drawn.clear()
-    entity_error = (
-        'Bad Request: can\'t parse entities: unsupported start tag "url" at byte offset 0'
-    )
     edit = _refusing("Bad Request: message to edit not found")
-    answer = _refusing(entity_error)
+    answer = _refusing(ENTITY_ERROR)
     with capture_logs() as logs, pytest.raises(TelegramBadRequest, match="parse entities"):
         await _tap(_card(), Telegram("never"), edit=edit, answer=answer)
 
     assert edit.await_count == 1 and answer.await_count == 1
     assert len(drawn) == 1
     assert REFUSED not in [e["event"] for e in logs]
+
+
+async def test_the_guard_answers_a_refused_link_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard's own reading of the error, with ``show`` raising straight at
+    it — the texts ``render`` would otherwise swallow (not modified) or never
+    produce here reach the decision as they are. A refusal is answered by one
+    resend without the link and a warning; any other text propagates after one
+    try. The refusals come first in the same run: the known positives."""
+    shown: list[Screen] = []
+    answer = {"error": ""}  # what Telegram says to a markup carrying the link
+
+    async def failing_show(_target: Any, screen: Screen, **_kwargs: Any) -> None:
+        shown.append(screen)
+        if any(b.label == WRITE for row in screen.rows for b in row):
+            method = SendMessage(chat_id=CID, text=screen.text)
+            raise TelegramBadRequest(method=method, message=answer["error"])
+
+    monkeypatch.setattr(admin_kb, "show", failing_show)
+
+    for error in ("Bad Request: BUTTON_USER_INVALID", URL_REFUSED):
+        shown.clear()
+        answer["error"] = error
+        with capture_logs() as logs:
+            await _tap(_card(), Telegram("never"))
+        assert len(shown) == 2, error
+        assert WRITE not in [b.label for row in shown[1].rows for b in row], error
+        assert [e["error"] for e in logs if e["event"] == REFUSED] == [error]
+
+    for error in (NOT_MODIFIED, ENTITY_ERROR, "Bad Request: message to edit not found"):
+        shown.clear()
+        answer["error"] = error
+        with capture_logs() as logs, pytest.raises(TelegramBadRequest) as raised:
+            await _tap(_card(), Telegram("never"))
+        assert raised.value.message == error
+        assert len(shown) == 1, f"no resend after {error!r}"
+        assert REFUSED not in [e["event"] for e in logs], error
 
 
 async def test_card_then_remove_gives_the_list_with_undo() -> None:
@@ -823,7 +968,9 @@ async def test_invite_makes_one_link_for_one_person_for_seven_days(
 
     link = bot.made[0]
     assert drawn[-1].id == "org.invite"
-    assert tap.text.startswith(f"✉️ <b>Приглашение</b> · @{NICK}")
+    # "never": the name is the stored @nick, a label in <code>; the others are live
+    shown = f"участник <code>@{NICK}</code>" if status == "never" else f"@{NICK}"
+    assert tap.text.startswith(f"✉️ <b>Приглашение</b> · {shown}\n")
     assert f"<code>{link}</code>" in tap.text
     assert "для одного человека, действует 7 дней" in tap.text
     assert tap.labels == ["📤 Переслать", "🤖 Отправить от бота", "⬅️ Организатор"]
@@ -1139,6 +1286,53 @@ class TestCardBuilder:
             name_line = screen.text.split("\n")[2]
             assert name_line == (f"{fake.PERSON} · @{NICK}" if username else fake.PERSON)
             assert "<a " not in screen.text and "tg://" not in screen.text
+
+    def test_the_body_repeats_no_name_the_title_has(self) -> None:
+        """The body's name line only when it adds something: a full name the title
+        does not show, or a live ``· @nick``."""
+        cases = [
+            # (name, full, username, the line after the title's blank line)
+            ("Аня", "Аня", None, f"ID: <code>{ORG}</code>"),
+            ("Аня", None, None, f"ID: <code>{ORG}</code>"),
+            (f"@{NICK}", None, None, f"ID: <code>{ORG}</code>"),
+            (f"@{NICK}", fake.PERSON, None, fake.PERSON),  # control: adds the name
+            (f"@{NICK}", fake.PERSON, NICK, f"{fake.PERSON} · @{NICK}"),  # control
+        ]
+        for name, full, username, line in cases:
+            screen = orgs.org_card_screen(
+                "ru", CID, TITLE, ORG, name, state="in_chat", full=full, username=username
+            )
+            assert screen.text.split("\n")[2] == line, (name, full, username)
+
+    def test_an_at_name_that_is_not_the_live_username_is_code(self) -> None:
+        """``@nick`` as a name, without that username from Telegram now, is a
+        remembered one (or a first name that starts with ``@``): bare, Telegram
+        would turn it into a mention of whoever holds it today. In ``<code>``
+        after the fallback's bold word, it is a label: R5 holds, nothing links.
+        Controls: the live username stays bold, and a plain name is untouched."""
+        for lang, word in (("ru", "участник"), ("en", "member")):
+            for username in (None, "someone_else"):
+                card = orgs.org_card_screen(
+                    lang, CID, TITLE, ORG, f"@{NICK}", state="never_joined", username=username
+                )
+                assert card.text.startswith(f"👤 <b>{word}</b> <code>@{NICK}</code> · {TITLE}\n")
+                assert f"@{NICK}" not in _outside_code(card.text), username
+                invite = orgs.org_invite_screen(
+                    lang, CID, TITLE, ORG, f"@{NICK}", LINKS[0], username=username
+                )
+                assert f"</b> · {word} <code>@{NICK}</code>\n" in invite.text
+        live = orgs.org_card_screen(
+            "ru", CID, TITLE, ORG, f"@{NICK}", state="in_chat", username=f"@{NICK}"
+        )
+        assert live.text.startswith(f"👤 <b>@{NICK}</b> · {TITLE}\n"), "control: live"
+        live_invite = orgs.org_invite_screen(
+            "ru", CID, TITLE, ORG, f"@{NICK}", LINKS[0], username=NICK
+        )
+        assert live_invite.text.startswith(f"✉️ <b>Приглашение</b> · @{NICK}\n"), "control"
+        plain = orgs.org_card_screen("ru", CID, TITLE, ORG, "Аня", state="never_joined")
+        assert plain.text.startswith(f"👤 <b>Аня</b> · {TITLE}\n"), "control: a name"
+        odd = orgs.org_card_screen("ru", CID, TITLE, ORG, "@<b>", state="never_joined")
+        assert odd.text.startswith(f"👤 <b>участник</b> <code>@&lt;b&gt;</code> · {TITLE}\n")
 
     def test_without_the_person_link_only_that_row_goes(self) -> None:
         for lang in ("ru", "en"):

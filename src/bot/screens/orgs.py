@@ -24,9 +24,10 @@ Six screens, built as plain data (``handlers/admin_kb.py`` sends them):
   - ``<a href="tg://user?id=N">`` in the text is accepted, but for a person the
     bot cannot see the entity is silently dropped and the name shows as plain
     text; for one it can see it stays a ``text_mention``.
-  - ``tg://user?id=N`` as a URL button is refused for everyone, the whole
-    message with it: ``BUTTON_USER_INVALID`` for a person the bot never saw,
-    ``BUTTON_USER_PRIVACY_RESTRICTED`` for a seen one with privacy settings.
+  - ``tg://user?id=N`` as a URL button was refused for both people tried, the
+    whole message with it: ``BUTTON_USER_INVALID`` for a person the bot never
+    saw, ``BUTTON_USER_PRIVACY_RESTRICTED`` for a seen one with privacy
+    settings. A seen person without such settings was not tried.
   - ``tg://openmessage?user_id=N`` is accepted as a text link (kept as a
     ``text_link``) and as a URL button, for both; a tap on the button opened
     the private chat with the person in both cases.
@@ -333,18 +334,38 @@ def organizer_label(name: str, lang: str, *, absent: bool = False) -> str:
     return clip(f"👤 {name}", NAME_PX - label_width_px(mark)) + mark
 
 
-def title_name(name: str, lang: str, uid: int, *, bold: bool = False) -> str:
+def _remembered_handle(name: str, username: str | None) -> bool:
+    """``name`` reads as ``@nick`` and is not the username Telegram gave just now."""
+    nick = profile_username(username)
+    return name.startswith("@") and (nick is None or name[1:].casefold() != nick.casefold())
+
+
+def title_name(
+    name: str, lang: str, uid: int, *, bold: bool = False, username: str | None = None
+) -> str:
     """``name`` as HTML for a screen's first line, ``bold`` wrapping it in ``<b>``.
 
-    The fallback «участник <id>» (`MEMBER`) keeps its id in ``<code>``, outside
-    the bold (lint R5 wants plain text there): a bare 9-11 digit number in a
-    message is autolinked by Telegram as a phone number that leads nowhere.
+    Two names are identifiers Telegram would turn into links on its own, so each
+    goes in ``<code>`` after the fallback's word, outside the bold (lint R5
+    wants plain text there):
+
+    * the fallback «участник <id>» (`MEMBER`): a bare 9-11 digit number is
+      autolinked as a phone number that leads nowhere;
+    * an ``@nick`` that is not ``username``, the one Telegram gave just now — a
+      remembered username, freed perhaps and taken by someone else. Bare, it
+      would read as a mention of whoever holds it today (INFERRED: Telegram
+      detects ``@mentions`` in bot text as it does phone numbers, and neither
+      inside ``<code>``; not measured on this card).
     """
-    if name != MEMBER(lang).format(id=uid):
+    if name == MEMBER(lang).format(id=uid):
+        code = str(uid)
+    elif _remembered_handle(name, username):
+        code = html.escape(name)
+    else:
         shown = html.escape(name)
         return f"<b>{shown}</b>" if bold else shown
     word = MEMBER(lang).format(id="").strip()
-    return f"<b>{word}</b> <code>{uid}</code>" if bold else f"{word} <code>{uid}</code>"
+    return f"<b>{word}</b> <code>{code}</code>" if bold else f"{word} <code>{code}</code>"
 
 
 def profile_username(username: str | None) -> str | None:
@@ -521,15 +542,24 @@ def org_card_screen(
       text adds nothing the labelled one does not, and is one more place to be
       wrong on Desktop or Web.
 
-    `` · @nick`` follows the name for a live username only. When no name was
-    ever known the title already says «участник <id>», so the body does not
-    repeat it.
+    The body's name line carries only what the title does not: the first and
+    last name when the title shows something else, and `` · @nick`` for a live
+    username only. A name the title already shows is not repeated, and when no
+    name was ever known the title says «участник <id>» and the body has no name
+    line at all. A remembered ``@nick`` is in ``<code>`` wherever it shows
+    (`title_name`), never bare.
     """
     nick = profile_username(username)
     lines: list[str] = []
     if name != MEMBER(lang).format(id=uid):
-        shown = html.escape(full or name)
-        lines.append(f"{shown} · @{nick}" if nick else shown)
+        shown = full or name
+        label = html.escape(shown)
+        if _remembered_handle(shown, username):
+            label = f"<code>{label}</code>"
+        if nick and shown.casefold() != f"@{nick}".casefold():
+            lines.append(f"{label} · @{nick}")
+        elif shown != name:
+            lines.append(label)
         lines.append(CARD_ID(lang).format(id=uid))
         lines.append("")
     lines.append(STATE[state](lang))
@@ -542,7 +572,7 @@ def org_card_screen(
     rows.append((Button(REMOVE(lang), cb("adm_kb_org_rm:", lang, cid, uid)),))
     rows.append((back("orgs", cb("adm_kb_orgs:", lang, cid, page), lang),))
     heading = CARD_TITLE(lang).format(
-        n=title_name(name, lang, uid, bold=True), t=chat_label(title, cid)
+        n=title_name(name, lang, uid, bold=True, username=username), t=chat_label(title, cid)
     )
     return Screen(
         id="org.card",
@@ -563,13 +593,17 @@ def org_invite_screen(
     *,
     notice: str | None = None,
     notice_raw: str | None = None,
+    username: str | None = None,
 ) -> Screen:
-    """A fresh one-person link for ``uid``, valid `INVITE_DAYS` days, and two ways to send it."""
+    """A fresh one-person link for ``uid``, valid `INVITE_DAYS` days, and two ways to send it.
+
+    ``username`` is the one Telegram gave just now, as on the card: without it
+    an ``@nick`` name is shown as a label, not a mention (`title_name`)."""
     body = INVITE_BODY(lang).format(t=chat_label(title, cid), d=INVITE_DAYS)
     return Screen(
         id="org.invite",
         text=(
-            f"{INVITE_TITLE(lang).format(n=title_name(name, lang, uid))}\n\n"
+            f"{INVITE_TITLE(lang).format(n=title_name(name, lang, uid, username=username))}\n\n"
             f"{body}\n<code>{html.escape(link)}</code>"
         ),
         rows=(
