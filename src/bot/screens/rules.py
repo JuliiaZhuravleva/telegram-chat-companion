@@ -247,17 +247,28 @@ _SWITCH_STATE: Final = {True: Tr("включены", "on"), False: Tr("выкл�
 
 SWITCH: Final = Tr("выключатель", "switch")
 """What the text calls the top button, so it reads as the thing a tap flips, not a state."""
-_SWITCH_HINT: Final = Tr(
-    "{top} — общий {switch}: после нажатия все правила будут {after}.",
-    "{top} is the master {switch}: tap it and all rules are {after}.",
-)
+_SWITCH_HINT: Final = {
+    True: Tr(
+        "{top} — общий {switch}: после нажатия все правила будут {after}.",
+        "{top} is the master {switch}: tap it and all rules are {after}.",
+    ),
+    False: Tr(
+        "{top} — общий {switch}: после нажатия правила будут {after}, кроме тех, что {paused}.",
+        "{top} is the master {switch}: tap it and rules are {after}, except the {paused} ones.",
+    ),
+}
+"""By the switch's state now. Turning rules on flips the chat's switch only, so a
+paused rule stays paused, and the line says so rather than promise all of them."""
 _TOP: Final = Tr("Верхняя кнопка", "The top button")
 
 
 def switch_hint(enabled: bool, lang: str) -> str:
     """The line that names the top button a switch and says what a tap leaves."""
-    return _SWITCH_HINT(lang).format(
-        top=_TOP(lang), switch=SWITCH(lang), after=_SWITCH_STATE[not enabled](lang)
+    return _SWITCH_HINT[enabled](lang).format(
+        top=_TOP(lang),
+        switch=SWITCH(lang),
+        after=_SWITCH_STATE[not enabled](lang),
+        paused=_PAUSED(lang),
     )
 
 
@@ -273,14 +284,21 @@ def master_label(chat: ChatRules, lang: str) -> str:
 
 
 def _row_parts(rule: RuleView, chat: ChatRules, lang: str) -> tuple[str, str, str]:
-    if rule.enabled:
-        head, status = "📏 ", f" · {_ON(lang)}" if chat.enabled else ""
+    """A row's glyph, its name cut to the room left, and one tag.
+
+    The tag is «на паузе» for a paused rule; under a priority mode a working rule
+    shows the fact the mode reads (mandatory, or its priority) and not «работает»,
+    which the 📏 glyph already says. Two tags cut the builder's own names
+    («Сообщения: 20 за…»); a paused rule's priority does not matter while it is
+    paused, and «обязательное» on it would read as "always acts".
+    """
+    if not rule.enabled:
+        head, tail = "⏸ ", f" · {_PAUSED(lang)}"
+    elif chat.mode in MODES:
+        head = "📏 "
+        tail = f" · {MANDATORY(lang)}" if rule.mandatory else f" · {PRIORITY(lang)} {rule.weight}"
     else:
-        head, status = "⏸ ", f" · {_PAUSED(lang)}"
-    extra = ""
-    if chat.mode in MODES:
-        extra = f" · {MANDATORY(lang)}" if rule.mandatory else f" · {PRIORITY(lang)} {rule.weight}"
-    tail = status + extra
+        head, tail = "📏 ", f" · {_ON(lang)}" if chat.enabled else ""
     room = _room(1) - label_width_px(head + tail)
     return head, fit(rule_name(rule, lang), room), tail
 
@@ -824,8 +842,9 @@ _ACTION_CHOICES: Final = (
         "n",
         Tr("🔔 Написать админу", "🔔 Message the admin"),
         Tr(
-            "бот пришлёт вам в личку, кто и что написал, а в чате промолчит.",
-            "the bot tells you in a private message who wrote what, and says nothing in the chat.",
+            "бот пришлёт админам бота в личку, кто и что написал, а в чате промолчит.",
+            "the bot tells its admins in a private message who wrote what, "
+            "and says nothing in the chat.",
         ),
     ),
     (

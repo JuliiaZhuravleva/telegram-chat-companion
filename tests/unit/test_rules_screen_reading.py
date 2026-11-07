@@ -16,18 +16,23 @@ unknown mode counts as ``all``.
 from __future__ import annotations
 
 import re
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from src.bot.handlers import rules as rule_handlers
 from src.bot.screens import rules
 from src.bot.screens.model import Screen
 from src.bot.screens.registry import Sample, load_all
 from src.bot.screens.samples import fake
 from src.bot.screens.samples import rules as rule_samples
 from src.models.rules import RulesMode
+from src.services.rules.engine import RuleEngine
 
 LANGS = ("ru", "en")
 WEIGHT_MODES = (RulesMode.HIGHEST_WEIGHT.value, RulesMode.WEIGHTED_RANDOM.value)
+PAUSED = {"ru": "на паузе", "en": "paused"}
+"""The row's word for a paused rule, as a reader sees it."""
 
 _SAMPLES: list[Sample] = [
     item
@@ -127,6 +132,69 @@ def test_every_matching_rule_acts_says_so_without_mandatory(lang: str, mode: str
     assert rules.MANDATORY(lang).casefold()[:-2] not in line.casefold()
 
 
+_ENGINE_SAYS = {
+    RulesMode.ALL.value: (
+        {1, 2, 3},
+        3,
+        "Если сообщение подходит под несколько правил, срабатывают все.",
+    ),
+    RulesMode.HIGHEST_WEIGHT.value: (
+        {1, 2},
+        2,
+        "Если сообщение подходит под несколько правил, срабатывают все обязательные "
+        "и одно из остальных — с наибольшим приоритетом.",
+    ),
+    RulesMode.WEIGHTED_RANDOM.value: (
+        {1},
+        2,
+        "Если сообщение подходит под несколько правил, срабатывают все обязательные "
+        "и одно случайное из остальных: чем выше приоритет, тем вероятнее.",
+    ),
+}
+"""Mode → rules that always act, how many act, and the line that says so.
+
+Rule 1 is mandatory with priority 1; rules 2 and 3 are optional, priorities 3
+and 1. The line is pinned word for word: a sentence that keeps the keywords and
+says something else («срабатывает одно обязательное…») must not pass."""
+
+
+async def _acting(mode: str) -> list[int]:
+    """Which of the three rules the real engine fires for one message matching all three."""
+
+    def row(rule_id: int, *, weight: int, mandatory: bool = False) -> dict[str, object]:
+        return {
+            "id": rule_id,
+            "chat_id": fake.CHAT_ID,
+            "rule_type": "keyword_trigger",
+            "config": {"keywords": ["x"], "action": "notify_admin"},
+            "weight": weight,
+            "mandatory": mandatory,
+            "enabled": True,
+            "status": "active",
+            "trigger_count": 0,
+        }
+
+    repo = AsyncMock()
+    repo.get_active_rules = AsyncMock(
+        return_value=[row(1, weight=1, mandatory=True), row(2, weight=3), row(3, weight=1)]
+    )
+    message = MagicMock(text="x", caption=None, sticker=None)
+    actions = await RuleEngine(repo).evaluate(
+        chat_id=fake.CHAT_ID, user_id=7, message=message, rules_mode=mode
+    )
+    return [action.rule.id for action in actions]
+
+
+@pytest.mark.parametrize("mode", list(_ENGINE_SAYS))
+async def test_the_several_rules_line_says_what_the_engine_does(mode: str):
+    always, count, said = _ENGINE_SAYS[mode]
+    for _ in range(8):  # weighted_random draws: every draw keeps the mandatory one
+        acting = await _acting(mode)
+        assert (always <= set(acting), len(acting)) == (True, count), (mode, acting)
+    assert rules.several_line(mode, "ru") == said
+    assert said in _list("ru", mode).text.splitlines()
+
+
 @pytest.mark.parametrize("lang", LANGS)
 def test_an_empty_list_does_not_explain_matches(lang: str):
     screen = rules.rules_screen(
@@ -157,6 +225,15 @@ def test_the_list_calls_the_top_button_a_switch_and_says_what_a_tap_leaves(
     assert screen.rows[0][0].callback.startswith("ar_all:")
 
 
+@pytest.mark.parametrize("lang", LANGS)
+def test_turning_rules_on_does_not_promise_to_wake_a_paused_rule(lang: str):
+    """The switch flips the chat's ``rules_enabled`` only (``handle_rules_all``): a
+    paused rule stays paused, and the line that says what a tap leaves says so.
+    Turning them off needs no such word: every rule stops."""
+    assert PAUSED[lang] in rules.switch_hint(False, lang)
+    assert PAUSED[lang] not in rules.switch_hint(True, lang)
+
+
 # ---------------------------------------------------------------------------
 # What each action sends
 # ---------------------------------------------------------------------------
@@ -173,6 +250,13 @@ def test_every_action_has_a_line_saying_what_the_bot_sends(lang: str):
     # The warning names a ready text, so it is not "your own text" too.
     warn = next(found[0] for label, found in said.items() if label.startswith("⚠️"))
     assert f"«{rules.WARN_PRESETS[0](lang)}»" in warn, warn
+
+
+def test_messaging_the_admin_says_every_admin_gets_it():
+    """The executor sends the card to every id in ``admin_ids``, not to the reader alone."""
+    text = rules.action_screen("ru", fake.CHAT_ID, rule_samples.WORDS_NAME).text
+    (line,) = [ln for ln in text.splitlines() if ln.startswith("🔔 Написать админу — ")]
+    assert "админам бота" in line and "вам" not in line.split(), line
 
 
 def test_the_admin_action_still_says_it_saves_at_once():
@@ -201,3 +285,89 @@ def test_the_list_samples_do_not_already_hold_the_rule_the_builder_samples_make(
     ]
     assert rows, "no rule rows drawn"
     assert [label for label in rows if any(s in label.casefold() for s in stems)] == []
+
+
+# ---------------------------------------------------------------------------
+# A rule's row: the automatic names whole
+# ---------------------------------------------------------------------------
+
+
+def _auto_names(lang: str) -> list[str]:
+    """Every name the builder gives a counting rule (``handle_builder_count``)."""
+    return [
+        name(lang).format(n=n)
+        for name, choices in (
+            (rule_handlers.SPAM_NAME, rules.SPAM_CHOICES),
+            (rule_handlers.FLOOD_NAME, rules.FLOOD_CHOICES),
+        )
+        for n in choices
+    ]
+
+
+def _row(lang: str, rule: rules.RuleView, chat: rules.ChatRules) -> str:
+    """The rule's button as the list draws it (the row under the switch)."""
+    screen = rules.rules_screen(
+        lang, chat_id=fake.CHAT_ID, title=fake.CHAT_TITLE, chat=chat, rules=[rule]
+    )
+    (button,) = screen.rows[1]
+    assert button.callback.startswith("ar_view:"), button
+    return button.label
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("mode", [RulesMode.ALL.value, *WEIGHT_MODES])
+def test_an_automatic_name_is_never_cut_on_the_list(lang: str, mode: str):
+    """«Сообщения: 20 за минуту» cut to «Сообщения: 20 за…» loses what the rule counts.
+
+    Every state a row can show, in every mode: the chat's switch on and off, the
+    rule working and paused, mandatory and two priorities."""
+    cut = []
+    for name in _auto_names(lang):
+        for chat_on in (True, False):
+            chat = rules.ChatRules(enabled=chat_on, common=False, mode=mode)
+            for enabled in (True, False):
+                for mandatory, weight in ((True, 1), (False, 1), (False, 10)):
+                    rule = _rule(
+                        1,
+                        rule_type="spam_detect",
+                        config={"name": name, "action": "notify_admin"},
+                        enabled=enabled,
+                        mandatory=mandatory,
+                        weight=weight,
+                    )
+                    label = _row(lang, rule, chat)
+                    if name not in label:
+                        cut.append(label)
+    assert cut == []
+
+
+def test_the_list_samples_show_the_automatic_name_whole():
+    labels = [
+        b.label
+        for item in _SAMPLES
+        if item.screen_id == "rules"
+        for row in item.build("ru").rows
+        for b in row
+        if b.callback and b.callback.startswith("ar_view:")
+    ]
+    spam = [label for label in labels if rule_samples.SPAM_NAME[:10] in label]
+    assert spam, labels
+    assert [label for label in spam if rule_samples.SPAM_NAME not in label] == []
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("mode", WEIGHT_MODES)
+def test_a_paused_rule_is_not_tagged_as_always_acting(lang: str, mode: str):
+    """The line under the mode says a mandatory rule always acts; a paused one does
+    not act at all, so its row says it is paused and nothing about acting."""
+    chat = rules.ChatRules(enabled=True, common=False, mode=mode)
+    label = _row(lang, _rule(1, mandatory=True, enabled=False), chat)
+    assert PAUSED[lang] in label and rules.MANDATORY(lang) not in label, label
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_a_random_mode_sample_is_drawn(lang: str):
+    """Its line is the longest the list says: the dump and the PNGs must show it."""
+    line = rules.several_line(RulesMode.WEIGHTED_RANDOM.value, lang)
+    drawn = [item.title for item in _SAMPLES if line in item.build(lang).text]
+    assert drawn, "no sample draws the list under weighted_random"

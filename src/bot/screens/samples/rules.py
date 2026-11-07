@@ -1,7 +1,7 @@
 """Rules samples: a chat's list, a rule's card, the builder, and what a fired rule sends.
 
 One sample per state that changes the buttons: the list on, off and inherited,
-empty, and paged under a priority mode; the card on, paused, just created while
+empty, paged under a priority mode, and under the random one; the card on, paused, just created while
 the chat's rules are off, and with its JSON open; every builder step; and the
 two typed-answer errors (a builder step, the JSON prompt).
 """
@@ -36,6 +36,7 @@ LONG_NAME: Final = "Следит за спойлерами к сериалам �
 _ON: Final = r.ChatRules(enabled=True, common=False)
 _OFF_COMMON: Final = r.ChatRules(enabled=False, common=True)
 _WEIGHTED: Final = r.ChatRules(enabled=True, common=False, mode="highest_weight")
+_RANDOM: Final = r.ChatRules(enabled=True, common=False, mode="weighted_random")
 
 _KEYWORDS: Final = r.RuleView(
     id=fake.RULE_ID,
@@ -97,7 +98,7 @@ _USER_DATA: Final = (
     EXCERPT,
     SPAM_NAME,
     LONG_NAME,
-    *(r.row_name(_LONG, _WEIGHTED, lang) for lang in ("ru", "en")),
+    *(r.row_name(_LONG, chat, lang) for chat in (_WEIGHTED, _RANDOM) for lang in ("ru", "en")),
     fake.PERSON,
     fake.PERSON_OTHER,
 )
@@ -138,6 +139,11 @@ def rules_empty(lang: Lang) -> Screen:
 @_panel("rules", title="Правила: режим по приоритету, страницы")
 def rules_weighted(lang: Lang) -> Screen:
     return _list(lang, _WEIGHTED, _SPAM, _LONG, _KEYWORDS, page=0, pages=2)
+
+
+@_panel("rules", title="Правила: случайное по приоритету, одно на паузе")
+def rules_random(lang: Lang) -> Screen:
+    return _list(lang, _RANDOM, _SPAM, _KEYWORDS, _FLOOD)
 
 
 @_panel("rules", title="Правила: после удаления")
