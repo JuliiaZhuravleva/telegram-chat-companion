@@ -43,9 +43,16 @@ from that same lookup (``_names``), so they cannot disagree about what to call
 someone. The store is ``OrganizerNameRepository`` from Dishka
 (``RepositoryProvider``). The same single ``getChatMember`` (``_seen``) also
 gives the card its membership state, so the list's `` · не в чате`` and the
-card's state line cannot disagree either. A stored ``@username`` may still name
-someone, but only one Telegram gives now reaches the card's ``👤 Профиль``: a
-freed username can belong to another person months later.
+card's state line cannot disagree either. When that call names nobody — the
+person never joined — ``getChat`` on their id is the second live source: it
+names anyone who has opened the bot (measured 2026-11-07), and says «chat not
+found» for everyone else. A stored ``@username`` may still name someone, but
+only one Telegram gives now becomes the card's ``t.me`` link (``💬 Написать
+лично``): a freed username can belong to another person months later. Without
+one the link goes by id, ``tg://openmessage?user_id=`` (`orgs.person_url`),
+which opened the private chat on Julia's phone even for a person the bot had
+never seen. Should Telegram refuse that button anyway, the card is shown once
+more without it (``_show_card``), so the refusal costs the button, not the card.
 
 An invite link is a credential: whoever holds it joins. It is never logged —
 events carry ``chat_id`` and ``user_id`` only, and an error text is scrubbed
@@ -64,7 +71,7 @@ from typing import Any, NamedTuple
 
 import structlog
 from aiogram import Bot, F, Router
-from aiogram.enums import ChatMemberStatus
+from aiogram.enums import ChatMemberStatus, ChatType
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
@@ -207,12 +214,22 @@ async def _add_organizer(
 # the id) is NOT here: it says nothing about membership.
 _NOT_A_MEMBER = re.compile(r"member not found|PARTICIPANT_ID_INVALID", re.IGNORECASE)
 
+# What `getChat` on a user id answers when the person never opened the bot: the
+# expected answer for most organizers who never joined, so not a failure.
+_NO_PRIVATE_CHAT = re.compile(r"chat not found", re.IGNORECASE)
+
+# Telegram's codes for a button it will not take (``BUTTON_USER_INVALID``,
+# ``BUTTON_USER_PRIVACY_RESTRICTED``, ``BUTTON_URL_INVALID``) and for a bad URL.
+# Case-sensitive on purpose: the codes are upper case, and a lower-case "url"
+# turns up in entity errors that have nothing to do with buttons.
+_LINK_REFUSED = re.compile(r"BUTTON_[A-Z_]+|\bURL\b")
+
 
 class _Name(NamedTuple):
     label: str
     state: orgs.Membership = "unknown"
     full: str | None = None
-    """First and last name, for the card's mention."""
+    """First and last name, the card's name line."""
     username: str | None = None
     """Without the ``@``, and only from Telegram's answer now. A stored one stays
     out: Telegram frees a username on a rename or a deleted account and anyone
@@ -225,7 +242,8 @@ class _Name(NamedTuple):
 
 
 class _Seen(NamedTuple):
-    """What one ``getChatMember`` said: the state, and the name when it gave one."""
+    """What Telegram said: the state from ``getChatMember``, and the name when it
+    or ``getChat`` gave one."""
 
     state: orgs.Membership
     name: str | None = None
@@ -242,6 +260,10 @@ async def _seen(bot: Bot | None, chat_id: int, user_id: int) -> _Seen:
     reads as ``never_joined``; any other failure is ``unknown``, with no name.
     A restricted person who is not a member reads as ``left``: a link lets them
     back in, restrictions and all.
+
+    When Telegram answers with an error, it named nobody, and ``getChat`` is
+    asked for the name (`_private`). Not after a timeout or another failure to
+    get an answer at all: the second call would only wait again.
     """
     if bot is None:
         return _Seen("unknown")
@@ -249,11 +271,11 @@ async def _seen(bot: Bot | None, chat_id: int, user_id: int) -> _Seen:
         member = await bot.get_chat_member(chat_id, user_id)
     except TelegramBadRequest as exc:
         if _NOT_A_MEMBER.search(exc.message or ""):
-            return _Seen("never_joined")
+            return await _private(bot, chat_id, user_id, "never_joined")
         logger.warning(
             "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
         )
-        return _Seen("unknown")
+        return await _private(bot, chat_id, user_id, "unknown")
     except Exception as exc:  # the list renders whatever the lookup does
         logger.warning(
             "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
@@ -275,6 +297,71 @@ async def _seen(bot: Bot | None, chat_id: int, user_id: int) -> _Seen:
         orgs.full_name(user.first_name, user.last_name),
         orgs.username_of(user.username),
     )
+
+
+async def _private(bot: Bot, chat_id: int, user_id: int, state: orgs.Membership) -> _Seen:
+    """``state``, with the name ``getChat`` gives for the person's own chat.
+
+    Telegram has a private chat for anyone who opened the bot, and ``getChat``
+    on their id returns it with their name and username, live like
+    ``getChatMember``'s. For anyone else it answers «chat not found» (measured
+    2026-11-07): expected, so logged at debug only; any other failure is a
+    warning. Either way ``state`` stands and the store names the person.
+    """
+    try:
+        chat = await bot.get_chat(user_id)
+    except TelegramBadRequest as exc:
+        if _NO_PRIVATE_CHAT.search(exc.message or ""):
+            logger.debug("Organizer name: no private chat", chat_id=chat_id, user_id=user_id)
+        else:
+            logger.warning(
+                "Organizer name: getChat failed",
+                chat_id=chat_id,
+                user_id=user_id,
+                error=exc.message,
+            )
+        return _Seen(state)
+    except Exception as exc:  # the name is a nicety: the card renders without it
+        logger.warning(
+            "Organizer name: getChat failed", chat_id=chat_id, user_id=user_id, error=str(exc)
+        )
+        return _Seen(state)
+    if getattr(chat, "type", None) != ChatType.PRIVATE:
+        return _Seen(state)
+    return _Seen(
+        state,
+        orgs.display_name(chat.username, chat.first_name, chat.last_name),
+        orgs.full_name(chat.first_name, chat.last_name),
+        orgs.username_of(chat.username),
+    )
+
+
+async def _show_card(callback: CallbackQuery, screen: Screen, chat_id: int, user_id: int) -> None:
+    """``show`` an organizer card, and once more without ``💬 Написать лично`` if
+    Telegram refuses that button.
+
+    A refused button takes the whole message with it, as an edit and as a new
+    message alike (``render.show`` tries both), so one bad link would leave the
+    organizer with no card at all. The link is the most likely part to be
+    refused: ``tg://user`` buttons were, for everyone (measured 2026-11-07), and
+    ``tg://openmessage`` was tried on one phone only. Only an error that names a
+    button or a URL is answered this way: any other would fail the bare card
+    just the same, so it propagates like every screen's. The query was answered
+    by the first try and is not answered again.
+    """
+    try:
+        await show(callback, screen)
+    except TelegramBadRequest as exc:
+        bare = orgs.without_person_link(screen)
+        if bare is None or not _LINK_REFUSED.search(exc.message or ""):
+            raise
+        logger.warning(
+            "Organizer card: link button refused",
+            chat_id=chat_id,
+            user_id=user_id,
+            error=exc.message,
+        )
+        await show(callback, bare, answered=True)
 
 
 async def _names(
@@ -720,7 +807,7 @@ async def handle_kb_organizer_card(
         await _not_an_organizer(callback, lang, chat_id, title, ids, organizer_names)
         return
     screen = await _card_view(callback.bot, lang, chat_id, title, ids, user_id, organizer_names)
-    await show(callback, screen)
+    await _show_card(callback, screen, chat_id, user_id)
 
 
 async def _invite(
@@ -764,7 +851,7 @@ async def _invite(
             notice_raw=line(lang),
             known=names,
         )
-        await show(callback, screen)
+        await _show_card(callback, screen, chat_id, user_id)
         return
 
     link = await _create_link(bot, chat_id, user_id, person.label, lang)
@@ -780,7 +867,7 @@ async def _invite(
             notice_raw=link.failure,
             known=names,
         )
-        await show(callback, screen)
+        await _show_card(callback, screen, chat_id, user_id)
         return
 
     notice, notice_raw = (

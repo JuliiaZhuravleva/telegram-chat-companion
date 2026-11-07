@@ -6,17 +6,30 @@ Six screens, built as plain data (``handlers/admin_kb.py`` sends them):
   on ``👤 {name}`` opens that person's card and changes nothing. Someone
   Telegram says is not in the group carries `` · не в чате``, explained in a
   line of its own while the page shows one.
-* ``org.card`` — one organizer: a text mention (``tg://user?id=`` lives in the
-  BODY only: as a URL button it can fail with BUTTON_USER_PRIVACY_RESTRICTED
-  and lose the whole message), ``@username`` when Telegram gives one now, the
-  id, what Telegram says about membership right now (`Membership`), and what
-  an organizer can do — phrased for later when the person is not in the group.
-  The actions: ``👤 Профиль`` (a ``t.me/{username}`` link, only for a valid
-  username Telegram gave just now: a stored one may belong to someone else by
-  now), ``✉️ Пригласить в чат`` (only for someone who left or never joined: a
-  banned person cannot use a link, and when Telegram did not answer nobody
-  knows), ``✖️ Убрать из организаторов`` — removes at once and offers
-  ``↩️ Вернуть`` on the list (undo over confirm) — and back to the person's page.
+* ``org.card`` — one organizer: the name as plain text, ``@username`` when
+  Telegram gives one now, the id, what Telegram says about membership right
+  now (`Membership`), and what an organizer can do — phrased for later when
+  the person is not in the group. The actions: ``💬 Написать лично``, first and
+  always (`person_url`: ``t.me/{username}`` for a valid username Telegram gave
+  just now — a stored one may belong to someone else by now — else
+  ``tg://openmessage?user_id=``), ``✉️ Пригласить в чат`` (only for someone who
+  left or never joined: a banned person cannot use a link, and when Telegram
+  did not answer nobody knows), ``✖️ Убрать из организаторов`` — removes at
+  once and offers ``↩️ Вернуть`` on the list (undo over confirm) — and back to
+  the person's page.
+
+  Person links, measured on the dev bot 2026-11-07 (taps on Julia's phone;
+  Telegram Desktop and Web not tried):
+
+  - ``<a href="tg://user?id=N">`` in the text is accepted, but for a person the
+    bot cannot see the entity is silently dropped and the name shows as plain
+    text; for one it can see it stays a ``text_mention``.
+  - ``tg://user?id=N`` as a URL button is refused for everyone, the whole
+    message with it: ``BUTTON_USER_INVALID`` for a person the bot never saw,
+    ``BUTTON_USER_PRIVACY_RESTRICTED`` for a seen one with privacy settings.
+  - ``tg://openmessage?user_id=N`` is accepted as a text link (kept as a
+    ``text_link``) and as a URL button, for both; a tap on the button opened
+    the private chat with the person in both cases.
 * ``org.invite`` — a one-person link valid for seven days, in ``<code>``,
   with ``📤 Переслать`` (Telegram's share sheet) and ``🤖 Отправить от бота``.
   The second is always offered: nothing the bot stores says whether it may
@@ -45,6 +58,7 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Collection, Sequence
+from dataclasses import replace
 from typing import Final, Literal
 from urllib.parse import quote
 
@@ -254,7 +268,11 @@ UNDO: Final = Tr("↩️ Вернуть", "↩️ Undo")
 NOT_LISTED: Final = Tr("✏️ Нет в списке", "✏️ Not listed")
 FROM_MEMBERS: Final = Tr("👥 Из участников", "👥 From members")
 PICK_LABEL: Final = Tr("🔍 Найти в Telegram", "🔍 Find in Telegram")
-PROFILE: Final = Tr("👤 Профиль", "👤 Profile")
+WRITE: Final = Tr("💬 Написать лично", "💬 Message privately")
+"""The card's person link (`person_url`). One label for both targets, because
+both open the private chat with the person: ``t.me/{username}`` does for a
+person, and ``tg://openmessage`` did on Julia's phone for someone the bot had
+never seen (2026-11-07)."""
 INVITE: Final = Tr("✉️ Пригласить в чат", "✉️ Invite to the chat")
 REMOVE: Final = Tr("✖️ Убрать из организаторов", "✖️ Remove from organizers")
 SHARE: Final = Tr("📤 Переслать", "📤 Share")
@@ -298,7 +316,7 @@ def display_name(username: object, first_name: object, last_name: object = None)
 
 
 def full_name(first_name: object, last_name: object = None) -> str | None:
-    """``First Last``, the words a mention shows; None when neither part is text."""
+    """``First Last``; None when neither part is text."""
     return " ".join(p for p in (_part(first_name), _part(last_name)) if p) or None
 
 
@@ -335,6 +353,35 @@ def profile_username(username: str | None) -> str | None:
         return None
     nick = username.strip().lstrip("@")
     return nick if USERNAME_RE.match(nick) else None
+
+
+def person_url(uid: int, username: str | None) -> str:
+    """Where ``💬 Написать лично`` goes: ``https://t.me/{username}`` when Telegram
+    gave a valid username just now (`profile_username`), else
+    ``tg://openmessage?user_id={uid}``.
+
+    ``t.me`` comes first because it is an ordinary https link every client
+    opens. The id form needs no username and no earlier contact: as a URL button
+    Telegram accepts it for a person the bot has never seen, where
+    ``tg://user?id=`` is refused (measured 2026-11-07). Pass only a username
+    from Telegram's answer now; a stored one may name a stranger by now.
+    """
+    nick = profile_username(username)
+    return f"https://t.me/{nick}" if nick else f"tg://openmessage?user_id={uid}"
+
+
+def without_person_link(screen: Screen) -> Screen | None:
+    """``screen`` without its ``💬 Написать лично`` row, or None when it has none.
+
+    For the one case the card must still arrive without it: Telegram refusing
+    the button (the handler's ``_show_card``). Matched by label in both
+    languages and by being a URL button, so no other row can go with it.
+    """
+    labels = {WRITE.ru, WRITE.en}
+    rows = tuple(
+        row for row in screen.rows if not any(b.url is not None and b.label in labels for b in row)
+    )
+    return None if len(rows) == len(screen.rows) else replace(screen, rows=rows)
 
 
 def _utf16(text: str) -> int:
@@ -457,26 +504,39 @@ def org_card_screen(
     """One organizer: who they are, whether they are in the chat, what can be done.
 
     ``name`` is the list's name for the person (``_names`` in the handler),
-    ``full`` their first and last name for the mention, ``username`` without
-    or with its ``@`` — only one Telegram gave just now: a stored one may have
-    been released and taken by someone else, and the card would then link to a
-    stranger. ``page`` is the list page the person is on: the back button
-    returns there.
+    ``full`` their first and last name, ``username`` without or with its ``@``
+    — only one Telegram gave just now: a stored one may have been released and
+    taken by someone else, and the card would then link to a stranger. ``page``
+    is the list page the person is on: the back button returns there.
+
+    The way to the person is the first button, on every card (`person_url`).
+    The name in the body is plain text, deliberately not a link:
+
+    * ``tg://user?id=`` there is a link only for people the bot can see;
+      for the rest Telegram drops it without a word (measured 2026-11-07), so
+      the same-looking name worked on one card and did nothing on another —
+      the very complaint the button answers.
+    * ``tg://openmessage`` there is kept by Telegram, but only the BUTTON was
+      tapped and seen to work, on one phone; an unlabelled second link in the
+      text adds nothing the labelled one does not, and is one more place to be
+      wrong on Desktop or Web.
+
+    `` · @nick`` follows the name for a live username only. When no name was
+    ever known the title already says «участник <id>», so the body does not
+    repeat it.
     """
-    shown = html.escape(full or name)
-    mention = f'<a href="tg://user?id={uid}">{shown}</a>'
     nick = profile_username(username)
-    head = f"{mention} · @{nick}" if nick else mention
-    lines = [head]
+    lines: list[str] = []
     if name != MEMBER(lang).format(id=uid):
+        shown = html.escape(full or name)
+        lines.append(f"{shown} · @{nick}" if nick else shown)
         lines.append(CARD_ID(lang).format(id=uid))
-    lines += ["", STATE[state](lang)]
+        lines.append("")
+    lines.append(STATE[state](lang))
     if state == "removed":
         lines.append(BANNED_HINT(lang))
     lines.append((CARD_ROLE_OUTSIDE if state in ABSENT else CARD_ROLE)(lang))
-    rows: list[tuple[Button, ...]] = []
-    if nick:
-        rows.append((Button(PROFILE(lang), url=f"https://t.me/{nick}"),))
+    rows: list[tuple[Button, ...]] = [(Button(WRITE(lang), url=person_url(uid, username)),)]
     if state in INVITABLE:
         rows.append((Button(INVITE(lang), cb("adm_kb_org_inv:", lang, cid, uid)),))
     rows.append((Button(REMOVE(lang), cb("adm_kb_org_rm:", lang, cid, uid)),))
