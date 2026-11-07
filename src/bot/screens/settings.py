@@ -14,7 +14,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
-from src.bot.screens.chat import COMMUNITY_LINES, LABELS
+from src.bot.screens import rules
+from src.bot.screens.chat import COMMUNITY_LINES, LABELS, tolerance_label
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import back
@@ -209,15 +210,17 @@ _SECTION_TITLE = Tr(
     "{icon} <b>{name}</b> · все чаты без своего значения",
     "{icon} <b>{name}</b> · every chat without its own value",
 )
-_RULES_MODES: Final[Mapping[str, Tr]] = {
-    "all": Tr("все сработавшие", "every match"),
-    "highest_weight": Tr("одно, самое весомое", "the heaviest one"),
-    "weighted_random": Tr("одно, случайно по весу", "one, at random by weight"),
-}
 _CHANCE = Tr("{label}: в {p} % случаев", "{label}: {p} % of the time")
 """Under the switch of the same name, so it reads that switch's label."""
 _TOLERANCE = Tr("Откровенность стикеров: {v}", "Sticker explicitness: {v}")
-_RULES_MODE = Tr("Срабатывают: {mode}", "Applied: {mode}")
+
+
+def _tolerance(value: object, lang: str) -> str:
+    """The panel's own words for the value: ``0.5, обычно`` on a preset."""
+    try:
+        return tolerance_label(float(value), lang)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return "?"
 
 
 def _percent(value: object) -> str:
@@ -238,12 +241,10 @@ def _info_lines(lang: str, section: Section, values: Mapping[str, Any]) -> list[
             _CHANCE(lang).format(
                 label=LABELS["ic"](lang), p=_percent(values.get("image_comment_sticker_chance"))
             ),
-            _TOLERANCE(lang).format(v=values.get("tolerance_level")),
+            _TOLERANCE(lang).format(v=_tolerance(values.get("tolerance_level"), lang)),
         ]
     if section == "rules":
-        mode = str(values.get("rules_mode"))
-        label = _RULES_MODES[mode](lang) if mode in _RULES_MODES else mode
-        return [_RULES_MODE(lang).format(mode=label)]
+        return [rules.mode_line(str(values.get("rules_mode")), lang)]
     if section == "community":
         # The six followers sit two to a row, so the short words need saying out.
         return ["\n".join(line(lang) for _, line in COMMUNITY_LINES)]
@@ -259,10 +260,9 @@ def defs_section_screen(lang: str, section: Section, values: Mapping[str, Any]) 
 
     def toggle(code: str) -> Button:
         on = bool(values.get(KEY_OF[code]))
-        return Button(
-            f"{'✅' if on else '⚪'} {LABELS[code](lang)}",
-            callback=cb("adm_defs_tgl:", lang, code),
-        )
+        # The rules switch says its state the way the rules screen does.
+        name = rules.switch_name(on, lang) if code == "re" else LABELS[code](lang)
+        return Button(f"{'✅' if on else '⚪'} {name}", callback=cb("adm_defs_tgl:", lang, code))
 
     return Screen(
         id="defs.section",

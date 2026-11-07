@@ -8,7 +8,9 @@ first. So the routing tests below go through the REAL handler chain
 would stay green with the two pickers taking each other's picks.
 
 Every way out of the search takes its keyboard away: a one-time keyboard only
-hides, and stays behind the input's icon.
+hides, and stays behind the input's icon. That includes the two ways out that
+are not the search's own: a name tapped in the inline picker, and an app with no
+person search sending the button's label back as text.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from aiogram.types import (
 from src.bot.handlers import admin_kb
 from src.bot.handlers import rules as handlers
 from src.bot.screens import rules as screens
-from src.bot.screens.render import render_text
+from src.bot.screens.render import render_text, to_markup
 from src.bot.screens.routes import REQUEST_IDS
 from src.bot.states.admin import AdminStates
 from src.models.chat_config import ChatConfig
@@ -68,6 +70,14 @@ async def _searching(state: _FakeState | None = None) -> _FakeState:
         rule_chat_id=GROUP_ID, rule_type="user_specific", rule_finding=GROUP_ID, lang="ru"
     )
     return state
+
+
+def _with_people(data: dict[str, object]) -> list[screens.Person]:
+    """The chat's most active people, for the exits that show the inline picker."""
+    data["message_repo"].get_top_active_users = AsyncMock(  # type: ignore[attr-defined]
+        return_value=([{"user_id": PICKED_ID, "first_name": "Аня", "username": "anya"}], 1)
+    )
+    return [screens.Person(PICKED_ID, "Аня", "anya")]
 
 
 def _with_rules_list(data: dict[str, object]) -> None:
@@ -231,6 +241,22 @@ class TestAPickReachesItsOwnPicker:
             "kb_organizer_ids",
         )
 
+    @pytest.mark.parametrize("request_id", [999, 0], ids=["unknown-id", "zero"])
+    async def test_a_pick_with_another_request_id_is_never_the_rules(self, request_id: int) -> None:
+        """The picker's own ``request_id`` filter: no other picker's pick is ever
+        the rule's person, even while the rules search is open and waiting."""
+        assert request_id not in set(REQUEST_IDS)
+        msg, data, bot = _make_message()
+        state = await _searching()
+
+        await _propagate(_pick(msg, request_id), data, state)
+
+        assert state._data.get("rule_user") is None, "the rules picker took another pick"
+        assert state._data["rule_finding"] == GROUP_ID, "the rules search was not touched"
+        assert screens.WHO_PICKED("ru").format(name="Аня @anya") not in [
+            s.text for s in _sends(bot)
+        ]
+
     async def test_a_stale_kb_pick_is_never_the_rules(self) -> None:
         msg, data, bot = _make_message()
         state = await _searching()
@@ -324,3 +350,160 @@ class TestEveryWayOutRemovesTheKeyboard:
         assert "rule_finding" not in state._data
         (line,) = _sends(bot)
         assert isinstance(line.reply_markup, ReplyKeyboardRemove)
+
+
+# ---------------------------------------------------------------------------
+# An app without the person search, through the real router
+# ---------------------------------------------------------------------------
+
+
+class TestAnAppWithoutTheSearch:
+    """An app that cannot open ``request_users`` sends the button's label as text."""
+
+    @pytest.mark.parametrize("label", ["🔍 Найти в Telegram", "Найти в Telegram"])
+    async def test_the_label_says_so_and_brings_back_the_chats_people(self, label: str) -> None:
+        msg, data, bot = _make_message(text=label)
+        people = _with_people(data)
+        state = await _searching()
+
+        await _propagate(msg, data, state)
+
+        line, picker = _sends(bot)
+        assert line.text == "Это приложение Telegram не открывает поиск."
+        assert isinstance(line.reply_markup, ReplyKeyboardRemove)
+        expected = screens.who_screen("ru", GROUP_ID, people, find=False)
+        assert picker.text == render_text(expected)
+        assert picker.reply_markup == to_markup(expected)
+        labels = [b.text for row in picker.reply_markup.inline_keyboard for b in row]
+        assert screens.FIND("ru") not in labels, "the button that opened nothing is back"
+        assert labels[-1] == "✖️ Отмена"
+        # The search is over; the draft is not.
+        assert await state.get_state() is None
+        assert state._data["rule_finding"] is None
+        assert state._data["rule_type"] == "user_specific"
+        assert state._data["rule_people"] == {str(PICKED_ID): "Аня @anya"}
+
+    async def test_in_english(self) -> None:
+        msg, data, bot = _make_message(text="🔍 Find in Telegram")
+        _with_people(data)
+        state = await _searching()
+        await state.update_data(lang="en")
+
+        await _propagate(msg, data, state)
+
+        assert _sends(bot)[0].text == screens.WHO_UNSUPPORTED("en")
+
+    async def test_a_name_from_that_picker_is_the_rules_person(self) -> None:
+        msg, data, bot = _make_message(text="🔍 Найти в Telegram")
+        _with_people(data)
+        state = await _searching()
+        await _propagate(msg, data, state)
+        fsm = _State(**state._data)
+
+        callback = await _tap(
+            handlers.handle_builder_who, f"ar_b_who:ru:{GROUP_ID}:{PICKED_ID}", fsm, _deps()
+        )
+
+        assert fsm.data["rule_user"] == PICKED_ID
+        # Nothing left to take away: the picker turns into the next step in place.
+        callback.message.answer.assert_not_awaited()
+        assert callback.message.edit_text.await_args.args[0] == render_text(
+            screens.action_screen("ru", GROUP_ID, "Аня @anya")
+        )
+
+    async def test_its_pages_stay_without_the_button(self) -> None:
+        """The pager re-draws the picker: the button must not come back on page two."""
+        state = _State(rule_chat_id=CHAT_ID, rule_type="user_specific", rule_no_find=True)
+        people = [{"user_id": PICKED_ID + i, "first_name": f"Имя{i}"} for i in range(4)]
+        deps = _deps(people=people)
+        deps["message_repo"].get_top_active_users = AsyncMock(return_value=(people, 9))
+
+        callback = await _tap(
+            handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:u:1", state, deps
+        )
+
+        labels = [
+            b.text
+            for row in callback.message.edit_text.await_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+        ]
+        assert screens.FIND("ru") not in labels
+        assert "✖️ Отмена" in labels
+
+    async def test_a_new_rule_offers_the_search_again(self) -> None:
+        state = _State(rule_chat_id=CHAT_ID, rule_type="user_specific", rule_no_find=True)
+        deps = _deps()
+        await _tap(handlers.handle_add_rule, f"ar_add:ru:{CHAT_ID}", state, deps)
+
+        assert state.data["rule_no_find"] is None
+
+    async def test_the_label_with_no_search_open_is_not_the_rules(self) -> None:
+        msg, data, bot = _make_message(text="🔍 Найти в Telegram")
+        _with_people(data)
+        state = _FakeState()
+
+        await _propagate(msg, data, state)
+
+        assert screens.WHO_UNSUPPORTED("ru") not in [s.text for s in _sends(bot)]
+        assert state._data.get("rule_no_find") is None
+
+
+# ---------------------------------------------------------------------------
+# A name tapped in the inline picker while the search is open
+# ---------------------------------------------------------------------------
+
+
+class TestANameTappedWhileTheSearchIsOpen:
+    """Telegram may keep the picker's buttons (``rule_who_keyboard_kept``), so a
+    name stays tappable above the open search."""
+
+    def _open(self, current: Any = AdminStates.awaiting_rule_who) -> _State:
+        return _State(
+            current,
+            rule_chat_id=CHAT_ID,
+            rule_type="user_specific",
+            rule_finding=CHAT_ID,
+            lang="ru",
+            rule_people={str(PICKED_ID): "Аня @anya"},
+        )
+
+    @pytest.mark.parametrize(
+        "current", [AdminStates.awaiting_rule_who, None], ids=["state-up", "state-dropped"]
+    )
+    async def test_ends_the_search_and_takes_its_keyboard_away(self, current: Any) -> None:
+        state = self._open(current)
+        with patch.object(handlers, "safe_edit_reply_markup", new_callable=AsyncMock) as retire:
+            callback = await _tap(
+                handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:{PICKED_ID}", state, _deps()
+            )
+
+        assert state.data["rule_user"] == PICKED_ID
+        assert state.data["rule_finding"] is None
+        assert await state.get_state() is None
+        (line_args, line_kwargs), (step_args, step_kwargs) = [
+            (c.args, c.kwargs) for c in callback.message.answer.await_args_list
+        ]
+        assert line_args[0] == "Выбран человек: Аня @anya"
+        assert isinstance(line_kwargs["reply_markup"], ReplyKeyboardRemove)
+        expected = screens.action_screen("ru", CHAT_ID, "Аня @anya")
+        assert (step_args[0], step_kwargs["reply_markup"]) == (
+            render_text(expected),
+            to_markup(expected),
+        )
+        callback.message.edit_text.assert_not_awaited()
+        callback.answer.assert_awaited_once()
+        # The picker above loses its names: the next step is the live screen.
+        assert retire.await_args.args[0] is callback.message
+
+    async def test_with_no_search_open_it_says_nothing_extra(self) -> None:
+        state = self._open(None)
+        state.data["rule_finding"] = None
+
+        callback = await _tap(
+            handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:{PICKED_ID}", state, _deps()
+        )
+
+        callback.message.answer.assert_not_awaited()
+        assert callback.message.edit_text.await_args.args[0] == render_text(
+            screens.action_screen("ru", CHAT_ID, "Аня @anya")
+        )

@@ -16,6 +16,7 @@ from html import escape
 from typing import Any, Final
 
 from src.bot.custom_emoji import fence
+from src.bot.screens.chat import COMMON, LABELS
 from src.bot.screens.i18n import Tr, plural_ru
 from src.bot.screens.lint import budget, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
@@ -66,6 +67,20 @@ MODES: Final = {
     "weighted_random": Tr("одно случайное правило, по весу", "one random rule, by weight"),
 }
 """Rules modes other than ``all``. Only these change what a rule's weight means."""
+MODE_ALL: Final = Tr("все подходящие правила", "every matching rule")
+_MODE: Final = Tr("Режим", "Mode")
+
+
+def mode_line(mode: str, lang: str) -> str:
+    """``Режим: …``: the one line that names a rules mode, on a chat's rules and on the defaults."""
+    if mode == "all":
+        name = MODE_ALL(lang)
+    elif mode in MODES:
+        name = MODES[mode](lang)
+    else:
+        name = escape(mode)
+    return f"{_MODE(lang)}: {name}"
+
 
 WARN_FALLBACK: Final = Tr(
     "⚠️ Сработало автоматическое правило чата.",
@@ -77,7 +92,6 @@ _TITLE: Final = Tr("Правила", "Rules")
 _ADD: Final = Tr("➕ Добавить", "➕ Add")
 _ON: Final = Tr("работает", "on")
 _PAUSED: Final = Tr("на паузе", "paused")
-_COMMON: Final = Tr("общее", "default")
 _NEW: Final = Tr("Новое правило:", "New rule:")
 _ELLIPSIS: Final = "…"
 
@@ -199,13 +213,18 @@ def _int(value: object, default: int) -> int:
 # ---------------------------------------------------------------------------
 
 
+_SWITCH_STATE: Final = {True: Tr("включены", "on"), False: Tr("выключены", "off")}
+
+
+def switch_name(enabled: bool, lang: str) -> str:
+    """The rules switch by name: the panel's noun and one state word, on every surface."""
+    return f"{LABELS['re'](lang)} {_SWITCH_STATE[enabled](lang)}"
+
+
 def master_label(chat: ChatRules, lang: str) -> str:
-    label = (
-        Tr("✅ Все правила включены", "✅ All rules on")(lang)
-        if chat.enabled
-        else Tr("⚪ Правила выключены", "⚪ Rules off")(lang)
-    )
-    return f"{label} · {_COMMON(lang)}" if chat.common else label
+    """The switch for all of a chat's rules, with the panel's suffix when the value is the default."""
+    glyph = "✅" if chat.enabled else "⚪"
+    return f"{glyph} {switch_name(chat.enabled, lang)}{COMMON(lang) if chat.common else ''}"
 
 
 def _row_parts(rule: RuleView, chat: ChatRules, lang: str) -> tuple[str, str, str]:
@@ -250,8 +269,8 @@ def rules_screen(
     if rules or page:
         hint = (
             Tr(
-                "Нажмите правило, чтобы открыть. Верхняя кнопка ставит на паузу все сразу.",
-                "Tap a rule to open it. The top button pauses all of them at once.",
+                "Нажмите правило, чтобы открыть. Верхняя кнопка выключает все сразу.",
+                "Tap a rule to open it. The top button turns all of them off at once.",
             )
             if chat.enabled
             else Tr(
@@ -263,7 +282,7 @@ def rules_screen(
         hint = Tr("Правил пока нет.", "No rules yet.")(lang)
     lines = [f"📏 <b>{_TITLE(lang)}</b> · {escape(title)}", "", hint]
     if chat.mode in MODES:
-        lines.append(f"{Tr('Режим', 'Mode')(lang)}: {MODES[chat.mode](lang)}")
+        lines.append(mode_line(chat.mode, lang))
 
     rows: list[tuple[Button, ...]] = [
         (Button(master_label(chat, lang), cb("ar_all:", lang, chat_id)),)
@@ -289,9 +308,9 @@ def rules_screen(
 GONE_NOTICE: Final = Tr("<i>Этого правила уже нет.</i>", "<i>This rule is gone.</i>")
 """The line ``rule.gone`` puts over the list (trusted HTML, no ✓: nothing was done)."""
 
-RULES_ON: Final = Tr("Правила включены", "Rules turned on")
-RULES_OFF: Final = Tr("Правила выключены", "Rules turned off")
-"""The notice after the switch for all of a chat's rules."""
+RULES_ON: Final = Tr(switch_name(True, "ru"), switch_name(True, "en"))
+RULES_OFF: Final = Tr(switch_name(False, "ru"), switch_name(False, "en"))
+"""The notice after the switch for all of a chat's rules: the switch's own words."""
 
 
 def gone_screen(
@@ -634,24 +653,36 @@ FIND_PLACEHOLDER: Final = Tr("Выберите человека", "Pick a person
 
 
 def who_screen(
-    lang: str, chat_id: int, people: Sequence[Person], *, page: int = 0, pages: int = 1
+    lang: str,
+    chat_id: int,
+    people: Sequence[Person],
+    *,
+    page: int = 0,
+    pages: int = 1,
+    find: bool = True,
 ) -> Screen:
     """``rule.who``: whose messages, picked from the chat's most active people.
 
     «🔍 Найти в Telegram» opens ``rule.who_find`` for anyone else, and is the
-    way on when nobody has written in the chat yet.
+    way on when nobody has written in the chat yet. ``find=False`` drops it,
+    for an app that sent the button's label back instead of opening the search.
     """
-    hint = (
-        Tr(
+    if find:
+        hint = Tr(
             "Чьи? Нажмите имя или найдите человека в Telegram.",
             "Whose? Tap a name or find the person in Telegram.",
         )
-        if people
-        else Tr(
+        nobody = Tr(
             "В этом чате пока никто не писал. Найдите человека в Telegram.",
             "Nobody has written in this chat yet. Find the person in Telegram.",
         )
-    )(lang)
+    else:
+        hint = Tr("Чьи? Нажмите имя.", "Whose? Tap a name.")
+        nobody = Tr(
+            "В этом чате пока никто не писал, а поиск в этом приложении Telegram не открывается.",
+            "Nobody has written in this chat yet, and this Telegram app can't open the search.",
+        )
+    text = (hint if people else nobody)(lang)
     rows: list[tuple[Button, ...]] = [
         (
             Button(
@@ -664,15 +695,13 @@ def who_screen(
     nav = pager(page, pages, lambda p: cb("ar_b_type:", lang, chat_id, "u", p))
     if nav is not None:
         rows.append(nav)
+    way_back = cancel(_list_cb(lang, chat_id), lang)
     rows.append(
-        (
-            Button(FIND(lang), cb("ar_b_find:", lang, chat_id)),
-            cancel(_list_cb(lang, chat_id), lang),
-        )
+        (Button(FIND(lang), cb("ar_b_find:", lang, chat_id)), way_back) if find else (way_back,)
     )
     return Screen(
         id="rule.who",
-        text=f"{_who_title(lang)}\n\n{hint}",
+        text=f"{_who_title(lang)}\n\n{text}",
         rows=tuple(rows),
     )
 
@@ -710,6 +739,10 @@ WHO_CANCELLED: Final = Tr("Правило не создано.", "The rule was n
 WHO_STALE: Final = Tr(
     "Этот поиск уже закрыт. Начните правило заново.",
     "This search is closed. Start the rule again.",
+)
+WHO_UNSUPPORTED: Final = Tr(
+    "Это приложение Telegram не открывает поиск.",
+    "This Telegram app can't open the search.",
 )
 """The short lines that take the reply keyboard away (a message carrying
 ``ReplyKeyboardRemove`` cannot carry inline buttons too)."""
