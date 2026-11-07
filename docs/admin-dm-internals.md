@@ -22,11 +22,9 @@ their part (§F.6, §A2.1), so an area adds to its own part without renumbering 
 | [src/bot/handlers/admin_chat_panel.py](../src/bot/handlers/admin_chat_panel.py) | Per-chat settings panel (`adm_pnl*`), including the `tolerance_level` FSM flow |
 | [src/bot/handlers/admin_defaults.py](../src/bot/handlers/admin_defaults.py) | Global-settings screen (`adm_defs*`) |
 | [src/bot/handlers/admin_kb.py](../src/bot/handlers/admin_kb.py) | Knowledge-base organizers of one chat (`adm_kb_org*`, `adm_kb_orgs:`) |
-| [src/bot/handlers/admin_reactions.py](../src/bot/handlers/admin_reactions.py) | Reactions panel (`adm_react*`) |
 | [src/bot/handlers/admin_sticker.py](../src/bot/handlers/admin_sticker.py) | Sticker browser, re-analysis, DM sticker check, description-merge reply (`adm_stk*`) |
 | [src/bot/handlers/rules.py](../src/bot/handlers/rules.py) | Rules engine UI (`adm_rules:`, `ar_*`) |
-| [src/bot/keyboards/admin*.py](../src/bot/keyboards/) | All inline keyboards; one module per handler module |
-| [src/bot/keyboards/access_card.py](../src/bot/keyboards/access_card.py) | The access card's keyboard (`access_keyboard`) |
+| [src/bot/keyboards/admin_kb.py](../src/bot/keyboards/admin_kb.py) | The add-organizer prompt's reply keyboard and the labels it sends back. Every inline keyboard of the panel is built from a screen (§F.6) |
 | [src/bot/keyboards/kb.py](../src/bot/keyboards/kb.py) | `/remember` undo and `/kb` paging — knowledge-base keyboards that are *not* panel screens |
 | [src/bot/screens/](../src/bot/screens/) | The screen system every redesigned screen uses: model, delivery, callback table, stale fallback, rules lint, sample registry (§F.6) |
 | [src/bot/access_requests.py](../src/bot/access_requests.py) | Files an attempt and sends the access card, for both the middleware and `my_chat_member` (§A6.2) |
@@ -46,7 +44,7 @@ their part (§F.6, §A2.1), so an area adds to its own part without renumbering 
 in aiogram the first handler whose filters match **consumes** the update:
 
 ```
-fsm_cancel → admin_sticker → admin_kb → admin_reactions → admin_chat_panel → admin_defaults
+fsm_cancel → admin_sticker → admin_kb → admin_chat_panel → admin_defaults
 → access_card → admin → rules → stale → commands → callbacks → chat_events → community
 → reactions → media → message
 ```
@@ -57,8 +55,8 @@ change to that test too.
 Consequences that are easy to break:
 
 - `admin_sticker` precedes `media`, which is why an admin's DM sticker reaches the catalogue
-  check ([admin_sticker.py:899](../src/bot/handlers/admin_sticker.py#L899)) instead of
-  `media.py`'s silent auto-learn.
+  check ([admin_sticker.py:985](../src/bot/handlers/admin_sticker.py#L985)) instead of
+  `media.py`'s silent auto-learn — unless an open prompt reads the sticker (§F.5).
 - `admin_chat_panel` precedes `commands`, which is why the tolerance FSM handler carries
   `~F.text.startswith("/")` — without it the open state would swallow every admin command
   until a valid float arrived.
@@ -86,7 +84,7 @@ There is no single admin gate. Which one a handler uses depends on what it can i
 |---|---|---|
 | `IsAdmin()` filter | `/admin`, `/settings`, `/costs`, DM sticker handlers, the stale catch-all | Uses middleware-injected `is_admin` when present, otherwise queries `bot_config` through the Dishka container. Filters run *before* inner middleware, hence the fallback |
 | `_guard_admin(kwargs, callback)` | `admin.py`, `rules.py` (`_check_admin`) | Reads `data["is_admin"]` set by `AccessControlMiddleware`, plus a private-chat check; logs `admin_access_denied` for the audit trail |
-| `check_admin_direct(bot_config_repo, user_id)` | `admin_kb`, `admin_reactions`, `admin_chat_panel`, `admin_defaults`, `admin_sticker` callbacks | Direct repository read, for handlers that already take `BotConfigRepository` via `FromDishka` and so cannot use the filter's injected flag |
+| `check_admin_direct(bot_config_repo, user_id)` | `admin_kb`, `admin_chat_panel`, `admin_defaults`, `admin_sticker` callbacks | Direct repository read, for handlers that already take `BotConfigRepository` via `FromDishka` and so cannot use the filter's injected flag |
 
 All of them funnel into `parse_admin_ids()` over the `admin_ids` value. **Every** callback
 handler additionally verifies `callback.message.chat.type == "private"`.
@@ -136,8 +134,8 @@ filters on must be in it, which `test_routes.py` checks against the source.
 | `adm_kb:` / `adm_kb_menu:` / `adm_kb_toggle:` | — | retired: the KB picker and menu are gone, the switch lives in the chat's memory section |
 | `adm_kb_orgs:` / `adm_kb_org_rm:` / `adm_kb_org_undo:` | `lang:chat_id:page` / `lang:chat_id:user_id` / `lang:chat_id:user_id:position` | organizer list / remove at once / put back at `position` |
 | `adm_kb_org_list:` / `adm_kb_org_pick:` | `lang:chat_id:page` / `lang:chat_id:user_id` | participant list / add the tapped one |
-| `adm_kb_org_add:` / `adm_kb_org_x:` | `lang:chat_id` | add prompt (new message, reply keyboard) / leave it from the failure answer |
-| `adm_react:` / `adm_react_menu:` / `adm_react_toggle:` | `lang:page` / `lang:chat_id` / `lang:chat_id:field` | reactions picker / menu / toggle |
+| `adm_kb_org_add:` | `lang:chat_id` | add prompt (new message, reply keyboard). The failure answer's own `adm_kb_org_x:` is gone: its «Отмена» is the reply keyboard's, and an old button reaches the catch-all |
+| `adm_react:` / `adm_react_menu:` / `adm_react_toggle:` | — | retired: the reactions switches are a section of the chat screen (§A2.2) |
 | `adm_stk_sets:` / `adm_stk_pk:` / `adm_stk_view:` | `lang:page` / `lang:pack_key:page` / `lang:file_unique_id` | packs / pack by its 12-hex key / sticker + card as new messages |
 | `adm_stk_set:` | `lang:set_name:page` | legacy pack button: still parsed, no longer emitted |
 | `adm_stk_card:` / `adm_stk_score:` | `lang:file_unique_id` | card in place / explicitness screen |
@@ -152,14 +150,130 @@ filters on must be in it, which `test_routes.py` checks against the source.
 
 `AdminStates` ([src/bot/states/admin.py](../src/bot/states/admin.py)):
 
-| State | Set by | Consumed by | Escape |
-|---|---|---|---|
-| `awaiting_setting_value` | `adm_pnl_tol:` | `admin_chat_panel.handle_chat_panel_tolerance_input` | `adm_pnl_tolcancel:` button, `/cancel`, or a typed `/command` (filtered out — but see the caption caveat in §F.2) |
-| `awaiting_kb_organizer` | `adm_kb_org_add:` (data: `kb_chat_id`, `kb_lang`; the prompt is a **new** message carrying a one-time reply keyboard with a `request_users` button, `request_id=REQUEST_IDS.ORG_PICK`) | `admin_kb.handle_kb_organizer_shared` (the `users_shared` service message, filtered on that `request_id` — a pick from another picker never reaches it — and matched in **any** state, registered **before** the reader, which would otherwise take a pick for an empty message and answer «not found»; without this state it writes nothing and answers stale), then `admin_kb.handle_kb_organizer_add_reply` for a forward or `@username` (clears state on entry, **before** the authority check; a failed lookup re-arms it and answers `org.fail`) | the `✖️ Отмена` keyboard label, `adm_kb_org_x:`, a pick from the participant list, `adm_kb_orgs:`, `/cancel`, or a typed `/command`; the `🔍 Найти в Telegram` label arriving as *text* means the client cannot open the picker — answered with the fallback, state kept; a forwarded message whose text starts with `/` or equals a label is still an organizer add, not a command. Every exit through `admin_kb` clears the state, sends `ReplyKeyboardRemove` on a line of its own and then the organizer list as a new message (a message cannot carry both keyboards). `adm_kb_org_x:` tapped while some *other* dialog is open shows the list and leaves that dialog alone |
-| `awaiting_rule_config` | `ar_type:` | `rules.handle_rule_config_input` (`IsAdmin`-gated since TD-049) | `ar_cancel:` button, `/cancel`, any `/command` incl. in a caption, or navigating back to any rules screen |
-| `awaiting_sticker_score` | `adm_stk_expedit:` (data: `exp_file_unique_id`, `exp_lang`, `exp_prompt_id`; the prompt is the score screen edited in place) | `admin_sticker.handle_sticker_explicitness_input` (admin re-checked in the body; a valid number clears the state and sends the card as a new message, an invalid one re-prompts in a new message and moves `exp_prompt_id`; either way the answered prompt loses its keyboard) | `adm_stk_expcancel:` button, `/cancel`, a typed `/command`, or any other `adm_stk_*` button — they clear this state only, never another screen's |
-| `awaiting_sticker_edit`, `awaiting_sticker` | — | — | declared, currently unused |
-| `awaiting_rule_words`, `awaiting_rule_text`, `awaiting_rule_react` | — | — | declared for the button-driven rule builder (A3); unused until it lands |
+Every state is a typed-input prompt: the admin's next message is read as its answer. The
+last two columns are the two tables described under *Leaving a prompt* below.
+
+| State | Set by | Answer read by | Own taps (`PROMPT_OWN_TAPS`) | Screens (`PROMPT_SCREENS`) |
+|---|---|---|---|---|
+| `awaiting_setting_value` | `adm_pnl_tol:` | `admin_chat_panel.handle_chat_panel_tolerance_input` | `adm_pnl_tol:`, `adm_pnl_tolcancel:` | `tol.in`, `tol.invalid` |
+| `awaiting_system_prompt` | `adm_pnl_sp:` | `admin_chat_panel.handle_chat_panel_sp_input` | `adm_pnl_sp:`, `adm_pnl_spx:`, `adm_pnl_spok:`, `adm_pnl_spre:` | `sp.prompt`, `sp.preview`, `sp.refused`, `sp.redo` |
+| `awaiting_kb_organizer` | `adm_kb_org_add:` (data: `kb_chat_id`, `kb_lang`; the prompt is a **new** message carrying a one-time reply keyboard with a `request_users` button, `request_id=REQUEST_IDS.ORG_PICK`) | `admin_kb.handle_kb_organizer_shared` (the `users_shared` service message, filtered on that `request_id` — a pick from another picker never reaches it — and matched in **any** state, registered **before** the reader, which would otherwise take a pick for an empty message and answer «not found»; without this state it writes nothing and answers stale), then `admin_kb.handle_kb_organizer_add_reply` for a forward or `@username` (clears state on entry, **before** the authority check; a failed lookup re-arms it and answers `org.fail`). The `🔍 Найти в Telegram` label arriving as *text* means the client cannot open the picker — answered with the fallback, state kept. A forwarded message whose text starts with `/` or equals a label is still an organizer add, not a command | `adm_kb_org_add:`, `adm_kb_org_list:`, `adm_kb_org_pick:`, `adm_kb_orgs:` | `org.add`, `org.fail`, `org.list` |
+| `awaiting_sticker_score` | `adm_stk_expedit:` (data: `exp_file_unique_id`, `exp_lang`, `exp_prompt_id`; the prompt is the score screen edited in place) | `admin_sticker.handle_sticker_explicitness_input` (admin re-checked in the body; a valid number clears the state and sends the card as a new message, an invalid one re-prompts in a new message and moves `exp_prompt_id`; either way the answered prompt loses its keyboard) | `adm_stk_expedit:`, `adm_stk_expcancel:` | `stk.score_in` |
+| `awaiting_rule_config` | `ar_cfg:`; `ar_type:` from old buttons | `rules.handle_rule_config_input` (`IsAdmin`-gated since TD-049) | every `ar_` tap | `rule.cfg`, `rule.cfg_bad` |
+| `awaiting_rule_words` | `ar_b_type:` with the keywords kind | `rules.handle_rule_words_input` | every `ar_` tap | `rule.words` |
+| `awaiting_rule_text` | `ar_b_act:` with a warning or a reply | `rules.handle_rule_text_input` | every `ar_` tap | `rule.text` |
+| `awaiting_rule_react` | `ar_b_act:` with a typed reaction | `rules.handle_rule_react_input` (a sticker counts as its emoji) | every `ar_` tap | `rule.react`, `rule.react_in` |
+| `awaiting_rule_who` | `ar_b_find:` (the person search: a reply keyboard, `REQUEST_IDS.RULE_WHO`) | `rules.handle_builder_found`, plus the handlers for its «Отмена» and for the label sent back as text | every `ar_` tap | `rule.who_find` |
+| `awaiting_sticker_edit`, `awaiting_sticker` | nothing | — | none: any tap ends them | none |
+
+`ar_` is a family: the middleware leaves every rules tap to `rules.py`, which ends its own
+prompts (§A3).
+
+The ways out of every prompt: `/cancel` (`fsm_cancel` is the first router, §F.2), a typed
+`/command`, the prompt's own cancel button, and any tap that is not one of its own taps. Each
+reader skips a `text` that starts with `/`, and the rules, sticker-score and organizer readers
+skip such a `caption` too (§F.2). The tolerance reader does not: a photo captioned `/help`
+there is read as a wrong number (TD-134). The instruction editor reads `text` only, so a photo
+never reaches it. Every exit through
+`admin_kb` clears the state, sends `ReplyKeyboardRemove` on a line of its own and then the
+organizer list as a new message (a message cannot carry both keyboards).
+
+#### Leaving a prompt: `PROMPT_OWN_TAPS`, `PROMPT_SCREENS` and `prompt_exit`
+
+The panel is buttons on many messages, so the admin can leave a prompt by tapping any older
+one. Each area used to close its prompts from its own handlers only. A tap in another area left
+the prompt armed, and the next text — maybe hours later, meant for something else — became a
+tolerance value, a line of a chat's instruction, or a rule. Two tables and a middleware fix
+that. Both tables live next to the states in
+[src/bot/states/admin.py](../src/bot/states/admin.py), keyed by the state string:
+
+- **`PROMPT_OWN_TAPS`**: state → the callback prefixes that keep the prompt open (`is_own_tap`
+  matches by prefix). An entry that ends in `_`, like `ar_`, is a family of prefixes. An empty
+  row means every tap ends the prompt.
+- **`PROMPT_SCREENS`**: state → the screen ids the prompt shows.
+- **`note_screen(message, screen_id, text, *, editable=True)`** records which message holds the
+  open prompt. `show_markup` calls it on every delivery; `admin_chat_panel` calls it by hand
+  for the instruction editor's replies it sends without `show`: the last piece of a split
+  screen (`_send_split`) and the refusal (`_reply_refused`). A prompt screen becomes the
+  chat's record (`PromptMessage`: the ids, the screen id, its title line, `editable`). Any other
+  screen delivered into that same message drops the record. `editable` is false when the
+  screen was sent with a reply keyboard. The record is in process memory, one per chat, like
+  the FSM's `MemoryStorage`, so a restart loses both together.
+- **`PromptExitMiddleware`** ([src/bot/middleware/prompt_exit.py](../src/bot/middleware/prompt_exit.py))
+  is an outer middleware on the main router's `callback_query`, registered in
+  `handlers/__init__.py` before any router is included. It runs once per tap, before any
+  filter. When the state has a row in `PROMPT_OWN_TAPS` and the payload is not one of its own
+  taps (and not `noop`), it clears the state, sets `data["raw_state"]` to `None` (aiogram read
+  the state before the middleware, and a `StateFilter` further down must see it gone) and logs
+  `Prompt left by a tap elsewhere` with the state and the action. The tap's handler then runs
+  with no state.
+
+The prompt's message would still be asking for input. So the middleware also closes it:
+
+- It takes the record (`take_prompt_message`) **before** the handler runs, so a prompt that the
+  handler opens records its own message and is not closed.
+- **After** the handler, in a `finally`, it edits the recorded message to the screen's title
+  and «Ввод закрыт.» («Input closed.»), in italics, with no buttons, and logs
+  `prompt_message_closed`. The language is the tapped payload's second field.
+- The title (`title_line`) is the screen's first non-empty line. A line without `<b>` gives no
+  title: that is an error reply, so its closed form is «Ввод закрыт.» alone and does not repeat
+  «… отправьте ещё раз». A bold line whose tags do not close on it, or that is longer than 200
+  characters, is sent as escaped plain text, cut to 200.
+
+It leaves the message as it is when:
+
+- the tapped message **is** the prompt's message — its handler is drawing a new screen there;
+- the record shows a screen of a different prompt (`take_prompt_message` checks it against
+  `PROMPT_SCREENS[state]`);
+- the message carries a **reply keyboard** (`org.add`, `rule.who_find`): Telegram cannot edit
+  it, so the middleware logs `prompt_message_left_open` with `reason="reply keyboard"`;
+- the edit fails (deleted, too old, Telegram unreachable): `prompt_message_left_open` with the
+  error as the reason. «message is not modified» is swallowed by `safe_edit_text`.
+
+The organizer prompt's reply keyboard is not taken away here. That needs a message of its own,
+and one more message on every tap that leaves the prompt would be noise. It stays until its next
+use, and every use removes it.
+
+**The invariant for a new state.** A new `AdminStates` state needs a row in `PROMPT_OWN_TAPS`
+**and** a row in `PROMPT_SCREENS`. If the bot arms it (`set_state(AdminStates.<name>)`
+anywhere in `src`), its `PROMPT_SCREENS` row must not be empty, and every screen in it needs a
+registered sample. It also needs a decision about stickers (next section) and a row in
+`_STICKER_TAKER` in `tests/unit/test_routes.py`. What fails when a row is missing (measured on a
+copy of the tree, 2026-11-07):
+
+| Mutation | Fails |
+|---|---|
+| a new state with no row anywhere | `test_every_prompt_state_has_an_allowlist`, `test_every_prompt_state_lists_its_screens` (the table's keys against `AdminStates`), `test_an_allowlist_names_routes[<state>]` (`KeyError`), `test_a_sticker_in_the_dm_goes_to_whoever_reads_it` («a state without a row») |
+| an armed state's `PROMPT_SCREENS` row emptied | `test_every_state_the_bot_sets_shows_a_screen` (it greps `src` for `set_state(AdminStates.…)`) |
+
+Two more guards hold the rows' contents: `test_an_allowlist_names_routes` (every own tap is a
+routed prefix, or a family that covers some) and `test_a_prompt_screen_does_not_end_its_prompt`
+(every button on a prompt's sample screens is one of its own taps). The middleware's behaviour
+is in `test_routes.py` (the state) and `tests/unit/test_prompt_message_closed.py` (the message).
+
+No test checks that a `PROMPT_SCREENS` row names the screen the handler really shows, or that
+a prompt is delivered through `show` / `note_screen` at all. A prompt sent with a bare
+`message.answer` still has its state ended, but its message is never closed.
+
+#### A sticker while a prompt is open: `STICKER_ANSWERS`
+
+An admin's sticker in the DM goes to the stickers area's catalogue check
+(`admin_sticker.handle_admin_sticker_check`). `admin_sticker` is included before every other
+panel router and before `media` (§F.2), so without a guard that handler would also take a
+sticker meant as a prompt's answer. `STICKER_ANSWERS` in `states/admin.py` lists the prompts
+that read a sticker; `takes_a_sticker(state, forwarded=…)` asks it, and the catalogue check's
+filter `_no_prompt_takes_it` steps aside when it says yes. The filter reads `raw_state`, the
+name `PromptExitMiddleware` clears.
+
+| State | Takes | Why |
+|---|---|---|
+| `awaiting_rule_react` | any sticker | a sticker stands for its emoji: `rules.handle_rule_react_input` reads `sticker.emoji` and checks it like a typed one |
+| `awaiting_sticker_score` | any sticker | its own handler answers that the number goes in as text. It is registered earlier in the same router, so it gets the sticker first anyway; the row keeps the table honest |
+| `awaiting_kb_organizer` | a **forwarded** sticker only | a forward names its sender, whatever it carries. A sticker the admin sends themself is neither a forward nor a `@username` |
+
+Every other prompt leaves a sticker to the catalogue check, the same as with no prompt open, and
+the prompt stays open (the check takes no FSM context). A new state that should read a sticker
+needs a row here, and `_STICKER_TAKER` names the handler that takes one in every state.
 
 Validation posture is *reject, do not clamp*: tolerance input outside `[0.0, 1.0]` and
 non-JSON rule configs re-prompt rather than silently coercing.
@@ -339,6 +453,22 @@ shows the parent screen with a notice that says what happened.
 | R12 | HTML tags are balanced and known; the text fits 4096 UTF-16 units after parsing |
 | R13 | `custom_emoji` recognises the keyboard as a screen |
 
+R10 measures a label with `label_width_px` against `budget(n)`, the widest text a row of `n`
+buttons shows uncut: 342, 163.5 and 104 px. A label cut at run time — a chat title, a person's
+name, a rule's words — is cut to `clip_room(n)`, which is `budget(n) - CLIP_MARGIN_PX` (2 px:
+340, 161.5 and 102 px). `CLIP_MARGIN_PX` is the bound the measured table in the rules test holds
+the estimator to; the worst label measured reads 0.2 px narrow. `clip_room` is the one source
+of that width: the chat screens (`chat.fit_label`), the rules screens (`rules._room`) and the
+organizer list (`orgs.NAME_PX = clip_room(1)`) all call it, and none keeps a margin of its own.
+The sticker screens are the exception: a pack title on the pack list and a sticker's
+description on a pack's page are cut by **character count** (`PACK_LABEL_CHARS` = 24,
+`ROW_LABEL_CHARS` = 22 in [screens/stickers.py](../src/bot/screens/stickers.py)), not by width.
+Ordinary titles fit (an all-capitals Russian title with `(120 из 120)` measures about 300 px of
+342), but 24 wide letters in a row do not: `Ш` or `W` repeated measures 400–434 px.
+`test_r10_a_clipped_label_uses_its_row` feeds each of the three a long name and checks the cut
+label ends with «…» and lands between 20 px under the one-button budget and the budget itself,
+so a clipper that drifts back to its own smaller width fails.
+
 `route` maps a payload to the handler that would take it: the tests pass `first_match`, the
 dump passes `first_handler` over `src.bot.handlers.router`. The retired/compat half of R7 reads
 the table instead of the router on purpose: a retired prefix still has its handler today and
@@ -418,7 +548,8 @@ dump is a picture, the test is the gate.
 | Test | Covers |
 |---|---|
 | `tests/unit/test_screen_rules.py` | the rules on every sample, one control per rule, the design copies, the sample ratchet, the section table |
-| `tests/unit/test_routes.py` | the callback table, 64-byte budgets, routing of legacy / new / garbled payloads, router order, the retired-write and "Invalid data" ratchets |
+| `tests/unit/test_routes.py` | the callback table, 64-byte budgets, routing of legacy / new / garbled payloads, router order, the retired-write and "Invalid data" ratchets; the two prompt tables, `PromptExitMiddleware`'s effect on the state, and who takes a sticker in each state (§F.5) |
+| `tests/unit/test_prompt_message_closed.py` | what `PromptExitMiddleware` does to the prompt's message: closed once, in the tap's language, left alone behind a reply keyboard or on an edit error (§F.5) |
 | `tests/unit/test_screens_render.py` | delivery: edit vs new message, the fallbacks, toasts answered once, splitting, the builders |
 | `tests/unit/test_screens_entries.py` | the container and the FSM context reaching an entry through a real dispatcher, the stale catch-all's three answers, every entry refusing without `data` |
 | `tests/unit/test_dump_screens.py` | the dump carries every key the renderer reads |
@@ -439,10 +570,11 @@ dump is a picture, the test is the gate.
 | `default_<field>` | scalar | Merge layer 2 for the 13 non-legacy per-chat fields |
 | `health_check_*` | scalars | Health scheduler config |
 
-Notification defaults live in two places that must agree:
-`AdminRepository._NOTIFICATION_DEFAULTS` and `AbuseNotificationService._NOTIFICATION_DEFAULTS`
-— `{"sticker": "on", "unauthorized": True, "jailbreak": True, "blacklist": True,
-"ai_fallback": True}`.
+Notification defaults live in two places that must agree on `unauthorized`:
+`AdminRepository._NOTIFICATION_DEFAULTS` — `{"sticker": "on", "unauthorized": True,
+"jailbreak": True, "blacklist": True, "ai_fallback": True}` — and the module-level
+`_NOTIFICATION_DEFAULTS` in `services/abuse/notifications.py`, now `{"unauthorized": True}`.
+The last three keys of the first have had no reader since their senders were removed (§A6.4).
 
 #### `chat_settings`
 
@@ -594,7 +726,9 @@ the payload from the chat list.
 the hub is drawn only by `show_hub`.
 
 **Notifications.** `_PANEL_TOGGLES = {"unauthorized"}`: the jailbreak, blacklist and AI-fallback
-switches are no longer drawn, keep their stored values, and an `adm_ntog:` naming one is stale.
+switches are no longer drawn and an `adm_ntog:` naming one is stale. Their stored values stay
+in `admin_settings`, but nothing reads them: the notifications they switched were never sent
+(§A6.4).
 The sticker cycle (`adm_nstk:`) is `next_sticker_mode` over off → on → detailed.
 
 **Defaults.** `adm_defs_tgl:` flips `default_{key}` in `bot_config`, calls
@@ -627,8 +761,6 @@ Files:
 | [src/bot/screens/chat.py](../src/bot/screens/chat.py) | Pure builders over a `ChatView`: the chat list, `/panel` results, one chat's root, its six sections, the tolerance screens; the copy and the toggle labels |
 | [src/bot/screens/samples/chat.py](../src/bot/screens/samples/chat.py) | One sample per state that changes a screen's rows or labels |
 | [src/bot/screens/sections.py](../src/bot/screens/sections.py) | Which section each setting code is shown in (`SECTION_OF`), the old group tokens (`LEGACY_GROUPS`), the `· общее` rule (`shows_common`) |
-| [src/bot/keyboards/admin_chat_panel.py](../src/bot/keyboards/admin_chat_panel.py) | The instruction editor's two keyboards; `chat_panel_root_keyboard`, a shim kept only until the KB area stops importing it |
-| [src/bot/handlers/admin_reactions.py](../src/bot/handlers/admin_reactions.py) | An empty router, kept while `handlers/__init__.py` includes it |
 | [src/bot/settings_fields.py](../src/bot/settings_fields.py) | The field registry (§A2.1) |
 
 ### A2.1 Settings-field registry
@@ -698,9 +830,11 @@ and the switch never show a value from before the write.
 
 Today both are defensive: `ChatConfigService` is Dishka `Scope.REQUEST`, so no cache survives
 a single update (measured 2026-08-06). They become load-bearing if the scope moves to
-`Scope.APP` — at which point the two write sites that do **not** invalidate
-(`approve_attempt` in `access_card.py`, `handle_wl_remove` in `admin.py`) must be fixed in
-the same commit. Tracked as TD-046.
+`Scope.APP`. Then the one write site that does **not** invalidate must be fixed in the same
+commit: approving from the access card (`handle_approve_notification` → `approve_attempt`, both
+in `access_card.py`). Approving from the requests screen (`handle_wl_approve`) and turning a chat
+off (`handle_wl_remove`, both in `admin.py`) already call `_invalidate` after the write.
+Tracked as TD-046.
 
 ### A2.2 Screens, callbacks and entries
 
@@ -739,9 +873,11 @@ the same commit. Tracked as TD-046.
   place, so older panel messages keep live buttons, and the state used to outlive the screen
   and read the admin's next text as a value. The list, a chat, a section, a switch, the presets
   screen, a preset, `/panel` and the `show_chat` / `show_chats` entries all call it first. It
-  clears `awaiting_setting_value` only: the instruction editor's `awaiting_system_prompt`
-  keeps its draft, which a «Save» confirms anyway. A button of another area does not pass
-  through here and leaves the prompt open.
+  clears `awaiting_setting_value` only. For a tap this now repeats what `PromptExitMiddleware`
+  has done before the handler ran (§F.5): any tap outside `adm_pnl_tol:` / `adm_pnl_tolcancel:`
+  ends the prompt, in this area or another, and the instruction editor's
+  `awaiting_system_prompt` and its draft end the same way. The call still matters for `/panel`
+  and for the entries opened by a message, which the middleware does not see.
 - **Unparsable payloads** — a non-integer chat id or page, an unknown section or code, a
   non-bool code on the toggle, a preset outside 0..1 — go to `show_stale`. The two cancel
   handlers (`adm_pnl_tolcancel:`, `adm_pnl_spx:`) clear their own state first, so the way out
@@ -752,8 +888,8 @@ the same commit. Tracked as TD-046.
   instruction editor (`adm_pnl_sp*:`) still answers `_NO_ROW` as an alert.
 - **`· общее` on the knowledge base is a footnote line** (`_KB_COMMON_ON` / `_KB_COMMON_OFF`),
   not the button's suffix (`_toggle(..., marked=False)`). The button shares its row with
-  `👥 Организаторы · N`; «⚪ База знаний · общее» estimates at about 152 px against the 150 px
-  that `fit_label`'s margin leaves half a row, and the rendered dump cut it. The line is still
+  `👥 Организаторы · N`; «⚪ База знаний · общее» estimates at 164.6 px, past the 163.5 px a
+  half row shows uncut (`clip_room(2)` is 161.5 px), and the rendered dump cut it. The line is still
   driven by `shows_common`, and the name stays «База знаний» everywhere.
 - **`show_chat(target, lang, chat_id, *, notice=None, data)`** resolves five dependencies from
   `data` (`ChatSettingsRepository`, `BotConfigRepository`, `ChatConfigService`,
@@ -790,7 +926,8 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
   the draft exists and belongs to the payload's chat; otherwise the tap is stale, never a rule
   made in another chat. `ar_add:` resets only the draft keys, in one mapping: `rule_chat_id` is
   itself a draft key, and passing it again as a keyword argument raised on every tap.
-- **Four prompt states** (`_RULE_STATES`: words, text, reaction, JSON). Every callback handler
+- **Five prompt states** (`_RULE_STATES`: words, text, reaction, the person search, JSON).
+  `PromptExitMiddleware` leaves every `ar_` tap to this file (§F.5), and every callback handler
   starts by leaving them (`_leave_config_prompt`) except the four in `_STATE_SETTERS`, each with
   its reason; `test_fsm_escape.py` walks the module and holds both halves. A typed answer that
   is accepted sends one new message and takes the keyboard off the prompt (`_retire_prompt`, by
@@ -818,9 +955,10 @@ module docstring), [src/bot/screens/rules.py](../src/bot/screens/rules.py) (pure
   `_claim_flood_cooldowns`, after the mode has picked and with no await between check and stamp,
   so two stickers evaluated together act once and a match that was not picked starts no rest.
   It is process-local, so a restart forgets it.
-- **Known gap**: in `awaiting_rule_react` a *sticker* is taken by `admin_sticker`'s `F.sticker`
-  handler, which carries no state filter and runs earlier in the router order. A typed emoji is
-  text, so the flow works; a sticker sent there does nothing for the rule.
+- **A sticker in `awaiting_rule_react` is the reaction.** `admin_sticker`'s DM sticker check runs
+  earlier in the router order and used to take it, so a sticker did nothing for the rule. Its
+  filter `_no_prompt_takes_it` now steps aside for this state (`STICKER_ANSWERS`, §F.5), and
+  `handle_rule_react_input` reads `sticker.emoji` like a typed one.
 
 ---
 
@@ -840,12 +978,13 @@ are in `keyboards/kb.py`, outside the panel. The prompt's state is described in 
   The page shown after either is derived from the index (`orgs.page_of`), not from the payload.
 - **Names are looked up per page.** `_names` asks Telegram only for the people on the page
   being drawn, concurrently (`asyncio.gather` over `resolve_display_name`); a name already
-  known from the event (a pick, a forward) is not asked again. A failed lookup reads
-  «участник {id}».
-- **Names are clipped by width, not length** (`orgs.clip` to `orgs.NAME_PX`, 90 % of a
-  one-button row by lint's estimate). The estimate is a per-script average; rendered at
-  390 px, long mixed names clipped to the full row still overflowed by up to 20 px and fit
-  from 92 %. A name of one wide letter repeated still overflows; Telegram's client cuts it.
+  known from the event (a pick, a forward) is not asked again. A failed lookup falls back to
+  `OrganizerNameRepository.names` (table `kb_organizer_names`, migration 038: the stored name,
+  else the latest one seen in the chat); «участник {id}» only when no name was ever known.
+- **Names are clipped by width, not length** (`orgs.clip` to `orgs.NAME_PX`, which is
+  `clip_room(1)`: 340 px, §F.6). The estimate is measured against the renderer per letter, so a
+  long mixed Cyrillic and Latin name needs no margin of its own. A script missing from the
+  estimator's table reads wide and is cut early, never late.
 - **Leaving the prompt is two messages.** `_leave_prompt` sends the line carrying
   `ReplyKeyboardRemove`, then the `orgs` screen with inline buttons as a new message — the
   same in every exit, callback or message.
@@ -988,10 +1127,15 @@ that matters, and it has already gone out.
 | Notification | Sender | Recipients | Gate |
 |---|---|---|---|
 | Access card | `AccessRequestService.submit` builds `cards.access_card` in the admin language; `AbuseNotificationService.notify_unauthorized(text=…, reply_markup=…)` delivers | all admins | `admin_settings.notifications.unauthorized` + 30-min per-chat in-memory cooldown + no prior rejection |
-| Jailbreak / Blacklist / AI fallback | `AbuseNotificationService` | all admins | matching `admin_settings` key |
 | New sticker | `StickerLearningService.notify_admins`, called from `media.py` | all admins | `admin_settings.notifications.sticker` ∈ {on, detailed}; skipped when `analysis_failed` or the sticker was already known |
 | Health alert | `HealthChecker._send_alert` | **all admins** | not switchable; de-duplicated by fingerprint |
 | Spend card | `SpendLimitService.notify_admins_if_exceeded`, from `reply_flow.finish_reply` | all admins | over `daily_spend_limit_usd`; once per UTC day |
+
+There is no jailbreak, blacklist or AI-fallback notification: their senders were never called
+and were removed in `21f0c77`. `notify_unauthorized` is the one method
+`AbuseNotificationService` has left. The `jailbreak`, `blacklist` and `ai_fallback` defaults in
+`AdminRepository._NOTIFICATION_DEFAULTS` are read by nothing. AI-path failures reach the
+admins as the health alert.
 
 `AbuseNotificationService` never imports the screen layer: the caller hands it finished text
 and markup. Services that build a card themselves (`spend_limit`, `health/checker`) import
