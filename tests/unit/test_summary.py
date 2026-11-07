@@ -649,6 +649,53 @@ class TestSummaryHeaderIsTheDesignedOne:
         assert "&lt;script&gt;" in new and "<b>Итог:</b>" in new and "@@u0@@" not in new
 
 
+class TestSummaryMessageIsPinned:
+    """The whole summary message, byte for byte, as groups receive it.
+
+    The heading and the summary screen share one source of wording; this pins
+    what that source must keep producing, so a change to the screen's copy
+    cannot quietly change a message the bot posts into every chat.
+    """
+
+    BODY = "**Темы:** цены & сроки\n- @@u0@@ предложила *вариант*"
+    BODY_HTML = (
+        "<b>Темы:</b> цены &amp; сроки\n"
+        '• <a href="tg://user?id=111">Alice</a> предложила <i>вариант</i>'
+    )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("language", "n", "heading"),
+        [
+            ("ru", 1, "📋 <b>Саммари чата</b> · 1 сообщение"),
+            ("ru", 2, "📋 <b>Саммари чата</b> · 2 сообщения"),
+            ("ru", 5, "📋 <b>Саммари чата</b> · 5 сообщений"),
+            ("ru", 11, "📋 <b>Саммари чата</b> · 11 сообщений"),
+            ("ru", 21, "📋 <b>Саммари чата</b> · 21 сообщение"),
+            ("ru", 101, "📋 <b>Саммари чата</b> · 101 сообщение"),
+            ("en", 1, "📋 <b>Chat summary</b> · 1 message"),
+            ("en", 2, "📋 <b>Chat summary</b> · 2 messages"),
+            ("en", 5, "📋 <b>Chat summary</b> · 5 messages"),
+            ("en", 11, "📋 <b>Chat summary</b> · 11 messages"),
+            ("en", 21, "📋 <b>Chat summary</b> · 21 messages"),
+            ("en", 101, "📋 <b>Chat summary</b> · 101 messages"),
+            # Anything that is not "ru" has always been written in English.
+            ("de", 2, "📋 <b>Chat summary</b> · 2 messages"),
+        ],
+    )
+    async def test_full_message(
+        self, summary_service, ai_router, message_repo, language, n, heading
+    ) -> None:
+        message_repo.get_for_summary.return_value = [
+            _make_message_row(content=f"сообщение {i}") for i in range(n)
+        ]
+        ai_router.generate_text.return_value = _make_text_result(self.BODY)
+
+        result = await summary_service.generate(chat_id=-1, language=language)
+
+        assert result == f"{heading}\n\n{self.BODY_HTML}"
+
+
 class TestSummaryConversationTruncation:
     """E-1: a conservative safety net protects the model call from a
     pathologically large prompt now that /summary can request up to 1000
