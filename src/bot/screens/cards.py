@@ -62,6 +62,7 @@ _NO_TITLE: Final = Tr("Чат без названия", "Untitled chat")
 _APPROVE: Final = Tr("👍 Одобрить", "👍 Approve")
 _REJECT: Final = Tr("❌ Отклонить", "❌ Reject")
 _CHAT_SETTINGS: Final = Tr("⚙️ Настройки чата", "⚙️ Chat settings")
+_TURN_OFF: Final = Tr("🔌 Отключить", "🔌 Turn off")
 _REJECTED_LIST: Final = Tr("🚫 Отклонённые", "🚫 Rejected")
 APPROVED: Final = Tr("Одобрено", "Approved")
 REJECTED: Final = Tr(
@@ -174,12 +175,24 @@ def is_added_card(text: object) -> bool:
 
 
 def access_approved(lang: Lang, who: Applicant) -> Screen:
-    """The card after approval: the request stays readable, the way on is the chat."""
+    """The card after approval: the request stays readable, the way on is the chat.
+
+    «🔌 Отключить» is the way back, not an undo: it opens the same question the
+    chat's screen asks (``adm_wl_rm_ask:``, page 0), because approval is not
+    fully reversible -- whatever the bot said in the chat meanwhile stays
+    said. Turning off moves ``enabled`` only; the approved attempt stays
+    approved.
+    """
     return Screen(
         id="card.access.ok",
         text=_access_text(who, lang, with_message=False, with_user_id=True),
         notice=APPROVED(lang),
-        rows=((Button(_CHAT_SETTINGS(lang), callback=cb("adm_pnl_menu:", lang, who.chat_id)),),),
+        rows=(
+            (
+                Button(_CHAT_SETTINGS(lang), callback=cb("adm_pnl_menu:", lang, who.chat_id)),
+                Button(_TURN_OFF(lang), callback=cb("adm_wl_rm_ask:", lang, who.chat_id, 0)),
+            ),
+        ),
     )
 
 

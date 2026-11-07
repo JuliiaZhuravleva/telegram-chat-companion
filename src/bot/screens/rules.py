@@ -43,6 +43,19 @@ MAX_WORDS: Final = 20
 MAX_WORD_CHARS: Final = 64
 
 _JSON_SHOWN_CHARS: Final = 3000
+JSON_SHOW: Final = Tr("🧩 Как записано (JSON)", "🧩 As stored (JSON)")
+JSON_HIDE: Final = Tr("🧩 Скрыть запись (JSON)", "🧩 Hide the record (JSON)")
+JSON_CAPTION: Final = Tr(
+    "Так бот хранит это правило; строки выше — главное из него словами. Изменить его так "
+    "нельзя, а новое правило так задаётся: «{add}» → «{cfg}».",
+    "This is how the bot stores the rule; the lines above give the gist in words. It cannot "
+    "be edited this way, but a new rule can be written like this: «{add}» → «{cfg}».",
+)
+"""The line above a rule's ``<pre>``. "The gist", not "the same": the words
+leave out fields the engine reads (``exclude_users``, ``case_sensitive``,
+``target_users``…), and the JSON leaves out priority and "required", which
+are columns. No path edits a stored rule's config; the JSON prompt only
+creates one."""
 _EXCERPT_CHARS: Final = 100
 _CAUGHT_CHARS: Final = 200
 
@@ -140,6 +153,7 @@ WARN_FALLBACK: Final = Tr(
 
 _TITLE: Final = Tr("Правила", "Rules")
 _ADD: Final = Tr("➕ Добавить", "➕ Add")
+_CFG_BUTTON: Final = Tr("🧩 Настроить в JSON", "🧩 Set up in JSON")
 _ON: Final = Tr("работает", "on")
 _PAUSED: Final = Tr("на паузе", "paused")
 _NEW: Final = Tr("Новое правило:", "New rule:")
@@ -548,7 +562,8 @@ def rule_screen(
     show_json: bool = False,
     notice: str | None = None,
 ) -> Screen:
-    """``rule``: one rule in words, with pause, delete and its raw JSON behind a button."""
+    """``rule``: one rule in words, with pause, delete and its stored form behind
+    «🧩 Как записано (JSON)», captioned with what it is and what can be done with it."""
     if not rule.enabled:
         status = _PAUSED(lang)
     elif chat.enabled:
@@ -580,7 +595,8 @@ def rule_screen(
         if common:
             lines.append(common)
     if show_json:
-        lines += ["", f"<pre>{config_json(rule.config)}</pre>"]
+        caption = JSON_CAPTION(lang).format(add=_ADD(lang), cfg=_CFG_BUTTON(lang))
+        lines += ["", caption, f"<pre>{config_json(rule.config)}</pre>"]
 
     rows: list[tuple[Button, ...]] = []
     if not chat.enabled:
@@ -599,9 +615,7 @@ def rule_screen(
     rows.append(
         (
             Button(
-                Tr("🧩 Скрыть JSON", "🧩 Hide JSON")(lang)
-                if show_json
-                else Tr("🧩 JSON", "🧩 JSON")(lang),
+                (JSON_HIDE if show_json else JSON_SHOW)(lang),
                 cb("ar_view:", lang, rule.id, rule.chat_id, *(() if show_json else ("j",))),
             ),
         )
@@ -662,12 +676,7 @@ def type_screen(lang: str, chat_id: int) -> Screen:
                 kind(Tr("🎭 Много стикеров", "🎭 Many stickers"), "f"),
                 kind(Tr("🛡 Много сообщений", "🛡 Many messages"), "s"),
             ),
-            (
-                Button(
-                    Tr("🧩 Настроить в JSON", "🧩 Set up in JSON")(lang),
-                    cb("ar_cfg:", lang, chat_id),
-                ),
-            ),
+            (Button(_CFG_BUTTON(lang), cb("ar_cfg:", lang, chat_id)),),
             (back("rules", _list_cb(lang, chat_id), lang),),
         ),
     )

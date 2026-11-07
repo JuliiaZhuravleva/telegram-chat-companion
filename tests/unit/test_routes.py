@@ -88,6 +88,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_pnl_spx:": (LANG, CID),
     "adm_wl_rm_ask:": (LANG, CID, PAGE),
     "adm_wl_rm:": (LANG, CID, PAGE),
+    "adm_wl_on:": (LANG, CID, PAGE),
     "adm_wl_pending:": (LANG, PAGE),
     "adm_wl_apr:": (LANG, INT4, PAGE),
     "adm_wl_rej:": (LANG, INT4, PAGE),

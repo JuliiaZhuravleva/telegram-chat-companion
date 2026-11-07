@@ -138,8 +138,9 @@ place. It is four buttons and one status line:
 💚 Всё работает · 💰 расход за сутки $0.04
 ```
 
-The line reads what is already recorded: the verdict of the **last** health check, the AI
-spend over the last 24 hours, and — on the Chats button — how many requests are waiting.
+The line reads what is already recorded: the verdict of the **last** health check and the AI
+spend over the last 24 hours. While access requests wait, **🙏 Запросы · N** sits beside
+🗂 Чаты and opens them in one tap; the Chats button itself never carries the count.
 Opening the panel never runs a check, so it costs nothing and does not change what the next
 alert says; «🔁 Обновить» on the status screen (§A1.3) is the one place a check runs on
 demand. Before the first check the line says «❔ Проверок пока не было». If the database
@@ -148,7 +149,8 @@ A day under one cent keeps four decimals, so it does not read as $0.00.
 
 | Button | Leads to | Section |
 |---|---|---|
-| 🗂 Чаты / Chats — `· 2 заявки` while requests wait | The chat list; requests and rejected chats are reached from there | §A1.2, §A2 |
+| 🗂 Чаты / Chats | The chat list; rejected chats, and requests too, are reached from there | §A1.2, §A2 |
+| 🙏 Запросы · N / Requests · N — only while requests wait, beside Chats | The first waiting request; its back button leads to the chat list | §A1.2 |
 | 📦 Паки стикеров / Sticker packs | The sticker catalogue | §A5 |
 | 📊 Состояние / Status | The last health check, statistics, costs | §A1.3 |
 | ⚙️ Общие настройки / General settings | Settings for every chat, notifications, panel language | §A1.4, §A1.5 |
@@ -163,8 +165,8 @@ The bot answers only in chats whose `chat_settings.enabled` is true. Everything 
 a message from an unknown chat, or the bot being added to a group — is described with the
 card it produces, in §A6.1.
 
-The chat list (§A2) carries the way in: **🙏 Заявки / Requests** and **🚫 Отклонённые /
-Rejected**. Both show **one chat per page** — its title, id and type, who wrote and the first
+The chat list (§A2) carries the way in: **🙏 Запросы доступа / Access requests** and
+**🚫 Отклонённые / Rejected**; while requests wait, the hub has its own button to them (§A1.1). Both show **one chat per page** — its title, id and type, who wrote and the first
 50 characters of what they wrote — with the two actions directly under it and ◀️ n/N ▶️ to
 walk the list. A number in the text never has to be matched to a button. A button pointing
 past the end of a list that has since shrunk shows the last entry.
@@ -176,7 +178,11 @@ done elsewhere.
 
 - **👍 Одобрить / Approve** enables the chat, copies its title and type onto its settings row,
   marks *every* waiting request from that chat approved at once, and opens **the new chat's
-  own screen** with «✓ Новый чат подключён» — that is where its settings are.
+  own screen** with «✓ Новый чат подключён» — that is where its settings are. That is all it
+  writes: nothing is posted to the group and no command menu is pushed. What follows is the
+  bot at work there — answering, and greeting or reacting where those are on — and none of that is taken back by turning the
+  chat off again — turning off moves only `enabled`, the attempt stays approved, and other
+  admins' copies of the card answer a later tap with «Запрос уже решён».
 - **❌ Отклонить / Reject** marks the request rejected and shows the next one with
   «✓ Отклонено»; after the last one, the chat list with the same line.
 - If another admin, or the card in the DM, got there first, the requests are redrawn with
@@ -192,7 +198,7 @@ While a chat has any rejected attempt:
 The screen says so in one line («Бот молчит в этих чатах и не присылает от них заявок»). The
 admin will not hear from that chat again until the record is dealt with:
 
-- **↩️ Вернуть в заявки / Back to requests** puts it back among the requests — notifications
+- **↩️ Вернуть в запросы / Back to requests** puts it back among the requests — notifications
   resume. «✓ Заявка возвращена».
 - **🗑 Забыть / Forget** asks first, then removes the record permanently: the chat becomes an
   unknown chat again, and its next message produces a fresh request and a fresh notification.
@@ -202,11 +208,32 @@ A record someone else already removed is answered with «✓ Запись не �
 
 #### Turning the bot off in one chat
 
-A chat's own screen (§A2) carries **🔌 Отключить**. It asks first — «Отключить бота здесь?» —
-and says exactly two things: the bot stops answering in that chat, and its settings are kept.
-Settings, history and knowledge base all survive; the switch is `enabled=false`, nothing more.
-Confirming shows the chat list with «✓ Бот отключён в чате «…»»; «⬅️ Не отключать» returns to
-the chat.
+A chat's own screen (§A2) carries **🔌 Отключить**, and so does an approved access card
+(§A6.3). It asks first — «Отключить бота здесь?» — and says in three lines what happens and how
+to come back:
+
+1. the bot stops answering there and the chat leaves «🗂 Чаты»; its settings are kept;
+2. right away, «↩️ Вернуть» on the list brings it back;
+3. later, the way that chat really has:
+   - a group or a private chat — someone writes there, an access request appears (at most one
+     every half hour — the cooldown that also spaces the cards), and approving it brings the bot back;
+   - a channel — posts never reach the whitelist gate, so only removing the bot and adding it
+     again files a request;
+   - a chat with **any rejected attempt on record**, even an old one from before it was
+     approved — it never asks again by itself (§A1.2, a rejection is a block) and lands in
+     «🚫 Отклонённые»; the way back is «↩️ Вернуть в запросы», then «👍 Одобрить». The screen
+     says so instead of promising a request that will not come.
+
+Settings, history and knowledge base all survive; the switch is `enabled=false`, nothing more,
+and the approved attempt stays approved. Confirming shows the chat list (its first page — both
+entry points carry page 0) with «✓ Бот отключён в чате «…»» and **↩️ Вернуть** as the top row — on that
+render only; that page holds one chat fewer so the keyboard does not grow. «↩️ Вернуть» sets
+`enabled=true` again and redraws the list with «✓ Бот снова работает в чате «…»» and no undo
+row. Tapped when the chat is already on (twice, or after another admin), it writes nothing and
+says the same; a chat whose settings row is gone is answered with «Этого чата нет в
+настройках, ничего не изменилось» — also what «🔌 Отключить» says then, rather than claiming
+the bot was turned off. «⬅️ Не отключать» returns to the chat's screen, from the chat's screen
+and from the access card alike.
 
 ### A1.3 Status, statistics, costs
 
@@ -322,9 +349,10 @@ This screen and 🌍 Global settings (§A1.4) are the same per-chat options at t
 and telling them apart is the single most important thing in the panel.
 
 **The chat list** (`🗂 Чаты`) shows the connected chats, most active first, each with its
-message count for the last 24 hours. When there are access requests or rejected chats, a row
-`🙏 Заявки · N` / `🚫 Отклонённые · N` sits on top and the page holds one chat fewer, so the
-keyboard never grows. With no chats at all the screen says how a chat gets here (add the bot
+message count for the last 24 hours. Waiting access requests get a row of their own on top,
+`🙏 Запросы доступа · N`, and the page holds one chat fewer; `🚫 Отклонённые · N` shares the
+bottom row with «⬅️ Панель». Right after «🔌 Отключить» the undo row `↩️ Вернуть` goes on top
+too, and that page holds one chat fewer again (§A1.2), so the keyboard never grows. With no chats at all the screen says how a chat gets here (add the bot
 to a group, a request arrives) and still shows that row when a request is waiting.
 
 **One chat** opens on a short screen: the chat's name and id, one status line (the bot on or
@@ -417,7 +445,10 @@ A small per-chat rules engine. 📏 Правила on a chat's screen opens that
 - The mode (how several matching rules combine) is a line of text. A rule's weight shows in its
   row only under a weight mode, the only place it means anything.
 - A row shows ✅/⏸ and the rule's name and opens the rule's card: what sets it off and what it
-  does in words, how often it fired, and 🧩 JSON for the raw config.
+  does in words, how often it fired, and **🧩 Как записано (JSON)**, which shows the rule as
+  the bot stores it under one line saying what that is: the lines above give the gist of the
+  same rule in words, the stored form cannot be edited, and a new rule can be written that way
+  through «➕ Добавить» → «🧩 Настроить в JSON». **🧩 Скрыть запись (JSON)** hides it again.
 - **On the card**: ⏸ На паузу / ▶ Возобновить, and 🗑 Удалить, which asks first and cannot be
   undone. While the chat's rules are off the card says so and carries the same switch.
 - **➕ Новое правило** builds a rule with buttons:
@@ -431,7 +462,7 @@ A small per-chat rules engine. 📏 Правила on a chat's screen opens that
     4096 characters.
   The new rule opens on its card with «✓ Правило создано». A refused answer says why and keeps
   the question open; ✖️ Отмена leaves it.
-- **🧩 JSON** in the builder takes the whole rule as a JSON object, for what the buttons do not
+- **🧩 Настроить в JSON** in the builder takes the whole rule as a JSON object, for what the buttons do not
   cover (regular expressions, exclusions, weight). The type goes in a `type` field, `weight` and
   `mandatory` are read out of the object. An unknown type or action, and a reaction Telegram
   would refuse, are refused here — otherwise the rule would be created and silently never act.
@@ -666,8 +697,10 @@ so "added, then someone posted" is one card, not two. The cooldown is in memory,
 clears it and a chat can end up with two pending rows; approving either one clears them all.
 
 **After a tap** the card stays readable and gets a status line on top — ✓ *Одобрено*, or
-✓ *Отклонено* with what that means — and one button that leads on: **⚙️ Настройки чата** for
-the approved chat, **🚫 Отклонённые** for the rejected list. A card older than 48 hours keeps its
+✓ *Отклонено* with what that means — and the buttons that lead on: **⚙️ Настройки чата** and
+**🔌 Отключить** side by side for the approved chat (the second asks the same question as the
+chat's screen, §A1.2 — it is a way back, not an undo: what approving already set in motion stays,
+§A1.2), **🚫 Отклонённые** for the rejected list. A card older than 48 hours keeps its
 text and only has its buttons swapped. A second tap, or a tap on a card whose request was already
 resolved from the panel, shows the state the request is actually in with a "Запрос уже решён"
 toast — never a second action. The lists the request lands in, and what approving or rejecting

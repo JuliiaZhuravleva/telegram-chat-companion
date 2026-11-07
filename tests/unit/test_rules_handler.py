@@ -427,6 +427,49 @@ class TestTheCard:
         assert _same(_shown(callback), expected)
         assert "<pre>" in _shown(callback)[0]
 
+    @pytest.mark.parametrize(
+        ("payload", "toggle", "goes_to"),
+        [
+            (f"ar_view:ru:{RULE_ID}:{CHAT_ID}", "🧩 Как записано (JSON)", ":j"),
+            (f"ar_view:ru:{RULE_ID}:{CHAT_ID}:j", "🧩 Скрыть запись (JSON)", f":{CHAT_ID}"),
+        ],
+    )
+    async def test_the_stored_form_says_what_it_is(
+        self, payload: str, toggle: str, goes_to: str
+    ) -> None:
+        """Plain words first, JSON last; shown, it is captioned with what it is
+        and with the one thing that can be done with such text."""
+        callback = await _tap(handlers.handle_rule_view, payload, _State(), _deps(_rule()))
+        text, markup = _shown(callback)
+
+        assert [[b.text for b in row] for row in markup.inline_keyboard] == [
+            ["⏸ На паузу", "🗑 Удалить"],
+            [toggle],
+            ["⬅️ Правила"],
+        ]
+        assert markup.inline_keyboard[1][0].callback_data.endswith(goes_to)
+        caption = (
+            "Так бот хранит это правило; строки выше — главное из него словами. Изменить его "
+            "так нельзя, а новое правило так задаётся: «➕ Добавить» → «🧩 Настроить в JSON»."
+        )
+        if payload.endswith(":j"):
+            lines = text.splitlines()
+            assert lines[lines.index(caption) + 1].startswith("<pre>")
+        else:
+            assert caption not in text
+            assert "<pre>" not in text
+
+    def test_the_caption_names_buttons_that_are_there(self) -> None:
+        """«➕ Добавить» → «🧩 Настроить в JSON»: the rule list's button, then the type step's."""
+        listed = screens.rules_screen(
+            "ru", chat_id=CHAT_ID, title="Чат", chat=_ON, rules=[screens.rule_view(_rule())]
+        )
+        add = [b.callback for row in listed.rows for b in row if b.label == "➕ Добавить"]
+        assert add == [f"ar_add:ru:{CHAT_ID}"]
+        kinds = screens.type_screen("ru", CHAT_ID)
+        cfg = [b.callback for row in kinds.rows for b in row if b.label == "🧩 Настроить в JSON"]
+        assert cfg == [f"ar_cfg:ru:{CHAT_ID}"]
+
     async def test_n_sends_it_as_a_new_message(self) -> None:
         """From the card a fired rule sends: that card stays as the record."""
         callback = await _tap(

@@ -103,6 +103,11 @@ def hub_bad(lang: Lang) -> Screen:
     return build_hub(lang, health={"status": "critical"}, spend=Decimal("1.27"), pending=3)
 
 
+@sample("hub", section="Панель", title="Запросов доступа больше сотни", nav="root")
+def hub_many(lang: Lang) -> Screen:
+    return build_hub(lang, health={"status": "healthy"}, spend=Decimal("0.0031"), pending=120)
+
+
 @sample("hub", section="Панель", title="База не ответила", nav="root")
 def hub_unknown(lang: Lang) -> Screen:
     return build_hub(lang, known=False)
@@ -161,6 +166,28 @@ def forget_ask(lang: Lang) -> Screen:
 @sample("chat.off_ask", section="Чаты", title="Отключить бота", nav="prompt", user_data=_PEOPLE)
 def off_ask(lang: Lang) -> Screen:
     return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Отключить бота: чат когда-то отклоняли",
+    nav="prompt",
+    user_data=_PEOPLE,
+)
+def off_ask_rejected(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0, rejected=True)
+
+
+@sample(
+    "chat.off_ask",
+    section="Чаты",
+    title="Отключить бота: канал",
+    nav="prompt",
+    user_data=_PEOPLE,
+)
+def off_ask_channel(lang: Lang) -> Screen:
+    return off_ask_screen(lang, fake.CHAT_ID, fake.CHAT_TITLE, 0, channel=True)
 
 
 # ---------------------------------------------------------------------------

@@ -173,10 +173,37 @@ class TestTurnOff:
         assert _payloads(screen) == [f"adm_wl_rm:en:{CHAT_ID}:3", f"adm_pnl_menu:en:{CHAT_ID}"]
         assert screen.rows[0][1].kind == "cancel"
 
-    def test_says_the_settings_are_kept_and_promises_nothing_else(self):
-        text = off_ask_screen("ru", CHAT_ID, "Test Chat", 0).text
+    @pytest.mark.parametrize(
+        ("lang", "labels"),
+        [("ru", [["🔌 Отключить", "⬅️ Не отключать"]]), ("en", [["🔌 Turn off", "⬅️ Keep it on"]])],
+    )
+    @pytest.mark.parametrize("variant", [{}, {"rejected": True}, {"channel": True}])
+    def test_the_same_two_buttons_whatever_the_way_back(
+        self, lang: str, labels: list[list[str]], variant: dict[str, bool]
+    ):
+        screen = off_ask_screen(lang, CHAT_ID, "Test Chat", 0, **variant)
 
-        assert "Настройки сохранятся" in text
+        assert [[b.label for b in row] for row in screen.rows] == labels
+
+    @pytest.mark.parametrize(
+        ("variant", "later"),
+        [
+            ({}, "когда в чате напишут, появится запрос доступа (не чаще раза в полчаса)"),
+            ({"channel": True}, "уберите бота из канала и добавьте снова"),
+            ({"rejected": True}, "чат сам не попросит: его уже отклоняли"),
+            ({"rejected": True, "channel": True}, "чат сам не попросит"),
+        ],
+    )
+    def test_says_what_happens_and_the_two_ways_back(self, variant: dict[str, bool], later: str):
+        """Settings kept, the chat leaves the list, «↩️ Вернуть» at once, and the
+        later path that chat really has: a rejection on record wins over the kind."""
+        body = off_ask_screen("ru", CHAT_ID, "Test Chat", 0, **variant).text.splitlines()[3:]
+
+        assert len(body) == 3
+        assert "Настройки сохранятся" in body[0]
+        assert "«🗂 Чаты»" in body[0]
+        assert body[1] == "Вернуть сразу — «↩️ Вернуть» в списке."
+        assert later in body[2]
 
 
 # ---------------------------------------------------------------------------
