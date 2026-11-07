@@ -101,6 +101,7 @@ _RULE_STATES: Final = frozenset(
         AdminStates.awaiting_rule_words.state,
         AdminStates.awaiting_rule_text.state,
         AdminStates.awaiting_rule_react.state,
+        AdminStates.awaiting_rule_who.state,
     }
 )
 """The typed-input prompts this file arms. Only these does a rules screen end."""
@@ -892,6 +893,7 @@ async def handle_builder_find(
         await show_stale(callback, lang, data=kwargs, state=state)
         return
     await state.update_data(rule_finding=chat_id, lang=lang)
+    await state.set_state(AdminStates.awaiting_rule_who)
     await show(callback, screens.who_find_screen(lang))
     if isinstance(callback.message, Message):
         try:
@@ -900,14 +902,24 @@ async def handle_builder_find(
             logger.info("rule_who_keyboard_kept", error=str(exc))
 
 
+async def _finding_chat(state: FSMContext) -> int | None:
+    """The chat of the open person search, or None when no search is open.
+
+    Open means BOTH: the state is ``awaiting_rule_who`` and ``rule_finding``
+    holds a chat id. The flag alone outlives a search that a tap on another
+    screen ended (the prompt-exit middleware drops the state, not the data).
+    """
+    if await state.get_state() != AdminStates.awaiting_rule_who.state:
+        return None
+    finding = (await state.get_data()).get("rule_finding")
+    return finding if isinstance(finding, int) and not isinstance(finding, bool) else None
+
+
 class _Finding(Filter):
-    """The rules person search is open: ``rule_finding`` holds its chat id."""
+    """The rules person search is open (see `_finding_chat`)."""
 
     async def __call__(self, _event: Message, state: FSMContext | None = None) -> bool:
-        if state is None:
-            return False
-        finding = (await state.get_data()).get("rule_finding")
-        return isinstance(finding, int) and not isinstance(finding, bool)
+        return state is not None and await _finding_chat(state) is not None
 
 
 _CANCEL_LABELS: Final = frozenset(bare_label(CANCEL(lang)) for lang in ("ru", "en"))
@@ -930,13 +942,15 @@ async def handle_builder_found(message: Message, state: FSMContext) -> None:
 
     Matched in any state by its own ``request_id``, ahead of everything that
     would read a message with no text. A pick from a search that is no longer
-    open (the rule was finished, cancelled or restarted) is answered as stale.
+    open (the rule was finished, cancelled or restarted, or a tap on another
+    screen ended the search) is answered as stale.
     """
     shared = message.users_shared
     data = await state.get_data()
     lang = lang_of(data.get("lang"))
-    finding = data.get("rule_finding")
-    chat_id = finding if isinstance(finding, int) and not isinstance(finding, bool) else None
+    chat_id = await _finding_chat(state)
+    if await state.get_state() == AdminStates.awaiting_rule_who.state:
+        await state.set_state(None)
     draft = await _draft(state, chat_id) if chat_id is not None else None
     if (
         shared is None
@@ -974,6 +988,7 @@ async def handle_builder_find_cancel(
     data = await state.get_data()
     lang = lang_of(data.get("lang"))
     chat_id = data.get("rule_finding")
+    await state.set_state(None)
     await state.update_data(**dict.fromkeys(_DRAFT_KEYS))
     await _leave_find(message, screens.WHO_CANCELLED(lang))
     if isinstance(chat_id, int):

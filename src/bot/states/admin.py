@@ -50,6 +50,11 @@ class AdminStates(StatesGroup):
     awaiting_rule_text = State()
     awaiting_rule_react = State()
 
+    # Rule builder: Telegram's person search is open under a reply keyboard,
+    # waiting for a pick (or its «Отмена»). A state of its own, like every other
+    # prompt, so a tap on another screen ends it and its «Отмена» is the rules'.
+    awaiting_rule_who = State()
+
 
 _OWN_TAPS: dict[State, tuple[str, ...]] = {
     # The tolerance number prompt: its opener and its «Отмена».
@@ -70,7 +75,6 @@ _OWN_TAPS: dict[State, tuple[str, ...]] = {
     # state to take the reply keyboard away with it.
     AdminStates.awaiting_kb_organizer: (
         "adm_kb_org_add:",
-        "adm_kb_org_x:",
         "adm_kb_org_list:",
         "adm_kb_org_pick:",
         "adm_kb_orgs:",
@@ -81,6 +85,7 @@ _OWN_TAPS: dict[State, tuple[str, ...]] = {
     AdminStates.awaiting_rule_words: ("ar_",),
     AdminStates.awaiting_rule_text: ("ar_",),
     AdminStates.awaiting_rule_react: ("ar_",),
+    AdminStates.awaiting_rule_who: ("ar_",),
     # Declared, never set: any tap ends them.
     AdminStates.awaiting_sticker_edit: (),
     AdminStates.awaiting_sticker: (),

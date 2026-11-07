@@ -63,7 +63,7 @@ def _sends(bot: AsyncMock) -> list[Any]:
 
 async def _searching(state: _FakeState | None = None) -> _FakeState:
     """A person rule's draft with the search open, as `handle_builder_find` leaves it."""
-    state = state or _FakeState()
+    state = state or _FakeState(AdminStates.awaiting_rule_who)
     await state.update_data(
         rule_chat_id=GROUP_ID, rule_type="user_specific", rule_finding=GROUP_ID, lang="ru"
     )
@@ -123,6 +123,7 @@ class TestOpeningTheSearch:
         assert cancel.text == "✖️ Отмена"
         assert markup.input_field_placeholder == screens.FIND_PLACEHOLDER("ru")
         assert state.data["rule_finding"] == CHAT_ID
+        assert await state.get_state() == AdminStates.awaiting_rule_who.state
         # The picker above loses its buttons: the search's Cancel is the one way out.
         assert retire.await_args.args[0] is callback.message
         assert retire.await_args.kwargs == {"reply_markup": None}
@@ -191,23 +192,29 @@ class TestAPickReachesItsOwnPicker:
         assert state._data["rule_user"] == PICKED_ID
         assert state._data["rule_name"] == "Аня @anya"
         assert state._data["rule_finding"] is None
+        assert await state.get_state() is None
         line, screen = _sends(bot)
         assert line.text == "Выбран человек: Аня @anya"
         assert isinstance(line.reply_markup, ReplyKeyboardRemove)
         assert screen.text == render_text(screens.action_screen("ru", GROUP_ID, "Аня @anya"))
         data["chat_settings_repo"].set_field.assert_not_awaited()  # type: ignore[attr-defined]
 
-    async def test_a_rules_pick_while_the_kb_prompt_is_armed_is_still_the_rules(self) -> None:
-        """The KB's forward/@username reader would take a message with no text."""
+    async def test_a_rules_pick_after_the_kb_prompt_took_over_is_stale_and_not_the_kbs(
+        self,
+    ) -> None:
+        """Opening the KB prompt ended the search (a foreign tap), so a pick from
+        its keyboard is stale: never a rule person, and never read by the KB's
+        forward/@username reader, which would take a message with no text."""
         msg, data, bot = _make_message()
         state = await _searching(_FakeState(AdminStates.awaiting_kb_organizer))
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
 
         await _propagate(_pick(msg, REQUEST_IDS.RULE_WHO), data, state)
 
-        assert state._data["rule_user"] == PICKED_ID
+        assert state._data.get("rule_user") is None
+        assert [s.text for s in _sends(bot)] == [screens.WHO_STALE("ru")]
         data["chat_settings_repo"].set_field.assert_not_awaited()  # type: ignore[attr-defined]
-        assert not any("Не нашёл" in s.text for s in _sends(bot))
+        assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
 
     async def test_a_kb_pick_is_the_kbs_while_the_rules_search_is_open(self) -> None:
         msg, data, bot = _make_message()
@@ -285,6 +292,7 @@ class TestEveryWayOutRemovesTheKeyboard:
         )
         assert rules.text == render_text(expected)
         assert all(state._data[k] is None for k in handlers._DRAFT_KEYS)
+        assert await state.get_state() is None
 
     async def test_cancel_in_english(self) -> None:
         msg, data, bot = _make_message(text="✖️ Cancel")

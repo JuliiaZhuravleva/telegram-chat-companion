@@ -16,11 +16,12 @@ What a failure here means in production:
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
-from aiogram.types import ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardRemove
 
 from src.bot.handlers import router as main_router
 from src.bot.screens.routes import (
@@ -192,12 +193,7 @@ def test_longest_payloads_measured():
 
 
 def _written_payloads() -> dict[str, set[str]]:
-    """Every payload the registered samples write, both languages, by prefix —
-    plus the instruction editor's two inline keyboards, which no sample draws."""
-    from src.bot.keyboards.admin_chat_panel import (
-        system_prompt_cancel_keyboard,
-        system_prompt_confirm_keyboard,
-    )
+    """Every payload the registered samples write, both languages, by prefix."""
     from src.bot.screens.registry import load_all
 
     payloads: list[str] = []
@@ -205,11 +201,6 @@ def _written_payloads() -> dict[str, set[str]]:
         for item in variants:
             for lang in ("ru", "en"):
                 payloads += [b.callback for row in item.build(lang).rows for b in row]
-    for markup in (
-        system_prompt_cancel_keyboard("ru", -100123),
-        system_prompt_confirm_keyboard("ru", -100123, 4242),
-    ):
-        payloads += [b.callback_data or "" for row in markup.inline_keyboard for b in row]
     by_prefix: dict[str, set[str]] = {}
     for data in payloads:
         prefix = prefix_of(data) if data and data != NOOP else None
@@ -556,6 +547,7 @@ _PROMPT_INPUT: dict[str, str] = {
 
 _PROMPT_SCREENS: dict[str, tuple[str, ...]] = {
     AdminStates.awaiting_setting_value.state: ("tol.in", "tol.invalid"),
+    AdminStates.awaiting_system_prompt.state: ("sp.prompt", "sp.preview", "sp.refused", "sp.redo"),
     AdminStates.awaiting_sticker_score.state: ("stk.score_in",),
     AdminStates.awaiting_kb_organizer.state: ("org.add", "org.fail", "org.list"),
     AdminStates.awaiting_rule_config.state: ("rule.cfg", "rule.cfg_bad"),
@@ -595,22 +587,6 @@ def test_a_prompt_screen_does_not_end_its_prompt(state: str):
                 for button in row:
                     if button.callback != NOOP:
                         assert is_own_tap(state, button.callback), (item.title, button.callback)
-
-
-def test_the_instruction_editor_keyboards_do_not_end_it():
-    from src.bot.keyboards.admin_chat_panel import (
-        system_prompt_cancel_keyboard,
-        system_prompt_confirm_keyboard,
-    )
-
-    state = AdminStates.awaiting_system_prompt.state
-    for markup in (
-        system_prompt_cancel_keyboard("ru", -100123),
-        system_prompt_confirm_keyboard("ru", -100123, 4242),
-    ):
-        for row in markup.inline_keyboard:
-            for button in row:
-                assert is_own_tap(state, button.callback_data or ""), button.callback_data
 
 
 @pytest.mark.parametrize("state", _ALL_STATES)
@@ -683,6 +659,23 @@ async def test_the_organizer_keyboard_cancel_after_its_prompt_is_a_cancel(text: 
     )
 
 
+async def test_the_rules_person_search_ends_on_a_foreign_tap_and_its_cancel_follows():
+    """The search is a prompt like the others: its «Отмена» is the rules' while it
+    is open; after another screen's button ended it, the leftover keyboard's
+    «Отмена» is a plain cancel and a pick from it is stale."""
+    open_search = FakeState(AdminStates.awaiting_rule_who)
+    await open_search.update_data(rule_finding=-100123, rule_type="user_specific")
+    msg, _ = admin_text("✖️ Отмена")
+    assert await deliver("message", msg, open_search) == "rules.handle_builder_find_cancel"
+
+    fsm = FakeState(AdminStates.awaiting_rule_who)
+    await fsm.update_data(rule_finding=-100123, rule_type="user_specific")
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    assert await fsm.get_state() is None
+    msg, _ = admin_text("✖️ Отмена")
+    assert await deliver("message", msg, fsm) == "fsm_cancel.handle_leftover_cancel"
+
+
 async def test_the_leftover_cancel_removes_the_keyboard():
     repo = AsyncMock()
     repo.get_admin_language = AsyncMock(return_value="ru")
@@ -695,3 +688,39 @@ async def test_the_leftover_cancel_removes_the_keyboard():
     # The prompt is already gone: said so, and the keyboard taken away with it.
     assert method.text == "Нечего отменять."
     assert isinstance(method.reply_markup, ReplyKeyboardRemove)
+
+
+def _admin_sticker(emoji: str | None) -> Message:
+    from aiogram.types import Chat, Sticker, User
+
+    from tests.unit.screen_routing import ADMIN_ID
+
+    return Message(
+        message_id=2,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        sticker=Sticker(
+            file_id="fake-file",
+            file_unique_id="fake-unique",
+            type="regular",
+            width=512,
+            height=512,
+            is_animated=False,
+            is_video=False,
+            emoji=emoji,
+        ),
+    ).as_(AsyncMock())
+
+
+async def test_a_sticker_in_the_rules_reaction_prompt_is_the_rules_answer():
+    """The two halves of one behaviour, from two branches: the stickers area's DM
+    check yields while another prompt is open, and the rules prompt accepts a
+    sticker. Only the union decides who takes it, so it is tested here."""
+    taken = await deliver(
+        "message", _admin_sticker("🔥"), FakeState(AdminStates.awaiting_rule_react)
+    )
+    assert taken is not None and taken.startswith("rules."), taken
+    # The control: with no prompt open the same sticker is the stickers area's check.
+    taken = await deliver("message", _admin_sticker("🔥"), FakeState())
+    assert taken is not None and taken.startswith("admin_sticker."), taken
