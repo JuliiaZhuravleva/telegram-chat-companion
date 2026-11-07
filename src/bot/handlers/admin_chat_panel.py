@@ -21,6 +21,16 @@ Handles:
   number outside 0..1 asks again (ADR-0008 Decision 10). Any other panel tap,
   and the `show_chat` / `show_chats` entries, close that prompt
   (`_close_number_prompt`), so text typed later is not read as a value.
+- ``adm_pnl_pct:`` / ``adm_pnl_pctset:`` / ``adm_pnl_pctx:`` — a percentage: how
+  often the bot joins in unasked (``rc``, from the behavior section) or answers
+  with a sticker (``sx``, ``ix``, from «Как часто» under stickers). Four presets
+  that save on a tap, and «Своё число», which asks for a number in its own state
+  (``AdminStates.awaiting_response_chance``). The typed limit is per field
+  (`screens.CHANCES`: 20 % for joining in, 50 % for a sticker, each a model
+  request); a number above it is refused with the reason, not clamped. The
+  `show_chat` / `show_chats` entries close this prompt too.
+- ``adm_pnl_lg:`` / ``adm_pnl_lgset:`` — the reply language: the languages the
+  bot can answer in, saved on a tap.
 - ``adm_pnl_sp:`` / ``adm_pnl_spok:`` / ``adm_pnl_spre:`` / ``adm_pnl_spx:`` —
   the per-chat instruction (``system_prompt``) editor: show the current one in
   an expandable quote, take a new one as text (a paste Telegram splits into
@@ -39,10 +49,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import math
 from collections import defaultdict
 from collections.abc import Mapping
 from contextlib import suppress
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import structlog
 from aiogram import Bot, F, Router
@@ -271,6 +282,7 @@ async def show_chat(
     rules_repo = await resolve(data, RulesRepository)
     admin_repo = await resolve(data, AdminRepository)
     await _close_number_prompt(state_of(data))
+    await _close_chance_prompt(state_of(data))
     return await _show_chat(
         target,
         _get_lang(lang),
@@ -321,6 +333,7 @@ async def show_chats(
     """Show the list of connected chats, the same way the ``adm_pnl:`` button does."""
     admin_repo = await resolve(data, AdminRepository)
     await _close_number_prompt(state_of(data))
+    await _close_chance_prompt(state_of(data))
     return await _show_chats(target, _get_lang(lang), page, admin_repo, notice=notice)
 
 
@@ -725,6 +738,310 @@ async def handle_chat_panel_tolerance_cancel(
         await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
         return
     await _show_section(callback, lang, view, "stickers")
+
+
+# ── Percentages: how often it joins in, how often it answers with a sticker ──
+
+
+def _chance_code(parts: list[str]) -> str | None:
+    """The field code at ``parts[3]`` when the panel has a picker for it."""
+    code = parts[3] if len(parts) > 3 else None
+    return code if code in screens.CHANCES else None
+
+
+def parse_percent(raw: str, cap: int) -> float | Literal["number", "high"]:
+    """A typed percentage in ``0..cap``, rounded to a tenth, or what was wrong with it.
+
+    ``5``, ``5,5`` and ``5.5 %`` all read; ``high`` is a number above the cap,
+    ``number`` everything else (not a number, below zero, ``nan``, ``inf``).
+    """
+    text = raw.strip().removesuffix("%").strip().replace(",", ".")
+    try:
+        value = float(text)
+    except ValueError:
+        return "number"
+    if not math.isfinite(value) or value < 0:
+        return "number"
+    if value > cap:
+        return "high"
+    return round(value, 1)
+
+
+async def _close_chance_prompt(state: FSMContext | None) -> None:
+    if state is not None and await state.get_state() == AdminStates.awaiting_response_chance.state:
+        await state.clear()
+
+
+async def _show_chance_home(
+    target: CallbackQuery | Message, lang: str, view: ChatView, code: str, *, notice: str | None
+) -> None:
+    """Where a percentage lives: behavior for ``rc``, «Как часто» for a sticker one."""
+    if code in screens.STICKER_CHANCES:
+        screen = screens.build_sticker_chances(view, lang)
+    else:
+        screen = screens.build_behavior(view, lang)
+    await show(target, _with_notice(screen, notice=notice))
+
+
+async def _save_chance(
+    target: CallbackQuery | Message,
+    lang: str,
+    chat_id: int,
+    code: str,
+    pct: float,
+    chat_settings_repo: ChatSettingsRepository,
+    bot_config_repo: BotConfigRepository,
+    chat_config_service: ChatConfigService,
+    admin_repo: AdminRepository,
+) -> None:
+    """Write ``pct`` percent as a 0..1 share and show where it lives, the new value on top."""
+    key = screens.chance_key(code)
+    written = await chat_settings_repo.set_field(chat_id, key, round(pct / 100, 4))
+    chat_config_service.invalidate(chat_id)
+    view = (
+        await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
+        if written
+        else None
+    )
+    if view is None:
+        logger.warning("Percentage write affected no chat_settings row", chat_id=chat_id, key=key)
+        await _show_chats(target, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        return
+    await _show_chance_home(target, lang, view, code, notice=screens.chance_set(code, pct, lang))
+
+
+@router.callback_query(F.data.startswith("adm_pnl_pct:"))
+async def handle_chat_panel_chance_prompt(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """«Как часто» (``adm_pnl_pct:{lang}:{chat_id}``), one picker (``…:{code}``),
+    or its number prompt (``…:{code}:in``).
+
+    The prompt arms its state before it goes up: the screen's message is
+    recorded only while the state is set (`note_screen`). When the number
+    arrives, the prompt's Cancel is taken off, so it cannot cancel a saved value.
+    """
+    if not await _guard(callback, bot_config_repo):
+        return
+    lang, chat_id = _parse_lang_chat(callback)
+    parts = (callback.data or "").split(":")
+    code = _chance_code(parts)
+    # Three shapes only: «Как часто», a picker, its number prompt (``…:in``).
+    if chat_id is None or (len(parts) > 3 and code is None) or parts[4:] not in ([], ["in"]):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
+    if view is None:
+        await _close_chance_prompt(state)
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        return
+    if code is None:
+        await _close_chance_prompt(state)
+        await show(callback, screens.build_sticker_chances(view, lang))
+        return
+    if parts[4:5] == ["in"]:
+        await state.set_state(AdminStates.awaiting_response_chance)
+        prompt_id = callback.message.message_id if isinstance(callback.message, Message) else None
+        await state.update_data(
+            pct_chat_id=chat_id, pct_lang=lang, pct_code=code, pct_prompt_id=prompt_id
+        )
+        await show(callback, screens.build_chance_input(view, code, lang))
+        return
+    await _close_chance_prompt(state)
+    await show(callback, screens.build_chance_prompt(view, code, lang))
+
+
+@router.callback_query(F.data.startswith("adm_pnl_pctset:"))
+async def handle_chat_panel_chance_set(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """A preset: ``adm_pnl_pctset:{lang}:{chat_id}:{code}:{percent}`` saves at once."""
+    if not await _guard(callback, bot_config_repo):
+        return
+    lang, chat_id = _parse_lang_chat(callback)
+    parts = (callback.data or "").split(":")
+    code = _chance_code(parts)
+    pct = parse_percent(parts[4], screens.CHANCES[code].cap) if code and len(parts) > 4 else None
+    if chat_id is None or code is None or not isinstance(pct, float):
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    await _save_chance(
+        callback,
+        lang,
+        chat_id,
+        code,
+        pct,
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        admin_repo,
+    )
+
+
+@router.message(
+    AdminStates.awaiting_response_chance,
+    F.chat.type == "private",
+    ~F.text.startswith("/"),
+)
+async def handle_chat_panel_chance_input(
+    message: Message,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
+) -> None:
+    """Take a typed percentage: one new message either way.
+
+    In range, it is saved and its screen follows as a new message; otherwise
+    the prompt comes again under what was wrong, the limit's reason included.
+    Either way the earlier prompt loses its Cancel. Commands pass through.
+    """
+    data = await state.get_data()
+    chat_id = data.get("pct_chat_id")
+    code = data.get("pct_code")
+    lang = _get_lang(data.get("pct_lang"))
+    if not isinstance(chat_id, int) or code not in screens.CHANCES:
+        await state.clear()
+        return
+    if not await check_admin_direct(
+        bot_config_repo, message.from_user.id if message.from_user else None
+    ):
+        await state.clear()
+        return
+
+    await _drop_prompt_keyboard(message.bot, message.chat.id, data.get("pct_prompt_id"))
+    pct = parse_percent(message.text or "", screens.CHANCES[code].cap)
+    if not isinstance(pct, float):
+        view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
+        if view is None:
+            await state.clear()
+            await _show_chats(message, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+            return
+        sent = await show(message, screens.build_chance_input(view, code, lang, invalid=pct))
+        await state.update_data(pct_prompt_id=sent.message_id if sent is not None else None)
+        return
+
+    await state.clear()
+    await _save_chance(
+        message,
+        lang,
+        chat_id,
+        code,
+        pct,
+        chat_settings_repo,
+        bot_config_repo,
+        chat_config_service,
+        admin_repo,
+    )
+
+
+@router.callback_query(F.data.startswith("adm_pnl_pctx:"))
+async def handle_chat_panel_chance_cancel(
+    callback: CallbackQuery,
+    state: FSMContext,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """Leave the number prompt without saving: back to where the percentage lives.
+
+    The state is cleared before anything else, malformed payload included —
+    the way out is the one thing this handler may never refuse.
+    """
+    if not await _guard(callback, bot_config_repo):
+        return
+    await _close_chance_prompt(state)
+    lang, chat_id = _parse_lang_chat(callback)
+    code = _chance_code((callback.data or "").split(":"))
+    if chat_id is None or code is None:
+        await show_stale(callback, lang, data=kwargs, state=state)
+        return
+    view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
+    if view is None:
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        return
+    await _show_chance_home(callback, lang, view, code, notice=None)
+
+
+# ── The reply language ────────────────────────────────────────────────────
+
+
+@router.callback_query(F.data.startswith("adm_pnl_lg:"))
+async def handle_chat_panel_language_prompt(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """The languages: ``adm_pnl_lg:{lang}:{chat_id}``, the current one marked."""
+    if not await _guard(callback, bot_config_repo):
+        return
+    await _close_number_prompt(state_of(kwargs))
+    lang, chat_id = _parse_lang_chat(callback)
+    if chat_id is None:
+        await show_stale(callback, lang, data=kwargs)
+        return
+    view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
+    if view is None:
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        return
+    await show(callback, screens.build_language_prompt(view, lang))
+
+
+@router.callback_query(F.data.startswith("adm_pnl_lgset:"))
+async def handle_chat_panel_language_set(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    chat_config_service: FromDishka[ChatConfigService],
+    admin_repo: FromDishka[AdminRepository],
+    **kwargs: Any,
+) -> None:
+    """``adm_pnl_lgset:{lang}:{chat_id}:{code}`` saves at once, back to behavior.
+
+    Only a language the bot can answer in is written (`screens.LANGUAGE_CODES`):
+    the prompt builder answers in English for anything that is not ``ru``, so
+    an unknown code would be saved as one thing and behave as another.
+    """
+    if not await _guard(callback, bot_config_repo):
+        return
+    await _close_number_prompt(state_of(kwargs))
+    lang, chat_id = _parse_lang_chat(callback)
+    parts = (callback.data or "").split(":")
+    code = parts[3] if len(parts) > 3 else None
+    if chat_id is None or code not in screens.LANGUAGE_CODES:
+        await show_stale(callback, lang, data=kwargs)
+        return
+    written = await chat_settings_repo.set_field(chat_id, "language", code)
+    chat_config_service.invalidate(chat_id)
+    view = (
+        await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
+        if written
+        else None
+    )
+    if view is None:
+        logger.warning("Language write affected no chat_settings row", chat_id=chat_id)
+        await _show_chats(callback, lang, 0, admin_repo, notice_raw=_CHAT_GONE(lang))
+        return
+    notice = screens.language_set(code, lang)
+    await show(callback, _with_notice(screens.build_behavior(view, lang), notice=notice))
 
 
 # ── The instruction (system_prompt) editor

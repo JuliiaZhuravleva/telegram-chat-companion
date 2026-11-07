@@ -60,6 +60,11 @@ class AdminStates(StatesGroup):
     # prompt, so a tap on another screen ends it and its «Отмена» is the rules'.
     awaiting_rule_who = State()
 
+    # Chat settings panel: a typed percentage (how often the bot joins in
+    # unasked, how often it answers with a sticker). Its own state, not
+    # awaiting_setting_value: that one's input handler reads a 0..1 tolerance.
+    awaiting_response_chance = State()
+
 
 _OWN_TAPS: dict[State, tuple[str, ...]] = {
     # The tolerance number prompt: its opener and its «Отмена».
@@ -91,6 +96,8 @@ _OWN_TAPS: dict[State, tuple[str, ...]] = {
     AdminStates.awaiting_rule_text: ("ar_",),
     AdminStates.awaiting_rule_react: ("ar_",),
     AdminStates.awaiting_rule_who: ("ar_",),
+    # The percentage prompt: the pickers it opens from, and its «Отмена».
+    AdminStates.awaiting_response_chance: ("adm_pnl_pct:", "adm_pnl_pctx:"),
     # Declared, never set: any tap ends them.
     AdminStates.awaiting_sticker_edit: (),
     AdminStates.awaiting_sticker: (),
@@ -134,6 +141,7 @@ _SCREENS: dict[State, tuple[str, ...]] = {
     AdminStates.awaiting_rule_text: ("rule.text",),
     AdminStates.awaiting_rule_react: ("rule.react", "rule.react_in"),
     AdminStates.awaiting_rule_who: ("rule.who_find",),
+    AdminStates.awaiting_response_chance: ("chance.in", "chance.invalid"),
     # Declared, never set: no screen asks for them.
     AdminStates.awaiting_sticker_edit: (),
     AdminStates.awaiting_sticker: (),

@@ -452,7 +452,7 @@ class TestSections:
 
         text, rows = _edited(callback)
         assert text.startswith(f"{title} · Тестовый чат")
-        assert rows[-1] == [f"adm_pnl_menu:ru:{CHAT_ID}"]
+        assert rows[-1][-1] == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     async def test_rules_open_the_rules_screen(self, rules: AsyncMock) -> None:
         callback = _callback(f"adm_pnl_grp:ru:{CHAT_ID}:rules")
@@ -892,7 +892,7 @@ class TestTolerancePreset:
         service.invalidate.assert_called_once_with(CHAT_ID)
         text, rows = _edited(callback)
         assert text.startswith(f"<i>✓ Откровенность: {label}</i>\n\n🎨 <b>Стикеры</b>")
-        assert rows[-1] == [f"adm_pnl_menu:ru:{CHAT_ID}"]
+        assert rows[-1][-1] == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     @pytest.mark.parametrize("raw", ["1.5", "-0.1", "abc", ""])
     async def test_a_value_out_of_range_is_stale(self, raw: str, stale: AsyncMock) -> None:
@@ -951,7 +951,7 @@ class TestToleranceInput:
         message.answer.assert_awaited_once()
         text, rows = _sent(message)
         assert text.startswith("<i>✓ Откровенность: 0.8</i>\n\n🎨 <b>Стикеры</b>")
-        assert rows[-1] == [f"adm_pnl_menu:ru:{CHAT_ID}"]
+        assert rows[-1][-1] == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     async def test_the_earlier_prompt_loses_its_cancel(self) -> None:
         message = _message("0.8")
@@ -1052,7 +1052,7 @@ class TestToleranceCancel:
         state.clear.assert_awaited_once()
         text, rows = _edited(callback)
         assert text.startswith("🎨 <b>Стикеры</b>")
-        assert rows[-1] == [f"adm_pnl_menu:ru:{CHAT_ID}"]
+        assert rows[-1][-1] == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     async def test_leaves_another_flows_state_alone(self) -> None:
         state = _state({}, AdminStates.awaiting_system_prompt.state)

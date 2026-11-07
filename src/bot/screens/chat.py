@@ -22,10 +22,10 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from html import escape
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from src.bot.custom_emoji import fence
-from src.bot.screens.i18n import Tr, plural_ru
+from src.bot.screens.i18n import Tr
 from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import back, cancel, pager
@@ -78,7 +78,7 @@ def config_values(config: Any, **overrides: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 LABELS: Final[dict[str, Tr]] = {
-    "rg": Tr("Не встревать без повода", "Stay out unless relevant"),
+    "rg": Tr("Встревать только по делу", "Join in only when useful"),
     "af": Tr("Защита от злоупотреблений", "Abuse protection"),
     "lc": Tr("Читать ссылки", "Read links"),
     "sm": Tr("Сохранять сообщения", "Save messages"),
@@ -204,21 +204,33 @@ SECTION_TITLES: Final[dict[Section, Tr]] = {
 
 _WORDS = Tr("Зовут словами: {words}", "Called by: {words}")
 _NO_WORDS = Tr("нет", "none")
-_CHANCE = Tr(
-    "Сам отвечает: на {pct} % сообщений{interval}",
-    "Joins in on its own: on {pct} % of messages{interval}",
+_JOINS = Tr("Встревает", "Joins in")
+"""How often the bot answers unasked: one name on the button, the line, the
+picker and the notice."""
+_JOINS_AT = Tr(
+    "Встревает: в {pct} % сообщений, без зова",
+    "Joins in: on {pct} % of messages, unasked",
 )
-_NEVER = Tr("Сам не вступает", "Never joins in on its own")
+_JOINS_UP_TO = Tr(
+    "Встревает: до {pct} % сообщений, без зова и только когда есть что добавить",
+    "Joins in: on up to {pct} % of messages, unasked and only when it has something to add",
+)
+_JOINS_NEVER = Tr(
+    "Встревает: никогда — отвечает, только когда зовут",
+    "Joins in: never; it answers only when called",
+)
 _LANGUAGE = Tr("Язык ответов: {lang}", "Reply language: {lang}")
 _LANGUAGES: Final[dict[str, Tr]] = {
     "ru": Tr("русский", "Russian"),
     "en": Tr("английский", "English"),
 }
+"""Every language the prompt builder answers in (``prompt_builder._language_section``)."""
+_LANGUAGE_BUTTON = Tr("🌐 Язык ответов", "🌐 Reply language")
 _PROMPT = Tr("Инструкция: {text}", "Instruction: {text}")
 _PROMPT_UNSET = Tr("не задана", "not set")
-_DB_ONLY = Tr(
-    "Слова, частота и язык меняются только в базе.",
-    "Words, frequency and language change only in the database.",
+_WORDS_FIXED = Tr(
+    "Слова, которыми зовут бота, здесь не меняются.",
+    "The words that call the bot cannot be changed here.",
 )
 _PROMPT_BUTTON = Tr("📝 Инструкция", "📝 Instruction")
 PROMPT_PREVIEW_CHARS: Final = 60
@@ -233,14 +245,17 @@ _KB_LINE = Tr(
     "Knowledge base: facts about the chat that the bot's admins and organizers save with /remember.",
 )
 
-_STICKER_CHANCE = Tr("Отвечает стикером: в {pct} % случаев", "Answers with a sticker: {pct} %")
 _STICKER_ON_STICKER = Tr("Стикер на стикер: в {pct} %", "Sticker for a sticker: {pct} %")
 _STICKER_ON_PHOTO = Tr("Стикер к фото: в {pct} %", "Sticker for a photo: {pct} %")
 _STICKER_ON_STICKER_OFF = Tr("Стикер на стикер: выключен", "Sticker for a sticker: off")
 _STICKER_ON_PHOTO_OFF = Tr("Стикер к фото: выключен", "Sticker for a photo: off")
-_PERCENT_DB_ONLY = Tr(
-    "Проценты меняются только в базе.", "Percentages change only in the database."
+_NO_STICKER_LEARNING = Tr(
+    "Пока выключено «{sl}», бот стикерами не отвечает.",
+    "While “{sl}” is off, the bot does not answer with stickers.",
 )
+"""Both sticker answers live inside the learning handler (``handlers/media.py``):
+with ``sticker_learning_enabled`` off neither fires, whatever their own switch says."""
+_HOW_OFTEN = Tr("Как часто", "How often")
 _TOLERANCE_BUTTON = Tr("🔞 Откровенность: {value}", "🔞 Explicitness: {value}")
 
 TOLERANCE_PRESETS: Final[tuple[tuple[float, Tr], ...]] = (
@@ -604,24 +619,6 @@ def _back_to_chats(lang: str) -> tuple[Button, ...]:
 # ── behavior ──────────────────────────────────────────────────────────────
 
 
-def _interval(seconds: int, lang: str) -> str:
-    if seconds <= 0:
-        return ""
-    minutes = seconds >= 60 and seconds % 60 == 0
-    n = seconds // 60 if minutes else seconds
-    if lang == "en":
-        unit = "min" if minutes else "s"
-        return (
-            f", at most once a {'minute' if minutes else 'second'}"
-            if n == 1
-            else (f", at most once per {n} {unit}")
-        )
-    if n == 1:
-        return f", не чаще раза в {'минуту' if minutes else 'секунду'}"
-    words = ("минуту", "минуты", "минут") if minutes else ("секунду", "секунды", "секунд")
-    return f", не чаще раза в {n} {plural_ru(n, *words)}"
-
-
 def _prompt_preview(prompt: str, lang: str) -> str:
     text = prompt.strip()
     if not text:
@@ -632,35 +629,69 @@ def _prompt_preview(prompt: str, lang: str) -> str:
     return f"<i>{escape(cut)}{more}</i>"
 
 
+def _percent(pct: float, lang: str) -> str:
+    """``5,5`` in Russian, ``5.5`` in English: a number already in percent."""
+    text = f"{round(pct, 1):g}"
+    return text.replace(".", ",") if lang == "ru" else text
+
+
+def _share(view: ChatView, code: str, lang: str) -> str:
+    """A stored 0..1 share as the percent a reader sees: ``0.055`` → ``5,5``."""
+    return _percent(float(view.value(code) or 0) * 100, lang)
+
+
+def _joins_line(view: ChatView, lang: str) -> str:
+    """How often it answers unasked. With the relevance check on, the roll is a
+    ceiling: the reply is dropped when the model finds nothing to add."""
+    if float(view.value("rc") or 0) <= 0:
+        return _JOINS_NEVER(lang)
+    line = _JOINS_UP_TO if view.on("rg") else _JOINS_AT
+    return line(lang).format(pct=_share(view, "rc", lang))
+
+
+def _language_name(code: str, lang: str) -> str:
+    name = _LANGUAGES.get(code)
+    return name(lang) if name else escape(code)
+
+
+def _behavior_name(lang: str) -> str:
+    return SECTION_TITLES["behavior"](lang).split(" ", 1)[1]
+
+
+def _back_to_behavior(view: ChatView, lang: str) -> tuple[Button, ...]:
+    callback = cb("adm_pnl_grp:", lang, view.chat_id, "behavior")
+    return (back("behavior", callback, lang, name=_behavior_name(lang)),)
+
+
 def build_behavior(view: ChatView, lang: str) -> Screen:
     words = view.value("tw") or ()
-    chance = float(view.value("rc") or 0)
-    language = str(view.value("lg") or "")
-    lang_name = _LANGUAGES.get(language)
     facts = "\n".join(
         (
+            _joins_line(view, lang),
+            _LANGUAGE(lang).format(lang=_language_name(str(view.value("lg") or ""), lang)),
+            _PROMPT(lang).format(text=_prompt_preview(str(view.value("sp") or ""), lang)),
             _WORDS(lang).format(
                 words=", ".join(escape(str(w)) for w in words) if words else _NO_WORDS(lang)
             ),
-            _CHANCE(lang).format(
-                pct=_pct(chance), interval=_interval(int(view.value("ri") or 0), lang)
-            )
-            if chance > 0
-            else _NEVER(lang),
-            _LANGUAGE(lang).format(lang=lang_name(lang) if lang_name else escape(language)),
-            _PROMPT(lang).format(text=_prompt_preview(str(view.value("sp") or ""), lang)),
         )
     )
     codes = ("rg", "af", "lc")
+    chance = f"🎲 {_JOINS(lang)} · {_share(view, 'rc', lang)} %"
     return Screen(
         id="behavior",
         text=_text(
-            _header("behavior", view, lang), facts, _notes(view, codes, lang, _DB_ONLY(lang))
+            _header("behavior", view, lang), facts, _WORDS_FIXED(lang), _notes(view, codes, lang)
         ),
         rows=(
+            (
+                Button(chance, cb("adm_pnl_pct:", lang, view.chat_id, "rc")),
+                Button(_LANGUAGE_BUTTON(lang), cb("adm_pnl_lg:", lang, view.chat_id)),
+            ),
             *((_toggle(view, code, lang),) for code in codes),
-            (Button(_PROMPT_BUTTON(lang), cb("adm_pnl_sp:", lang, view.chat_id)),),
-            _back_to_chat(view, lang),
+            (
+                Button(_PROMPT_BUTTON(lang), cb("adm_pnl_sp:", lang, view.chat_id)),
+                *_back_to_chat(view, lang),
+            ),
         ),
     )
 
@@ -827,17 +858,17 @@ def build_voice(view: ChatView, lang: str) -> Screen:
 
 
 def build_stickers(view: ChatView, lang: str) -> Screen:
-    lines = [_STICKER_CHANCE(lang).format(pct=_pct(float(view.value("sc") or 0)))]
-    lines.append(
-        _STICKER_ON_STICKER(lang).format(pct=_pct(float(view.value("sx") or 0)))
-        if view.on("sr")
-        else _STICKER_ON_STICKER_OFF(lang)
-    )
-    lines.append(
-        _STICKER_ON_PHOTO(lang).format(pct=_pct(float(view.value("ix") or 0)))
-        if view.on("ic")
-        else _STICKER_ON_PHOTO_OFF(lang)
-    )
+    if view.on("sl"):
+        lines = [
+            _STICKER_ON_STICKER(lang).format(pct=_share(view, "sx", lang))
+            if view.on("sr")
+            else _STICKER_ON_STICKER_OFF(lang),
+            _STICKER_ON_PHOTO(lang).format(pct=_share(view, "ix", lang))
+            if view.on("ic")
+            else _STICKER_ON_PHOTO_OFF(lang),
+        ]
+    else:
+        lines = [_NO_STICKER_LEARNING(lang).format(sl=LABELS["sl"](lang))]
     tolerance = float(view.value("tol") or 0)
     codes = ("sl", "sr", "ic", "tol")
     tol_label = _TOLERANCE_BUTTON(lang).format(value=tolerance_label(tolerance, lang)) + _marker(
@@ -845,17 +876,16 @@ def build_stickers(view: ChatView, lang: str) -> Screen:
     )
     return Screen(
         id="chat.stickers",
-        text=_text(
-            _header("stickers", view, lang),
-            "\n".join(lines),
-            _notes(view, codes, lang, _PERCENT_DB_ONLY(lang)),
-        ),
+        text=_text(_header("stickers", view, lang), "\n".join(lines), _notes(view, codes, lang)),
         rows=(
             (_toggle(view, "sl", lang),),
             (_toggle(view, "sr", lang),),
             (_toggle(view, "ic", lang),),
             (Button(tol_label, cb("adm_pnl_tol:", lang, view.chat_id)),),
-            _back_to_chat(view, lang),
+            (
+                Button(f"🎲 {_HOW_OFTEN(lang)}", cb("adm_pnl_pct:", lang, view.chat_id)),
+                *_back_to_chat(view, lang),
+            ),
         ),
     )
 
@@ -884,6 +914,291 @@ def build_tolerance_prompt(view: ChatView, lang: str) -> Screen:
         id="tol.prompt",
         text=_text(_TOL_TITLE(lang), _TOL_BODY(lang).format(value=_number(current))),
         rows=(tuple(buttons[:3]), (*buttons[3:], custom), _back_to_stickers(view, lang)),
+    )
+
+
+# ── how often: one picker for every percentage ────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class Chance:
+    """A percentage the panel sets: its name, four presets, and the typed limit."""
+
+    name: Tr
+    presets: tuple[tuple[int, Tr], ...]
+    about: Tr
+    cap: int = 100
+    """Highest number the admin may type, in percent."""
+    cap_reason: Tr | None = None
+    """Why the cap is below 100, said on the picker, the prompt and a refusal."""
+    toggle: str | None = None
+    """The switch on «Стикеры» without which this number does nothing."""
+
+
+_RARELY = Tr("Редко", "Rarely")
+_SOMETIMES = Tr("Иногда", "Sometimes")
+_OFTEN = Tr("Часто", "Often")
+_HALF = Tr("Через раз", "Half the time")
+_STICKER_CAP_REASON = Tr(
+    "каждый такой ответ — запрос к модели, а их число в день ограничено",
+    "every such answer is a request to the model, and those are limited per day",
+)
+"""A sticker answer searches the sticker store by an embedding of the incoming
+sticker or photo (``StickerLearningService.search``): one model request per
+hit, uncached, against the bot's shared daily quota. Free in money, not in
+quota, so the typed limit sits at the YAML default for a sticker (50 %)."""
+
+CHANCES: Final[dict[str, Chance]] = {
+    "rc": Chance(
+        _JOINS,
+        ((0, Tr("Никогда", "Never")), (2, _RARELY), (5, _SOMETIMES), (10, _OFTEN)),
+        Tr(
+            "Доля сообщений, на которые бот может ответить сам, без зова.",
+            "The share of messages the bot may answer on its own, unasked.",
+        ),
+        cap=20,
+        cap_reason=Tr(
+            "каждый такой ответ — платный запрос к модели",
+            "every such reply is a paid request to the model",
+        ),
+    ),
+    "sx": Chance(
+        LABELS["sr"],
+        ((10, _RARELY), (25, _SOMETIMES), (40, _OFTEN), (50, _HALF)),
+        Tr(
+            "Доля стикеров, на которые бот отвечает своим стикером.",
+            "The share of stickers the bot answers with a sticker of its own.",
+        ),
+        cap=50,
+        cap_reason=_STICKER_CAP_REASON,
+        toggle="sr",
+    ),
+    "ix": Chance(
+        LABELS["ic"],
+        ((10, _RARELY), (20, _SOMETIMES), (30, _OFTEN), (50, _HALF)),
+        Tr(
+            "Доля фото, к которым бот добавляет стикер.",
+            "The share of photos the bot adds a sticker to.",
+        ),
+        cap=50,
+        cap_reason=_STICKER_CAP_REASON,
+        toggle="ic",
+    ),
+}
+"""Field code → its picker. ``sticker_response_chance`` (``sc``) is not here: no
+code reads it, so a number for it would change nothing."""
+STICKER_CHANCES: Final = ("sx", "ix")
+
+_CHANCE_BODY = Tr(
+    "Сейчас {pct} %. {about} Нажатие сразу сохраняет.",
+    "Now {pct} %. {about} A tap saves at once.",
+)
+_CHANCE_LIMIT = Tr("Больше {cap} % нельзя: {reason}.", "No more than {cap} %: {reason}.")
+_CHANCE_CEILING = Tr(
+    "Пока включено «{gate}», это верхняя граница: бот отвечает, только когда есть что добавить.",
+    "While “{gate}” is on, this is a ceiling: the bot replies only when it has something to add.",
+)
+_CHANCE_OFF = Tr(
+    "«{name}» сейчас выключен: число начнёт действовать, когда вы его включите на экране «Стикеры».",
+    "“{name}” is off now: the number takes effect once you turn it on on the Stickers screen.",
+)
+_CHANCE_NO_LEARNING = Tr(
+    "Пока на экране «Стикеры» выключено «{sl}», бот стикерами не отвечает, что бы здесь ни стояло.",
+    "While “{sl}” is off on the Stickers screen, the bot does not answer with stickers, "
+    "whatever is set here.",
+)
+_CHANCE_NEVER = Tr(
+    "Чтобы этого не было совсем, выключите «{name}» на экране «Стикеры».",
+    "To stop it entirely, turn off “{name}” on the Stickers screen.",
+)
+_CHANCE_INPUT = Tr(
+    "Напишите число от 0 до {cap} — процент. Сейчас {pct} %.",
+    "Send a number from 0 to {cap}, in percent. Now {pct} %.",
+)
+_CHANCE_INVALID = Tr(
+    "<i>Нужно число от 0 до {cap}, например {example}.</i>",
+    "<i>A number from 0 to {cap} is needed, for example {example}.</i>",
+)
+_STICKER_CHANCES_BODY = Tr(
+    "Как часто бот отвечает стикером там, где это включено. Включают и выключают "
+    "на экране «Стикеры».",
+    "How often the bot answers with a sticker where that is on. They are switched on "
+    "and off on the Stickers screen.",
+)
+_LANGUAGE_TITLE = Tr("🌐 <b>Язык ответов</b>", "🌐 <b>Reply language</b>")
+_LANGUAGE_BODY = Tr(
+    "Сейчас {lang}. На этом языке бот отвечает в чате, пишет саммари и расшифровывает "
+    "голосовые. Нажатие сразу сохраняет.",
+    "Now {lang}. In this language the bot answers in the chat, writes summaries and "
+    "transcribes voice messages. A tap saves at once.",
+)
+_LANGUAGE_VOICE = Tr(
+    "Если в чате говорят на другом языке, расшифровки голосовых могут выйти с ошибками.",
+    "If people in the chat speak another language, voice transcripts may come out wrong.",
+)
+"""The same setting is the language hint sent with every voice message
+(``handlers/media.py`` → ``transcribe(language=…)``)."""
+LANGUAGE_CODES: Final = frozenset(_LANGUAGES)
+
+
+def chance_key(code: str) -> str:
+    """The ``chat_settings`` column a percentage picker writes (``rc`` → its key)."""
+    return FIELDS_BY_CODE[code].key
+
+
+def chance_set(code: str, pct: float, lang: str) -> str:
+    """The notice after a percentage is saved: «Встревает: 5 %»."""
+    return f"{CHANCES[code].name(lang)}: {_percent(pct, lang)} %"
+
+
+def language_set(code: str, lang: str) -> str:
+    """The notice after the reply language is saved: «Язык ответов: английский»."""
+    return _LANGUAGE(lang).format(lang=_language_name(code, lang))
+
+
+def _chance_pct(view: ChatView, code: str) -> float:
+    return round(float(view.value(code) or 0) * 100, 1)
+
+
+def _chance_title(code: str, lang: str) -> str:
+    return f"🎲 <b>{CHANCES[code].name(lang)}</b>"
+
+
+def _chance_limit(spec: Chance, lang: str) -> str | None:
+    if spec.cap_reason is None:
+        return None
+    return _CHANCE_LIMIT(lang).format(cap=spec.cap, reason=spec.cap_reason(lang))
+
+
+def _back_to_chance_home(view: ChatView, code: str, lang: str) -> tuple[Button, ...]:
+    if code not in STICKER_CHANCES:
+        return _back_to_behavior(view, lang)
+    callback = cb("adm_pnl_pct:", lang, view.chat_id)
+    return (back("chance.stickers", callback, lang, name=_HOW_OFTEN(lang)),)
+
+
+def build_sticker_chances(view: ChatView, lang: str) -> Screen:
+    """``chance.stickers``: how often each sticker answer fires; a tap opens its picker."""
+    rows = tuple(
+        (
+            Button(
+                f"🎲 {CHANCES[code].name(lang)} · {_share(view, code, lang)} %"
+                + _marker(view, code, lang),
+                cb("adm_pnl_pct:", lang, view.chat_id, code),
+            ),
+        )
+        for code in STICKER_CHANCES
+    )
+    if view.on("sl"):
+        off = " ".join(
+            _CHANCE_OFF(lang).format(name=CHANCES[code].name(lang))
+            for code in STICKER_CHANCES
+            if not view.on(CHANCES[code].toggle or code)
+        )
+    else:
+        off = _CHANCE_NO_LEARNING(lang).format(sl=LABELS["sl"](lang))
+    return Screen(
+        id="chance.stickers",
+        text=_text(
+            f"🎲 <b>{_HOW_OFTEN(lang)}</b> · {escape(view.name)}",
+            _STICKER_CHANCES_BODY(lang),
+            off,
+            _notes(view, STICKER_CHANCES, lang),
+        ),
+        rows=(*rows, _back_to_stickers(view, lang)),
+    )
+
+
+def build_chance_prompt(view: ChatView, code: str, lang: str) -> Screen:
+    """``chance.prompt``: four presets that save on a tap, and a way to type a number.
+
+    A stored number off the presets (``0.3 %``) is said in the text and marks none.
+    """
+    spec = CHANCES[code]
+    now = _chance_pct(view, code)
+
+    def preset(pct: int, name: Tr) -> Button:
+        dot = "• " if abs(now - pct) < 0.05 else ""
+        return Button(
+            f"{dot}{name(lang)} {pct} %", cb("adm_pnl_pctset:", lang, view.chat_id, code, pct)
+        )
+
+    buttons = [preset(pct, name) for pct, name in spec.presets]
+    custom = Button(_TOL_CUSTOM(lang), cb("adm_pnl_pct:", lang, view.chat_id, code, "in"))
+    if spec.toggle is None:
+        aside = _CHANCE_CEILING(lang).format(gate=LABELS["rg"](lang)) if view.on("rg") else None
+    elif not view.on("sl"):
+        aside = _CHANCE_NO_LEARNING(lang).format(sl=LABELS["sl"](lang))
+    elif view.on(spec.toggle):
+        aside = _CHANCE_NEVER(lang).format(name=spec.name(lang))
+    else:
+        aside = _CHANCE_OFF(lang).format(name=spec.name(lang))
+    return Screen(
+        id="chance.prompt",
+        text=_text(
+            _chance_title(code, lang),
+            _CHANCE_BODY(lang).format(pct=_percent(now, lang), about=spec.about(lang)),
+            _chance_limit(spec, lang),
+            aside,
+        ),
+        rows=(
+            tuple(buttons[:2]),
+            tuple(buttons[2:]),
+            (custom,),
+            _back_to_chance_home(view, code, lang),
+        ),
+    )
+
+
+def build_chance_input(
+    view: ChatView, code: str, lang: str, *, invalid: Literal["number", "high"] | None = None
+) -> Screen:
+    """``chance.in``, or ``chance.invalid`` under what was wrong with the last
+    number: not one in range (``number``) or above a cap that has a reason (``high``)."""
+    spec = CHANCES[code]
+    limit = _chance_limit(spec, lang)
+    if invalid == "high" and limit is not None:
+        # The reason is the notice now; said again under the prompt it is noise.
+        notice: str | None = f"<i>{limit}</i>"
+        limit = None
+    elif invalid:
+        example = 3 if spec.cap <= 20 else 40
+        notice = _CHANCE_INVALID(lang).format(cap=spec.cap, example=example)
+    else:
+        notice = None
+    return Screen(
+        id="chance.invalid" if invalid else "chance.in",
+        text=_text(
+            _chance_title(code, lang),
+            _CHANCE_INPUT(lang).format(cap=spec.cap, pct=_share(view, code, lang)),
+            limit,
+        ),
+        rows=((cancel(cb("adm_pnl_pctx:", lang, view.chat_id, code), lang),),),
+        notice_raw=notice,
+    )
+
+
+def build_language_prompt(view: ChatView, lang: str) -> Screen:
+    """``chat.lang``: the languages the bot answers in; a tap saves.
+
+    A stored code outside them is said as it is and marks none.
+    """
+    current = str(view.value("lg") or "")
+    buttons = tuple(
+        Button(
+            f"{'• ' if code == current else ''}{name(lang).capitalize()}",
+            cb("adm_pnl_lgset:", lang, view.chat_id, code),
+        )
+        for code, name in _LANGUAGES.items()
+    )
+    return Screen(
+        id="chat.lang",
+        text=_text(
+            _LANGUAGE_TITLE(lang),
+            _LANGUAGE_BODY(lang).format(lang=_language_name(current, lang)),
+            _LANGUAGE_VOICE(lang),
+        ),
+        rows=(buttons, _back_to_behavior(view, lang)),
     )
 
 
