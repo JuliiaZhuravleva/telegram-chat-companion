@@ -66,7 +66,7 @@ from src.bot.screens.stickers import (
     pack_key,
     pack_rows,
 )
-from src.bot.states.admin import AdminStates
+from src.bot.states.admin import AdminStates, takes_a_sticker
 from src.bot.utils import check_admin_direct, safe_edit_reply_markup
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -968,12 +968,21 @@ async def handle_sticker_explicitness_reset(
 # ── Admin sends a sticker straight to the bot ───────────────────────────
 
 
-# StateFilter(None): this router runs before every other FSM-owning router, so
-# without it a sticker sent as the answer to another screen's prompt (the rules
-# reaction prompt, say) would be taken for a catalogue check. In this module's
-# own score prompt `handle_sticker_explicitness_input`, registered above, has
-# already answered it.
-@router.message(F.sticker, F.chat.type == "private", IsAdmin(), StateFilter(None))
+def _no_prompt_takes_it(message: Message, raw_state: str | None = None) -> bool:
+    """No open prompt reads this sticker as its answer (`STICKER_ANSWERS`).
+
+    This router runs before every other FSM-owning router. A prompt that takes
+    a sticker (the rules reaction prompt; a forward in the organizer prompt; in
+    this module the score prompt, whose `handle_sticker_explicitness_input` is
+    registered above) keeps it. Any other prompt has no use for a sticker, and
+    letting it fall through would hand it to the media router's silent learn:
+    it gets the check here, exactly as with no prompt open, and the prompt stays
+    open. ``raw_state`` is what `PromptExitMiddleware` clears, by the same name.
+    """
+    return not takes_a_sticker(raw_state, forwarded=message.forward_origin is not None)
+
+
+@router.message(F.sticker, F.chat.type == "private", IsAdmin(), _no_prompt_takes_it)
 async def handle_admin_sticker_check(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],

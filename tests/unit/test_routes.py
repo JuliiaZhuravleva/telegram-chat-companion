@@ -39,7 +39,13 @@ from src.bot.screens.routes import (
 )
 from src.bot.screens.sections import SECTIONS
 from src.bot.settings_fields import FIELDS_BY_CODE
-from src.bot.states.admin import PROMPT_OWN_TAPS, AdminStates, is_own_tap
+from src.bot.states.admin import (
+    PROMPT_OWN_TAPS,
+    PROMPT_SCREENS,
+    STICKER_ANSWERS,
+    AdminStates,
+    is_own_tap,
+)
 from src.models.rules import RuleType
 from tests.unit.screen_routing import FakeState, admin_tap, admin_text, deliver, first_match
 
@@ -545,23 +551,38 @@ _PROMPT_INPUT: dict[str, str] = {
 }
 """Each armed prompt → the handler that reads the admin's next message as its answer."""
 
-_PROMPT_SCREENS: dict[str, tuple[str, ...]] = {
-    AdminStates.awaiting_setting_value.state: ("tol.in", "tol.invalid"),
-    AdminStates.awaiting_system_prompt.state: ("sp.prompt", "sp.preview", "sp.refused", "sp.redo"),
-    AdminStates.awaiting_sticker_score.state: ("stk.score_in",),
-    AdminStates.awaiting_kb_organizer.state: ("org.add", "org.fail", "org.list"),
-    AdminStates.awaiting_rule_config.state: ("rule.cfg", "rule.cfg_bad"),
-    AdminStates.awaiting_rule_words.state: ("rule.words",),
-    AdminStates.awaiting_rule_text.state: ("rule.text",),
-    AdminStates.awaiting_rule_react.state: ("rule.react", "rule.react_in"),
-}
-"""The screens shown while a prompt is armed: their buttons must not end it."""
-
 _ALL_STATES = [s.state for s in AdminStates.__all_states__]
 
 
 def test_every_prompt_state_has_an_allowlist():
     assert set(PROMPT_OWN_TAPS) == set(_ALL_STATES)
+
+
+def test_every_prompt_state_lists_its_screens():
+    """`PROMPT_SCREENS` (next to the allowlists in states/admin.py) is the one list
+    of the screens a prompt shows: the middleware closes the message showing one."""
+    assert set(PROMPT_SCREENS) == set(_ALL_STATES)
+
+
+_SET_STATE = re.compile(r"set_state\(\s*AdminStates\.(\w+)")
+
+
+def _states_set_in(source: str) -> set[str]:
+    return {f"AdminStates:{name}" for name in _SET_STATE.findall(source)}
+
+
+def test_every_state_the_bot_sets_shows_a_screen():
+    """A prompt the bot arms puts a screen up, and that screen is listed: an
+    empty row is only for a state nothing sets."""
+    source = "\n".join(p.read_text() for p in sorted(Path("src").rglob("*.py")))
+    armed = _states_set_in(source)
+    # The scan sees the source: these two are set by the panel and the rules.
+    assert {"AdminStates:awaiting_setting_value", "AdminStates:awaiting_rule_who"} <= armed
+    assert _states_set_in("await state.set_state(\n    AdminStates.awaiting_rule_text)") == {
+        "AdminStates:awaiting_rule_text"
+    }
+    assert armed <= set(_ALL_STATES)
+    assert [state for state in sorted(armed) if not PROMPT_SCREENS[state]] == []
 
 
 @pytest.mark.parametrize("state", _ALL_STATES)
@@ -575,12 +596,12 @@ def test_an_allowlist_names_routes(state: str):
             assert entry.endswith("_") and any(p.startswith(entry) for p in ROUTES), entry
 
 
-@pytest.mark.parametrize("state", sorted(_PROMPT_SCREENS))
+@pytest.mark.parametrize("state", sorted(PROMPT_SCREENS))
 def test_a_prompt_screen_does_not_end_its_prompt(state: str):
     from src.bot.screens.registry import load_all
 
     samples = load_all()
-    for screen_id in _PROMPT_SCREENS[state]:
+    for screen_id in PROMPT_SCREENS[state]:
         assert screen_id in samples, screen_id
         for item in samples[screen_id]:
             for row in item.build("ru").rows:
@@ -608,6 +629,21 @@ async def test_a_foreign_tap_ends_the_prompt_and_its_own_taps_keep_it(state: str
     assert cleared, "no tap ended the prompt"
     assert "adm_menu:" in cleared and "adm_close:" in cleared
     assert all(is_own_tap(state, p) for p in kept)
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_the_handler_after_a_foreign_tap_sees_no_state(state: str):
+    """aiogram read ``raw_state`` before the middleware cleared the prompt and
+    hands that copy to every filter: it is cleared with the prompt."""
+    seen: dict[str, object] = {}
+    await deliver("callback_query", admin_tap("adm_menu:ru"), FakeState(state), seen=seen)
+    assert "raw_state" in seen and seen["raw_state"] is None
+    # The control: the prompt's own tap keeps it, and the handler sees it.
+    own = next((cb(p, *a) for p, a in WORST_CASE.items() if is_own_tap(state, cb(p, *a))), None)
+    if own is not None:
+        seen = {}
+        await deliver("callback_query", admin_tap(own), FakeState(state), seen=seen)
+        assert seen["raw_state"] == state
 
 
 async def test_a_page_counter_does_not_end_a_prompt():
@@ -724,3 +760,87 @@ async def test_a_sticker_in_the_rules_reaction_prompt_is_the_rules_answer():
     # The control: with no prompt open the same sticker is the stickers area's check.
     taken = await deliver("message", _admin_sticker("🔥"), FakeState())
     assert taken is not None and taken.startswith("admin_sticker."), taken
+
+
+_STICKER_CHECK = "admin_sticker.handle_admin_sticker_check"
+
+_STICKER_TAKER: dict[str | None, str] = {
+    None: _STICKER_CHECK,
+    AdminStates.awaiting_setting_value.state: _STICKER_CHECK,
+    AdminStates.awaiting_sticker_edit.state: _STICKER_CHECK,
+    AdminStates.awaiting_sticker_score.state: "admin_sticker.handle_sticker_explicitness_input",
+    AdminStates.awaiting_sticker.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_config.state: _STICKER_CHECK,
+    AdminStates.awaiting_kb_organizer.state: _STICKER_CHECK,
+    AdminStates.awaiting_system_prompt.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_words.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_text.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_react.state: "rules.handle_rule_react_input",
+    AdminStates.awaiting_rule_who.state: _STICKER_CHECK,
+}
+"""Who takes a sticker the admin sends in the DM, by the prompt open at the time.
+
+A prompt that reads a sticker as its answer keeps it; any other prompt has no
+use for one, and the sticker gets the stickers area's check, exactly as with no
+prompt open. The organizer prompt reads a FORWARD (below); a sticker of the
+admin's own is neither a forward nor a @username."""
+
+
+@pytest.mark.parametrize("state", [None, *_ALL_STATES])
+async def test_a_sticker_in_the_dm_goes_to_whoever_reads_it(state: str | None):
+    assert set(_STICKER_TAKER) == {None, *_ALL_STATES}, "a state without a row"
+    taken = await deliver("message", _admin_sticker("🔥"), FakeState(state))
+    assert taken is not None and not taken.startswith("media."), taken
+    assert taken == _STICKER_TAKER[state]
+    if state is not None:
+        assert (taken == _STICKER_CHECK) == (STICKER_ANSWERS.get(state) != "any")
+
+
+def _forwarded_sticker() -> Message:
+    from aiogram.types import MessageOriginUser, User
+
+    return _admin_sticker("🔥").model_copy(
+        update={
+            "forward_origin": MessageOriginUser(
+                date=datetime(2026, 11, 7, 11, 0, tzinfo=UTC),
+                sender_user=User(id=900001, is_bot=False, first_name="Тестовый"),
+            )
+        }
+    )
+
+
+async def test_a_forwarded_sticker_in_the_organizer_prompt_names_the_organizer():
+    """A forward names its sender whatever it carries: the organizer prompt's."""
+    taken = await deliver(
+        "message", _forwarded_sticker(), FakeState(AdminStates.awaiting_kb_organizer)
+    )
+    assert taken == "admin_kb.handle_kb_organizer_add_reply"
+    # The control: with no prompt open, the same forward is the stickers check.
+    assert await deliver("message", _forwarded_sticker(), FakeState()) == _STICKER_CHECK
+
+
+def _reply_to_card(text: str) -> Message:
+    from aiogram.types import Chat, User
+
+    from tests.unit.screen_routing import ADMIN_ID
+
+    card = Message(
+        message_id=7,
+        date=datetime(2026, 11, 7, 11, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=1, is_bot=True, first_name="Bot"),
+        text="🖼 Стикер",
+    )
+    msg, _ = admin_text(text)
+    return msg.model_copy(update={"reply_to_message": card})
+
+
+@pytest.mark.parametrize("text", ["✖️ Отмена", "Отмена", "✖️ Cancel", "Cancel"])
+async def test_a_reply_cancel_to_a_sticker_card_is_the_cards_answer(text: str):
+    """A REPLY «Отмена» was typed under a card; a reply-keyboard tap is never a
+    reply. Only the plain one is the leftover keyboard's."""
+    assert await deliver("message", _reply_to_card(text), FakeState()) == (
+        "admin_sticker.handle_admin_sticker_reply"
+    )
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState()) == "fsm_cancel.handle_leftover_cancel"
