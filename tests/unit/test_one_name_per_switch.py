@@ -176,12 +176,18 @@ def test_the_rules_switch_has_one_name_on_every_surface(lang: str, enabled: bool
 @pytest.mark.parametrize("lang", LANGS)
 @pytest.mark.parametrize("mode", ["highest_weight", "weighted_random"])
 def test_a_rules_mode_reads_the_same_on_the_chats_rules_and_on_the_defaults(lang: str, mode: str):
+    """The outcome sentence is one text on both; the mode's name is on the defaults only.
+
+    On a chat's list the name above the sentence read as a contradiction (round 4),
+    so that list says the outcome alone."""
     shown = settings._info_lines(lang, "rules", {"rules_mode": mode})
     assert shown == [rules.mode_line(mode, lang), rules.several_line(mode, lang)]
     chat = rules.ChatRules(enabled=True, common=False, mode=mode)
+    chat_lines = _rules_area(lang, chat)[0].text.splitlines()
     for line in shown:
         assert line in _defaults_rules(lang, True, mode).text.splitlines()
-        assert line in _rules_area(lang, chat)[0].text.splitlines()
+    assert rules.several_line(mode, lang) in chat_lines
+    assert rules.mode_line(mode, lang) not in chat_lines
 
 
 @pytest.mark.parametrize("lang", LANGS)

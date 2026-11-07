@@ -71,13 +71,24 @@ MANDATORY: Final = Tr("обязательное", "required")
 """A ``mandatory`` rule: it acts whatever the mode (`RuleEngine.evaluate`)."""
 
 MODES: Final = {
-    "highest_weight": Tr("одно правило с наибольшим приоритетом", "one rule, highest priority"),
+    "highest_weight": Tr(
+        "все обязательные и одно с наибольшим приоритетом",
+        "every required one and the one with the highest priority",
+    ),
     "weighted_random": Tr(
-        "одно случайное правило: чем выше приоритет, тем вероятнее",
-        "one random rule: the higher the priority, the likelier",
+        "все обязательные и одно случайное по приоритету",
+        "every required one and one at random by priority",
     ),
 }
-"""Rules modes other than ``all``. Only these change what a rule's weight means."""
+"""Rules modes other than ``all``. Only these change what a rule's weight means.
+
+The name says the mandatory rules too: «одно правило…» on the line above
+«срабатывают все обязательные и одно…» read as a contradiction to all five
+readers of round 4."""
+_HIGHER: Final = Tr("больше число — выше приоритет", "a bigger number is a higher priority")
+"""Which way a priority points: no reader of round 4 could tell whether 2 beats 1.
+
+`RuleEngine._apply_mode` keeps the maximum ``weight`` (and weighs the draw by it)."""
 MODE_ALL: Final = Tr("все подходящие правила", "every matching rule")
 _MODE: Final = Tr("Режим", "Mode")
 
@@ -88,15 +99,15 @@ _SEVERAL: Final = {
     ),
     "highest_weight": Tr(
         "Если сообщение подходит под несколько правил, срабатывают все обязательные "
-        "и одно из остальных — с наибольшим приоритетом.",
+        "и одно из остальных — с наибольшим приоритетом ({higher}).",
         "If a message matches several rules, every required one acts, "
-        "and of the others only the one with the highest priority.",
+        "and of the others only the one with the highest priority ({higher}).",
     ),
     "weighted_random": Tr(
         "Если сообщение подходит под несколько правил, срабатывают все обязательные "
-        "и одно случайное из остальных: чем выше приоритет, тем вероятнее.",
+        "и одно случайное из остальных: чем выше приоритет, тем вероятнее ({higher}).",
         "If a message matches several rules, every required one acts, "
-        "and of the others one at random: the higher the priority, the likelier.",
+        "and of the others one at random: the higher the priority, the likelier ({higher}).",
     ),
 }
 
@@ -118,7 +129,7 @@ def several_line(mode: str, lang: str) -> str:
     Every matching mandatory rule acts; the mode picks only among the others;
     a mode the engine does not know runs as ``all``, and reads so here.
     """
-    return _SEVERAL.get(mode, _SEVERAL["all"])(lang)
+    return _SEVERAL.get(mode, _SEVERAL["all"])(lang).format(higher=_HIGHER(lang))
 
 
 WARN_FALLBACK: Final = Tr(
@@ -334,8 +345,10 @@ def rules_screen(
 ) -> Screen:
     """``rules``: one chat's rules, three a page, with the switch for all of them.
 
-    Under a list with rules, what acts when one message matches several of them:
-    the mode by name (only when it is not ``all``) and the outcome in words.
+    Under a list with rules, what acts when one message matches several of them,
+    in words. The mode's name is not shown here: the sentence says all of it, and
+    the two lines together read as a contradiction (round 4). The defaults screen,
+    where the mode is the subject, still names it.
     """
     listed = bool(rules or page)
     lines = [f"📏 <b>{_TITLE(lang)}</b> · {escape(title)}", ""]
@@ -343,8 +356,6 @@ def rules_screen(
         lines += [switch_hint(chat.enabled, lang), _OPEN_HINT(lang), ""]
     else:
         lines.append(Tr("Правил пока нет.", "No rules yet.")(lang))
-    if chat.mode in MODES:
-        lines.append(mode_line(chat.mode, lang))
     if listed:
         lines.append(several_line(chat.mode, lang))
     common = common_line(chat, lang)
@@ -481,23 +492,30 @@ def _per_window(lang: str, _n: int, seconds: int, what: Tr) -> str:
     return f"{what(lang)} {Tr('за {s} с', 'in {s} s')(lang).format(s=seconds)}"
 
 
+_REPLIES: Final = Tr("отвечает автору", "replies to the author")
+
+
 def does(rule: RuleView, lang: str) -> str:
     """What a rule does when it fires, in words."""
     cfg = rule.config
     action = str(cfg.get("action", "notify_admin"))
     if action == "notify_admin":
         return Tr("пишет админу", "messages the admin")(lang)
+    # One verb for both: the builder offers them as one choice, «Ответить автору».
     if action == "warn_user":
         text = cfg.get("warning_message")
         if not isinstance(text, str) or not text:
             return Tr(
-                "предупреждает автора стандартным текстом", "warns the author with the default text"
+                "отвечает автору стандартным предупреждением",
+                "replies to the author with the default warning",
             )(lang)
-        return f"{Tr('предупреждает автора', 'warns the author')(lang)}: {_quote(text)}"
+        return f"{_REPLIES(lang)}: {_quote(text)}"
     if action == "custom_response":
         text = cfg.get("response_template")
-        said = _quote(text) if isinstance(text, str) and text else "—"
-        return f"{Tr('отвечает текстом', 'replies with text')(lang)}: {said}"
+        if not isinstance(text, str) or not text:
+            # `_custom_response` sends nothing for an empty template.
+            return Tr("ничего: текст ответа пуст", "nothing: the reply text is empty")(lang)
+        return f"{_REPLIES(lang)}: {_quote(text)}"
     if action == "set_reaction":
         emoji = cfg.get("emoji")
         return f"{Tr('ставит реакцию', 'reacts with')(lang)} {escape(str(emoji or '—'))}"
@@ -862,21 +880,13 @@ _ACTION_CHOICES: Final = (
         ),
     ),
     (
-        "w",
-        Tr("⚠️ Предупредить автора", "⚠️ Warn the author"),
-        Tr(
-            "бот ответит автору в чате коротким предупреждением; текст выберете "
-            "из готовых («{preset}») или напишете сами.",
-            "the bot replies to the author in the chat with a short warning; you pick "
-            "a ready text («{preset}») or write your own.",
-        ),
-    ),
-    (
         "c",
-        Tr("💬 Ответить своим текстом", "💬 Reply with my text"),
+        Tr("💬 Ответить автору", "💬 Reply to the author"),
         Tr(
-            "бот ответит автору в чате вашим текстом и может назвать автора по имени.",
-            "the bot replies to the author in the chat with your text, and can name the author.",
+            "бот ответит автору в чате: готовым текстом («{preset}») или вашим, "
+            "можно с именем автора.",
+            "the bot replies to the author in the chat: with a ready text («{preset}») "
+            "or your own, which can name the author.",
         ),
     ),
     (
@@ -890,8 +900,13 @@ _ACTION_CHOICES: Final = (
 )
 """Builder action token, its button, and what the bot then sends, one line each.
 
-The warning and the reply both answer the author in the chat; what tells them
-apart is the ready texts (a warning) and the author's name filled in (a reply)."""
+A warning and a reply are one choice here. Both are the same plain-text reply
+to the author (`RuleExecutor._warn_user`, `_custom_response`), and two buttons
+for it read as "very similar" to all five readers of rounds 3 and 4. A ready
+text is still stored as ``warn_user`` and a typed one as ``custom_response``
+(its name placeholders need the template), so nothing stored changes meaning.
+The ``w`` token is no longer offered but still answers: a keyboard sent before
+this change keeps working."""
 
 
 def action_screen(lang: str, chat_id: int, name: str) -> Screen:
@@ -922,27 +937,30 @@ def action_screen(lang: str, chat_id: int, name: str) -> Screen:
 
 
 def text_screen(lang: str, chat_id: int, name: str, *, action: str) -> Screen:
-    """``rule.text``: the warning (typed or a ready one) or the reply (typed)."""
+    """``rule.text``: the reply to the author, a ready text or a typed one.
+
+    ``warn_user`` is the screen the retired ⚠️ choice opened (still reachable
+    from an old keyboard): the same ready texts, without the name placeholders.
+    """
     title = _new_title("📏", name, lang)
     if action == "warn_user":
         body = Tr(
             "Напишите текст сообщением или нажмите готовый. Правило сразу сохранится.",
             "Type the text as a message or tap a ready one. The rule is saved at once.",
         )(lang)
-        rows: list[tuple[Button, ...]] = [
-            (Button(preset(lang), cb("ar_b_txt:", lang, chat_id, i)),)
-            for i, preset in enumerate(WARN_PRESETS)
-        ]
     else:
         body = Tr(
-            "Напишите текст ответа сообщением. Правило сразу сохранится.\n"
-            "В текст подставятся: <code>{first_name}</code> — имя автора, "
+            "Нажмите готовый текст или напишите свой сообщением. Правило сразу сохранится.\n"
+            "В свой текст можно подставить: <code>{first_name}</code> — имя автора, "
             "<code>{username}</code> — его ник, <code>{rule_name}</code> — название правила.",
-            "Type the reply as a message. The rule is saved at once.\n"
-            "These are filled in: <code>{first_name}</code> — the author's name, "
+            "Tap a ready text or type your own as a message. The rule is saved at once.\n"
+            "Your own text can carry: <code>{first_name}</code> — the author's name, "
             "<code>{username}</code> — their username, <code>{rule_name}</code> — the rule's name.",
         )(lang)
-        rows = []
+    rows: list[tuple[Button, ...]] = [
+        (Button(preset(lang), cb("ar_b_txt:", lang, chat_id, i)),)
+        for i, preset in enumerate(WARN_PRESETS)
+    ]
     rows.append((cancel(_list_cb(lang, chat_id), lang),))
     return Screen(id="rule.text", text=f"{title}\n\n{body}", rows=tuple(rows))
 

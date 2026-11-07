@@ -108,14 +108,20 @@ def test_the_priority_word_is_the_same_on_every_surface_that_shows_it(lang: str)
 @pytest.mark.parametrize("lang", LANGS)
 @pytest.mark.parametrize("mode", WEIGHT_MODES)
 def test_a_weight_mode_says_mandatory_rules_always_act(lang: str, mode: str):
-    """The line under the mode answers the question with the rows' own words."""
+    """The outcome line answers the question with the rows' own words.
+
+    The mode's name is not above it: «Режим: одно правило…» over «срабатывают все
+    обязательные и одно…» read as a contradiction to all five readers of round 4."""
     lines = _list(lang, mode).text.splitlines()
-    assert rules.mode_line(mode, lang) in lines
+    assert rules.mode_line(mode, lang) not in lines
+    assert not any(ln.startswith(rules.mode_line(mode, lang).split(":")[0] + ":") for ln in lines)
     line = rules.several_line(mode, lang)
     assert line in lines, lines
     mandatory = rules.MANDATORY(lang).casefold()[:-2]  # «обязательн…», «require…»
     assert mandatory in line.casefold(), line
     assert rules.PRIORITY(lang).casefold() in line.casefold(), line
+    # Which way a priority points: nobody in round 4 could tell whether 2 beats 1.
+    assert rules._HIGHER(lang) in line, line
     # The row tag it explains is the same word.
     rows = [b.label for row in _list(lang, mode).rows for b in row]
     assert any(label.endswith(f" · {rules.MANDATORY(lang)}") for label in rows), rows
@@ -142,13 +148,14 @@ _ENGINE_SAYS = {
         {1, 2},
         2,
         "Если сообщение подходит под несколько правил, срабатывают все обязательные "
-        "и одно из остальных — с наибольшим приоритетом.",
+        "и одно из остальных — с наибольшим приоритетом (больше число — выше приоритет).",
     ),
     RulesMode.WEIGHTED_RANDOM.value: (
         {1},
         2,
         "Если сообщение подходит под несколько правил, срабатывают все обязательные "
-        "и одно случайное из остальных: чем выше приоритет, тем вероятнее.",
+        "и одно случайное из остальных: чем выше приоритет, тем вероятнее "
+        "(больше число — выше приоритет).",
     ),
 }
 """Mode → rules that always act, how many act, and the line that says so.
@@ -244,12 +251,13 @@ def test_every_action_has_a_line_saying_what_the_bot_sends(lang: str):
     screen = rules.action_screen(lang, fake.CHAT_ID, rule_samples.WORDS_NAME)
     lines = screen.text.splitlines()
     labels = [b.label for row in screen.rows for b in row if b.kind != "cancel"]
-    assert len(labels) == len(rules.ACTIONS)
+    # A warning and a reply are one choice: both reply to the author (rounds 3 and 4).
+    assert len(labels) == 3, labels
     said = {label: [ln for ln in lines if ln.startswith(f"{label} — ")] for label in labels}
     assert {label: len(found) for label, found in said.items()} == dict.fromkeys(labels, 1), lines
-    # The warning names a ready text, so it is not "your own text" too.
-    warn = next(found[0] for label, found in said.items() if label.startswith("⚠️"))
-    assert f"«{rules.WARN_PRESETS[0](lang)}»" in warn, warn
+    # The reply names a ready text, so both of its ways are on the line.
+    reply = next(found[0] for label, found in said.items() if label.startswith("💬"))
+    assert f"«{rules.WARN_PRESETS[0](lang)}»" in reply, reply
 
 
 def test_messaging_the_admin_says_every_admin_gets_it():
@@ -371,3 +379,60 @@ def test_a_random_mode_sample_is_drawn(lang: str):
     line = rules.several_line(RulesMode.WEIGHTED_RANDOM.value, lang)
     drawn = [item.title for item in _SAMPLES if line in item.build(lang).text]
     assert drawn, "no sample draws the list under weighted_random"
+
+
+# ---------------------------------------------------------------------------
+# One reply to the author (round 4, R4): the ⚠️ and 💬 choices were one action
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_the_reply_screen_offers_the_ready_texts_and_the_placeholders(lang: str) -> None:
+    """A tap on a ready text saves the rule; the placeholders are for a typed one."""
+    screen = rules.text_screen(lang, fake.CHAT_ID, "spam", action="custom_response")
+
+    *texts, last = screen.rows
+    assert [row[0].label for row in texts] == [preset(lang) for preset in rules.WARN_PRESETS]
+    assert [row[0].callback for row in texts] == [
+        f"ar_b_txt:{lang}:{fake.CHAT_ID}:{i}" for i in range(len(rules.WARN_PRESETS))
+    ]
+    assert [b.kind for b in last] == ["cancel"]
+    for placeholder in ("{first_name}", "{username}", "{rule_name}"):
+        assert f"<code>{placeholder}</code>" in screen.text
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+def test_both_reply_actions_read_as_one_verb(lang: str) -> None:
+    """A rule saved as warn_user and one saved as custom_response say the same thing."""
+    warn = _rule(
+        1, config={"name": "a", "keywords": ["x"], "action": "warn_user", "warning_message": "Тише"}
+    )
+    reply = _rule(
+        2,
+        config={
+            "name": "b",
+            "keywords": ["x"],
+            "action": "custom_response",
+            "response_template": "Тише",
+        },
+    )
+
+    assert rules.does(warn, lang) == rules.does(reply, lang)
+    assert rules.does(warn, lang).startswith(rules._REPLIES(lang))
+
+
+@pytest.mark.parametrize(("lang", "said"), [("ru", "ничего"), ("en", "nothing")])
+def test_an_empty_reply_says_the_bot_sends_nothing(lang: str, said: str) -> None:
+    """`_custom_response` sends nothing for an empty template; the rule must not claim a reply."""
+    empty = _rule(
+        1,
+        config={
+            "name": "a",
+            "keywords": ["x"],
+            "action": "custom_response",
+            "response_template": "",
+        },
+    )
+
+    assert rules.does(empty, lang).startswith(said)
+    assert rules._REPLIES(lang) not in rules.does(empty, lang)

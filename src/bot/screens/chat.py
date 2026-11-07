@@ -111,15 +111,27 @@ A name says what the switch changes, never more: the greeting itself is the
 mode's, so its follower is «Ждать сообщения» (when the greeting comes) — under
 ⚪ «Новичок» read "no greeting" while the bot greeted every newcomer on joining."""
 
-COMMON_NOTE = Tr("Как в общих настройках: {names}.", "As in the general settings: {names}.")
-"""The one line that says which values on a screen come from the general settings."""
+COMMON_NOTE = Tr(
+    "Как в общих настройках: {names}. Изменение здесь касается только этого чата.",
+    "As in the general settings: {names}. A change here applies to this chat only.",
+)
+"""The one line that says which values on a screen come from the general settings.
+
+Its second sentence answers what round 4 could not: which value wins once
+the reader taps one of them (this chat's, from then on, and nowhere else)."""
 _ALL_COMMON = Tr(
-    "Все значения на кнопках — как в общих настройках.",
-    "Every value on the buttons is as in the general settings.",
+    "Все значения на кнопках — как в общих настройках. Изменение здесь касается только этого чата.",
+    "Every value on the buttons is as in the general settings. "
+    "A change here applies to this chat only.",
 )
 _COMMON_NAMES: Final[dict[str, Tr]] = {"tol": Tr("Откровенность", "Explicitness")}
 """A name for `COMMON_NOTE` where the button is not a `LABELS` switch."""
-TAP_TOGGLES = Tr("Нажатие включает или выключает.", "A tap turns a setting on or off.")
+TAP_TOGGLES = Tr(
+    "✅ — включено, ⚪ — выключено. Нажатие переключает.",
+    "✅ is on, ⚪ is off. A tap switches it.",
+)
+"""On every screen with yes/no switches: all five readers of round 4 had to guess
+that ⚪ means off, and none could tell it from "not set"."""
 
 TOGGLED_ON = Tr("Включено: {label}", "On: {label}")
 TOGGLED_OFF = Tr("Выключено: {label}", "Off: {label}")
@@ -605,11 +617,14 @@ def build_chat(view: ChatView, lang: str) -> Screen:
                     cb("adm_kb_orgs:", lang, view.chat_id, 0),
                 ),
             ),
+            (Button(_RULES(lang).format(n=view.rules), cb("ar_list:", lang, view.chat_id, 0)),),
+            # Next to the way out, not in the section grid: among the sections'
+            # nouns it read as a state to all five readers of round 4. It opens
+            # a confirmation (`chat.off_ask`), so the bottom row is safe.
             (
-                Button(_RULES(lang).format(n=view.rules), cb("ar_list:", lang, view.chat_id, 0)),
                 Button(_DISCONNECT(lang), cb("adm_wl_rm_ask:", lang, view.chat_id, 0)),
+                *_back_to_chats(lang),
             ),
-            _back_to_chats(lang),
         ),
     )
 
@@ -682,7 +697,10 @@ def build_behavior(view: ChatView, lang: str) -> Screen:
     return Screen(
         id="behavior",
         text=_text(
-            _header("behavior", view, lang), facts, _WORDS_FIXED(lang), _notes(view, codes, lang)
+            _header("behavior", view, lang),
+            facts,
+            _WORDS_FIXED(lang),
+            _notes(view, codes, lang, TAP_TOGGLES(lang)),
         ),
         rows=(
             (
@@ -876,7 +894,11 @@ def build_stickers(view: ChatView, lang: str) -> Screen:
     tol_label = _TOLERANCE_BUTTON(lang).format(value=tolerance_label(tolerance, lang))
     return Screen(
         id="chat.stickers",
-        text=_text(_header("stickers", view, lang), "\n".join(lines), _notes(view, codes, lang)),
+        text=_text(
+            _header("stickers", view, lang),
+            "\n".join(lines),
+            _notes(view, codes, lang, TAP_TOGGLES(lang)),
+        ),
         rows=(
             (_toggle(view, "sl", lang),),
             (_toggle(view, "sr", lang),),
@@ -1020,10 +1042,10 @@ _CHANCE_INVALID = Tr(
     "<i>A number from 0 to {cap} is needed, for example {example}.</i>",
 )
 _STICKER_CHANCES_BODY = Tr(
-    "Как часто бот отвечает стикером там, где это включено. Включают и выключают "
-    "на экране «Стикеры».",
-    "How often the bot answers with a sticker where that is on. They are switched on "
-    "and off on the Stickers screen.",
+    "Как часто бот отвечает стикером там, где это включено. Нажмите кнопку, "
+    "чтобы выбрать частоту. Включают и выключают на экране «Стикеры».",
+    "How often the bot answers with a sticker where that is on. Tap a button "
+    "to choose how often. They are switched on and off on the Stickers screen.",
 )
 _LANGUAGE_TITLE = Tr("🌐 <b>Язык ответов</b>", "🌐 <b>Reply language</b>")
 _LANGUAGE_BODY = Tr(

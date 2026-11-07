@@ -1168,7 +1168,11 @@ async def handle_builder_preset_text(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     **kwargs: Any,
 ) -> None:
-    """A ready warning text: the rule is saved."""
+    """A ready text: the rule is saved, as ``warn_user`` with that text.
+
+    Stored as a warning whichever screen offered it: a ready text has no name
+    placeholders, and ``warn_user`` is what such a rule always was.
+    """
     if await _denied(callback, kwargs):
         return
     lang, chat_id, rest = _builder_args(callback, 3)
@@ -1180,7 +1184,10 @@ async def handle_builder_preset_text(
         or draft is None
         or i is None
         or not 0 <= i < len(screens.WARN_PRESETS)
-        or draft.get("rule_action") != RuleAction.WARN_USER.value
+        # «Ответить автору» (a reply draft) offers the ready texts too, and the
+        # retired ⚠️ choice (a warning draft) may still be on an old keyboard.
+        or draft.get("rule_action")
+        not in (RuleAction.WARN_USER.value, RuleAction.CUSTOM_RESPONSE.value)
         or _config_for(draft) is None
     ):
         await show_stale(callback, lang, data=kwargs, state=state)

@@ -65,12 +65,18 @@ from src.bot.utils import safe_edit_text
 logger = structlog.get_logger(__name__)
 
 CLOSED = Tr(
-    "Вы нажали кнопку на другом экране — ответа здесь больше не жду.",
-    "You tapped a button on another screen — no longer waiting for an answer here.",
+    "Здесь ответа больше не жду: нажата другая кнопка. Ничего не сохранено — "
+    "чтобы начать заново, откройте экран кнопкой ниже.",
+    "No longer waiting for an answer here: another button was tapped. Nothing was saved; "
+    "to start again, open the screen with the button below.",
 )
 """Plain text, not an aside: it is the one thing this message still says. Says
 the tap, not "you opened another screen": «Закрыть» ends a prompt too and opens
-nothing."""
+nothing.
+
+Round 4: «Вы нажали…» read as a scolding, and nobody could tell whether the
+half-done answer had been kept or what to do next, so it says both. "Nothing was
+saved" is this prompt's own answer: it was never given."""
 
 CLOSED_ID = "prompt.closed"
 

@@ -849,12 +849,12 @@ class TestBuilderCounts:
         await _tap(handlers.handle_builder_type, f"ar_b_type:en:{CHAT_ID}:s", state, deps)
         await _tap(handlers.handle_builder_count, f"ar_b_n:en:{CHAT_ID}:20", state, deps)
         callback = await _tap(
-            handlers.handle_builder_action, f"ar_b_act:en:{CHAT_ID}:w", state, deps
+            handlers.handle_builder_action, f"ar_b_act:en:{CHAT_ID}:c", state, deps
         )
         assert state.current == AdminStates.awaiting_rule_text.state
         assert _same(
             _shown(callback),
-            screens.text_screen("en", CHAT_ID, "Messages: 20 a minute", action="warn_user"),
+            screens.text_screen("en", CHAT_ID, "Messages: 20 a minute", action="custom_response"),
         )
         await _tap(handlers.handle_builder_preset_text, f"ar_b_txt:en:{CHAT_ID}:1", state, deps)
 
@@ -869,6 +869,24 @@ class TestBuilderCounts:
             "warning_message": screens.WARN_PRESETS[1]("en"),
         }
         assert state.current is None
+
+    async def test_the_retired_warning_choice_still_answers_from_an_old_keyboard(self) -> None:
+        """``w`` is no longer offered, but a keyboard sent before the merge still works."""
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:s", state, deps)
+        await _tap(handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:20", state, deps)
+        offered = [
+            b.callback for row in screens.action_screen("ru", CHAT_ID, "x").rows for b in row
+        ]
+        assert f"ar_b_act:ru:{CHAT_ID}:w" not in offered, offered
+
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:w", state, deps)
+        await _tap(handlers.handle_builder_preset_text, f"ar_b_txt:ru:{CHAT_ID}:0", state, deps)
+
+        config = _created(deps)["config"]
+        assert config["action"] == "warn_user"
+        assert config["warning_message"] == screens.WARN_PRESETS[0]("ru")
 
     @pytest.mark.parametrize(("kind", "n"), [("f", 20), ("s", 10)])
     async def test_a_count_from_the_other_kinds_choices_is_stale(
@@ -1161,14 +1179,18 @@ class TestBuilderStaleSteps:
         stale.assert_awaited_once()
         deps["rules_repo"].create.assert_not_awaited()
 
-    async def test_a_ready_warning_for_a_reply_rule_is_stale(self, stale: AsyncMock) -> None:
-        """Warning presets sit on the warning prompt; the reply prompt has none."""
+    @pytest.mark.parametrize("action", ["set_reaction", "notify_admin", None])
+    async def test_a_ready_text_for_a_rule_that_does_not_reply_is_stale(
+        self, action: str | None, stale: AsyncMock
+    ) -> None:
+        """Ready texts sit on the reply prompt only; a draft that reacts or messages
+        the admin (or has no action yet) has no use for one."""
         state = _State(
             rule_chat_id=CHAT_ID,
             rule_type="spam_detect",
             rule_n=20,
             rule_name="x",
-            rule_action="custom_response",
+            rule_action=action,
         )
         deps = _deps()
 

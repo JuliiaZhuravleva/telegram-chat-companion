@@ -118,10 +118,16 @@ async def _open(screen_id: str, state: AdminStates | Any, lang: str = "ru") -> F
 @pytest.mark.parametrize(
     ("tap_lang", "closed", "home"),
     [
-        ("ru", "Вы нажали кнопку на другом экране — ответа здесь больше не жду.", "⬅️ Стикеры"),
+        (
+            "ru",
+            "Здесь ответа больше не жду: нажата другая кнопка. Ничего не сохранено — "
+            "чтобы начать заново, откройте экран кнопкой ниже.",
+            "⬅️ Стикеры",
+        ),
         (
             "en",
-            "You tapped a button on another screen — no longer waiting for an answer here.",
+            "No longer waiting for an answer here: another button was tapped. "
+            "Nothing was saved; to start again, open the screen with the button below.",
             "⬅️ Stickers",
         ),
     ],

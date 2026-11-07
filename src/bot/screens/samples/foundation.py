@@ -188,8 +188,8 @@ def _memory(lang: Lang) -> Screen:
     return Screen(
         id="memory",
         text=Tr(
-            "🧠 <b>Память</b> · {t}\n\nНажатие включает или выключает.",
-            "🧠 <b>Memory</b> · {t}\n\nA tap turns a setting on or off.",
+            "🧠 <b>Память</b> · {t}\n\n✅ — включено, ⚪ — выключено. Нажатие переключает.",
+            "🧠 <b>Memory</b> · {t}\n\n✅ is on, ⚪ is off. A tap switches it.",
         )(lang).format(t=fake.CHAT_TITLE),
         rows=(
             (toggle(True, Tr("Сохранять сообщения", "Save messages"), "sm"),),

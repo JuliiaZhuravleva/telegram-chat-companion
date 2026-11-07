@@ -365,7 +365,7 @@ class TestChatRoot:
         assert f"adm_pnl_grp:ru:{CHAT_ID}:behavior" in _flat(rows)
         assert f"ar_list:ru:{CHAT_ID}:0" in _flat(rows)
         assert "📏 Правила · 3" in _labels(callback)
-        assert rows[-1] == ["adm_pnl:ru:0"]
+        assert rows[-1] == [f"adm_wl_rm_ask:ru:{CHAT_ID}:0", "adm_pnl:ru:0"]
 
     async def test_the_organizers_are_one_tap_from_the_root_with_their_count(self) -> None:
         """Both organizer tasks begin at the chat, not in a setting: removing the

@@ -269,8 +269,10 @@ class TestTheChatRoot:
 
         *actions, last = screen.rows
         assert len(actions) <= 4
-        assert [b.kind for b in last] == ["back"]
-        for buttons in actions:
+        # «Отключить бота» sits by the way out: in the section grid it read as a state.
+        assert [b.kind for b in last] == ["action", "back"]
+        assert last[0].callback == f"adm_wl_rm_ask:{lang}:{CHAT_ID}:0"
+        for buttons in (*actions, last):
             assert len(buttons) <= 3
             for b in buttons:
                 assert label_width_px(b.label) <= clip_room(len(buttons)), b.label
@@ -462,3 +464,52 @@ class TestTheCommunityTextSaysOnlyWhatIsOn:
                 for buttons in screen.rows:
                     for b in buttons:
                         assert label_width_px(b.label) <= clip_room(len(buttons)), b.label
+
+
+# ── round 4: what ✅/⚪ mean and whose value a tap changes ─────────────────
+
+
+_SWITCH_SCREENS = ("behavior", "memory", "voice", "stickers", "reactions")
+
+
+@pytest.mark.parametrize("lang", ["ru", "en"])
+@pytest.mark.parametrize("name", _SWITCH_SCREENS)
+def test_every_switch_screen_says_what_the_two_marks_mean(name: str, lang: str) -> None:
+    """All five readers of round 4 guessed ⚪; none could tell it from "not set"."""
+    screen = getattr(screens, f"build_{name}")(_view({}), lang)
+
+    assert _switches(screen), "the control: this screen has switches"
+    assert screens.TAP_TOGGLES(lang) in screen.text
+    assert screen.text.count(screens.TAP_TOGGLES(lang)) == 1
+
+
+@pytest.mark.parametrize(
+    ("lang", "only_here"),
+    [
+        ("ru", "Изменение здесь касается только этого чата."),
+        ("en", "A change here applies to this chat only."),
+    ],
+)
+def test_the_origin_line_says_a_change_stays_in_this_chat(lang: str, only_here: str) -> None:
+    """Both forms: some values inherited, and every one of them."""
+    some = screens.build_behavior(_view(_null("rg")), lang)
+    every = screens.build_stickers(_view(_null("sl", "sr", "ic", "tol")), lang)
+    own = screens.build_behavior(
+        _view({FIELDS_BY_CODE[code].key: True for code in ("rg", "af", "lc")}), lang
+    )
+
+    assert screens.COMMON_NOTE(lang).split(":", 1)[0] in some.text
+    assert only_here in some.text
+    assert only_here in every.text
+    # No inherited value, no origin line: the sentence is about the common values.
+    assert only_here not in own.text
+
+
+@pytest.mark.parametrize(("lang", "hint"), [("ru", "Нажмите кнопку"), ("en", "Tap a button")])
+def test_the_sticker_chances_say_a_tap_picks_how_often(lang: str, hint: str) -> None:
+    screen = screens.build_sticker_chances(_view({}), lang)
+
+    assert hint in screen.text
+    assert any(
+        b.callback and b.callback.startswith("adm_pnl_pct:") for row in screen.rows for b in row
+    )
