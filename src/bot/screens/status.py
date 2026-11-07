@@ -19,7 +19,8 @@ from decimal import Decimal
 from html import escape
 from typing import Any, Final
 
-from src.bot.screens.i18n import Tr
+from src.bot.screens.cards import hint_line, stored_issue_line
+from src.bot.screens.i18n import Tr, lang_of
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import back
 from src.bot.screens.routes import cb
@@ -121,6 +122,12 @@ def health_text(row: Mapping[str, Any] | None, lang: str, *, now: datetime | Non
     (``hint``) the alert carried: the panel is what someone opens when they are
     not sure the alert is still true, so it must not say less than the alert.
     Rows written before those fields existed render with the message alone.
+
+    The problem line and the advice are said in the admin's language, with the
+    card's words (``cards.stored_issue_line`` / ``hint_line``): the row keeps
+    the checker's English message and ``diagnosis``'s Russian advice, and must
+    keep them, because de-duplication reads the same row. A kind the screen
+    does not know shows its stored text.
     """
     title = f"📊 <b>{_STATUS_TITLE(lang)}</b>"
     if row is None:
@@ -133,11 +140,12 @@ def health_text(row: Mapping[str, Any] | None, lang: str, *, now: datetime | Non
     lines = [title, "", f"{icon} <b>{words(lang)}</b>"]
     for issue in _issues(row):
         mark = "🔥" if str(issue.get("severity", "warning")) == "critical" else "⚠️"
-        lines.append(f"{mark} {escape(str(issue.get('message', '')))}")
+        lines.append(f"{mark} {escape(stored_issue_line(lang_of(lang), issue))}")
         if issue.get("detail"):
             lines.append(f"     {escape(str(issue['detail']))}")
-        if issue.get("hint"):
-            lines.append(f"     💡 {escape(str(issue['hint']))}")
+        hint = hint_line(lang_of(lang), str(issue["hint"])) if issue.get("hint") else None
+        if hint:
+            lines.append(f"     💡 {escape(hint)}")
     lines += [
         "",
         _DB_OK(lang) if row.get("db_ok", True) else _DB_DOWN(lang),

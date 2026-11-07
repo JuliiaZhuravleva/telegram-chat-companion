@@ -141,6 +141,9 @@ def _format_since(since: datetime) -> str:
 # admin's language. The English `message` is unchanged and is still what
 # `health_log` stores and what a keyless fingerprint would fall back to; every
 # issue below has a key, so its fingerprint never reads the message at all.
+# The status screen reads these messages back to say them in the admin's
+# language (`cards.stored_issue_line`): rewording one here makes that screen
+# show it as stored, which `tests/unit/test_health_issue_language.py` catches.
 
 _DB_MESSAGES: Mapping[str, str] = {
     "connection": "Database connectivity failed: connection unavailable",

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -286,15 +287,20 @@ def _task(lang: Lang, task: str) -> str:
     return label(lang) if label else task
 
 
-def _held(lang: Lang, since: datetime, at: datetime) -> str:
-    """``03.11 14:05 UTC (2 ч 5 мин)``: when it started and how long it has held."""
-    seconds = max(int((at - since).total_seconds()), 0)
+def _held_text(lang: Lang, since: str, seconds: int) -> str:
+    """``03.11 14:05 UTC (2 ч 5 мин)`` from the start as written and the seconds held."""
     hours, minutes = seconds // 3600, seconds % 3600 // 60
     if lang == "en":
         elapsed = f"{hours}h {minutes}m" if hours else f"{minutes}m"
     else:
         elapsed = f"{hours} ч {minutes} мин" if hours else f"{minutes} мин"
-    return f"{since.strftime('%d.%m %H:%M UTC')} ({elapsed})"
+    return f"{since} ({elapsed})"
+
+
+def _held(lang: Lang, since: datetime, at: datetime) -> str:
+    """``03.11 14:05 UTC (2 ч 5 мин)``: when it started and how long it has held."""
+    seconds = max(int((at - since).total_seconds()), 0)
+    return _held_text(lang, since.strftime("%d.%m %H:%M UTC"), seconds)
 
 
 def db_down_line(lang: Lang, cause: str) -> str:
@@ -321,11 +327,18 @@ def failure_line(
     at: datetime,
 ) -> str:
     """Every provider for ``task`` failed ``count`` times; since when, measured at ``at``."""
+    held = _held(lang, since, at) if since else None
+    return _failure_text(lang, task=task, count=count, provider=provider, held=held)
+
+
+def _failure_text(
+    lang: Lang, *, task: str, count: int, provider: str | None, held: str | None
+) -> str:
     line = _FAILED_CALLS(lang).format(task=_task(lang, task), count=count)
     if provider:
         line += f" ({provider})"
-    if since:
-        line += _SINCE(lang).format(since=_held(lang, since, at))
+    if held:
+        line += _SINCE(lang).format(since=held)
     return line
 
 
@@ -334,6 +347,66 @@ def hint_line(lang: Lang, hint: str | None) -> str | None:
     if not hint or lang != "en":
         return hint
     return _HINT_EN.get(hint, hint)
+
+
+# Reading a stored issue back. ``health_log.issues`` keeps the checker's
+# English message and the issue's key, and neither may change: the key is what
+# de-duplication compares, and a keyless row's fingerprint IS its message, so
+# rewording either would make every open problem alert all admins once more.
+# The status screen therefore recovers the facts from those two at render time
+# and says them with the same words as the card. The patterns mirror the
+# messages ``src/services/health/checker.py`` writes; a unit test round-trips
+# every kind through the real checker, so a reworded message fails there
+# instead of quietly showing English on the Russian screen.
+_STORED_DB_CAUSE: Final[Mapping[str, str]] = {
+    "Database connectivity failed: connection unavailable": "connection",
+    "Database connectivity failed: query error": "query",
+    "Database connectivity failed: unexpected error": "unexpected",
+}
+_STORED_FALLBACK: Final = re.compile(
+    r"AI fallback activated (?P<count>\d+) time\(s\) in last 15 min"
+)
+_STORED_FAILURE: Final = re.compile(
+    r"AI calls failed outright in last 15 min: (?P<task>\S+) x(?P<count>\d+)"
+    r"(?: \((?P<provider>[^()]+)\))?"
+    r"(?:, holding since (?P<since>\d\d\.\d\d \d\d:\d\d UTC)"
+    r" \((?:(?P<hours>\d+)h )?(?P<minutes>\d+)m\))?"
+)
+
+
+def stored_issue_line(lang: Lang, row: Mapping[str, Any]) -> str:
+    """A stored ``health_log`` issue in the admin's language, as the card says it.
+
+    The kind comes from the row's key, the facts from its message. A kind this
+    does not know, or a message whose shape it does not recognise, shows the
+    stored text as it is -- the same fallback the card has for a plain issue.
+    """
+    key = str(row.get("key") or "")
+    message = str(row.get("message") or "")
+    kind = key.split(":", 1)[0]
+    if kind == "db":
+        cause = _STORED_DB_CAUSE.get(message)
+        if cause:
+            return db_down_line(lang, cause)
+    elif kind == "ai_fallback":
+        found = _STORED_FALLBACK.fullmatch(message)
+        if found:
+            return fallback_line(lang, int(found["count"]))
+    elif kind == "ai_failure":
+        found = _STORED_FAILURE.fullmatch(message)
+        if found:
+            held = None
+            if found["since"]:
+                seconds = int(found["hours"] or 0) * 3600 + int(found["minutes"]) * 60
+                held = _held_text(lang, found["since"], seconds)
+            return _failure_text(
+                lang,
+                task=found["task"],
+                count=int(found["count"]),
+                provider=found["provider"],
+                held=held,
+            )
+    return message
 
 
 def cleared_line(lang: Lang, *, key: str, message: str) -> str:

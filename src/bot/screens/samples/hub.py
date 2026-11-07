@@ -59,9 +59,15 @@ _PEOPLE: Final = (
     _SAID_EN,
 )
 
-# The health checker records its advice in Russian whatever the panel's
-# language: on the English screen it is recorded data, not the screen's copy.
-_HINT: Final = "Пополнить кредиты провайдера: https://example.invalid/billing"
+# Issues exactly as ``health_log.issues`` stores them: the checker's English
+# message, its key, the provider's words and ``diagnosis``'s advice. The
+# screen says them in the admin's language; only the provider text is shown as
+# it came. Written out rather than raised through the checker because its
+# message measures "holding since" against the real clock.
+_CREDITS_ERROR: Final = (
+    "gemini: 429 RESOURCE_EXHAUSTED. Your prepayment credits are depleted. "
+    "Please go to AI Studio at https://ai.studio/projects to manage your project and billing."
+)
 
 
 def _attempt(lang: Lang, *, title: str | None = None) -> dict[str, Any]:
@@ -183,27 +189,32 @@ def status_none(lang: Lang) -> Screen:
     return status_screen(lang, None, now=_NOW)
 
 
-@sample(
-    "status.bad",
-    section="Состояние",
-    title="Предупреждение с советом",
-    nav="panel",
-    user_data=(_HINT,),
-)
+@sample("status.bad", section="Состояние", title="Предупреждение с советом", nav="panel")
 def status_warning(lang: Lang) -> Screen:
-    issue = {
+    from src.services.health.checker import _issue_row, fallback_issue
+    from src.services.health.diagnosis import hint_for
+
+    hint = hint_for(_CREDITS_ERROR)
+    failure = {
         "severity": "warning",
-        "message": "AI calls failed outright in last 15 min: embeddings x12",
-        "detail": "429 prepayment credits are depleted",
-        "hint": _HINT,
+        "message": (
+            "AI calls failed outright in last 15 min: embeddings x12 (gemini), "
+            "holding since 15.01 09:50 UTC (2h 5m)"
+        ),
+        "key": f"ai_failure:embeddings:RateLimitError:{hint}",
+        "detail": _CREDITS_ERROR,
+        "hint": hint,
     }
-    return status_screen(lang, _health("warning", issues=[issue]), now=_NOW)
+    issues = [_issue_row(fallback_issue(3)), failure]
+    return status_screen(lang, _health("warning", issues=issues, fallbacks_15m=3), now=_NOW)
 
 
 @sample("status.bad", section="Состояние", title="Сбой, база недоступна", nav="panel")
 def status_critical(lang: Lang) -> Screen:
-    issue = {"severity": "critical", "message": "Database unreachable"}
-    row = _health("critical", issues=[issue], db_ok=False, messages_30m=0, fallbacks_15m=4)
+    from src.services.health.checker import _issue_row, db_issue
+
+    issues = [_issue_row(db_issue("connection"))]
+    row = _health("critical", issues=issues, db_ok=False, messages_30m=0, fallbacks_15m=0)
     return status_screen(lang, row, now=_NOW)
 
 

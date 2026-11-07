@@ -14,7 +14,7 @@ import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
@@ -1235,9 +1235,18 @@ def _slice_page(
 # top and the "… and N more" line.
 
 
+def _kb_chat_name(chat: Chat) -> str | None:
+    """The DM heading's name: the chat's title, else -- a private chat has none -- the
+    person's first and last name. Whatever is not a non-empty string is skipped."""
+    parts = [chat.title] if chat.title else [chat.first_name, chat.last_name]
+    name = " ".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
+    return name or None
+
+
 async def _render_kb_dm(
-    bot: Bot | None, chat_id: int, facts: list[dict[str, Any]], lang: Lang, page: int
+    bot: Bot | None, chat: Chat, facts: list[dict[str, Any]], lang: Lang, page: int
 ) -> Screen:
+    chat_id = chat.id
     page = max(0, page)
     page_facts, total_pages = _slice_page(facts, page, _KB_PAGE_SIZE_DM)
     page = min(page, total_pages - 1)
@@ -1266,7 +1275,14 @@ async def _render_kb_dm(
     # rejects, taking the whole page down for one bad fact. A display name can
     # do the same.
     body = _fit_message(blocks, lang, header=[], footer=[]).strip()
-    return entry.kb_dm(lang, total=len(facts), body=body, page=page, pages=total_pages)
+    return entry.kb_dm(
+        lang,
+        title=_kb_chat_name(chat),
+        total=len(facts),
+        body=body,
+        page=page,
+        pages=total_pages,
+    )
 
 
 def _render_kb_group(facts: list[dict[str, Any]], lang: Lang, page: int) -> Screen:
@@ -1300,7 +1316,7 @@ async def handle_kb_view_dm(
         await message.answer(_KB_EMPTY_DM[lang])
         return
 
-    await show(message, await _render_kb_dm(message.bot, message.chat.id, facts, lang, 0))
+    await show(message, await _render_kb_dm(message.bot, message.chat, facts, lang, 0))
 
 
 @router.message(Command("kb"), F.chat.type.in_({"group", "supergroup"}))
@@ -1368,7 +1384,7 @@ async def handle_kb_view_page(
         return
 
     if callback.message.chat.type == "private":
-        screen = await _render_kb_dm(callback.bot, chat_id, facts, lang, page)
+        screen = await _render_kb_dm(callback.bot, callback.message.chat, facts, lang, page)
     else:
         screen = _render_kb_group(facts, lang, page)
     await show(callback, screen)
