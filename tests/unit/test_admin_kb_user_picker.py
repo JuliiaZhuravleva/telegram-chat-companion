@@ -36,7 +36,9 @@ from src.bot.handlers import admin_kb
 from src.bot.keyboards.admin_kb import ORG_PICK_REQUEST_ID
 from src.bot.states.admin import AdminStates
 from src.database.repositories.organizer_names import KnownName
-from tests.unit.test_fsm_escape import ADMIN_ID, _FakeState, _make_message, _propagate
+from tests.unit.kb_organizer_fakes import written
+from tests.unit.test_fsm_escape import ADMIN_ID, _connected, _FakeState, _propagate
+from tests.unit.test_fsm_escape import _make_message as _unconnected_message
 
 GROUP_ID = -100123  # obviously fake
 PICKED_ID = 7001
@@ -116,13 +118,15 @@ async def _parked_in_prompt() -> _FakeState:
     return state
 
 
+def _make_message(**kwargs: Any) -> tuple[Message, dict[str, object], AsyncMock]:
+    """The admin's message, with the group connected: it has a settings row, no organizers."""
+    msg, data, bot = _unconnected_message(**kwargs)
+    _connected(data)
+    return msg, data, bot
+
+
 def _written_ids(data: dict[str, object]) -> list[int] | None:
-    repo = data["chat_settings_repo"]
-    if not repo.set_field.await_count:  # type: ignore[attr-defined]
-        return None
-    chat_id, field, value = repo.set_field.await_args.args  # type: ignore[attr-defined]
-    assert (chat_id, field) == (GROUP_ID, "kb_organizer_ids")
-    return json.loads(value)
+    return written(data["chat_settings_repo"], GROUP_ID)
 
 
 @pytest.fixture

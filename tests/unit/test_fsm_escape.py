@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -32,6 +33,7 @@ from src.bot.handlers import router as main_router
 from src.bot.handlers.fsm_cancel import router as fsm_cancel_router
 from src.bot.states.admin import AdminStates
 from src.models.chat_config import ChatConfig
+from tests.unit.kb_organizer_fakes import wire_organizer_writers, written
 
 ADMIN_ID = 555
 CHAT_ID = 555
@@ -110,9 +112,11 @@ def _make_message(
         ),
     ).as_(bot)
 
-    chat_settings_repo = MagicMock()
+    # No settings row: a chat never seen. The organizer writers then answer
+    # None, as the single UPDATE does; a test that adds an organizer stores a
+    # row first (`_connected`).
+    chat_settings_repo = wire_organizer_writers(MagicMock())
     chat_settings_repo.get = AsyncMock(return_value=None)
-    chat_settings_repo.set_field = AsyncMock()
 
     data: dict[str, object] = {
         "is_admin": is_admin,
@@ -152,6 +156,13 @@ def _make_message(
         "knowledge_service": AsyncMock(),
     }
     return msg, data, bot
+
+
+def _connected(data: dict[str, object], *organizer_ids: int) -> None:
+    """Give the chat the bot is adding organizers to a settings row."""
+    data["chat_settings_repo"].get = AsyncMock(  # type: ignore[attr-defined]
+        return_value={"chat_title": None, "kb_organizer_ids": json.dumps(list(organizer_ids))}
+    )
 
 
 def _admin_repo(lang: str = "ru") -> AsyncMock:
@@ -636,6 +647,7 @@ class TestForwardingStillWorksForOrganizers:
         from src.bot.handlers import admin_kb
 
         msg, data, bot = _make_message(text="/kb", forwarded=True)
+        _connected(data)
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
 
@@ -649,8 +661,7 @@ class TestForwardingStillWorksForOrganizers:
             mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
             await _propagate(msg, data, state)
 
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
-        assert data["chat_settings_repo"].set_field.await_args.args[1] == "kb_organizer_ids"  # type: ignore[union-attr]
+        assert written(data["chat_settings_repo"], -100123) == [99]
 
 
 class TestCommandsEscapeTheOrganizerPrompt:
@@ -706,6 +717,7 @@ class TestCommandsEscapeTheOrganizerPrompt:
         from src.bot.handlers import admin_kb
 
         msg, data, bot = _make_message(text="@someone")
+        _connected(data)
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
         data["message_repo"].find_by_username = AsyncMock(return_value={"user_id": 77})  # type: ignore[union-attr]
@@ -714,7 +726,7 @@ class TestCommandsEscapeTheOrganizerPrompt:
             mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
             await _propagate(msg, data, state)
 
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
+        assert written(data["chat_settings_repo"], -100123) == [77]
 
 
 class TestCancelIsNotEatenWhenItIsContent:
@@ -727,6 +739,7 @@ class TestCancelIsNotEatenWhenItIsContent:
         from src.bot.handlers import admin_kb
 
         msg, data, bot = _make_message(text="/cancel", forwarded=True)
+        _connected(data)
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
 
@@ -737,7 +750,7 @@ class TestCancelIsNotEatenWhenItIsContent:
         assert "Отменено." not in _sent_texts(bot), (
             "a forwarded message reading /cancel was treated as the cancel command"
         )
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
+        assert written(data["chat_settings_repo"], -100123) == [99]
 
 
 class TestDemotionDoesNotStrandTheOrganizerPrompt:

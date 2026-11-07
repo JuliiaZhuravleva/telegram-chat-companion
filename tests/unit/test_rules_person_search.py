@@ -37,7 +37,8 @@ from src.bot.screens.render import render_text, to_markup
 from src.bot.screens.routes import REQUEST_IDS
 from src.bot.states.admin import AdminStates
 from src.models.chat_config import ChatConfig
-from tests.unit.test_fsm_escape import _FakeState, _make_message, _propagate
+from tests.unit.kb_organizer_fakes import written
+from tests.unit.test_fsm_escape import _connected, _FakeState, _make_message, _propagate
 from tests.unit.test_rules_handler import CHAT_ID, _callback, _deps, _State, _tap
 
 GROUP_ID = CHAT_ID  # invented
@@ -207,7 +208,7 @@ class TestAPickReachesItsOwnPicker:
         assert line.text == "Выбран человек: Аня @anya"
         assert isinstance(line.reply_markup, ReplyKeyboardRemove)
         assert screen.text == render_text(screens.action_screen("ru", GROUP_ID, "Аня @anya"))
-        data["chat_settings_repo"].set_field.assert_not_awaited()  # type: ignore[attr-defined]
+        assert written(data["chat_settings_repo"], -100123) is None
 
     async def test_a_rules_pick_after_the_kb_prompt_took_over_is_stale_and_not_the_kbs(
         self,
@@ -223,11 +224,12 @@ class TestAPickReachesItsOwnPicker:
 
         assert state._data.get("rule_user") is None
         assert [s.text for s in _sends(bot)] == [screens.WHO_STALE("ru")]
-        data["chat_settings_repo"].set_field.assert_not_awaited()  # type: ignore[attr-defined]
+        assert written(data["chat_settings_repo"], -100123) is None
         assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
 
     async def test_a_kb_pick_is_the_kbs_while_the_rules_search_is_open(self) -> None:
         msg, data, bot = _make_message()
+        _connected(data)
         bot.get_chat_member = AsyncMock(return_value=MagicMock(status="member"))
         state = await _searching(_FakeState(AdminStates.awaiting_kb_organizer))
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
@@ -235,11 +237,7 @@ class TestAPickReachesItsOwnPicker:
         await _propagate(_pick(msg, REQUEST_IDS.ORG_PICK), data, state)
 
         assert state._data.get("rule_user") is None, "the rules picker took the KB's pick"
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[attr-defined]
-        assert data["chat_settings_repo"].set_field.await_args.args[:2] == (  # type: ignore[attr-defined]
-            -100123,
-            "kb_organizer_ids",
-        )
+        assert written(data["chat_settings_repo"], -100123) == [PICKED_ID]
 
     @pytest.mark.parametrize("request_id", [999, 0], ids=["unknown-id", "zero"])
     async def test_a_pick_with_another_request_id_is_never_the_rules(self, request_id: int) -> None:
