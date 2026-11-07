@@ -13,6 +13,7 @@ handlers registered in the wrong order.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -32,9 +33,9 @@ from aiogram.types import (
 )
 
 from src.bot.handlers import admin_kb
-from src.bot.handlers.admin_kb import _shared_user_label
 from src.bot.keyboards.admin_kb import ORG_PICK_REQUEST_ID
 from src.bot.states.admin import AdminStates
+from src.database.repositories.organizer_names import KnownName
 from tests.unit.test_fsm_escape import ADMIN_ID, _FakeState, _make_message, _propagate
 
 GROUP_ID = -100123  # obviously fake
@@ -78,22 +79,18 @@ def _not_a_member(error: str) -> TelegramBadRequest:
 
 
 class _Store:
-    """The organizer-name store, recording what an add remembered."""
+    """The organizer-name store, recording what an add remembered and reading it back."""
 
-    remembered: list[tuple[Any, ...]]
-
-    def __init__(self, pool: object) -> None:
-        assert pool is POOL, "the handler did not hand its injected pool to the store"
+    def __init__(self) -> None:
+        self.remembered: list[tuple[Any, ...]] = []
 
     async def remember(self, chat_id: int, user_id: int, **parts: str | None) -> bool:
         self.remembered.append((chat_id, user_id, parts))
         return True
 
-    async def names(self, chat_id: int, user_ids: object) -> dict[int, object]:
-        return {}
-
-
-POOL = object()
+    async def names(self, chat_id: int, user_ids: Iterable[int]) -> dict[int, KnownName]:
+        latest = {uid: KnownName(**parts) for _, uid, parts in self.remembered}
+        return {uid: latest[uid] for uid in user_ids if uid in latest}
 
 
 def _bot_answering(bot: AsyncMock, member: object | Exception) -> AsyncMock:
@@ -149,7 +146,8 @@ class TestAPickAddsTheOrganizer:
         sends = _sends(bot)
         assert len(sends) == 2, "the line that removes the keyboard, then the organizer list"
         assert NOT_FOUND not in sends[0].text  # type: ignore[attr-defined]
-        assert sends[0].text == "✓ Аня Ким (@anya) теперь организатор."  # type: ignore[attr-defined]
+        # The name the list shows, not the picker's «Аня Ким (@anya)».
+        assert sends[0].text == "✓ @anya теперь организатор."  # type: ignore[attr-defined]
         assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
         assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
         assert isinstance(sends[1].reply_markup, InlineKeyboardMarkup)  # type: ignore[attr-defined]
@@ -194,7 +192,7 @@ class TestAPickAddsTheOrganizer:
 
         assert _written_ids(data) is None
         sends = _sends(bot)
-        assert sends[0].text == "✓ Аня Ким (@anya) уже организатор."  # type: ignore[attr-defined]
+        assert sends[0].text == "✓ @anya уже организатор."  # type: ignore[attr-defined]
         assert isinstance(sends[0].reply_markup, ReplyKeyboardRemove)  # type: ignore[attr-defined]
         assert sends[1].text.startswith(ORGS_HEAD)  # type: ignore[attr-defined]
 
@@ -206,13 +204,10 @@ class TestSomeoneNeverInTheGroup:
     @pytest.mark.parametrize(
         "error", ["Bad Request: member not found", "Bad Request: PARTICIPANT_ID_INVALID"]
     )
-    async def test_is_added_named_marked_and_remembered(
-        self, error: str, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        store = type("S", (_Store,), {"remembered": []})
-        monkeypatch.setattr(admin_kb, "OrganizerNameRepository", store, raising=False)
+    async def test_is_added_named_marked_and_remembered(self, error: str) -> None:
+        store = _Store()
         msg, data, bot = _make_message()
-        data["pool"] = POOL
+        data["organizer_names"] = store
         lookup = _bot_answering(bot, _not_a_member(error))
         state = await _parked_in_prompt()
 
@@ -222,7 +217,7 @@ class TestSomeoneNeverInTheGroup:
         assert _written_ids(data) == [PICKED_ID]
         sends = _sends(bot)
         assert sends[0].text == (  # type: ignore[attr-defined]
-            "✓ Аня Ким (@anya) теперь организатор.\n⚠️ Сейчас этого человека в чате нет."
+            "✓ @anya теперь организатор.\n⚠️ Сейчас этого человека в чате нет."
         )
         labels = [b.text for row in sends[1].reply_markup.inline_keyboard for b in row]  # type: ignore[attr-defined]
         assert labels[0] == "✖️ @anya · не в чате", labels
@@ -396,21 +391,6 @@ async def test_the_prompt_is_sent_with_the_picker_through_the_router(
     assert sends[0].reply_markup.keyboard[0][0].request_users is not None  # type: ignore[attr-defined]
     assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
     assert (await state.get_data()) == {"kb_chat_id": GROUP_ID, "kb_lang": "ru"}
-
-
-class TestSharedUserLabel:
-    def test_full_name_and_username(self) -> None:
-        user = SharedUser(user_id=1, first_name="Аня", last_name="Ким", username="anya")
-        assert _shared_user_label(user) == "Аня Ким (@anya)"
-
-    def test_username_only(self) -> None:
-        assert _shared_user_label(SharedUser(user_id=1, username="anya")) == "@anya"
-
-    def test_name_only(self) -> None:
-        assert _shared_user_label(SharedUser(user_id=1, first_name="Аня")) == "Аня"
-
-    def test_nothing_falls_back_to_the_id(self) -> None:
-        assert _shared_user_label(SharedUser(user_id=42)) == "42"
 
 
 class TestDrawnIconsDoNotBreakTheLabels:

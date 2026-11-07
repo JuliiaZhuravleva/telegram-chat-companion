@@ -29,6 +29,7 @@ from src.database.repositories.member_state import ChatMemberStateRepository
 from src.database.repositories.memory import MemoryRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.observability import ObservabilityRepository
+from src.database.repositories.organizer_names import OrganizerNameRepository
 from src.database.repositories.reactions import ReactionRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.database.repositories.rules import RulesRepository
@@ -168,6 +169,10 @@ class RepositoryProvider(Provider):
     @provide
     def observability_repo(self, pool: asyncpg.Pool) -> ObservabilityRepository:
         return ObservabilityRepository(pool)
+
+    @provide
+    def organizer_name_repo(self, pool: asyncpg.Pool) -> OrganizerNameRepository:
+        return OrganizerNameRepository(pool)
 
 
 class ServiceProvider(Provider):

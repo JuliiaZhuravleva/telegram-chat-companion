@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Iterable
+import re
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime
 from typing import Any, get_type_hints
 from unittest.mock import AsyncMock, MagicMock
@@ -28,6 +29,7 @@ from aiogram.types import (
     Chat,
     ChatMemberLeft,
     ChatMemberMember,
+    ChatMemberRestricted,
     InlineKeyboardMarkup,
     Message,
     MessageOriginChannel,
@@ -35,7 +37,9 @@ from aiogram.types import (
     MessageOriginUser,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    SharedUser,
     User,
+    UsersShared,
 )
 from dishka import Provider, Scope, make_async_container, provide
 from dishka.integrations.aiogram import inject
@@ -56,7 +60,8 @@ from src.bot.screens import orgs
 from src.bot.states.admin import AdminStates
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
-from src.database.repositories.organizer_names import KnownName
+from src.database.repositories.organizer_names import KnownName, OrganizerNameRepository
+from src.di import RepositoryProvider
 from tests.unit.test_fsm_escape import _FakeState
 
 ADMIN_ID = 111
@@ -72,8 +77,8 @@ ORGS_HEAD = "👥 <b>Организаторы</b>"
 MEMBER_NOT_FOUND = "Bad Request: member not found"
 PARTICIPANT_ID_INVALID = "Bad Request: PARTICIPANT_ID_INVALID"
 NOT_A_MEMBER = [MEMBER_NOT_FOUND, PARTICIPANT_ID_INVALID]
-POOL = object()
-"""What Dishka would inject as the pool; the store double checks it was handed on."""
+# A failure that says nothing about membership: no name from Telegram, no mark.
+UNVERIFIABLE = "Bad Request: chat not found"
 
 
 # ---------------------------------------------------------------------------
@@ -87,13 +92,21 @@ class FakeBot:
     Someone in ``NAMES`` is a member (``@nick`` names have a username); anyone
     else is unknown to Telegram in a way that says nothing about membership.
     ``error`` makes every lookup fail with that ``TelegramBadRequest`` text (or
-    raise that exception); ``left`` are members who left the group.
+    raise that exception); ``left`` are members who left the group;
+    ``restricted`` are restricted members, mapped to their ``is_member``.
     """
 
-    def __init__(self, *, error: str | Exception | None = None, left: Iterable[int] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        error: str | Exception | None = None,
+        left: Iterable[int] = (),
+        restricted: Mapping[int, bool] | None = None,
+    ) -> None:
         self.asked: list[int] = []
         self.error = error
         self.left = set(left)
+        self.restricted = dict(restricted or {})
 
     async def get_chat_member(self, chat_id: int, user_id: int) -> object:
         self.asked.append(user_id)
@@ -104,7 +117,7 @@ class FakeBot:
             raise TelegramBadRequest(method=method, message=self.error)
         name = NAMES.get(user_id)
         if name is None:
-            raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
+            raise TelegramBadRequest(method=method, message=UNVERIFIABLE)
         nick = name.startswith("@")
         user = User(
             id=user_id,
@@ -112,18 +125,46 @@ class FakeBot:
             first_name="Ник" if nick else name,
             username=name[1:] if nick else None,
         )
+        if user_id in self.restricted:
+            return _restricted(user, is_member=self.restricted[user_id])
         return ChatMemberLeft(user=user) if user_id in self.left else ChatMemberMember(user=user)
+
+
+def _restricted(user: User, *, is_member: bool) -> ChatMemberRestricted:
+    """A restricted member as Telegram sends one: every permission field is required."""
+    permissions = dict.fromkeys(
+        (
+            "can_send_messages",
+            "can_send_audios",
+            "can_send_documents",
+            "can_send_photos",
+            "can_send_videos",
+            "can_send_video_notes",
+            "can_send_voice_notes",
+            "can_send_polls",
+            "can_send_other_messages",
+            "can_add_web_page_previews",
+            "can_react_to_messages",
+            "can_edit_tag",
+            "can_change_info",
+            "can_invite_users",
+            "can_pin_messages",
+            "can_manage_topics",
+        ),
+        False,
+    )
+    return ChatMemberRestricted(
+        user=user, is_member=is_member, until_date=datetime(2030, 1, 1), **permissions
+    )
 
 
 class FakeNames:
     """The organizer-name store over dicts: ``stored`` rows, ``seen`` chat history."""
 
-    stored: dict[int, KnownName]
-    seen: dict[int, KnownName]
-    calls: list[tuple[Any, ...]]
-
-    def __init__(self, pool: object) -> None:
-        assert pool is POOL, "the handler did not hand its injected pool to the store"
+    def __init__(self) -> None:
+        self.stored: dict[int, KnownName] = {}
+        self.seen: dict[int, KnownName] = {}
+        self.calls: list[tuple[Any, ...]] = []
 
     async def remember(
         self,
@@ -156,14 +197,15 @@ class FakeNames:
         return found
 
 
+_CURRENT: dict[str, FakeNames] = {}
+
+
 @pytest.fixture(autouse=True)
-def store(monkeypatch: pytest.MonkeyPatch) -> type[FakeNames]:
-    """The store the handlers build from their pool, fresh per test."""
-    names = type("Names", (FakeNames,), {"stored": {}, "seen": {}, "calls": []})
-    # raising=False: the same tests run against a handler module from before the
-    # store existed, to show they fail there.
-    monkeypatch.setattr(admin_kb, "OrganizerNameRepository", names, raising=False)
-    return names
+def store() -> Iterator[FakeNames]:
+    """The store Dishka would inject, fresh per test; ``_call``/``_read`` pass it on."""
+    _CURRENT["store"] = names = FakeNames()
+    yield names
+    _CURRENT.clear()
 
 
 @pytest.fixture
@@ -298,7 +340,7 @@ class TestExtractUsername:
 
 
 async def _call(handler: Any, callback: MagicMock, **deps: Any) -> None:
-    deps.setdefault("pool", POOL)
+    deps.setdefault("organizer_names", _CURRENT["store"])
     await handler(
         callback,
         chat_settings_repo=deps.pop("chat_settings_repo", None) or _make_chat_settings_repo(),
@@ -595,7 +637,7 @@ class TestNames:
 
     @pytest.mark.parametrize("error", NOT_A_MEMBER)
     async def test_the_stored_name_and_a_mark_for_someone_not_in_the_group(
-        self, error: str, store: type[FakeNames]
+        self, error: str, store: FakeNames
     ) -> None:
         store.stored[ORG_USER_ID] = KnownName("Аня", "Ким", None)
         bot = FakeBot(error=error)
@@ -607,7 +649,7 @@ class TestNames:
 
     @pytest.mark.parametrize("error", NOT_A_MEMBER)
     async def test_the_chat_history_names_someone_never_stored(
-        self, error: str, store: type[FakeNames]
+        self, error: str, store: FakeNames
     ) -> None:
         store.seen[ORG_USER_ID] = KnownName("Аня", None, "anya")
 
@@ -615,7 +657,7 @@ class TestNames:
 
         assert _first_label(callback) == "✖️ @anya · не в чате"
 
-    async def test_the_live_name_beats_the_stored_one(self, store: type[FakeNames]) -> None:
+    async def test_the_live_name_beats_the_stored_one(self, store: FakeNames) -> None:
         store.stored[ORG_USER_ID] = KnownName("Старое имя", None, None)
 
         callback = await _list_of([ORG_USER_ID], FakeBot())
@@ -624,6 +666,17 @@ class TestNames:
         assert not any(c[0] == "names" for c in store.calls), (
             "Telegram named everyone: the store must not be asked"
         )
+
+    async def test_a_restricted_user_outside_the_group_is_marked(self) -> None:
+        """``restricted`` is neither LEFT nor KICKED: only ``is_member`` tells."""
+        callback = await _list_of([ORG_USER_ID], FakeBot(restricted={ORG_USER_ID: False}))
+
+        assert _first_label(callback) == "✖️ Аня · не в чате"
+
+    async def test_a_restricted_member_still_in_the_group_is_not_marked(self) -> None:
+        callback = await _list_of([ORG_USER_ID], FakeBot(restricted={ORG_USER_ID: True}))
+
+        assert _first_label(callback) == "✖️ Аня"
 
     async def test_someone_who_left_is_named_and_marked(self) -> None:
         callback = await _list_of([ORG_USER_ID, OTHER_ID], FakeBot(left={OTHER_ID}))
@@ -642,7 +695,7 @@ class TestNames:
         ids=["other_bad_request", "network"],
     )
     async def test_a_failure_that_says_nothing_about_membership_has_no_mark(
-        self, error: str | Exception, store: type[FakeNames]
+        self, error: str | Exception, store: FakeNames
     ) -> None:
         store.stored[ORG_USER_ID] = KnownName("Аня", "Ким", None)
 
@@ -650,13 +703,12 @@ class TestNames:
 
         assert _first_label(callback) == "✖️ Аня Ким"
 
-    @pytest.mark.parametrize("pool", [POOL, None], ids=["empty_store", "no_store"])
-    async def test_the_id_only_when_no_name_was_ever_known(self, pool: object) -> None:
-        callback = await _list_of([ORG_USER_ID], FakeBot(error=MEMBER_NOT_FOUND), pool=pool)
+    async def test_the_id_only_when_no_name_was_ever_known(self) -> None:
+        callback = await _list_of([ORG_USER_ID], FakeBot(error=MEMBER_NOT_FOUND))
 
         assert _first_label(callback) == f"✖️ участник {ORG_USER_ID} · не в чате"
 
-    async def test_remove_then_undo_names_them_both_times(self, store: type[FakeNames]) -> None:
+    async def test_remove_then_undo_names_them_both_times(self, store: FakeNames) -> None:
         """The stored name outlives the removal: ↩️ Вернуть brings it back."""
         store.stored[NEW_ID] = KnownName(None, None, "newbie")
         bot = FakeBot(error=PARTICIPANT_ID_INVALID)
@@ -678,7 +730,7 @@ class TestNames:
         assert text.startswith("<i>✓ @newbie снова организатор</i>")
         assert "✖️ @newbie · не в чате" in _labels(markup)
 
-    async def test_a_stored_name_with_markup_is_escaped(self, store: type[FakeNames]) -> None:
+    async def test_a_stored_name_with_markup_is_escaped(self, store: FakeNames) -> None:
         store.stored[ORG_USER_ID] = KnownName("<b>Аня</b>", None, None)
         callback = _make_callback(
             f"adm_kb_org_rm:ru:{CHAT_ID}:{ORG_USER_ID}", bot=FakeBot(error=MEMBER_NOT_FOUND)
@@ -762,7 +814,7 @@ class TestPick:
         assert _labels(markup)[0] == "✖️ @newbie"
         assert "2/2" in _labels(markup)
 
-    async def test_the_name_from_the_chat_history_is_kept(self, store: type[FakeNames]) -> None:
+    async def test_the_name_from_the_chat_history_is_kept(self, store: FakeNames) -> None:
         """A participant who has since left: the list's name stays with them."""
         store.seen[NEW_ID] = KnownName("Новый", None, "newbie_seen")
         bot = FakeBot(error=MEMBER_NOT_FOUND)
@@ -869,7 +921,7 @@ async def _read(
         _make_bot_config_repo(),
         message_repo,
         state,  # type: ignore[arg-type]
-        pool=POOL,
+        _CURRENT["store"],  # type: ignore[arg-type]
     )
     return repo, message_repo, state
 
@@ -897,10 +949,13 @@ class TestReaderAdds:
 
     async def test_a_forward_from_someone_without_a_username_uses_the_name(self) -> None:
         message = _reply(forward_origin=_user_origin(username=None))
+        message.bot = FakeBot(error=UNVERIFIABLE)
 
         await _read(message)
 
-        assert _sent(message)[0][0] == "✓ Новый теперь организатор."
+        (line, _), (_, markup) = _sent(message)
+        assert line == "✓ Новый теперь организатор."
+        assert "✖️ Новый" in _labels(markup)
 
     async def test_a_username_seen_in_the_chat_adds(self) -> None:
         message = _reply(text="@newbie")
@@ -914,7 +969,7 @@ class TestReaderAdds:
 
     @pytest.mark.parametrize("error", NOT_A_MEMBER)
     async def test_a_forward_from_outside_the_group_is_remembered_and_marked(
-        self, error: str, store: type[FakeNames]
+        self, error: str, store: FakeNames
     ) -> None:
         message = _reply(forward_origin=_user_origin())
         message.bot = FakeBot(error=error)
@@ -928,7 +983,7 @@ class TestReaderAdds:
         assert "✖️ @newbie · не в чате" in _labels(markup)
 
     async def test_a_typed_username_is_remembered_with_the_name_the_chat_knows(
-        self, store: type[FakeNames]
+        self, store: FakeNames
     ) -> None:
         message = _reply(text="@newbie")
         message.bot = FakeBot(error=MEMBER_NOT_FOUND)
@@ -946,7 +1001,9 @@ class TestReaderAdds:
         repo, _, state = await _read(message, message_repo=message_repo)
 
         assert _written(repo) is None
-        assert _sent(message)[0][0] == "✓ @anya_org уже организатор."
+        (line, _), (_, markup) = _sent(message)
+        assert line == "✓ Аня уже организатор.", "the name the list shows, not the typed one"
+        assert _labels(markup)[0] == "✖️ Аня"
         assert await state.get_state() is None
 
 
@@ -1013,7 +1070,7 @@ class TestReaderFails:
 
 
 # ---------------------------------------------------------------------------
-# The store's pool comes from Dishka
+# The store comes from Dishka
 # ---------------------------------------------------------------------------
 
 _STORE_USERS = [
@@ -1028,16 +1085,43 @@ _STORE_USERS = [
 
 
 @pytest.mark.parametrize("handler", _STORE_USERS, ids=lambda h: h.__name__)
-def test_every_handler_that_names_organizers_asks_dishka_for_the_pool(handler: Any) -> None:
-    """``pool`` defaults to None for direct calls, so a handler whose ``pool`` is
-    not a Dishka dependency would never get one and silently skip the store."""
-    param = inspect.signature(handler).parameters["pool"]
-    key = default_parse_dependency(param, get_type_hints(handler, include_extras=True)["pool"])
+def test_every_handler_that_names_organizers_asks_dishka_for_the_store(handler: Any) -> None:
+    """Required, so no caller can leave it out and get a list named by Telegram alone."""
+    param = inspect.signature(handler).parameters["organizer_names"]
+    hint = get_type_hints(handler, include_extras=True)["organizer_names"]
+    key = default_parse_dependency(param, hint)
 
-    assert key is not None and key.type_hint is asyncpg.Pool
+    assert key is not None and key.type_hint is OrganizerNameRepository
+    assert param.default is inspect.Parameter.empty
 
 
-async def test_dishka_hands_the_pool_through_to_the_list(store: type[FakeNames]) -> None:
+async def test_the_repository_provider_builds_the_store_per_request() -> None:
+    """The handlers' key must be one the real providers can satisfy, or every
+    organizer screen fails at injection."""
+    pool = object()
+
+    class Pool(Provider):
+        scope = Scope.APP
+
+        @provide
+        def pool(self) -> asyncpg.Pool:
+            return pool  # type: ignore[return-value]
+
+    container = make_async_container(Pool(), RepositoryProvider())
+    try:
+        async with container() as first:
+            one = await first.get(OrganizerNameRepository)
+        async with container() as second:
+            two = await second.get(OrganizerNameRepository)
+    finally:
+        await container.close()
+
+    assert isinstance(one, OrganizerNameRepository)
+    assert one._pool is pool
+    assert one is not two, "Scope.REQUEST: a new repository per update"
+
+
+async def test_dishka_hands_the_store_through_to_the_list(store: FakeNames) -> None:
     """The real wrapper ``setup_dishka(auto_inject=True)`` applies, end to end."""
     store.stored[ORG_USER_ID] = KnownName("Аня", "Ким", None)
     settings = _make_chat_settings_repo([ORG_USER_ID])
@@ -1046,8 +1130,8 @@ async def test_dishka_hands_the_pool_through_to_the_list(store: type[FakeNames])
         scope = Scope.APP
 
         @provide
-        def pool(self) -> asyncpg.Pool:
-            return POOL
+        def names(self) -> OrganizerNameRepository:
+            return store  # type: ignore[return-value]
 
         @provide
         def chat_settings(self) -> ChatSettingsRepository:
@@ -1065,3 +1149,109 @@ async def test_dishka_hands_the_pool_through_to_the_list(store: type[FakeNames])
         await container.close()
 
     assert _first_label(callback) == "✖️ Аня Ким · не в чате"
+
+
+# ---------------------------------------------------------------------------
+# One name per person
+# ---------------------------------------------------------------------------
+
+PICKED = 903  # not in NAMES: Telegram names them only through ``member``
+
+
+def _picked(user: SharedUser) -> MagicMock:
+    """The service message Telegram sends when the admin picks a person."""
+    message = MagicMock(spec=Message)
+    message.from_user = MagicMock(id=ADMIN_ID)
+    message.users_shared = UsersShared(request_id=1, users=[user])
+    message.answer = AsyncMock()
+    return message
+
+
+class _PickedBot(FakeBot):
+    """Telegram knows the picked person as ``member`` (with this name), or says ``error``."""
+
+    def __init__(self, member: User | None, error: str | None) -> None:
+        super().__init__(error=error)
+        self.member = member
+
+    async def get_chat_member(self, chat_id: int, user_id: int) -> object:
+        if user_id == PICKED and self.member is not None:
+            self.asked.append(user_id)
+            return ChatMemberMember(user=self.member)
+        return await super().get_chat_member(chat_id, user_id)
+
+
+def _row_name(label: str) -> str:
+    assert label.startswith("✖️ "), label
+    return label.removeprefix("✖️ ").removesuffix(" · не в чате")
+
+
+def _notice_name(text: str, tail: str) -> str:
+    found = re.match(rf"<i>✓ (.+) {tail}</i>", text)
+    assert found, text
+    return found.group(1)
+
+
+@pytest.mark.parametrize(
+    ("user", "in_chat", "name"),
+    [
+        (
+            SharedUser(user_id=PICKED, first_name="Аня", last_name="Ким", username="anya"),
+            True,
+            "@anya",
+        ),
+        (
+            SharedUser(user_id=PICKED, first_name="Аня", last_name="Ким", username="anya"),
+            False,
+            "@anya",
+        ),
+        (SharedUser(user_id=PICKED, first_name="Аня", last_name="Ким"), False, "Аня Ким"),
+        (SharedUser(user_id=PICKED, username="anya"), False, "@anya"),
+    ],
+    ids=["in_chat", "not_in_chat", "no_username", "username_only"],
+)
+async def test_the_pick_the_list_and_the_notices_name_a_person_alike(
+    user: SharedUser, in_chat: bool, name: str, store: FakeNames
+) -> None:
+    """Confirmation, list row, removal and undo notices: one name, one formatter."""
+    member = (
+        User(id=PICKED, is_bot=False, first_name=user.first_name or "", username=user.username)
+        if in_chat
+        else None
+    )
+    bot = _PickedBot(member, None if in_chat else MEMBER_NOT_FOUND)
+    message = _picked(user)
+    message.bot = bot
+    repo = _make_chat_settings_repo([])
+
+    await admin_kb.handle_kb_organizer_shared(
+        message,
+        repo,
+        _make_bot_config_repo(),
+        AsyncMock(),
+        await _prompt_state(),  # type: ignore[arg-type]
+        store,  # type: ignore[arg-type]
+    )
+
+    (line, _), (_, markup) = _sent(message)
+    confirmed = re.match(r"✓ (.+) теперь организатор\.", line)
+    assert confirmed, line
+    in_the_list = _row_name(_labels(markup)[0])
+
+    remove = _make_callback(f"adm_kb_org_rm:ru:{CHAT_ID}:{PICKED}", bot=bot)
+    await _call(
+        handle_kb_organizer_remove, remove, chat_settings_repo=_make_chat_settings_repo([PICKED])
+    )
+    removed_text, removed_markup = _edited(remove)
+    undo = _make_callback(dict(_buttons(removed_markup))["↩️ Вернуть"], bot=bot)
+    await _call(handle_kb_organizer_undo, undo, chat_settings_repo=_make_chat_settings_repo([]))
+    restored_text, restored_markup = _edited(undo)
+
+    assert {
+        "confirmation": confirmed.group(1),
+        "list": in_the_list,
+        "removed": _notice_name(removed_text, "больше не организатор"),
+        "restored": _notice_name(restored_text, "снова организатор"),
+        "list after undo": _row_name(_labels(restored_markup)[0]),
+    } == dict.fromkeys(("confirmation", "list", "removed", "restored", "list after undo"), name)
+    assert ("не в чате" in _labels(markup)[0]) is not in_chat

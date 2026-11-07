@@ -27,6 +27,11 @@ menu enumerates chats from `chat_settings WHERE enabled = true`
 (`handlers/rules.py`). So the configured moderation rules stopped firing AND
 became unreachable, with no error and no counter.
 
+Since then the set has grown by the same test -- typed by people, rebuilt by
+nothing: `chat_user_aliases`, `chat_member_state` (who left), and
+`kb_organizer_names`, the names of the knowledge-base organizers whose ids are
+a `chat_settings` column and therefore move with it.
+
 One curated table deliberately stays behind, and the reason is not that it is
 unreachable: `unauthorized_attempts` holds the admin's *rejection* of a chat,
 which `config.py` and `test_retention_preserves_bans.py` both declare durable
@@ -64,6 +69,7 @@ class MigrationOutcome:
     rules_moved: int = 0
     aliases_moved: int = 0
     members_moved: int = 0
+    organizer_names_moved: int = 0
 
 
 class ChatMigrationRepository:
@@ -73,7 +79,7 @@ class ChatMigrationRepository:
         self._pool = pool
 
     async def migrate(self, old_chat_id: int, new_chat_id: int) -> MigrationOutcome:
-        """Move `chat_settings`, `chat_facts` and `custom_rules`, atomically.
+        """Move the curated per-chat rows (see the module docstring), atomically.
 
         Three outcomes, and the third is the reason this is not a bare UPDATE:
 
@@ -180,6 +186,29 @@ class ChatMigrationRepository:
                 old_chat_id,
                 new_chat_id,
             )
+            # The organizer ids are a `chat_settings` column, so they have just
+            # moved; their names must go with them, or every organizer Telegram
+            # cannot name (someone who left, a failed lookup) turns into
+            # «участник <id>» in the list. A name can already sit on the new
+            # id (an organizer added there before the migration line): the
+            # newer `updated_at` wins, and nothing is left on the old id.
+            names_result = await conn.execute(
+                """
+                INSERT INTO kb_organizer_names
+                       (chat_id, user_id, first_name, last_name, username, updated_at)
+                SELECT $2, user_id, first_name, last_name, username, updated_at
+                  FROM kb_organizer_names WHERE chat_id = $1
+                ON CONFLICT (chat_id, user_id) DO UPDATE
+                   SET first_name = EXCLUDED.first_name,
+                       last_name = EXCLUDED.last_name,
+                       username = EXCLUDED.username,
+                       updated_at = EXCLUDED.updated_at
+                 WHERE kb_organizer_names.updated_at < EXCLUDED.updated_at
+                """,
+                old_chat_id,
+                new_chat_id,
+            )
+            await conn.execute("DELETE FROM kb_organizer_names WHERE chat_id = $1", old_chat_id)
 
         return MigrationOutcome(
             status="migrated",
@@ -188,11 +217,16 @@ class ChatMigrationRepository:
             rules_moved=_rows_affected(rules_result),
             aliases_moved=_rows_affected(aliases_result),
             members_moved=_rows_affected(members_result),
+            organizer_names_moved=_rows_affected(names_result),
         )
 
 
 def _rows_affected(result: str | None) -> int:
-    """asyncpg returns a command tag like ``UPDATE 3``."""
+    """asyncpg returns a command tag like ``UPDATE 3`` or ``INSERT 0 3``.
+
+    For an upsert the count is the rows inserted or updated; a conflict the
+    ``WHERE`` turned down is not counted.
+    """
     if not result:
         return 0
     try:

@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 import asyncpg
 import pytest_asyncio
 
+from src.database.repositories.messages import MessageRepository
 from src.database.repositories.organizer_names import KnownName, OrganizerNameRepository
 
 CHAT = -960_001
@@ -223,3 +224,31 @@ class TestNames:
 
     async def test_no_ids_is_no_query(self, repo: OrganizerNameRepository) -> None:
         assert await repo.names(CHAT, []) == {}
+
+
+class TestTypedUsername:
+    """`MessageRepository.find_by_username`: the typed ``@nick`` path of adding an organizer.
+
+    It shares the history this file seeds, and the same NULL-dated rows: in a
+    ``DESC`` order Postgres puts NULL first, so an undated (imported) row would
+    beat every dated one and hand the organizer list the wrong person.
+    """
+
+    async def test_a_null_dated_row_does_not_beat_a_dated_one(self, db_pool: asyncpg.Pool) -> None:
+        await _posted(db_pool, 1, VERA, first_name="Вера", username="Same_Nick", at=None)
+        await _posted(db_pool, 2, BORIS, first_name="Борис", username="same_nick", at=T0)
+
+        found = await MessageRepository(db_pool).find_by_username(CHAT, "same_nick")
+
+        assert found is not None
+        assert (found["user_id"], found["first_name"]) == (BORIS, "Борис"), (
+            "the undated row is the oldest, not the newest"
+        )
+
+    async def test_the_newest_dated_row_wins(self, db_pool: asyncpg.Pool) -> None:
+        await _posted(db_pool, 1, VERA, first_name="Вера", username="nick", at=T0)
+        await _posted(db_pool, 2, BORIS, first_name="Борис", username="nick", at=T0 + timedelta(1))
+
+        found = await MessageRepository(db_pool).find_by_username(CHAT, "NICK")
+
+        assert found is not None and found["user_id"] == BORIS
