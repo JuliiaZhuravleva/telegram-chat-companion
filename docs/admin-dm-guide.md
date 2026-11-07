@@ -467,11 +467,18 @@ once, which is the mistake the card exists to prevent.) An empty list says so, a
 admins can always save facts.
 
 **The card** («👤 {name} · {chat}») shows a mention of the person that opens their profile,
-their `@username` when known, the id, what Telegram says about them right now (one
-`getChatMember`: in the chat, not in the chat, never joined, removed and banned, or «Telegram
-не ответил») and what an organizer can do. Its buttons, at most four plus the way back:
+their `@username` when Telegram gives one right now, the id, what Telegram says about them
+right now (one `getChatMember`: in the chat, not in the chat, never joined, removed and
+banned, or «Telegram не ответил») and what an organizer can do — for someone outside the
+group, as something they can do once inside («Сохранять факты командой /remember сможет,
+когда будет в чате.»). When no name was ever known, the title reads «участник» with the id
+in a copyable code span instead of a bare number (Telegram would turn that into a dead phone
+link), and the separate ID line is left out. Its buttons, at most four plus the way back:
 
-- **👤 Профиль** opens `t.me/{username}`; only for a valid username.
+- **👤 Профиль** opens `t.me/{username}`; only for a valid username (4 to 32 letters, digits
+  or `_`) that Telegram gave just now. A username the bot remembered from earlier gets no
+  button and no `@username` beside the mention: it may since have been freed and taken by
+  someone else.
 - **✉️ Пригласить в чат**, only for someone who is not in the chat or never joined. A banned
   person gets a line instead: a link will not let them in until the ban is lifted in the
   group's settings. When Telegram did not answer, there is no invite either: the person may
@@ -489,9 +496,10 @@ characters), so the group's own list of invite links says what it was for.
   person from their own account, which always works.
 - **🤖 Отправить от бота** makes another fresh link and sends it to the person as a private
   message from the bot, with the chat's name. Telegram lets a bot write first only to someone
-  who has opened a private chat with it; otherwise the screen says so and points to
-  **📤 Переслать**. Any other failure says Telegram did not deliver it, and the link shown
-  still works.
+  who has opened a private chat with it and not blocked it; otherwise (including someone the
+  bot has never met) the screen says the bot cannot write first, names both causes, and
+  points to **📤 Переслать** — the link shown still works. Any other failure says Telegram
+  did not deliver it, and the link shown still works.
 - **⬅️ Организатор** goes back to the card.
 
 When the bot has no right to invite members (it is not a group admin, or lacks «Пригласительные

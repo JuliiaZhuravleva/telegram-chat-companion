@@ -8,17 +8,23 @@ Six screens, built as plain data (``handlers/admin_kb.py`` sends them):
   line of its own while the page shows one.
 * ``org.card`` — one organizer: a text mention (``tg://user?id=`` lives in the
   BODY only: as a URL button it can fail with BUTTON_USER_PRIVACY_RESTRICTED
-  and lose the whole message), ``@username`` when known, the id, and what
-  Telegram says about membership right now (`Membership`). The actions:
-  ``👤 Профиль`` (a ``t.me/{username}`` link, only for a valid username),
-  ``✉️ Пригласить в чат`` (only for someone who left or never joined: a banned
-  person cannot use a link, and when Telegram did not answer nobody knows),
-  ``✖️ Убрать из организаторов`` — removes at once and offers ``↩️ Вернуть``
-  on the list (undo over confirm) — and back to the person's page.
+  and lose the whole message), ``@username`` when Telegram gives one now, the
+  id, what Telegram says about membership right now (`Membership`), and what
+  an organizer can do — phrased for later when the person is not in the group.
+  The actions: ``👤 Профиль`` (a ``t.me/{username}`` link, only for a valid
+  username Telegram gave just now: a stored one may belong to someone else by
+  now), ``✉️ Пригласить в чат`` (only for someone who left or never joined: a
+  banned person cannot use a link, and when Telegram did not answer nobody
+  knows), ``✖️ Убрать из организаторов`` — removes at once and offers
+  ``↩️ Вернуть`` on the list (undo over confirm) — and back to the person's page.
 * ``org.invite`` — a one-person link valid for seven days, in ``<code>``,
   with ``📤 Переслать`` (Telegram's share sheet) and ``🤖 Отправить от бота``.
   The second is always offered: nothing the bot stores says whether it may
-  write to that person first, so a refusal (403) is answered on this screen.
+  write to that person first, so a refusal (a 403, or a 400 «chat not found»
+  for someone the bot never met) is answered on this screen.
+
+When no name was ever known, a title shows «участник» with the id in
+``<code>`` (`title_name`): a bare long number autolinks as a dead phone link.
 * ``org.list`` — the chat's participants by activity; a tap adds. Current
   organizers carry ``✓`` and a tap on them only says so.
 * ``org.add`` — a NEW message with a reply keyboard: Telegram's own person
@@ -74,8 +80,10 @@ unknown state might be someone already inside."""
 INVITE_DAYS: Final = 7
 INVITE_NAME_LIMIT: Final = 32
 """Telegram's cap on an invite link's name, counted here in UTF-16 units."""
-USERNAME_RE: Final = re.compile(r"^[A-Za-z0-9_]{5,32}$")
-"""A username a ``t.me/`` link may be built from; anything else gets no link."""
+USERNAME_RE: Final = re.compile(r"^[A-Za-z0-9_]{4,32}$")
+"""A username a ``t.me/`` link may be built from; anything else gets no link.
+Four, not five: collectible usernames (Fragment) can be four characters, and
+the pattern exists to keep junk out of a URL, not to judge a name."""
 
 # ---------------------------------------------------------------------------
 # Copy
@@ -145,7 +153,8 @@ RESTORED: Final = Tr("{n} снова организатор", "{n} is an organiz
 ALREADY: Final = Tr("{n} уже организатор", "{n} is already an organizer")
 ALREADY_TOAST: Final = Tr("Уже организатор", "Already an organizer")
 MEMBER: Final = Tr("участник {id}", "member {id}")
-"""The id, when no name was ever known: not from Telegram, not stored, not in the chat's history."""
+"""The id, when no name was ever known: not from Telegram, not stored, not in the chat's history.
+A screen title shows it through `title_name`, which puts the id in ``<code>``."""
 NOT_IN_CHAT: Final = Tr(" · не в чате", " · not in chat")
 """Appended to an organizer's name when Telegram says the person is not in the group."""
 NOT_ORGANIZER: Final = Tr(
@@ -155,8 +164,10 @@ NOT_ORGANIZER: Final = Tr(
 """On the list, after a tap on a card or an invite of someone removed meanwhile."""
 
 # The card
-CARD_TITLE: Final = Tr("👤 <b>{n}</b> · {t}", "👤 <b>{n}</b> · {t}")
+CARD_TITLE: Final = Tr("👤 {n} · {t}", "👤 {n} · {t}")
+"""``{n}`` is `title_name` with ``bold``: ``<b>{name}</b>``, or the id fallback."""
 CARD_ID: Final = Tr("ID: <code>{id}</code>", "ID: <code>{id}</code>")
+"""Left out when the title already carries the id (no name was ever known)."""
 STATE: Final[dict[Membership, Tr]] = {
     "in_chat": Tr("Сейчас в чате.", "In the chat now."),
     "left": Tr("Сейчас не в чате.", "Not in the chat now."),
@@ -178,6 +189,13 @@ CARD_ROLE: Final = Tr(
     "Может сохранять факты командой /remember в этом чате.",
     "Can save facts with /remember in this chat.",
 )
+CARD_ROLE_OUTSIDE: Final = Tr(
+    "Сохранять факты командой /remember сможет, когда будет в чате.",
+    "Can save facts with /remember once in the chat.",
+)
+"""The role line for someone Telegram says is not in the group (`ABSENT`):
+/remember works only from inside the group, so «Может» would contradict the
+state line just above it."""
 NO_INVITE_RIGHT: Final = Tr(
     "<i>У бота нет права приглашать участников, ссылка не создана. "
     "Право выдают в настройках администраторов группы. Больше ничего не изменилось.</i>",
@@ -215,11 +233,15 @@ DM_TEXT_UNTITLED: Final = Tr(
 )
 SENT: Final = Tr("Ссылка отправлена в личные сообщения", "The link was sent as a private message")
 DM_FORBIDDEN: Final = Tr(
-    "<i>Бот не может написать этому человеку первым: тот ещё не открывал с ним "
-    "личный чат. Ссылку можно отправить через «📤 Переслать».</i>",
-    "<i>The bot cannot write to this person first: they have not opened a private "
-    "chat with it. The link can be sent with «📤 Share».</i>",
+    "<i>Бот не может написать первым: у этого человека нет чата с ботом или бот у него "
+    "заблокирован. Ссылка ниже действует, её можно отправить через «📤 Переслать».</i>",
+    "<i>The bot cannot write first: this person has no chat with the bot, or has blocked "
+    "it. The link below works and can be sent with «📤 Share».</i>",
 )
+"""One line for every way Telegram says the bot may not write first: a 403 for a
+block or for someone who never opened the chat, a 400 «chat not found» for
+someone the bot never met. Both causes are named, since telling them apart
+would rest on Telegram's wording, and the repair is the same."""
 DM_FAILED: Final = Tr(
     "<i>Telegram не доставил сообщение. Ссылка действует, её можно отправить "
     "через «📤 Переслать».</i>",
@@ -291,6 +313,20 @@ def organizer_label(name: str, lang: str, *, absent: bool = False) -> str:
         return clip(f"👤 {name}", NAME_PX)
     mark = NOT_IN_CHAT(lang)
     return clip(f"👤 {name}", NAME_PX - label_width_px(mark)) + mark
+
+
+def title_name(name: str, lang: str, uid: int, *, bold: bool = False) -> str:
+    """``name`` as HTML for a screen's first line, ``bold`` wrapping it in ``<b>``.
+
+    The fallback «участник <id>» (`MEMBER`) keeps its id in ``<code>``, outside
+    the bold (lint R5 wants plain text there): a bare 9-11 digit number in a
+    message is autolinked by Telegram as a phone number that leads nowhere.
+    """
+    if name != MEMBER(lang).format(id=uid):
+        shown = html.escape(name)
+        return f"<b>{shown}</b>" if bold else shown
+    word = MEMBER(lang).format(id="").strip()
+    return f"<b>{word}</b> <code>{uid}</code>" if bold else f"{word} <code>{uid}</code>"
 
 
 def profile_username(username: str | None) -> str | None:
@@ -422,17 +458,22 @@ def org_card_screen(
 
     ``name`` is the list's name for the person (``_names`` in the handler),
     ``full`` their first and last name for the mention, ``username`` without
-    or with its ``@``. ``page`` is the list page the person is on: the back
-    button returns there.
+    or with its ``@`` — only one Telegram gave just now: a stored one may have
+    been released and taken by someone else, and the card would then link to a
+    stranger. ``page`` is the list page the person is on: the back button
+    returns there.
     """
     shown = html.escape(full or name)
     mention = f'<a href="tg://user?id={uid}">{shown}</a>'
     nick = profile_username(username)
     head = f"{mention} · @{nick}" if nick else mention
-    lines = [head, CARD_ID(lang).format(id=uid), "", STATE[state](lang)]
+    lines = [head]
+    if name != MEMBER(lang).format(id=uid):
+        lines.append(CARD_ID(lang).format(id=uid))
+    lines += ["", STATE[state](lang)]
     if state == "removed":
         lines.append(BANNED_HINT(lang))
-    lines.append(CARD_ROLE(lang))
+    lines.append((CARD_ROLE_OUTSIDE if state in ABSENT else CARD_ROLE)(lang))
     rows: list[tuple[Button, ...]] = []
     if nick:
         rows.append((Button(PROFILE(lang), url=f"https://t.me/{nick}"),))
@@ -440,7 +481,9 @@ def org_card_screen(
         rows.append((Button(INVITE(lang), cb("adm_kb_org_inv:", lang, cid, uid)),))
     rows.append((Button(REMOVE(lang), cb("adm_kb_org_rm:", lang, cid, uid)),))
     rows.append((back("orgs", cb("adm_kb_orgs:", lang, cid, page), lang),))
-    heading = CARD_TITLE(lang).format(n=html.escape(name), t=chat_label(title, cid))
+    heading = CARD_TITLE(lang).format(
+        n=title_name(name, lang, uid, bold=True), t=chat_label(title, cid)
+    )
     return Screen(
         id="org.card",
         text=f"{heading}\n\n" + "\n".join(lines),
@@ -466,7 +509,7 @@ def org_invite_screen(
     return Screen(
         id="org.invite",
         text=(
-            f"{INVITE_TITLE(lang).format(n=html.escape(name))}\n\n"
+            f"{INVITE_TITLE(lang).format(n=title_name(name, lang, uid))}\n\n"
             f"{body}\n<code>{html.escape(link)}</code>"
         ),
         rows=(

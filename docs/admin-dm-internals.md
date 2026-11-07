@@ -988,9 +988,21 @@ are in `keyboards/kb.py`, outside the panel. The prompt's state is described in 
   `never_joined`; any other failure → `unknown`, logged. `left` covers someone who never
   joined as well (Telegram does not tell them apart), hence the card's neutral «Сейчас не в
   чате». The same call feeds the list's « · не в чате» and the card's name, `@username` and
-  `t.me` link (only for a name matching `orgs.USERNAME_RE`; anything else gets no button).
-  The mention `tg://user?id=` lives in the text, never in a URL button:
-  `BUTTON_USER_PRIVACY_RESTRICTED` would reject the whole message.
+  `t.me` link (only for a name matching `orgs.USERNAME_RE`, `{4,32}` because collectible
+  usernames can be four characters; anything else gets no button). Only a username from
+  *this* answer reaches the card: when Telegram names nobody (`never_joined`, `unknown`)
+  `_names` takes the name from the store but leaves `_Name.username` empty, since a stored
+  username may have been freed and re-taken and `t.me/{it}` would open a stranger. The
+  stored `@nick` still serves as the list's and the title's name (`orgs.display_name`
+  prefers it) — a label, not a link. The mention `tg://user?id=` lives in the text, never in
+  a URL button: `BUTTON_USER_PRIVACY_RESTRICTED` would reject the whole message.
+- **The card's role line follows the state**: `CARD_ROLE` for `in_chat` and `unknown`,
+  `CARD_ROLE_OUTSIDE` («…сможет, когда будет в чате.») for `orgs.ABSENT`, because
+  `/remember` only works from inside the group.
+- **The «участник <id>» fallback keeps the id in `<code>`** (`orgs.title_name`) in the card
+  and invite titles, outside the `<b>` so lint R5's plain-text title still holds, and the
+  card drops `CARD_ID` as a repeat. A bare 9-11 digit number in a message is autolinked by
+  Telegram as a phone number.
 - **The invite only for `left` and `never_joined`** (`orgs.INVITABLE`). A banned person is
   refused at the door, so the card says the ban must be lifted; `unknown` might be someone
   already inside. `_invite` re-asks Telegram on every tap, so an old `✉️` button for someone
@@ -1001,9 +1013,13 @@ are in `keyboards/kb.py`, outside the panel. The prompt's state is described in 
   any other is logged and said (`LINK_FAILED`). Nothing is written in any case.
 - **`🤖 Отправить от бота` is always offered and makes a fresh link.** Nothing stored says
   whether the person ever opened a private chat with the bot, which Telegram requires before a
-  bot may write first, so the 403 (`TelegramForbiddenError`) is answered on the invite screen
-  (`DM_FORBIDDEN`, pointing to `📤 Переслать`); any other failure is logged and said
-  (`DM_FAILED`). The link shown before is not revoked: it expires on its own.
+  bot may write first, so the refusal is answered on the invite screen (`DM_FORBIDDEN`, naming
+  both causes — no chat with the bot, or blocked — and pointing to `📤 Переслать`). A refusal
+  is `_cannot_write_first`: a 403 (`TelegramForbiddenError`), or a 400 matching
+  `chat not found` / `PEER_ID_INVALID`, which is what Telegram answers for someone the bot has
+  never met (the same text `src/bot/commands.py` handles for a per-admin scope). Any other
+  failure is logged and said (`DM_FAILED`). The link shown before is not revoked: it expires
+  on its own.
 - **The invite link is a credential and is never logged.** Log events carry `chat_id` and
   `user_id`; a failure's text goes through `_error_text` — Telegram's description or the class
   name, the link in hand replaced by value and any invite-link shape by regex — and no

@@ -3,7 +3,8 @@
 
 One sample per state that changes the rows: a list, an empty list, a removal
 with ``↩️ Вернуть`` on a paged list (the six-row worst case), the card in every
-membership state Telegram can report and after a refused link, the invite as
+membership state Telegram can report, with no name ever known, and after a
+refused link, the invite as
 shown and after each answer to «🤖 Отправить от бота», the participant list
 with current organizers marked, and every reason ``org.fail`` tells apart.
 
@@ -230,11 +231,16 @@ def _card(
     state: orgs.Membership,
     *,
     username: str | None = _NICK,
+    name: str | None = None,
+    full: str | None = fake.PERSON,
     notice_raw: str | None = None,
 ) -> Screen:
-    """The card as ``_card_view`` draws it: the list's name (``@nick`` when
-    Telegram gave a username), the full name for the mention, page of position 1."""
-    name = f"@{username}" if username else fake.PERSON
+    """The card as ``_card_view`` draws it, page of position 1. ``username`` is
+    the one Telegram gave now (``_names`` never hands on a stored one); ``name``
+    is the list's name, by default what ``_names`` picks from that answer:
+    ``@nick`` when there is a username, else the full name."""
+    if name is None:
+        name = f"@{username}" if username else fake.PERSON
     return orgs.org_card_screen(
         lang,
         _CID,
@@ -242,7 +248,7 @@ def _card(
         fake.USER_ID,
         name,
         state=state,
-        full=fake.PERSON,
+        full=full,
         username=username,
         page=orgs.page_of(1),
         notice_raw=notice_raw,
@@ -267,8 +273,22 @@ def org_card_left(lang: Lang) -> Screen:
 @sample("org.card", section="Чаты", title="Не вступал в чат", nav="panel", user_data=_PEOPLE)
 def org_card_never_joined(lang: Lang) -> Screen:
     # Telegram answers "member not found" with no user: the name comes from
-    # the store, which may hold no username at all.
-    return _card(lang, "never_joined", username=None)
+    # the store, @username and all, but that username gets no 👤 Профиль and
+    # no «· @nick»: it may have been freed and taken by someone else since.
+    return _card(lang, "never_joined", name=fake.USERNAME, username=None)
+
+
+@sample("org.card", section="Чаты", title="Имя неизвестно", nav="panel", user_data=_PEOPLE)
+def org_card_no_name(lang: Lang) -> Screen:
+    # Telegram did not name the person and nothing was ever stored: «участник
+    # <id>», the id in <code> in the title and no separate ID line.
+    return _card(
+        lang,
+        "never_joined",
+        name=orgs.MEMBER(lang).format(id=fake.USER_ID),
+        full=None,
+        username=None,
+    )
 
 
 @sample("org.card", section="Чаты", title="Заблокирован в чате", nav="panel", user_data=_PEOPLE)

@@ -11,8 +11,10 @@ Callbacks (all ``adm_kb_*``, the chat id in the payload):
 - ``adm_kb_org_inv:`` — make a one-person, seven-day invite link for an
   organizer who left or never joined, and show it.
 - ``adm_kb_org_dm:`` — make a fresh link and send it to the person from the
-  bot. Telegram refuses (403) when the person never opened a chat with the
-  bot; that answer is the only reliable signal, so the button is always there.
+  bot. Telegram refuses when the bot may not write first: a 403 (never opened
+  a chat with the bot, or blocked it) or a 400 «chat not found» (the bot never
+  met them). That answer is the only reliable signal, so the button is always
+  there, and both refusals get the same line pointing to ``📤 Переслать``.
 - ``adm_kb_org_rm:`` — remove one at once (from the card), the list that comes
   back offers ``↩️ Вернуть``.
 - ``adm_kb_org_undo:`` — put the removed person back where they were.
@@ -41,7 +43,9 @@ from that same lookup (``_names``), so they cannot disagree about what to call
 someone. The store is ``OrganizerNameRepository`` from Dishka
 (``RepositoryProvider``). The same single ``getChatMember`` (``_seen``) also
 gives the card its membership state, so the list's `` · не в чате`` and the
-card's state line cannot disagree either.
+card's state line cannot disagree either. A stored ``@username`` may still name
+someone, but only one Telegram gives now reaches the card's ``👤 Профиль``: a
+freed username can belong to another person months later.
 
 An invite link is a credential: whoever holds it joins. It is never logged —
 events carry ``chat_id`` and ``user_id`` only, and an error text is scrubbed
@@ -210,7 +214,9 @@ class _Name(NamedTuple):
     full: str | None = None
     """First and last name, for the card's mention."""
     username: str | None = None
-    """Without the ``@``."""
+    """Without the ``@``, and only from Telegram's answer now. A stored one stays
+    out: Telegram frees a username on a rename or a deleted account and anyone
+    may take it, so the card's ``t.me`` button would open a stranger's profile."""
 
     @property
     def absent(self) -> bool:
@@ -292,10 +298,11 @@ async def _names(
     for uid, seen in zip(wanted, live, strict=True):
         name, full, username = seen.name, seen.full, seen.username
         if name is None and uid in stored:
+            # The stored username still names the person (the list has always
+            # shown it), but it is not handed on as theirs: see `_Name.username`.
             row = stored[uid]
             name = orgs.display_name(row.username, row.first_name, row.last_name)
             full = orgs.full_name(row.first_name, row.last_name)
-            username = orgs.username_of(row.username)
         if name is None:
             name = orgs.MEMBER(lang).format(id=uid)
         known[uid] = _Name(name, seen.state, full, username)
@@ -632,16 +639,32 @@ async def _create_link(bot: Bot, chat_id: int, user_id: int, name: str, lang: st
     return _Link(created.invite_link)
 
 
+# What sendMessage answers a bot that may not write to the person first, besides
+# the 403 (a block, or a person who never opened the chat): 400 «chat not found»
+# or PEER_ID_INVALID for someone the bot has never met at all — the same answer
+# `src/bot/commands.py` gets for a per-admin command scope.
+_NO_PRIVATE_CHAT = re.compile(r"chat not found|PEER_ID_INVALID", re.IGNORECASE)
+
+
+def _cannot_write_first(exc: BaseException) -> bool:
+    """Telegram refused because the bot may not start a chat with this person."""
+    if isinstance(exc, TelegramForbiddenError):
+        return True
+    return isinstance(exc, TelegramBadRequest) and bool(_NO_PRIVATE_CHAT.search(exc.message or ""))
+
+
 async def _send_link(
     bot: Bot, chat_id: int, user_id: int, lang: str, title: str | None, link: str
 ) -> tuple[str | None, str | None]:
     """DM ``link`` to the person: ``(notice, notice_raw)`` for the invite screen."""
     try:
         await bot.send_message(user_id, orgs.invite_dm_text(lang, title, link))
-    except TelegramForbiddenError:
-        logger.info("Organizer invite: bot cannot write first", chat_id=chat_id, user_id=user_id)
-        return None, orgs.DM_FORBIDDEN(lang)
     except Exception as exc:  # the link exists and is on the screen either way
+        if _cannot_write_first(exc):
+            logger.info(
+                "Organizer invite: bot cannot write first", chat_id=chat_id, user_id=user_id
+            )
+            return None, orgs.DM_FORBIDDEN(lang)
         logger.warning(
             "Organizer invite: message failed",
             chat_id=chat_id,

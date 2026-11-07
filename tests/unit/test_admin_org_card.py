@@ -20,16 +20,19 @@ from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import CreateChatInviteLink, GetChatMember, SendMessage
 from aiogram.types import (
     ChatInviteLink,
+    ChatMemberAdministrator,
     ChatMemberBanned,
     ChatMemberLeft,
     ChatMemberMember,
+    ChatMemberOwner,
+    ChatMemberRestricted,
     InlineKeyboardMarkup,
     User,
 )
@@ -66,10 +69,22 @@ RIGHTS_ERRORS = [
 # ---------------------------------------------------------------------------
 
 
+def _no_rights(cls: type[Any]) -> dict[str, bool]:
+    """Every required ``can_*`` field of a ChatMember type, all False: the
+    type's own field list, so a field aiogram adds does not break the double."""
+    return {
+        name: False
+        for name, field in cls.model_fields.items()
+        if field.is_required() and name.startswith("can_")
+    }
+
+
 class Telegram:
     """The three Bot API calls the card makes, answered like Telegram, recorded.
 
     ``status`` is what ``getChatMember`` says about the organizer: ``member``,
+    ``restricted`` (restricted and still a member), ``restricted_out``
+    (restricted, ``is_member`` false), ``administrator``, ``creator``,
     ``left``, ``kicked``, ``never`` (Telegram's "member not found") or
     ``unknown`` (a network failure: nothing is known). ``link_error`` makes
     ``createChatInviteLink`` fail with that text; ``dm_error`` is the class
@@ -119,6 +134,20 @@ class Telegram:
             return ChatMemberLeft(user=user)
         if self.status == "kicked":
             return ChatMemberBanned(user=user, until_date=datetime(2030, 1, 1, tzinfo=UTC))
+        if self.status in ("restricted", "restricted_out"):
+            return ChatMemberRestricted(
+                user=user,
+                is_member=self.status == "restricted",
+                until_date=datetime(2030, 1, 1, tzinfo=UTC),
+                **_no_rights(ChatMemberRestricted),
+            )
+        if self.status == "administrator":
+            return ChatMemberAdministrator(
+                user=user, is_anonymous=False, **_no_rights(ChatMemberAdministrator)
+            )
+        if self.status == "creator":
+            return ChatMemberOwner(user=user, is_anonymous=False)
+        assert self.status == "member", self.status
         return ChatMemberMember(user=user)
 
     async def create_chat_invite_link(self, chat_id: int, **kwargs: Any) -> ChatInviteLink:
@@ -344,25 +373,38 @@ INVITE = "✉️ Пригласить в чат"
 REMOVE = "✖️ Убрать из организаторов"
 BACK_TO_LIST = "⬅️ Организаторы"
 
+IN = "Сейчас в чате."
+OUT = "Сейчас не в чате."
+NEVER = "В чат не вступал."
+BANNED = "Удалён из чата и заблокирован в нём."
+SILENT = "Telegram не ответил, в чате ли человек сейчас."
+CAN = "Может сохранять факты командой /remember в этом чате."
+WILL = "Сохранять факты командой /remember сможет, когда будет в чате."
+
 CARD_STATES = [
-    # status, username, labels, state line
-    ("member", NICK, [PROFILE, REMOVE, BACK_TO_LIST], "Сейчас в чате."),
-    ("member", None, [REMOVE, BACK_TO_LIST], "Сейчас в чате."),
-    ("left", NICK, [PROFILE, INVITE, REMOVE, BACK_TO_LIST], "Сейчас не в чате."),
-    ("never", None, [INVITE, REMOVE, BACK_TO_LIST], "В чат не вступал."),
-    ("kicked", NICK, [PROFILE, REMOVE, BACK_TO_LIST], "Удалён из чата и заблокирован в нём."),
-    (
-        "unknown",
-        None,
-        [REMOVE, BACK_TO_LIST],
-        "Telegram не ответил, в чате ли человек сейчас.",
-    ),
+    # status, username (Telegram's, or for never/unknown the store's), labels,
+    # state line, role line
+    ("member", NICK, [PROFILE, REMOVE, BACK_TO_LIST], IN, CAN),
+    ("member", None, [REMOVE, BACK_TO_LIST], IN, CAN),
+    # Restricted and still a member: in the chat, a link would change nothing.
+    ("restricted", NICK, [PROFILE, REMOVE, BACK_TO_LIST], IN, CAN),
+    # Restricted and NOT a member: out, and a link lets them back in.
+    ("restricted_out", NICK, [PROFILE, INVITE, REMOVE, BACK_TO_LIST], OUT, WILL),
+    ("administrator", NICK, [PROFILE, REMOVE, BACK_TO_LIST], IN, CAN),
+    ("creator", NICK, [PROFILE, REMOVE, BACK_TO_LIST], IN, CAN),
+    ("left", NICK, [PROFILE, INVITE, REMOVE, BACK_TO_LIST], OUT, WILL),
+    ("never", None, [INVITE, REMOVE, BACK_TO_LIST], NEVER, WILL),
+    # A stored username is not a profile: it may be someone else's by now.
+    ("never", NICK, [INVITE, REMOVE, BACK_TO_LIST], NEVER, WILL),
+    ("kicked", NICK, [PROFILE, REMOVE, BACK_TO_LIST], BANNED, WILL),
+    ("unknown", None, [REMOVE, BACK_TO_LIST], SILENT, CAN),
+    ("unknown", NICK, [REMOVE, BACK_TO_LIST], SILENT, CAN),
 ]
 
 
-@pytest.mark.parametrize(("status", "username", "labels", "line"), CARD_STATES)
+@pytest.mark.parametrize(("status", "username", "labels", "line", "role"), CARD_STATES)
 async def test_the_card_per_membership_state(
-    status: str, username: str | None, labels: list[str], line: str
+    status: str, username: str | None, labels: list[str], line: str, role: str
 ) -> None:
     # Telegram names nobody it cannot see: those come from the store.
     store = Store({ORG: KnownName(FIRST, LAST, username)})
@@ -370,10 +412,14 @@ async def test_the_card_per_membership_state(
 
     assert card.labels == labels
     assert line in card.text
+    assert role in card.text and ({CAN, WILL} - {role}).pop() not in card.text
     assert (orgs.BANNED_HINT("ru") in card.text) is (status == "kicked")
     assert card.target(REMOVE) == cb("adm_kb_org_rm:", "ru", CID, ORG)
-    if username:
+    if PROFILE in labels:
         assert card.target(PROFILE) == f"https://t.me/{username}"
+        assert f"</a> · @{username}\n" in card.text
+    else:
+        assert "</a> · @" not in card.text, "no @nick beside the mention without a live one"
     if INVITE in labels:
         assert card.target(INVITE) == _inv()
 
@@ -396,6 +442,24 @@ async def test_the_card_names_the_person_and_says_what_they_can_do() -> None:
     assert not any(to.startswith("tg://") for _, to in card.buttons)
 
 
+async def test_with_no_name_ever_known_the_id_is_in_code_and_said_once(
+    drawn: list[Screen],
+) -> None:
+    """«участник 555000111» bare in a title autolinks as a phone number that
+    leads nowhere; the id goes in ``<code>`` and the ID line, now a repeat, goes."""
+    card = await _tap(_card(), Telegram("never"))  # Telegram has no name, the store none
+
+    first, *body = card.text.split("\n")
+    assert first == f"👤 <b>участник</b> <code>{ORG}</code> · {TITLE}"
+    assert not any(line.startswith("ID:") for line in body), body
+    assert card.text.count(f"<code>{ORG}</code>") == 1, "the title's, not a second one"
+    assert body[1] == f'<a href="tg://user?id={ORG}">участник {ORG}</a>'
+    assert drawn[-1].id == "org.card"
+
+    invite = await _tap(_inv(), Telegram("never"))
+    assert invite.text.startswith(f"✉️ <b>Приглашение</b> · участник <code>{ORG}</code>\n")
+
+
 async def test_back_returns_to_the_page_the_person_is_on() -> None:
     ids = [100 + i for i in range(orgs.ORGS_PER_PAGE)] + [ORG]
     card = await _tap(_card(), Telegram(), ids=ids)
@@ -414,6 +478,24 @@ async def test_card_then_remove_gives_the_list_with_undo() -> None:
     settings.set_field.assert_awaited_once()
     assert json.loads(settings.set_field.await_args.args[2]) == [OTHER]
     assert "↩️ Вернуть" in removed.labels
+    assert removed.target("↩️ Вернуть") == cb("adm_kb_org_undo:", "ru", CID, ORG, 1)
+
+
+async def test_a_remove_button_from_before_the_card_still_removes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chats are full of the old list's buttons: ``adm_kb_org_rm:…:p``, the
+    origin token trailing. It must still remove (that is what the button said),
+    not land on the stale screen."""
+    stale = AsyncMock()
+    monkeypatch.setattr(admin_kb, "show_stale", stale)
+    ids = [OTHER, ORG]
+    settings = _settings(ids)
+    removed = await _tap(cb("adm_kb_org_rm:", "ru", CID, ORG) + ":p", Telegram(), settings=settings)
+
+    stale.assert_not_awaited()
+    settings.set_field.assert_awaited_once()
+    assert json.loads(settings.set_field.await_args.args[2]) == [OTHER]
     assert removed.target("↩️ Вернуть") == cb("adm_kb_org_undo:", "ru", CID, ORG, 1)
 
 
@@ -478,7 +560,7 @@ async def test_a_tap_from_someone_not_an_admin_does_nothing(data: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("status", ["left", "never"])
+@pytest.mark.parametrize("status", ["left", "restricted_out", "never"])
 async def test_invite_makes_one_link_for_one_person_for_seven_days(
     status: str, drawn: list[Screen]
 ) -> None:
@@ -504,6 +586,10 @@ async def test_invite_makes_one_link_for_one_person_for_seven_days(
     assert tap.labels == ["📤 Переслать", "🤖 Отправить от бота", "⬅️ Организатор"]
     share = tap.target("📤 Переслать")
     assert share.startswith(f"https://t.me/share/url?url={quote(link, safe='')}&text=")
+    assert parse_qs(urlsplit(share).query) == {
+        "url": [link],
+        "text": [f"Приглашение в «{TITLE}»"],
+    }
     assert tap.target("🤖 Отправить от бота") == _dm()
     assert tap.target("⬅️ Организатор") == _card()
     tap.settings.set_field.assert_not_awaited()
@@ -545,10 +631,33 @@ async def test_another_link_failure_is_logged_and_said_honestly(drawn: list[Scre
     assert failed and failed[0]["chat_id"] == CID and failed[0]["user_id"] == ORG
 
 
+async def test_an_untitled_chat_gets_the_untitled_wording(drawn: list[Screen]) -> None:
+    """No stored title: neither the share text nor the DM may say «Приглашение
+    в «None»» or quote an empty name."""
+    bot = Telegram("left")
+    invite = await _tap(_inv(), bot, settings=_settings([ORG], title=None))
+    share = parse_qs(urlsplit(invite.target("📤 Переслать")).query)
+    assert share == {"url": [bot.made[0]], "text": ["Приглашение в чат"]}
+
+    bot = Telegram("left")
+    await _tap(_dm(), bot, settings=_settings([ORG], title=None))
+    [(to, text)] = bot.sent
+    assert to == ORG
+    assert text == (
+        f"Вас приглашают в чат. Ссылка для одного человека, действует 7 дней:\n{bot.made[0]}"
+    )
+    assert drawn[-1].notice == orgs.SENT("ru")
+
+
 @pytest.mark.parametrize(
     ("status", "line"),
     [
         ("member", orgs.ALREADY_IN_CHAT),
+        # An organizer who is an admin, the owner, or restricted but still a
+        # member is in the chat: no link, whatever the old button said.
+        ("restricted", orgs.ALREADY_IN_CHAT),
+        ("administrator", orgs.ALREADY_IN_CHAT),
+        ("creator", orgs.ALREADY_IN_CHAT),
         ("kicked", orgs.NO_LINK),
         ("unknown", orgs.NO_LINK),
     ],
@@ -595,27 +704,49 @@ async def test_a_title_with_markup_is_escaped_in_the_message() -> None:
     assert "«&lt;b&gt;A&lt;/b&gt; &amp; B»" in bot.sent[0][1]
 
 
-async def test_a_403_says_the_bot_cannot_write_first(drawn: list[Screen]) -> None:
-    bot = Telegram("left", dm_error=TelegramForbiddenError)
-    tap = await _tap(_dm(), bot)
+CANNOT_WRITE_FIRST = [
+    # A 403: never opened a chat with the bot, or blocked it.
+    (TelegramForbiddenError, "Forbidden: bot can't initiate conversation with a user"),
+    (TelegramForbiddenError, "Forbidden: bot was blocked by the user"),
+    # A 400 for someone the bot never met at all.
+    (TelegramBadRequest, "Bad Request: chat not found"),
+    (TelegramBadRequest, "Bad Request: PEER_ID_INVALID"),
+]
+
+
+@pytest.mark.parametrize(("error", "message"), CANNOT_WRITE_FIRST)
+async def test_a_refusal_to_write_first_says_so_and_points_to_share(
+    error: type[Exception], message: str, drawn: list[Screen]
+) -> None:
+    bot = Telegram("left", dm_error=error, dm_message=message)
+    with capture_logs() as logs:
+        tap = await _tap(_dm(), bot)
 
     assert len(bot.sent) == 1, "the send was attempted"
     assert drawn[-1].id == "org.invite"
     assert drawn[-1].notice_raw == orgs.DM_FORBIDDEN("ru")
-    assert orgs.DM_FORBIDDEN("ru") in tap.text
+    assert tap.text.startswith(
+        "<i>Бот не может написать первым: у этого человека нет чата с ботом или бот у него "
+        "заблокирован. Ссылка ниже действует, её можно отправить через «📤 Переслать».</i>"
+    )
     assert f"<code>{bot.made[0]}</code>" in tap.text, "the link is still there to forward"
     assert "📤 Переслать" in tap.labels
+    events = [e["event"] for e in logs]
+    assert "Organizer invite: bot cannot write first" in events, events
+    assert "Organizer invite: message failed" not in events, events
 
 
 async def test_another_send_failure_is_logged_and_said_honestly(drawn: list[Screen]) -> None:
-    bot = Telegram("left", dm_error=TelegramBadRequest, dm_message="Bad Request: chat not found")
+    bot = Telegram(
+        "left", dm_error=TelegramBadRequest, dm_message="Bad Request: message is too long"
+    )
     with capture_logs() as logs:
         tap = await _tap(_dm(), bot)
 
     assert drawn[-1].notice_raw == orgs.DM_FAILED("ru")
     assert orgs.DM_FAILED("ru") in tap.text
     failed = [e for e in logs if e["event"] == "Organizer invite: message failed"]
-    assert failed and failed[0]["error"] == "Bad Request: chat not found"
+    assert failed and failed[0]["error"] == "Bad Request: message is too long"
 
 
 # ---------------------------------------------------------------------------
@@ -706,11 +837,58 @@ class TestCardBuilder:
             assert len(screen.rows) <= 5
 
     def test_an_invalid_username_gets_no_profile_button(self) -> None:
-        for bad in ("ab", "has space", "кириллица", "x" * 33):
+        for bad in ("abc", "has space", "кириллица", "x" * 33):
             screen = orgs.org_card_screen(
                 "ru", CID, TITLE, ORG, "Аня", state="in_chat", username=bad
             )
             assert PROFILE not in [b.label for row in screen.rows for b in row], bad
+            assert "</a> · @" not in screen.text, bad
+
+    def test_a_four_character_username_gets_the_profile(self) -> None:
+        """Collectible usernames can be four characters long."""
+        for nick in ("abcd", "@abcd", "x" * 32):
+            screen = orgs.org_card_screen(
+                "ru", CID, TITLE, ORG, "Аня", state="in_chat", username=nick
+            )
+            bare = nick.lstrip("@")
+            assert screen.rows[0][0].label == PROFILE, nick
+            assert screen.rows[0][0].url == f"https://t.me/{bare}"
+            assert f"</a> · @{bare}\n" in screen.text
+
+    @pytest.mark.parametrize(
+        ("state", "role"),
+        [
+            ("in_chat", CAN),
+            ("unknown", CAN),
+            ("left", WILL),
+            ("never_joined", WILL),
+            ("removed", WILL),
+        ],
+    )
+    def test_the_role_line_follows_the_state(self, state: str, role: str) -> None:
+        screen = orgs.org_card_screen("ru", CID, TITLE, ORG, "Аня", state=state)  # type: ignore[arg-type]
+        lines = screen.text.split("\n")
+        assert lines[-1] == role
+        assert ({CAN, WILL} - {role}).pop() not in screen.text
+        english = orgs.org_card_screen("en", CID, TITLE, ORG, "Ann", state=state)  # type: ignore[arg-type]
+        assert english.text.split("\n")[-1] == (
+            "Can save facts with /remember in this chat."
+            if role == CAN
+            else "Can save facts with /remember once in the chat."
+        )
+
+    def test_the_id_fallback_title_in_both_languages(self) -> None:
+        for lang, word in (("ru", "участник"), ("en", "member")):
+            name = orgs.MEMBER(lang).format(id=ORG)
+            card = orgs.org_card_screen(lang, CID, TITLE, ORG, name, state="never_joined")
+            assert card.text.startswith(f"👤 <b>{word}</b> <code>{ORG}</code> · {TITLE}\n")
+            assert "ID:" not in card.text
+            invite = orgs.org_invite_screen(lang, CID, TITLE, ORG, name, LINKS[0])
+            assert f"</b> · {word} <code>{ORG}</code>\n" in invite.text
+        # A real name that merely contains digits is a name, not the fallback.
+        named = orgs.org_card_screen("ru", CID, TITLE, ORG, "Аня 2000", state="in_chat")
+        assert named.text.startswith(f"👤 <b>Аня 2000</b> · {TITLE}\n")
+        assert f"ID: <code>{ORG}</code>" in named.text
 
     def test_back_goes_to_the_list_page(self) -> None:
         screen = orgs.org_card_screen("en", CID, TITLE, ORG, "Ann", state="in_chat", page=2)
@@ -763,13 +941,14 @@ def test_the_link_name_fits_32_utf16_units() -> None:
 # ---------------------------------------------------------------------------
 
 SAMPLE_INPUTS = {
-    # sample title: (status, username Telegram or the store gives)
-    "В чате, есть @username": ("member", NICK),
-    "В чате, без @username": ("member", None),
-    "Вышел из чата": ("left", NICK),
-    "Не вступал в чат": ("never", None),
-    "Заблокирован в чате": ("kicked", NICK),
-    "Telegram не ответил": ("unknown", None),
+    # sample title: (status, username Telegram or the store gives, stored at all)
+    "В чате, есть @username": ("member", NICK, True),
+    "В чате, без @username": ("member", None, True),
+    "Вышел из чата": ("left", NICK, True),
+    "Не вступал в чат": ("never", NICK, True),
+    "Заблокирован в чате": ("kicked", NICK, True),
+    "Telegram не ответил": ("unknown", None, True),
+    "Имя неизвестно": ("never", None, False),
 }
 
 
@@ -779,9 +958,9 @@ async def test_each_card_sample_is_the_screen_the_handler_draws(
 ) -> None:
     """Samples built from imagined inputs drift from the handler's real ones;
     each card sample must equal the handler's screen for the same person."""
-    status, username = SAMPLE_INPUTS[title]
+    status, username, stored = SAMPLE_INPUTS[title]
     sample = next(item for item in load_all()["org.card"] if item.title == title)
-    store = Store({ORG: KnownName(FIRST, LAST, username)})
+    store = Store({ORG: KnownName(FIRST, LAST, username)} if stored else {})
     await _tap(_card(), Telegram(status, username=username), ids=[OTHER, ORG], store=store)
 
     assert drawn[-1] == sample.build("ru")
