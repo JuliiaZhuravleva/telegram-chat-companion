@@ -632,17 +632,20 @@ async def handle_costs_verify(
             )
         finally:
             await client.close()
-    except Exception as exc:
+    except Exception:
         # The query is answered already, so the global error handler can no
         # longer say anything: without this screen the tap would end in silence.
         logger.warning("costs_verify_failed", period=period, exc_info=True)
-        error_screen = costs_error_screen(
-            lang, period, code="unexpected", error=f"Unexpected error: {type(exc).__name__}"
-        )
+        error_screen = costs_error_screen(lang, period, code="unexpected", error="Unexpected error")
         await show(callback, error_screen, answered=True)
         return
 
     if report.error:
+        # The screen shows the localised reason; the client's own words, which
+        # can name an exception class, are kept here.
+        logger.warning(
+            "costs_verify_refused", period=period, code=report.error_code, error=report.error
+        )
         error_screen = costs_error_screen(lang, period, code=report.error_code, error=report.error)
         await show(callback, error_screen, answered=True)
         return
@@ -659,11 +662,22 @@ async def handle_costs_verify(
         if covered_seconds:
             interval = timedelta(seconds=covered_seconds)
 
-    by_provider = await response_log_repo.get_cost_by_provider(interval)
-    ours = next(
-        (Decimal(row["total_cost"]) for row in by_provider if row["provider"] == "openai"),
-        Decimal("0"),
-    )
+    try:
+        by_provider = await response_log_repo.get_cost_by_provider(interval)
+        ours = next(
+            (Decimal(row["total_cost"]) for row in by_provider if row["provider"] == "openai"),
+            Decimal("0"),
+        )
+    except Exception:
+        # Answered already, as above: a failed read of our own figure must end
+        # on a screen with a retry, not on the one the admin pressed.
+        logger.warning("costs_verify_ours_failed", period=period, exc_info=True)
+        error_screen = costs_error_screen(
+            lang, period, code="ours_failed", error="Own costs could not be read"
+        )
+        await show(callback, error_screen, answered=True)
+        return
+
     screen = costs_verify_screen(
         lang,
         period,

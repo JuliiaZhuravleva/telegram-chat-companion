@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from html import escape as html_escape
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -17,6 +18,9 @@ from src.utils.aliases import AliasView, build_alias_view, primary_alias
 from src.utils.background import fire_and_forget
 from src.utils.display_tz import DISPLAY_TZ
 from src.utils.senders import row_sender_label
+
+if TYPE_CHECKING:
+    from src.bot.screens.i18n import Lang
 
 logger = structlog.get_logger(__name__)
 
@@ -141,18 +145,18 @@ def _header(language: str, count: int) -> str:
     """``📋 **Саммари чата** · 2 сообщения`` -- the heading of ``summary.result``.
 
     Markdown, not HTML: it is converted together with the model's text, as it
-    always was, so the summary below it comes out byte for byte the same. A
-    unit test holds it equal to ``screens.entry.summary_result``'s heading.
+    always was, so the summary below it comes out byte for byte the same. The
+    words come from ``screens.entry.summary_heading``, the screen's own source;
+    a unit test pins the whole message.
     """
     # Imported here: the screen package imports the reply path, which imports
     # services -- at module level this would close an import cycle.
-    from src.bot.screens.i18n import plural_ru
+    from src.bot.screens.entry import summary_heading
 
-    if language == "ru":
-        noun = plural_ru(count, "сообщение", "сообщения", "сообщений")
-        return f"📋 **Саммари чата** · {count} {noun}\n\n"
-    noun = "message" if count == 1 else "messages"
-    return f"📋 **Chat summary** · {count} {noun}\n\n"
+    # Anything but "ru" has always been written in English here, while the
+    # screen layer reads anything but "en" as Russian: map it before handing over.
+    lang: Lang = "ru" if language == "ru" else "en"
+    return summary_heading(lang, count, bold=("**", "**")) + "\n\n"
 
 
 class SummaryService:

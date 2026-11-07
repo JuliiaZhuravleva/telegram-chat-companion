@@ -238,7 +238,7 @@ def group_added(lang: Lang) -> Screen:
 # /summary
 # ---------------------------------------------------------------------------
 
-_SUMMARY_TITLE: Final = Tr("📋 <b>Саммари чата</b>", "📋 <b>Chat summary</b>")
+_SUMMARY_NAME: Final = Tr("Саммари чата", "Chat summary")
 _SUMMARY_INVALID: Final = Tr(
     "🤔 Не понял количество сообщений. Выберите или напишите <code>/summary 300</code>: "
     "от {min} до {max}.",
@@ -253,11 +253,22 @@ def _messages(lang: Lang, n: int) -> str:
     return f"{n} message" if n == 1 else f"{n} messages"
 
 
+def summary_heading(lang: Lang, count: int, *, bold: tuple[str, str] = ("<b>", "</b>")) -> str:
+    """``📋 <b>Саммари чата</b> · 2 сообщения``: the one source of the summary's heading.
+
+    ``bold`` is the markup around the name. The summary service writes its
+    heading in Markdown (``("**", "**")``) because it is converted together with
+    the model's text; the words, the count and the layout come from here either way.
+    """
+    opening, closing = bold
+    return f"📋 {opening}{_SUMMARY_NAME(lang)}{closing} · {_messages(lang, count)}"
+
+
 def summary_result(lang: Lang, *, count: int, body_html: str) -> Screen:
     """A summary: the heading names the count, the body is the model's (escaped) HTML."""
     return Screen(
         id="summary.result",
-        text=f"{_SUMMARY_TITLE(lang)} · {_messages(lang, count)}\n\n{body_html}",
+        text=f"{summary_heading(lang, count)}\n\n{body_html}",
     )
 
 
@@ -333,13 +344,27 @@ def kb_group(lang: Lang, *, total: int, body: str, page: int, pages: int) -> Scr
     return _kb("kb.group", lang, label=_facts(lang, total), body=body, page=page, pages=pages)
 
 
-def kb_dm(lang: Lang, *, title: str | None, total: int, body: str, page: int, pages: int) -> Screen:
-    """``/kb`` in a DM: the chat's name on top, facts by topic with who and when; same pager.
+_KB_PRIVATE: Final = Tr("личный чат", "private chat")
 
+
+def kb_dm(
+    lang: Lang,
+    *,
+    title: str | None,
+    total: int,
+    body: str,
+    page: int,
+    pages: int,
+    private: bool = False,
+) -> Screen:
+    """``/kb`` in a DM: which chat on top, facts by topic with who and when; same pager.
+
+    ``private``: the facts are the private chat's own, and the heading says
+    «личный чат» -- the chat's only name there is the reader's own. Otherwise
     ``title`` is the chat's name as Telegram gives it (raw, escaped here); a
     chat with no name shows the fact count instead.
     """
-    label = _kb_label(title, lang, total)
+    label = _KB_PRIVATE(lang) if private else _kb_label(title, lang, total)
     return _kb("kb.dm", lang, label=label, body=body, page=page, pages=pages)
 
 

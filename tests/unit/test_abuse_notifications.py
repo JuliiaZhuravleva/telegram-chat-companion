@@ -113,3 +113,35 @@ class TestAccessCardText:
     def test_admin_language_is_the_card_language(self):
         ru = render_text(cards.access_card("ru", cards.Applicant(chat_id=-100), attempt_id=None))
         assert ru.startswith("🙏 <b>Новый чат просит доступ</b>")
+
+
+class TestEverySenderHasACaller:
+    """A sender nobody calls is a notification admins can never receive.
+
+    ``notify_jailbreak``, ``notify_blacklist`` and ``notify_ai_fallback`` sat
+    here with no caller while their settings suggested they worked. Each public
+    ``notify_*`` method must be called somewhere in ``src/`` outside this module.
+    """
+
+    def test_each_notify_method_is_called_from_src(self):
+        import inspect
+        import re
+        from pathlib import Path
+
+        from src.services.abuse import notifications
+        from src.services.abuse.notifications import AbuseNotificationService
+
+        senders = [
+            name
+            for name, _ in inspect.getmembers(AbuseNotificationService, inspect.isfunction)
+            if name.startswith("notify_")
+        ]
+        assert senders, "the control: the service has at least one sender"
+
+        own = Path(notifications.__file__).resolve()
+        src = own.parents[2]  # src/services/abuse/notifications.py → src
+        sources = [p.read_text() for p in src.rglob("*.py") if p.resolve() != own]
+        uncalled = [
+            name for name in senders if not any(re.search(rf"\.{name}\(", text) for text in sources)
+        ]
+        assert uncalled == []

@@ -1688,64 +1688,53 @@ def _private_chat(chat: MagicMock, *, first: Any, last: Any = None, title: Any =
     chat.last_name = last
 
 
-class TestKbDmHeadingNamesTheChat:
-    """``kb.dm`` says whose knowledge base it is -- ``📚 База знаний · <the
-    chat's name>`` -- not the fact count, which the group heading keeps. A
-    private chat has no title, so its name is the person's first and last
-    name, which is user input and is escaped.
+_KB_DM_PRIVATE_HEADING = {
+    "ru": "📚 <b>База знаний</b> · личный чат\n\n",
+    "en": "📚 <b>Knowledge base</b> · private chat\n\n",
+}
+
+
+class TestKbDmHeading:
+    """``kb.dm``'s heading says which chat's facts these are.
+
+    ``/kb`` in a private chat reads that chat's own facts, so the heading says
+    «личный чат» -- naming the person would be naming the reader to
+    themselves. A group shown in this layout keeps its title, escaped (user
+    input) and capped for a phone line.
     """
 
     @pytest.mark.asyncio
-    async def test_command_heading_is_the_chat_name(self) -> None:
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    async def test_private_chat_heading_says_private_chat(self, lang: str) -> None:
         msg = _make_message(chat_type="private")
         _private_chat(msg.chat, first="Аня", last="Петрова")
         repo = _make_knowledge_repo()
         repo.get_active_facts = AsyncMock(return_value=_make_facts(7))
 
-        await handle_kb_view_dm(msg, _make_chat_config(), repo)
+        await handle_kb_view_dm(msg, _make_chat_config(language=lang), repo)
 
         text = msg.answer.call_args[0][0]
-        assert text.startswith("📚 <b>База знаний</b> · Аня Петрова\n\n"), text[:80]
-        assert "7 фактов" not in text
+        assert text.startswith(_KB_DM_PRIVATE_HEADING[lang]), text[:80]
+        assert "Аня" not in text and "Петрова" not in text
+        assert "7 фактов" not in text and "7 facts" not in text
 
     @pytest.mark.asyncio
-    async def test_the_name_is_escaped(self) -> None:
-        msg = _make_message(chat_type="private")
-        _private_chat(msg.chat, first="<b>Аня</b>", last="& Ко")
-        repo = _make_knowledge_repo()
-        repo.get_active_facts = AsyncMock(return_value=_make_facts(2))
-
-        await handle_kb_view_dm(msg, _make_chat_config(language="en"), repo)
-
-        text = msg.answer.call_args[0][0]
-        assert text.startswith("📚 <b>Knowledge base</b> · &lt;b&gt;Аня&lt;/b&gt; &amp; Ко\n\n")
-
-    @pytest.mark.asyncio
-    async def test_a_chat_with_a_title_shows_the_title(self) -> None:
-        msg = _make_message(chat_type="private")
-        _private_chat(msg.chat, first="Аня", title="Тестовый <чат>")
-        repo = _make_knowledge_repo()
-        repo.get_active_facts = AsyncMock(return_value=_make_facts(2))
-
-        await handle_kb_view_dm(msg, _make_chat_config(), repo)
-
-        assert msg.answer.call_args[0][0].startswith("📚 <b>База знаний</b> · Тестовый &lt;чат&gt;")
-
-    @pytest.mark.asyncio
-    async def test_the_next_page_keeps_the_name(self) -> None:
-        callback = _make_kb_view_callback("kb_view:ru:1", chat_type="private")
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    async def test_the_next_page_keeps_the_heading(self, lang: str) -> None:
+        callback = _make_kb_view_callback(f"kb_view:{lang}:1", chat_type="private")
         _private_chat(callback.message.chat, first="Аня")
         repo = _make_knowledge_repo()
         repo.get_active_facts = AsyncMock(return_value=_make_facts(7))
 
-        await handle_kb_view_page(callback, _make_chat_config(), repo)
+        await handle_kb_view_page(callback, _make_chat_config(language=lang), repo)
 
         text = callback.message.edit_text.call_args[0][0]
-        assert text.startswith("📚 <b>База знаний</b> · Аня\n\n"), text[:80]
+        assert text.startswith(_KB_DM_PRIVATE_HEADING[lang]), text[:80]
+        assert "Аня" not in text
         assert "факт номер 5" in text
 
     @pytest.mark.asyncio
-    async def test_no_name_at_all_falls_back_to_the_count(self) -> None:
+    async def test_a_private_chat_never_shows_a_name_even_with_no_name_at_all(self) -> None:
         msg = _make_message(chat_type="private")
         _private_chat(msg.chat, first="  ")
         repo = _make_knowledge_repo()
@@ -1753,23 +1742,54 @@ class TestKbDmHeadingNamesTheChat:
 
         await handle_kb_view_dm(msg, _make_chat_config(), repo)
 
-        assert msg.answer.call_args[0][0].startswith("📚 <b>База знаний</b> · 7 фактов\n\n")
+        assert msg.answer.call_args[0][0].startswith(_KB_DM_PRIVATE_HEADING["ru"])
 
     @pytest.mark.asyncio
-    async def test_a_long_name_is_capped_for_the_phone_and_the_length_budget(self) -> None:
-        """A name may be 64+64 characters, each an astral emoji (2 UTF-16 units):
+    @pytest.mark.parametrize(
+        ("lang", "heading"),
+        [
+            ("ru", "📚 <b>База знаний</b> · Тестовый &lt;чат&gt; &amp; Ко\n\n"),
+            ("en", "📚 <b>Knowledge base</b> · Тестовый &lt;чат&gt; &amp; Ко\n\n"),
+        ],
+    )
+    async def test_a_group_keeps_its_escaped_title(self, lang: str, heading: str) -> None:
+        from src.bot.handlers.commands import _render_kb_dm
+        from src.bot.screens.render import render_text
+
+        msg = _make_message(chat_type="supergroup")
+        _private_chat(msg.chat, first=None, title="Тестовый <чат> & Ко")
+
+        screen = await _render_kb_dm(msg.bot, msg.chat, _make_facts(2), lang, 0)
+
+        assert render_text(screen).startswith(heading), render_text(screen)[:80]
+
+    @pytest.mark.asyncio
+    async def test_a_group_with_no_title_falls_back_to_the_count(self) -> None:
+        from src.bot.handlers.commands import _render_kb_dm
+        from src.bot.screens.render import render_text
+
+        msg = _make_message(chat_type="supergroup")
+        _private_chat(msg.chat, first=None, title="  ")
+
+        screen = await _render_kb_dm(msg.bot, msg.chat, _make_facts(7), "ru", 0)
+
+        assert render_text(screen).startswith("📚 <b>База знаний</b> · 7 фактов\n\n")
+
+    @pytest.mark.asyncio
+    async def test_a_long_title_is_capped_for_the_phone_and_the_length_budget(self) -> None:
+        """A title may be 128 characters, each an astral emoji (2 UTF-16 units):
         the heading takes at most ``KB_TITLE_UNITS`` of them, so the room
         ``_fit_message`` keeps beside the body still holds."""
+        from src.bot.handlers.commands import _render_kb_dm
         from src.bot.screens.entry import KB_TITLE_UNITS
+        from src.bot.screens.render import render_text
 
-        msg = _make_message(chat_type="private")
-        _private_chat(msg.chat, first="🦊" * 64, last="&" * 64)
-        repo = _make_knowledge_repo()
-        repo.get_active_facts = AsyncMock(return_value=_make_facts(2))
+        msg = _make_message(chat_type="supergroup")
+        _private_chat(msg.chat, first=None, title="🦊" * 64 + "&" * 64)
 
-        await handle_kb_view_dm(msg, _make_chat_config(), repo)
+        screen = await _render_kb_dm(msg.bot, msg.chat, _make_facts(2), "ru", 0)
 
-        heading = msg.answer.call_args[0][0].split("\n\n", 1)[0]
+        heading = render_text(screen).split("\n\n", 1)[0]
         name = heading.removeprefix("📚 <b>База знаний</b> · ")
         assert name.endswith("…") and name.startswith("🦊")
         assert len(name.encode("utf-16-le")) // 2 <= KB_TITLE_UNITS

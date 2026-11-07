@@ -1,10 +1,9 @@
-"""Admin notification sender for abuse events."""
+"""Admin notification sender: the access card for a chat that is not allowed yet."""
 
 from __future__ import annotations
 
 import contextlib
 import json
-from html import escape
 from typing import Any
 
 import structlog
@@ -15,20 +14,19 @@ from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
+# Only the type this service sends. The stored settings may still carry other
+# keys (``jailbreak``, ``blacklist``, ``ai_fallback``) from senders that were
+# removed; they are left where they are and read by nothing here.
 _NOTIFICATION_DEFAULTS: dict[str, Any] = {
-    "sticker": "on",
     "unauthorized": True,
-    "jailbreak": True,
-    "blacklist": True,
-    "ai_fallback": True,
 }
 
 
 class AbuseNotificationService:
-    """Send notifications to admin about abuse events.
+    """Deliver the access card to the bot's admins.
 
-    Notification types: jailbreak, blacklist, ai_fallback, unauthorized.
-    Runs in parallel with main response — never blocks user.
+    One notification type: ``unauthorized``. Runs in parallel with the main
+    response — never blocks the user.
 
     Admin IDs are resolved from bot_config at call time (not at construction),
     so changes to admin_ids take effect immediately.
@@ -52,84 +50,6 @@ class AbuseNotificationService:
                 notifications = data.get("notifications") or {}
         merged = {**_NOTIFICATION_DEFAULTS, **notifications}
         return bool(merged.get(notification_type, True))
-
-    async def notify_jailbreak(
-        self,
-        *,
-        chat_id: int,
-        user_id: int,
-        username: str | None,
-        pattern_description: str | None,
-        severity: int | None,
-        bot: Any = None,
-    ) -> None:
-        """Notify admins about a jailbreak attempt."""
-        if bot is None:
-            return
-
-        if not await self._is_notification_enabled("jailbreak"):
-            return
-
-        admin_ids = await self._get_admin_ids()
-        if not admin_ids:
-            return
-
-        text = (
-            f"⚠️ Jailbreak attempt\n"
-            f"Chat: <code>{chat_id}</code>\n"
-            f"User: {escape(username) if username else f'<code>{user_id}</code>'}\n"
-            f"Pattern: {escape(pattern_description) if pattern_description else 'unknown'}\n"
-            f"Severity: {severity or 'N/A'}"
-        )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, text)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin",
-                    admin_id=admin_id,
-                    error_type=type(exc).__name__,
-                )
-
-    async def notify_blacklist(
-        self,
-        *,
-        chat_id: int,
-        user_id: int,
-        username: str | None,
-        content: str,
-        timeout_hours: float,
-        bot: Any = None,
-    ) -> None:
-        """Notify admins about a blacklist trigger."""
-        if bot is None:
-            return
-
-        if not await self._is_notification_enabled("blacklist"):
-            return
-
-        admin_ids = await self._get_admin_ids()
-        if not admin_ids:
-            return
-
-        text = (
-            f"🚫 Blacklist triggered\n"
-            f"Chat: <code>{chat_id}</code>\n"
-            f"User: {escape(username) if username else f'<code>{user_id}</code>'}\n"
-            f"Content: {escape(content[:50])}\n"
-            f"Timeout: {timeout_hours:.1f}h"
-        )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, text)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin",
-                    admin_id=admin_id,
-                    error_type=type(exc).__name__,
-                )
 
     async def notify_unauthorized(
         self,
@@ -179,41 +99,3 @@ class AbuseNotificationService:
                     error_type=type(exc).__name__,
                 )
         return sent
-
-    async def notify_ai_fallback(
-        self,
-        *,
-        chat_id: int,
-        primary_provider: str,
-        fallback_provider: str,
-        error: str,
-        bot: Any = None,
-    ) -> None:
-        """Notify admins when AI primary provider failed and fallback was used."""
-        if bot is None:
-            return
-
-        if not await self._is_notification_enabled("ai_fallback"):
-            return
-
-        admin_ids = await self._get_admin_ids()
-        if not admin_ids:
-            return
-
-        text = (
-            f"🔄 AI fallback activated\n"
-            f"Chat: <code>{chat_id}</code>\n"
-            f"Primary: {primary_provider} (failed)\n"
-            f"Fallback: {fallback_provider}\n"
-            f"Error: {error[:100]}"
-        )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, text, parse_mode=None)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin",
-                    admin_id=admin_id,
-                    error_type=type(exc).__name__,
-                )
