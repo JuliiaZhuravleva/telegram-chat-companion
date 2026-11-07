@@ -406,7 +406,7 @@ class TestOrganizerList:
 
         text, markup = _edited(callback)
         assert text.startswith(f"{ORGS_HEAD} · Тестовый чат")
-        assert _labels(markup) == ["✖️ Аня", "✖️ Борис", "➕ Добавить", "⬅️ Чат"]
+        assert _labels(markup) == ["👤 Аня", "👤 Борис", "➕ Добавить", "⬅️ Чат"]
         assert _buttons(markup)[-1][1] == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     async def test_the_empty_list_says_who_can_save_facts_anyway(self) -> None:
@@ -441,7 +441,7 @@ class TestOrganizerList:
 
         assert sorted(bot.asked) == [901, 902]
         _, markup = _edited(callback)
-        assert _labels(markup)[:2] == ["✖️ Вера", "✖️ Глеб"]
+        assert _labels(markup)[:2] == ["👤 Вера", "👤 Глеб"]
         assert "2/2" in _labels(markup)
 
     async def test_a_page_past_the_end_shows_the_last_page(self) -> None:
@@ -451,7 +451,7 @@ class TestOrganizerList:
         await _call(handle_kb_organizers, callback, chat_settings_repo=repo, state=_FakeState())
 
         _, markup = _edited(callback)
-        assert _labels(markup)[0] == "✖️ Вера"
+        assert _labels(markup)[0] == "👤 Вера"
         assert "2/2" in _labels(markup)
 
     async def test_an_unknown_title_shows_the_chat_id(self) -> None:
@@ -515,7 +515,7 @@ class TestRemove:
         text, markup = _edited(callback)
         assert text.startswith("<i>✓ Аня больше не организатор</i>\n\n")
         assert ("↩️ Вернуть", f"adm_kb_org_undo:ru:{CHAT_ID}:{ORG_USER_ID}:0") in _buttons(markup)
-        assert "✖️ Аня" not in _labels(markup)
+        assert "👤 Аня" not in _labels(markup)
 
     async def test_the_page_the_person_was_on_is_kept(self) -> None:
         ids = [ORG_USER_ID, OTHER_ID, NEW_ID, 901, 902]
@@ -526,7 +526,7 @@ class TestRemove:
 
         assert _written(repo) == [ORG_USER_ID, OTHER_ID, NEW_ID, 902]
         _, markup = _edited(callback)
-        assert _labels(markup)[0] == "✖️ Глеб"
+        assert _labels(markup)[0] == "👤 Глеб"
         assert "2/2" in _labels(markup)
 
     async def test_someone_already_gone_writes_nothing(self) -> None:
@@ -563,7 +563,7 @@ class TestUndo:
         text, markup = _edited(callback)
         assert text.startswith("<i>✓ Аня снова организатор</i>")
         assert "↩️ Вернуть" not in _labels(markup)
-        assert _labels(markup)[0] == "✖️ Аня"
+        assert _labels(markup)[0] == "👤 Аня"
 
     async def test_a_second_tap_writes_nothing(self) -> None:
         callback = _make_callback(f"adm_kb_org_undo:ru:{CHAT_ID}:{ORG_USER_ID}:0")
@@ -645,7 +645,7 @@ class TestNames:
         callback = await _list_of([ORG_USER_ID], bot)
 
         assert bot.asked == [ORG_USER_ID]
-        assert _first_label(callback) == "✖️ Аня Ким · не в чате"
+        assert _first_label(callback) == "👤 Аня Ким · не в чате"
 
     @pytest.mark.parametrize("error", NOT_A_MEMBER)
     async def test_the_chat_history_names_someone_never_stored(
@@ -655,14 +655,14 @@ class TestNames:
 
         callback = await _list_of([ORG_USER_ID], FakeBot(error=error))
 
-        assert _first_label(callback) == "✖️ @anya · не в чате"
+        assert _first_label(callback) == "👤 @anya · не в чате"
 
     async def test_the_live_name_beats_the_stored_one(self, store: FakeNames) -> None:
         store.stored[ORG_USER_ID] = KnownName("Старое имя", None, None)
 
         callback = await _list_of([ORG_USER_ID], FakeBot())
 
-        assert _first_label(callback) == "✖️ Аня"
+        assert _first_label(callback) == "👤 Аня"
         assert not any(c[0] == "names" for c in store.calls), (
             "Telegram named everyone: the store must not be asked"
         )
@@ -671,18 +671,18 @@ class TestNames:
         """``restricted`` is neither LEFT nor KICKED: only ``is_member`` tells."""
         callback = await _list_of([ORG_USER_ID], FakeBot(restricted={ORG_USER_ID: False}))
 
-        assert _first_label(callback) == "✖️ Аня · не в чате"
+        assert _first_label(callback) == "👤 Аня · не в чате"
 
     async def test_a_restricted_member_still_in_the_group_is_not_marked(self) -> None:
         callback = await _list_of([ORG_USER_ID], FakeBot(restricted={ORG_USER_ID: True}))
 
-        assert _first_label(callback) == "✖️ Аня"
+        assert _first_label(callback) == "👤 Аня"
 
     async def test_someone_who_left_is_named_and_marked(self) -> None:
         callback = await _list_of([ORG_USER_ID, OTHER_ID], FakeBot(left={OTHER_ID}))
 
         _, markup = _edited(callback)
-        assert _labels(markup)[:2] == ["✖️ Аня", "✖️ Борис · не в чате"]
+        assert _labels(markup)[:2] == ["👤 Аня", "👤 Борис · не в чате"]
 
     @pytest.mark.parametrize(
         "error",
@@ -701,12 +701,12 @@ class TestNames:
 
         callback = await _list_of([ORG_USER_ID], FakeBot(error=error))
 
-        assert _first_label(callback) == "✖️ Аня Ким"
+        assert _first_label(callback) == "👤 Аня Ким"
 
     async def test_the_id_only_when_no_name_was_ever_known(self) -> None:
         callback = await _list_of([ORG_USER_ID], FakeBot(error=MEMBER_NOT_FOUND))
 
-        assert _first_label(callback) == f"✖️ участник {ORG_USER_ID} · не в чате"
+        assert _first_label(callback) == f"👤 участник {ORG_USER_ID} · не в чате"
 
     async def test_remove_then_undo_names_them_both_times(self, store: FakeNames) -> None:
         """The stored name outlives the removal: ↩️ Вернуть brings it back."""
@@ -728,7 +728,7 @@ class TestNames:
         )
         text, markup = _edited(undo)
         assert text.startswith("<i>✓ @newbie снова организатор</i>")
-        assert "✖️ @newbie · не в чате" in _labels(markup)
+        assert "👤 @newbie · не в чате" in _labels(markup)
 
     async def test_a_stored_name_with_markup_is_escaped(self, store: FakeNames) -> None:
         store.stored[ORG_USER_ID] = KnownName("<b>Аня</b>", None, None)
@@ -801,7 +801,7 @@ class TestPick:
         assert _written(repo) == [ORG_USER_ID, NEW_ID]
         text, markup = _edited(callback)
         assert text.startswith("<i>✓ @newbie теперь организатор</i>")
-        assert _labels(markup)[:2] == ["✖️ Аня", "✖️ @newbie"]
+        assert _labels(markup)[:2] == ["👤 Аня", "👤 @newbie"]
         assert state.clear_calls == 0
 
     async def test_the_list_opens_on_the_new_persons_page(self) -> None:
@@ -811,7 +811,7 @@ class TestPick:
         await _call(handle_kb_organizer_pick, callback, chat_settings_repo=repo, state=_FakeState())
 
         _, markup = _edited(callback)
-        assert _labels(markup)[0] == "✖️ @newbie"
+        assert _labels(markup)[0] == "👤 @newbie"
         assert "2/2" in _labels(markup)
 
     async def test_the_name_from_the_chat_history_is_kept(self, store: FakeNames) -> None:
@@ -831,7 +831,7 @@ class TestPick:
         assert store.stored[NEW_ID] == KnownName("Новый", None, "newbie_seen")
         text, markup = _edited(callback)
         assert text.startswith("<i>✓ @newbie_seen теперь организатор</i>")
-        assert _labels(markup)[0] == "✖️ @newbie_seen · не в чате"
+        assert _labels(markup)[0] == "👤 @newbie_seen · не в чате"
 
     async def test_an_organizer_already_gets_a_toast_only(self) -> None:
         callback = _make_callback(f"adm_kb_org_pick:ru:{CHAT_ID}:{ORG_USER_ID}")
@@ -945,7 +945,7 @@ class TestReaderAdds:
         assert line == "✓ @newbie теперь организатор."
         assert isinstance(remove, ReplyKeyboardRemove)
         assert text.startswith(ORGS_HEAD)
-        assert "✖️ @newbie" in _labels(markup)
+        assert "👤 @newbie" in _labels(markup)
 
     async def test_a_forward_from_someone_without_a_username_uses_the_name(self) -> None:
         message = _reply(forward_origin=_user_origin(username=None))
@@ -955,7 +955,7 @@ class TestReaderAdds:
 
         (line, _), (_, markup) = _sent(message)
         assert line == "✓ Новый теперь организатор."
-        assert "✖️ Новый" in _labels(markup)
+        assert "👤 Новый" in _labels(markup)
 
     async def test_a_username_seen_in_the_chat_adds(self) -> None:
         message = _reply(text="@newbie")
@@ -980,7 +980,7 @@ class TestReaderAdds:
         assert store.stored[NEW_ID] == KnownName("Новый", None, "newbie")
         (line, _), (_, markup) = _sent(message)
         assert line == "✓ @newbie теперь организатор.\n⚠️ Сейчас этого человека в чате нет."
-        assert "✖️ @newbie · не в чате" in _labels(markup)
+        assert "👤 @newbie · не в чате" in _labels(markup)
 
     async def test_a_typed_username_is_remembered_with_the_name_the_chat_knows(
         self, store: FakeNames
@@ -992,7 +992,7 @@ class TestReaderAdds:
         await _read(message, message_repo=message_repo)
 
         assert store.stored[NEW_ID] == KnownName("Новый", None, "newbie")
-        assert "✖️ @newbie · не в чате" in _labels(_sent(message)[1][1])
+        assert "👤 @newbie · не в чате" in _labels(_sent(message)[1][1])
 
     async def test_someone_already_on_the_list_is_said_so(self) -> None:
         message = _reply(text="@anya_org")
@@ -1003,7 +1003,7 @@ class TestReaderAdds:
         assert _written(repo) is None
         (line, _), (_, markup) = _sent(message)
         assert line == "✓ Аня уже организатор.", "the name the list shows, not the typed one"
-        assert _labels(markup)[0] == "✖️ Аня"
+        assert _labels(markup)[0] == "👤 Аня"
         assert await state.get_state() is None
 
 
@@ -1148,7 +1148,7 @@ async def test_dishka_hands_the_store_through_to_the_list(store: FakeNames) -> N
     finally:
         await container.close()
 
-    assert _first_label(callback) == "✖️ Аня Ким · не в чате"
+    assert _first_label(callback) == "👤 Аня Ким · не в чате"
 
 
 # ---------------------------------------------------------------------------
@@ -1182,8 +1182,8 @@ class _PickedBot(FakeBot):
 
 
 def _row_name(label: str) -> str:
-    assert label.startswith("✖️ "), label
-    return label.removeprefix("✖️ ").removesuffix(" · не в чате")
+    assert label.startswith("👤 "), label
+    return label.removeprefix("👤 ").removesuffix(" · не в чате")
 
 
 def _notice_name(text: str, tail: str) -> str:

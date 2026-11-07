@@ -114,26 +114,28 @@ def test_page_of() -> None:
 
 
 class TestOrgsScreen:
-    def test_one_remove_row_per_person_then_add_then_back(self) -> None:
+    def test_one_card_row_per_person_then_add_then_back(self) -> None:
+        """A name opens the person's card; until 2026-11 the same tap removed them."""
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE)
 
         assert screen.id == "orgs"
         assert _rows(screen) == [
-            [("✖️ Аня", f"adm_kb_org_rm:ru:{CHAT_ID}:111")],
-            [("✖️ Борис", f"adm_kb_org_rm:ru:{CHAT_ID}:222")],
+            [("👤 Аня", f"adm_kb_org:ru:{CHAT_ID}:111")],
+            [("👤 Борис", f"adm_kb_org:ru:{CHAT_ID}:222")],
             [("➕ Добавить", f"adm_kb_org_list:ru:{CHAT_ID}:0")],
             [("⬅️ Чат", f"adm_pnl_menu:ru:{CHAT_ID}")],
         ]
         assert screen.text.startswith("👥 <b>Организаторы</b> · Чат\n\n")
 
-    def test_the_line_says_a_tap_removes_at_once_and_undo_follows(self) -> None:
-        """Every reader was nervous about the tap and nobody knew ↩️ Вернуть
-        exists: it appears only after the tap, so the screen says so before."""
+    def test_the_line_says_what_organizers_can_do_not_what_a_tap_does(self) -> None:
+        """A text twin: the tap no longer removes, so the line that warned it
+        did is gone, and the body does not list the buttons either."""
         for lang in ("ru", "en"):
             text = orgs.orgs_screen(lang, CHAT_ID, "Чат", PEOPLE).text
-            assert f"«{orgs.UNDO(lang)}»" in text, text
+            assert text.endswith(orgs.ORGS_BODY(lang)), text
+            assert f"«{orgs.UNDO(lang)}»" not in text
         ru = orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE).text
-        assert "Нажатие на имя сразу убирает человека" in ru
+        assert "Нажатие" not in ru and "убира" not in ru and "Добавить" not in ru
 
     def test_empty_says_who_can_save_facts_anyway(self) -> None:
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", [])
@@ -173,18 +175,18 @@ class TestOrgsScreen:
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", [(1, "Ж" * 60)])
 
         label = _labels(screen)[0]
-        assert label.startswith("✖️ Ж") and label.endswith("…")
+        assert label.startswith("👤 Ж") and label.endswith("…")
         assert label_width_px(label) <= orgs.NAME_PX
 
     def test_someone_not_in_the_chat_is_marked(self) -> None:
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", PEOPLE, absent={222})
 
         assert _rows(screen)[:2] == [
-            [("✖️ Аня", f"adm_kb_org_rm:ru:{CHAT_ID}:111")],
-            [("✖️ Борис · не в чате", f"adm_kb_org_rm:ru:{CHAT_ID}:222")],
+            [("👤 Аня", f"adm_kb_org:ru:{CHAT_ID}:111")],
+            [("👤 Борис · не в чате", f"adm_kb_org:ru:{CHAT_ID}:222")],
         ]
         english = orgs.orgs_screen("en", CHAT_ID, "Chat", PEOPLE, absent={222})
-        assert _labels(english)[1] == "✖️ Борис · not in chat"
+        assert _labels(english)[1] == "👤 Борис · not in chat"
 
     def test_the_mark_is_explained_only_while_the_page_shows_it(self) -> None:
         """All four readers guessed what «не в чате» means; the task "remove
@@ -198,7 +200,7 @@ class TestOrgsScreen:
         screen = orgs.orgs_screen("ru", CHAT_ID, "Чат", [(1, "Ж" * 60)], absent={1})
 
         label = _labels(screen)[0]
-        assert label.startswith("✖️ Ж") and label.endswith("… · не в чате")
+        assert label.startswith("👤 Ж") and label.endswith("… · не в чате")
         assert label_width_px(label) <= orgs.NAME_PX
 
     def test_the_title_is_escaped_and_a_missing_one_is_the_chat_id(self) -> None:

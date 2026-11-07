@@ -6,7 +6,15 @@ The screens are built in ``screens/orgs.py``; this module reads and writes
 Callbacks (all ``adm_kb_*``, the chat id in the payload):
 
 - ``adm_kb_orgs:`` — the organizer list, a page of it.
-- ``adm_kb_org_rm:`` — remove one at once, the result offers ``↩️ Вернуть``.
+- ``adm_kb_org:`` — one organizer's card. A tap on a name opens it and writes
+  nothing; until 2026-11 the same tap removed the person at once.
+- ``adm_kb_org_inv:`` — make a one-person, seven-day invite link for an
+  organizer who left or never joined, and show it.
+- ``adm_kb_org_dm:`` — make a fresh link and send it to the person from the
+  bot. Telegram refuses (403) when the person never opened a chat with the
+  bot; that answer is the only reliable signal, so the button is always there.
+- ``adm_kb_org_rm:`` — remove one at once (from the card), the list that comes
+  back offers ``↩️ Вернуть``.
 - ``adm_kb_org_undo:`` — put the removed person back where they were.
 - ``adm_kb_org_list:`` — the chat's participants by activity, a page of them.
 - ``adm_kb_org_pick:`` — add the tapped participant.
@@ -28,9 +36,16 @@ and only then «участник <id>». When Telegram says the person is not in
 group, the name carries `` · не в чате``.
 
 One name per person: the line that confirms an add, the person's row in the
-list and the notices after a remove or an undo all take the name from that
-same lookup (``_names``), so they cannot disagree about what to call someone.
-The store is ``OrganizerNameRepository`` from Dishka (``RepositoryProvider``).
+list, the card and the notices after a remove or an undo all take the name
+from that same lookup (``_names``), so they cannot disagree about what to call
+someone. The store is ``OrganizerNameRepository`` from Dishka
+(``RepositoryProvider``). The same single ``getChatMember`` (``_seen``) also
+gives the card its membership state, so the list's `` · не в чате`` and the
+card's state line cannot disagree either.
+
+An invite link is a credential: whoever holds it joins. It is never logged —
+events carry ``chat_id`` and ``user_id`` only, and an error text is scrubbed
+of the link before it is logged (``_error_text``).
 """
 
 from __future__ import annotations
@@ -39,13 +54,14 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Iterable, Mapping
+from datetime import UTC, datetime, timedelta
 from html import escape as html_escape
 from typing import Any, NamedTuple
 
 import structlog
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -190,39 +206,69 @@ _NOT_A_MEMBER = re.compile(r"member not found|PARTICIPANT_ID_INVALID", re.IGNORE
 
 class _Name(NamedTuple):
     label: str
-    absent: bool = False
-    """Telegram says the person is not in the group (left, removed, never joined)."""
+    state: orgs.Membership = "unknown"
+    full: str | None = None
+    """First and last name, for the card's mention."""
+    username: str | None = None
+    """Without the ``@``."""
+
+    @property
+    def absent(self) -> bool:
+        """Telegram says the person is not in the group (left, removed, never joined)."""
+        return self.state in orgs.ABSENT
 
 
-async def _live(bot: Bot | None, chat_id: int, user_id: int) -> tuple[str | None, bool]:
-    """``(name, absent)`` from one ``getChatMember``: what Telegram says about the person now.
+class _Seen(NamedTuple):
+    """What one ``getChatMember`` said: the state, and the name when it gave one."""
+
+    state: orgs.Membership
+    name: str | None = None
+    full: str | None = None
+    username: str | None = None
+
+
+async def _seen(bot: Bot | None, chat_id: int, user_id: int) -> _Seen:
+    """What Telegram says about the person now, from one ``getChatMember``.
 
     The pick can be someone who never was in this chat, which is worth a mark,
     not a refusal: the organizer list is an authority list, and someone about to
     be invited may be on it on purpose. Only an answer that SAYS "not a member"
-    marks the person; any other failure is unverifiable, has no name and no mark.
+    reads as ``never_joined``; any other failure is ``unknown``, with no name.
+    A restricted person who is not a member reads as ``left``: a link lets them
+    back in, restrictions and all.
     """
     if bot is None:
-        return None, False
+        return _Seen("unknown")
     try:
         member = await bot.get_chat_member(chat_id, user_id)
     except TelegramBadRequest as exc:
         if _NOT_A_MEMBER.search(exc.message or ""):
-            return None, True
+            return _Seen("never_joined")
         logger.warning(
             "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
         )
-        return None, False
+        return _Seen("unknown")
     except Exception as exc:  # the list renders whatever the lookup does
         logger.warning(
             "Organizer name: lookup failed", chat_id=chat_id, user_id=user_id, error=str(exc)
         )
-        return None, False
-    user = member.user
-    absent = member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.KICKED) or (
+        return _Seen("unknown")
+    state: orgs.Membership
+    if member.status == ChatMemberStatus.KICKED:
+        state = "removed"
+    elif member.status == ChatMemberStatus.LEFT or (
         isinstance(member, ChatMemberRestricted) and not member.is_member
+    ):
+        state = "left"
+    else:
+        state = "in_chat"
+    user = member.user
+    return _Seen(
+        state,
+        orgs.display_name(user.username, user.first_name, user.last_name),
+        orgs.full_name(user.first_name, user.last_name),
+        orgs.username_of(user.username),
     )
-    return orgs.display_name(user.username, user.first_name, user.last_name), absent
 
 
 async def _names(
@@ -240,16 +286,19 @@ async def _names(
     an organizer reads it from here (``orgs.display_name`` formats it)."""
     known = dict(known or {})
     wanted = [uid for uid in dict.fromkeys(user_ids) if uid not in known]
-    live = await asyncio.gather(*(_live(bot, chat_id, uid) for uid in wanted))
-    unnamed = [uid for uid, (name, _) in zip(wanted, live, strict=True) if name is None]
+    live = await asyncio.gather(*(_seen(bot, chat_id, uid) for uid in wanted))
+    unnamed = [uid for uid, seen in zip(wanted, live, strict=True) if seen.name is None]
     stored = await store.names(chat_id, unnamed) if unnamed else {}
-    for uid, (name, absent) in zip(wanted, live, strict=True):
+    for uid, seen in zip(wanted, live, strict=True):
+        name, full, username = seen.name, seen.full, seen.username
         if name is None and uid in stored:
             row = stored[uid]
             name = orgs.display_name(row.username, row.first_name, row.last_name)
+            full = orgs.full_name(row.first_name, row.last_name)
+            username = orgs.username_of(row.username)
         if name is None:
             name = orgs.MEMBER(lang).format(id=uid)
-        known[uid] = _Name(name, absent)
+        known[uid] = _Name(name, seen.state, full, username)
     return known
 
 
@@ -263,6 +312,7 @@ async def _orgs_view(
     *,
     page: int = 0,
     notice: str | None = None,
+    notice_raw: str | None = None,
     undo: tuple[int, int] | None = None,
     known: Mapping[int, _Name] | None = None,
 ) -> Screen:
@@ -278,8 +328,39 @@ async def _orgs_view(
         page=page,
         pages=pages,
         notice=notice,
+        notice_raw=notice_raw,
         undo=undo,
         absent={uid for uid in shown if names[uid].absent},
+    )
+
+
+async def _card_view(
+    bot: Bot | None,
+    lang: str,
+    chat_id: int,
+    title: str | None,
+    ids: list[int],
+    user_id: int,
+    store: OrganizerNameRepository,
+    *,
+    notice: str | None = None,
+    notice_raw: str | None = None,
+    known: Mapping[int, _Name] | None = None,
+) -> Screen:
+    """One organizer's card; ``user_id`` must be in ``ids`` (its position picks the back page)."""
+    person = (await _names(bot, chat_id, [user_id], lang, store, known))[user_id]
+    return orgs.org_card_screen(
+        lang,
+        chat_id,
+        title,
+        user_id,
+        person.label,
+        state=person.state,
+        full=person.full,
+        username=person.username,
+        page=orgs.page_of(ids.index(user_id)),
+        notice=notice,
+        notice_raw=notice_raw,
     )
 
 
@@ -405,8 +486,9 @@ async def handle_kb_organizer_remove(
 ) -> None:
     """Remove an organizer at once and offer ``↩️ Вернуть`` (undo over confirm).
 
-    The page that comes back is the one the person was on, so the admin does
-    not lose their place in a long list.
+    Reached from the card's ``✖️ Убрать из организаторов`` (and from list
+    buttons sent before the card existed). The page that comes back is the one
+    the person was on, so the admin does not lose their place in a long list.
     """
     if not await _admin_tap(callback, bot_config_repo):
         return
@@ -484,6 +566,242 @@ async def handle_kb_organizer_undo(
         known=names,
     )
     await show(callback, screen)
+
+
+# ---------------------------------------------------------------------------
+# One organizer: the card and the invite
+# ---------------------------------------------------------------------------
+
+# What Telegram answers createChatInviteLink when the bot is not an admin or
+# lacks can_invite_users: CHAT_ADMIN_REQUIRED, or "not enough rights to …".
+_NO_INVITE_RIGHT = re.compile(r"CHAT_ADMIN_REQUIRED|not enough rights|rights", re.IGNORECASE)
+
+# Any invite link's shape, so a scrub does not depend on knowing which link a
+# failure text happens to quote.
+_INVITE_LINK = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/(?:\+|joinchat/)[\w-]+")
+
+
+def _error_text(exc: BaseException, link: str | None = None) -> str:
+    """A failure as it may be logged: Telegram's description or the class name, never a link.
+
+    ``str(exc)`` of a Telegram error does not carry the request, but a message
+    composed elsewhere might quote it; the scrub is what makes "never logged"
+    hold whatever the text says: the link in hand by value, any other by shape.
+    """
+    text = exc.message if isinstance(exc, TelegramAPIError) else type(exc).__name__
+    if link:
+        text = text.replace(link, "<link>")
+    return _INVITE_LINK.sub("<link>", text)
+
+
+class _Link(NamedTuple):
+    url: str | None
+    failure: str | None = None
+    """The card's line when no link was made (HTML, a `notice_raw`)."""
+
+
+async def _create_link(bot: Bot, chat_id: int, user_id: int, name: str, lang: str) -> _Link:
+    """A link for one person, valid `orgs.INVITE_DAYS` days, named after them."""
+    try:
+        created = await bot.create_chat_invite_link(
+            chat_id,
+            name=orgs.invite_link_name(name, lang),
+            expire_date=datetime.now(UTC) + timedelta(days=orgs.INVITE_DAYS),
+            member_limit=1,
+        )
+    except TelegramBadRequest as exc:
+        if _NO_INVITE_RIGHT.search(exc.message or ""):
+            logger.info("Organizer invite: no invite right", chat_id=chat_id, user_id=user_id)
+            return _Link(None, orgs.NO_INVITE_RIGHT(lang))
+        logger.warning(
+            "Organizer invite: link failed",
+            chat_id=chat_id,
+            user_id=user_id,
+            error=_error_text(exc),
+        )
+        return _Link(None, orgs.LINK_FAILED(lang))
+    except Exception as exc:  # the card answers whatever Telegram does
+        logger.warning(
+            "Organizer invite: link failed",
+            chat_id=chat_id,
+            user_id=user_id,
+            error=_error_text(exc),
+        )
+        return _Link(None, orgs.LINK_FAILED(lang))
+    logger.info("Organizer invite link made", chat_id=chat_id, user_id=user_id)
+    return _Link(created.invite_link)
+
+
+async def _send_link(
+    bot: Bot, chat_id: int, user_id: int, lang: str, title: str | None, link: str
+) -> tuple[str | None, str | None]:
+    """DM ``link`` to the person: ``(notice, notice_raw)`` for the invite screen."""
+    try:
+        await bot.send_message(user_id, orgs.invite_dm_text(lang, title, link))
+    except TelegramForbiddenError:
+        logger.info("Organizer invite: bot cannot write first", chat_id=chat_id, user_id=user_id)
+        return None, orgs.DM_FORBIDDEN(lang)
+    except Exception as exc:  # the link exists and is on the screen either way
+        logger.warning(
+            "Organizer invite: message failed",
+            chat_id=chat_id,
+            user_id=user_id,
+            error=_error_text(exc, link),
+        )
+        return None, orgs.DM_FAILED(lang)
+    logger.info("Organizer invite sent", chat_id=chat_id, user_id=user_id)
+    return orgs.SENT(lang), None
+
+
+async def _not_an_organizer(
+    callback: CallbackQuery,
+    lang: str,
+    chat_id: int,
+    title: str | None,
+    ids: list[int],
+    store: OrganizerNameRepository,
+) -> None:
+    """The person left the list meanwhile (another admin, a second tap): the list, with a line."""
+    screen = await _orgs_view(
+        callback.bot,
+        lang,
+        chat_id,
+        title,
+        ids,
+        store,
+        notice_raw=orgs.NOT_ORGANIZER(lang),
+    )
+    await show(callback, screen)
+
+
+@router.callback_query(F.data.startswith("adm_kb_org:"))
+async def handle_kb_organizer_card(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    organizer_names: FromDishka[OrganizerNameRepository],
+    **kwargs: Any,
+) -> None:
+    """One organizer's card. Opening it writes nothing."""
+    if not await _admin_tap(callback, bot_config_repo):
+        return
+    lang = _lang_of_payload(callback.data)
+    fields = _ints(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, lang, data=kwargs)
+        return
+    chat_id, user_id = fields
+
+    ids, title = await _load(chat_settings_repo, chat_id)
+    if user_id not in ids:
+        await _not_an_organizer(callback, lang, chat_id, title, ids, organizer_names)
+        return
+    screen = await _card_view(callback.bot, lang, chat_id, title, ids, user_id, organizer_names)
+    await show(callback, screen)
+
+
+async def _invite(
+    callback: CallbackQuery,
+    chat_settings_repo: ChatSettingsRepository,
+    organizer_names: OrganizerNameRepository,
+    data: dict[str, Any],
+    *,
+    send: bool,
+) -> None:
+    """Make a link for an organizer outside the chat; with ``send``, DM it from the bot.
+
+    Both re-check what the card showed: the person may have been removed from
+    the list, or joined, since the card was drawn. Only ``left`` and
+    ``never_joined`` get a link (`orgs.INVITABLE`).
+    """
+    lang = _lang_of_payload(callback.data)
+    fields = _ints(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, lang, data=data)
+        return
+    chat_id, user_id = fields
+
+    ids, title = await _load(chat_settings_repo, chat_id)
+    if user_id not in ids:
+        await _not_an_organizer(callback, lang, chat_id, title, ids, organizer_names)
+        return
+    bot = callback.bot
+    names = await _names(bot, chat_id, [user_id], lang, organizer_names)
+    person = names[user_id]
+    if bot is None or person.state not in orgs.INVITABLE:
+        line = orgs.ALREADY_IN_CHAT if person.state == "in_chat" else orgs.NO_LINK
+        screen = await _card_view(
+            bot,
+            lang,
+            chat_id,
+            title,
+            ids,
+            user_id,
+            organizer_names,
+            notice_raw=line(lang),
+            known=names,
+        )
+        await show(callback, screen)
+        return
+
+    link = await _create_link(bot, chat_id, user_id, person.label, lang)
+    if link.url is None:
+        screen = await _card_view(
+            bot,
+            lang,
+            chat_id,
+            title,
+            ids,
+            user_id,
+            organizer_names,
+            notice_raw=link.failure,
+            known=names,
+        )
+        await show(callback, screen)
+        return
+
+    notice, notice_raw = (
+        await _send_link(bot, chat_id, user_id, lang, title, link.url) if send else (None, None)
+    )
+    screen = orgs.org_invite_screen(
+        lang,
+        chat_id,
+        title,
+        user_id,
+        person.label,
+        link.url,
+        notice=notice,
+        notice_raw=notice_raw,
+    )
+    await show(callback, screen)
+
+
+@router.callback_query(F.data.startswith("adm_kb_org_inv:"))
+async def handle_kb_organizer_invite(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    organizer_names: FromDishka[OrganizerNameRepository],
+    **kwargs: Any,
+) -> None:
+    """A one-person, seven-day link for an organizer who left or never joined."""
+    if not await _admin_tap(callback, bot_config_repo):
+        return
+    await _invite(callback, chat_settings_repo, organizer_names, kwargs, send=False)
+
+
+@router.callback_query(F.data.startswith("adm_kb_org_dm:"))
+async def handle_kb_organizer_invite_dm(
+    callback: CallbackQuery,
+    chat_settings_repo: FromDishka[ChatSettingsRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    organizer_names: FromDishka[OrganizerNameRepository],
+    **kwargs: Any,
+) -> None:
+    """A fresh link, sent to the person from the bot; a 403 says to forward it instead."""
+    if not await _admin_tap(callback, bot_config_repo):
+        return
+    await _invite(callback, chat_settings_repo, organizer_names, kwargs, send=True)
 
 
 # ---------------------------------------------------------------------------

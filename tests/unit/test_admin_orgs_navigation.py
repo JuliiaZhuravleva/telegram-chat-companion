@@ -90,12 +90,7 @@ def test_the_samples_agree_on_how_many_organizers_there_are() -> None:
         if not any(b.kind == "pager" or b.label.startswith("◀") for row in s.rows for b in row)
     ]
     people = [
-        sum(
-            1
-            for row in s.rows
-            for b in row
-            if b.callback and b.callback.startswith("adm_kb_org_rm:")
-        )
+        sum(1 for row in s.rows for b in row if b.callback and b.callback.startswith("adm_kb_org:"))
         for s in one_page
     ]
     assert len(one_page) >= 3

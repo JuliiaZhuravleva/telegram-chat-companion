@@ -139,6 +139,10 @@ ROUTES: Final[dict[str, Route]] = {
     "ar_cfg:": Route("rule.cfg", "new"),
     # ── knowledge-base organizers ──
     "adm_kb_orgs:": Route("orgs", "kept"),
+    # A name on ``orgs`` opens the person's card; removing moved onto it.
+    "adm_kb_org:": Route("org.card", "new"),
+    "adm_kb_org_inv:": Route("org.invite", "new"),
+    "adm_kb_org_dm:": Route("org.invite", "new"),
     "adm_kb_org_rm:": Route("orgs", "kept"),
     "adm_kb_org_undo:": Route("orgs", "new"),
     "adm_kb_org_list:": Route("org.list", "kept"),
@@ -264,6 +268,7 @@ BACK_NAMES: Final[dict[str, Tr]] = {
     "rules": Tr("Правила", "Rules"),
     "rule": Tr("Правило", "Rule"),
     "orgs": Tr("Организаторы", "Organizers"),
+    "org.card": Tr("Организатор", "Organizer"),
     "requests": Tr("Запросы доступа", "Access requests"),
     "settings": Tr("Общие настройки", "General settings"),
     "defs": Tr("Для всех чатов", "All chats"),
