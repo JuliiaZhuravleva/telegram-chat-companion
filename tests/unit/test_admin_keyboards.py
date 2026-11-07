@@ -287,6 +287,62 @@ class TestNotif:
         if en:
             assert notif_screen("en", {"sticker": mode}).rows[0][0].label.endswith(en)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "stored",
+        [{}, {"sticker": None}, {"sticker": "weird"}, {"sticker": ""}, {"sticker": "OFF"}]
+        + [{"sticker": mode} for mode in ("off", "on", "detailed")],
+    )
+    async def test_the_label_says_what_the_sender_will_do(self, stored: dict[str, Any]):
+        """Read the stored value through the real consumer, then compare the screen."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from src.bot.handlers.media import handle_sticker_message
+        from src.services.modules.sticker.models import StickerLearningResult
+
+        message = MagicMock()
+        message.sticker = MagicMock(set_name=None, is_animated=False, is_video=False)
+        message.sender_chat = None
+        message.is_automatic_forward = None
+        config = MagicMock(sticker_learning_enabled=True, sticker_reply_to_sticker_enabled=False)
+        service = MagicMock()
+        service.learn = AsyncMock(
+            return_value=StickerLearningResult(is_new=True, file_unique_id="unique-1")
+        )
+        service.notify_admins = AsyncMock()
+        bot_config_repo = MagicMock()
+        bot_config_repo.get = AsyncMock(return_value=[111])
+        admin_repo = MagicMock()
+        admin_repo.get_notification_settings = AsyncMock(return_value=stored)
+
+        with patch(
+            "src.bot.handlers.media.download_telegram_file",
+            new_callable=AsyncMock,
+            return_value=b"fake-webp",
+        ):
+            await handle_sticker_message(
+                message,
+                config,
+                service,
+                MagicMock(),
+                MagicMock(),
+                MagicMock(get_recent=AsyncMock(return_value=[])),
+                bot_config_repo,
+                admin_repo,
+                MagicMock(),
+            )
+
+        admin_repo.get_notification_settings.assert_awaited_once()
+        if not service.notify_admins.await_count:
+            effect = "off"
+        else:
+            # learning.notify_admins adds the collage for "detailed" only.
+            sent = service.notify_admins.await_args.kwargs["notification_mode"]
+            effect = "detailed" if sent == "detailed" else "on"
+        word = {"off": "выкл", "on": "кратко", "detailed": "подробно"}[effect]
+        label = notif_screen("ru", stored).rows[0][0].label
+        assert label == f"🖼 Новые стикеры: {word}", (stored, effect)
+
     def test_only_two_switches(self):
         screen = notif_screen(
             "en", {"sticker": "on", "unauthorized": False, "jailbreak": True, "blacklist": True}

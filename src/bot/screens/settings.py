@@ -14,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
+from src.bot.screens.chat import COMMUNITY_LINES, LABELS
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Button, Screen
 from src.bot.screens.render import back
@@ -73,9 +74,15 @@ _REQUESTS = Tr("Заявки чатов", "Chat requests")
 
 
 def sticker_mode(settings: Mapping[str, Any]) -> str:
-    """The stored sticker-report mode; anything unknown counts as the first one, off."""
+    """The stored sticker-report mode, read the way the sender reads it.
+
+    ``handlers/media.py`` sends the report unless the value is exactly ``"off"``,
+    and only ``"detailed"`` adds the collage. Anything else (no value, None, a
+    word from an older version) therefore gets the brief report, so the screen
+    says ``"on"`` for it rather than claiming the reports are off.
+    """
     mode = str(settings.get("sticker", "on"))
-    return mode if mode in STICKER_CYCLE else STICKER_CYCLE[0]
+    return mode if mode in STICKER_CYCLE else "on"
 
 
 def next_sticker_mode(settings: Mapping[str, Any]) -> str:
@@ -180,29 +187,6 @@ def defs_screen(lang: str) -> Screen:
     )
 
 
-# Short labels: a phone fits about 17 characters on a full-width button and
-# about 8 on a third. The community section pairs its six followers up, so it
-# carries a legend saying what each short word does.
-TOGGLE_LABELS: Final[Mapping[str, Tr]] = {
-    "rg": Tr("Не встревать без повода", "Stay out unless it fits"),
-    "lc": Tr("Читать ссылки", "Read links"),
-    "ch": Tr("Искать по архиву чата", "Search the chat archive"),
-    "kb": Tr("База знаний", "Knowledge base"),
-    "tx": Tr("Сворачивать расшифровки", "Collapse transcripts"),
-    "sr": Tr("Стикер на стикер", "Sticker for a sticker"),
-    "ic": Tr("Стикер к фото", "Sticker on photos"),
-    "rx": Tr("Ставить реакции", "Add reactions"),
-    "rh": Tr("Запоминать чужие", "Remember others'"),
-    "cm": Tr("Режим сообщества", "Community mode"),
-    "gf": Tr("Новичок", "Newcomer"),
-    "wb": Tr("Возвращение", "Comeback"),
-    "fp": Tr("Прощание", "Farewell"),
-    "fd": Tr("Уходы", "Departures"),
-    "rj": Tr("Шутка", "Joke"),
-    "aw": Tr("Советы", "Advice"),
-    "re": Tr("Свои правила", "Custom rules"),
-}
-
 SECTION_TOGGLES: Final[Mapping[Section, tuple[tuple[str, ...], ...]]] = {
     "behavior": (("rg",), ("lc",)),
     "memory": (("ch",), ("kb",)),
@@ -225,30 +209,14 @@ _SECTION_TITLE = Tr(
     "{icon} <b>{name}</b> · все чаты без своего значения",
     "{icon} <b>{name}</b> · every chat without its own value",
 )
-_COMMUNITY_LEGEND = Tr(
-    "Новичок: приветствовать на первом сообщении\n"
-    "Возвращение: «с возвращением» тем, кто вернулся\n"
-    "Прощание: прощаться в чате\n"
-    "Уходы: сообщать админам об уходе в личку\n"
-    "Шутка: «он вернётся»\n"
-    "Советы: следить за советами",
-    "Newcomer: greet on the first message\n"
-    "Comeback: welcome back whoever returns\n"
-    "Farewell: say goodbye in the chat\n"
-    "Departures: tell the admins in private\n"
-    "Joke: «they'll be back»\n"
-    "Advice: watch for advice",
-)
 _RULES_MODES: Final[Mapping[str, Tr]] = {
     "all": Tr("все сработавшие", "every match"),
     "highest_weight": Tr("одно, самое весомое", "the heaviest one"),
     "weighted_random": Tr("одно, случайно по весу", "one, at random by weight"),
 }
-_STICKER_CHANCE = Tr(
-    "Стикер на стикер: в {p} % случаев", "Sticker for a sticker: {p} % of the time"
-)
-_PHOTO_CHANCE = Tr("Стикер к фото: в {p} % случаев", "Sticker on photos: {p} % of the time")
-_TOLERANCE = Tr("Откровенность стикеров: {v}", "Sticker frankness: {v}")
+_CHANCE = Tr("{label}: в {p} % случаев", "{label}: {p} % of the time")
+"""Under the switch of the same name, so it reads that switch's label."""
+_TOLERANCE = Tr("Откровенность стикеров: {v}", "Sticker explicitness: {v}")
 _RULES_MODE = Tr("Срабатывают: {mode}", "Applied: {mode}")
 
 
@@ -263,8 +231,13 @@ def _info_lines(lang: str, section: Section, values: Mapping[str, Any]) -> list[
     """The values this screen shows but cannot change: a number or a mode is not a yes/no."""
     if section == "stickers":
         return [
-            _STICKER_CHANCE(lang).format(p=_percent(values.get("sticker_reply_to_sticker_chance"))),
-            _PHOTO_CHANCE(lang).format(p=_percent(values.get("image_comment_sticker_chance"))),
+            _CHANCE(lang).format(
+                label=LABELS["sr"](lang),
+                p=_percent(values.get("sticker_reply_to_sticker_chance")),
+            ),
+            _CHANCE(lang).format(
+                label=LABELS["ic"](lang), p=_percent(values.get("image_comment_sticker_chance"))
+            ),
             _TOLERANCE(lang).format(v=values.get("tolerance_level")),
         ]
     if section == "rules":
@@ -272,7 +245,8 @@ def _info_lines(lang: str, section: Section, values: Mapping[str, Any]) -> list[
         label = _RULES_MODES[mode](lang) if mode in _RULES_MODES else mode
         return [_RULES_MODE(lang).format(mode=label)]
     if section == "community":
-        return [_COMMUNITY_LEGEND(lang)]
+        # The six followers sit two to a row, so the short words need saying out.
+        return ["\n".join(line(lang) for _, line in COMMUNITY_LINES)]
     return []
 
 
@@ -286,7 +260,7 @@ def defs_section_screen(lang: str, section: Section, values: Mapping[str, Any]) 
     def toggle(code: str) -> Button:
         on = bool(values.get(KEY_OF[code]))
         return Button(
-            f"{'✅' if on else '⚪'} {TOGGLE_LABELS[code](lang)}",
+            f"{'✅' if on else '⚪'} {LABELS[code](lang)}",
             callback=cb("adm_defs_tgl:", lang, code),
         )
 

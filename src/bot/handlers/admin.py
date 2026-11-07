@@ -363,8 +363,11 @@ async def handle_wl_restore(
     if not attempt:
         await _show_rejected(callback, admin_repo, lang, page, notice=NOT_FOUND(lang))
         return
-    if attempt.get("status") == "rejected":
-        await admin_repo.update_attempt_status(attempt_id, "pending")
+    if attempt.get("status") != "rejected":
+        # Another admin approved it, or restored it a moment ago: nothing to undo.
+        await _show_rejected(callback, admin_repo, lang, page, notice=ALREADY_HANDLED(lang))
+        return
+    await admin_repo.update_attempt_status(attempt_id, "pending")
     await _show_rejected(callback, admin_repo, lang, page, notice=RESTORED(lang))
 
 
@@ -621,13 +624,23 @@ async def handle_costs_verify(
 
     # The billing call can take seconds: stop the spinner first.
     await callback.answer()
-    client = OpenAIBillingClient(api_key)
     try:
-        report = await client.get_costs(
-            days={"1h": 1, "24h": 1, "7d": 7}[period], project_id=project_id
+        client = OpenAIBillingClient(api_key)
+        try:
+            report = await client.get_costs(
+                days={"1h": 1, "24h": 1, "7d": 7}[period], project_id=project_id
+            )
+        finally:
+            await client.close()
+    except Exception as exc:
+        # The query is answered already, so the global error handler can no
+        # longer say anything: without this screen the tap would end in silence.
+        logger.warning("costs_verify_failed", period=period, exc_info=True)
+        error_screen = costs_error_screen(
+            lang, period, code="unexpected", error=f"Unexpected error: {type(exc).__name__}"
         )
-    finally:
-        await client.close()
+        await show(callback, error_screen, answered=True)
+        return
 
     if report.error:
         error_screen = costs_error_screen(lang, period, code=report.error_code, error=report.error)

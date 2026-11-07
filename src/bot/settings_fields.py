@@ -20,12 +20,12 @@ first of them is in the merge at all:
   (``adm_kb_orgs:``) per the A-2 ADR; not part of ``ChatConfig`` either (it's
   written straight through ``ChatSettingsRepository``, never merged).
 
-Legacy vs. new (``FieldSpec.legacy``): 13 of these 33 columns still carry a
+Legacy vs. new (``FieldSpec.legacy``): 13 of these 34 columns still carry a
 SQL ``DEFAULT`` from migration 001 (``alembic/versions/001_initial_schema.py``),
 so ``ensure_exists()`` materializes a per-chat value on first contact and
 permanently shadows ``bot_config.default_*`` for that field on every chat the
 bot has already seen — the "inherited from default" story is false for them
-until the forward-only migration in C-2 (deferred to tech debt). The other 20
+until the forward-only migration in C-2 (deferred to tech debt). The other 21
 are nullable, no-DEFAULT columns (CLAUDE.md "Per-chat columns: nullable, no
 DEFAULT") where NULL honestly means "inherited". Consumers:
 
@@ -104,7 +104,7 @@ class FieldSpec:
 
     legacy: bool
     """True for the 13 migration-001 columns that still carry a SQL DEFAULT
-    (see module docstring). False for the 13 new nullable/no-DEFAULT columns."""
+    (see module docstring). False for the 21 newer nullable/no-DEFAULT columns."""
 
     def label_for(self, lang: str) -> str:
         """Resolve the i18n label, falling back to ru then the raw key."""
@@ -424,7 +424,7 @@ def fields_by_group() -> tuple[tuple[FieldGroup, tuple[FieldSpec, ...]], ...]:
 
 
 def new_fields() -> tuple[FieldSpec, ...]:
-    """The 13 fields eligible for the defaults screen (C-1) and the
+    """The 21 fields eligible for the defaults screen (C-1) and the
     "inherited from default" marker (B-2) — the 13 legacy columns lie about
     inheritance until migration C-2 lands."""
     return tuple(field for field in CHAT_SETTINGS_FIELDS if not field.legacy)
