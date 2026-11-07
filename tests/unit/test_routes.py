@@ -76,6 +76,11 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_pnl_tol:": (LANG, CID, "in"),
     "adm_pnl_tolset:": (LANG, CID, "0.95"),
     "adm_pnl_tolcancel:": (LANG, CID),
+    "adm_pnl_pct:": (LANG, CID, CODE, "in"),
+    "adm_pnl_pctset:": (LANG, CID, CODE, "100"),
+    "adm_pnl_pctx:": (LANG, CID, CODE),
+    "adm_pnl_lg:": (LANG, CID),
+    "adm_pnl_lgset:": (LANG, CID, "ru"),
     "adm_pnl_sp:": (LANG, CID),
     "adm_pnl_spok:": (LANG, CID, INT4),  # the draft's revision: a message id
     "adm_pnl_spre:": (LANG, CID, INT4),
@@ -777,6 +782,7 @@ _STICKER_TAKER: dict[str | None, str] = {
     AdminStates.awaiting_rule_text.state: _STICKER_CHECK,
     AdminStates.awaiting_rule_react.state: "rules.handle_rule_react_input",
     AdminStates.awaiting_rule_who.state: _STICKER_CHECK,
+    AdminStates.awaiting_response_chance.state: _STICKER_CHECK,
 }
 """Who takes a sticker the admin sends in the DM, by the prompt open at the time.
 

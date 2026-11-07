@@ -201,7 +201,7 @@ def behavior_common(lang: Lang) -> Screen:
 @sample(
     "behavior",
     section=_SECTION,
-    title="Сам не вступает, значения свои",
+    title="Не встревает, значения свои",
     nav="panel",
     user_data=_BEHAVIOR_DATA,
 )
@@ -341,3 +341,71 @@ def community_on(lang: Lang) -> Screen:
 def community_inherited(lang: Lang) -> Screen:
     """Every part paired and marked ``· общее``: the widest the pairs get."""
     return screens.build_community(_view(community_enabled=True), lang)
+
+
+# ── percentages and the reply language ───────────────────────────────────
+
+
+@sample("chance.prompt", section=_SECTION, title="Встревает: сейчас пресет", nav="panel")
+def chance_joins_preset(lang: Lang) -> Screen:
+    return screens.build_chance_prompt(_view(), "rc", lang)
+
+
+@sample("chance.prompt", section=_SECTION, title="Встревает: своё число", nav="panel")
+def chance_joins_custom(lang: Lang) -> Screen:
+    """0.3 % is no preset: the text says it, and no button is marked."""
+    return screens.build_chance_prompt(_view(random_response_chance=0.003), "rc", lang)
+
+
+@sample("chance.prompt", section=_SECTION, title="Стикер на стикер выключен", nav="panel")
+def chance_sticker_off(lang: Lang) -> Screen:
+    row = {"sticker_reply_to_sticker_enabled": False}
+    return screens.build_chance_prompt(_view(row=row), "sx", lang)
+
+
+@sample("chance.stickers", section=_SECTION, title="Значения общие", nav="panel", user_data=_TITLES)
+def chance_stickers_common(lang: Lang) -> Screen:
+    return screens.build_sticker_chances(_view(), lang)
+
+
+@sample(
+    "chance.stickers",
+    section=_SECTION,
+    title="Значения свои, одно выключено",
+    nav="panel",
+    user_data=_TITLES,
+)
+def chance_stickers_own(lang: Lang) -> Screen:
+    own = {**_OWN_ROW, "sticker_reply_to_sticker_chance": 0.75, "image_comment_sticker_chance": 1.0}
+    return screens.build_sticker_chances(_view(row=own), lang)
+
+
+@sample("chance.in", section=_SECTION, title="Встревает: ввод числа", nav="prompt")
+def chance_joins_input(lang: Lang) -> Screen:
+    return screens.build_chance_input(_view(), "rc", lang)
+
+
+@sample("chance.in", section=_SECTION, title="Стикер на стикер: ввод числа", nav="prompt")
+def chance_sticker_input(lang: Lang) -> Screen:
+    return screens.build_chance_input(_view(), "sx", lang)
+
+
+@sample("chance.invalid", section=_SECTION, title="Не число", nav="prompt")
+def chance_not_a_number(lang: Lang) -> Screen:
+    return screens.build_chance_input(_view(), "rc", lang, invalid="number")
+
+
+@sample("chance.invalid", section=_SECTION, title="Больше предела", nav="prompt")
+def chance_above_cap(lang: Lang) -> Screen:
+    return screens.build_chance_input(_view(), "rc", lang, invalid="high")
+
+
+@sample("chat.lang", section=_SECTION, title="Сейчас русский", nav="panel")
+def language_ru(lang: Lang) -> Screen:
+    return screens.build_language_prompt(_view(), lang)
+
+
+@sample("chat.lang", section=_SECTION, title="Сейчас неизвестный код", nav="panel")
+def language_unknown(lang: Lang) -> Screen:
+    """A code the panel does not offer: shown as stored, no button marked."""
+    return screens.build_language_prompt(_view(language="de"), lang)

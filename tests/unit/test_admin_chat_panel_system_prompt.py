@@ -484,7 +484,8 @@ class TestSave:
         assert text.startswith("<i>✓ Инструкция сохранена")
         assert "Поведение" in text or "Behavior" in text
         markup = callback.message.edit_text.call_args.kwargs["reply_markup"]
-        assert markup.inline_keyboard[-1][0].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
+        # The back button is the last one of the last row (it shares it with «Инструкция»).
+        assert markup.inline_keyboard[-1][-1].callback_data == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     @pytest.mark.asyncio
     async def test_stale_button_after_restart_writes_nothing(self) -> None:

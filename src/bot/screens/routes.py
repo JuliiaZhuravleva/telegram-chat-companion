@@ -71,6 +71,16 @@ def _toggle_arg(parts: list[str]) -> str:
     return SECTION_SCREEN[section] if section else "chat"
 
 
+def _chance_arg(parts: list[str]) -> str:
+    if len(parts) <= 3:
+        return "chance.stickers"
+    return "chance.in" if parts[4:5] == ["in"] else "chance.prompt"
+
+
+def _chance_home_arg(parts: list[str]) -> str:
+    return "behavior" if parts[3:4] == ["rc"] else "chance.stickers"
+
+
 ROUTES: Final[dict[str, Route]] = {
     # ── hub ──
     "adm_menu:": Route("hub", "kept"),
@@ -83,6 +93,11 @@ ROUTES: Final[dict[str, Route]] = {
     "adm_pnl_tol:": Route("tol.prompt", "kept"),
     "adm_pnl_tolset:": Route("chat.stickers", "new"),
     "adm_pnl_tolcancel:": Route("chat.stickers", "kept"),
+    "adm_pnl_pct:": Route(_chance_arg, "new"),
+    "adm_pnl_pctset:": Route(_chance_home_arg, "new"),
+    "adm_pnl_pctx:": Route(_chance_home_arg, "new"),
+    "adm_pnl_lg:": Route("chat.lang", "new"),
+    "adm_pnl_lgset:": Route("behavior", "new"),
     "adm_pnl_sp:": Route("sp.prompt", "kept"),
     "adm_pnl_spok:": Route("behavior", "kept"),
     "adm_pnl_spre:": Route("sp.redo", "kept"),
