@@ -28,11 +28,12 @@ The builder keeps its answers in FSM data (``rule_*`` keys) and asks for typed
 input in four states (`_RULE_STATES`). A payload a handler cannot parse, or a
 builder step whose draft is gone or belongs to another chat, is a stale button.
 
-The person search is the one reply keyboard here. It has no state of its own:
-``rule_finding`` in FSM data marks it open, and its picks carry
-``REQUEST_IDS.RULE_WHO``, so the knowledge base's picker never takes them. Every
-way out of it (a pick, «✖️ Отмена», a stale pick, ``/cancel``) takes the
-keyboard away.
+The person search is the one reply keyboard here. It is open while the state
+is ``awaiting_rule_who`` AND ``rule_finding`` in FSM data holds its chat
+(`_finding_chat`), and its picks carry ``REQUEST_IDS.RULE_WHO``, so the
+knowledge base's picker never takes them. Every way out of it (a pick, a name
+tapped in the inline picker, «✖️ Отмена», the button's label sent back as text
+by an app without the search, a stale pick, ``/cancel``) takes the keyboard away.
 """
 
 from __future__ import annotations
@@ -118,6 +119,7 @@ _DRAFT_KEYS: Final = (
     "rule_people",
     "rule_prompt_id",
     "rule_finding",
+    "rule_no_find",
 )
 """The builder's answers in FSM data, set to None when a new rule starts.
 
@@ -802,21 +804,32 @@ async def handle_builder_type(
     await state.update_data(rule_type=rule_type, lang=lang)
     if kind == "u":
         page = _int(rest[1] if len(rest) > 1 else None) or 0
-        people, total = await message_repo.get_top_active_users(chat_id, page, screens.WHO_PER_PAGE)
-        clamped, pages, _ = page_slice(total, page, screens.WHO_PER_PAGE)
-        if clamped != page:
-            people, total = await message_repo.get_top_active_users(
-                chat_id, clamped, screens.WHO_PER_PAGE
-            )
-            clamped, pages, _ = page_slice(total, clamped, screens.WHO_PER_PAGE)
-        persons = [
-            screens.Person(int(p["user_id"]), p.get("first_name"), p.get("username"))
-            for p in people
-        ]
-        await state.update_data(rule_people={str(p.user_id): p.display for p in persons})
-        await show(callback, screens.who_screen(lang, chat_id, persons, page=clamped, pages=pages))
+        await show(callback, await _who(state, message_repo, lang, chat_id, page))
         return
     await show(callback, screens.count_screen(lang, chat_id, kind or ""))
+
+
+async def _who(
+    state: FSMContext, message_repo: MessageRepository, lang: str, chat_id: int, page: int
+) -> Screen:
+    """The picker of the chat's most active people, remembering the names it shows.
+
+    Without «🔍 Найти в Telegram» once this admin's app sent its label back as
+    text (``rule_no_find``): there the button opens nothing.
+    """
+    people, total = await message_repo.get_top_active_users(chat_id, page, screens.WHO_PER_PAGE)
+    clamped, pages, _ = page_slice(total, page, screens.WHO_PER_PAGE)
+    if clamped != page:
+        people, total = await message_repo.get_top_active_users(
+            chat_id, clamped, screens.WHO_PER_PAGE
+        )
+        clamped, pages, _ = page_slice(total, clamped, screens.WHO_PER_PAGE)
+    persons = [
+        screens.Person(int(p["user_id"]), p.get("first_name"), p.get("username")) for p in people
+    ]
+    no_find = (await state.get_data()).get("rule_no_find") is True
+    await state.update_data(rule_people={str(p.user_id): p.display for p in persons})
+    return screens.who_screen(lang, chat_id, persons, page=clamped, pages=pages, find=not no_find)
 
 
 @router.callback_query(F.data.startswith("ar_b_match:"))
@@ -851,9 +864,17 @@ async def handle_builder_who(
     state: FSMContext,
     **kwargs: Any,
 ) -> None:
-    """Whose messages: one person from the chat's most active ones."""
+    """Whose messages: one person from the chat's most active ones.
+
+    A name tapped while the person search is still open (Telegram kept the
+    picker's buttons, ``rule_who_keyboard_kept``) ends the search the way a
+    pick in it does: the keyboard goes on its own short line, and the next
+    step comes under it. Read off the flag, not the state, which a tap on
+    another screen may already have dropped while the keyboard stayed up.
+    """
     if await _denied(callback, kwargs):
         return
+    searching = isinstance((await state.get_data()).get("rule_finding"), int)
     await _leave_config_prompt(state, keep_draft=True)
     lang, chat_id, rest = _builder_args(callback, 3)
     user_id = _int(rest[0] if rest else None)
@@ -869,7 +890,15 @@ async def handle_builder_who(
     people = draft.get("rule_people")
     shown = people.get(str(user_id)) if isinstance(people, dict) else None
     name = _cap_name(shown if isinstance(shown, str) and shown else str(user_id))
-    await state.update_data(rule_user=user_id, rule_name=name)
+    await state.update_data(rule_user=user_id, rule_name=name, rule_finding=None)
+    if searching and isinstance(callback.message, Message):
+        await callback.answer()
+        await _leave_find(callback.message, screens.WHO_PICKED(lang).format(name=name))
+        await show(
+            callback, screens.action_screen(lang, chat_id, name), answered=True, new_message=True
+        )
+        await _retire(callback.message)
+        return
     await show(callback, screens.action_screen(lang, chat_id, name))
 
 
@@ -896,10 +925,15 @@ async def handle_builder_find(
     await state.set_state(AdminStates.awaiting_rule_who)
     await show(callback, screens.who_find_screen(lang))
     if isinstance(callback.message, Message):
-        try:
-            await safe_edit_reply_markup(callback.message, reply_markup=None)
-        except TelegramAPIError as exc:
-            logger.info("rule_who_keyboard_kept", error=str(exc))
+        await _retire(callback.message)
+
+
+async def _retire(picker: Message) -> None:
+    """Take the inline picker's buttons away: the search is the live screen now, or is over."""
+    try:
+        await safe_edit_reply_markup(picker, reply_markup=None)
+    except TelegramAPIError as exc:
+        logger.info("rule_who_keyboard_kept", error=str(exc))
 
 
 async def _finding_chat(state: FSMContext) -> int | None:
@@ -923,6 +957,7 @@ class _Finding(Filter):
 
 
 _CANCEL_LABELS: Final = frozenset(bare_label(CANCEL(lang)) for lang in ("ru", "en"))
+_FIND_LABELS: Final = frozenset(bare_label(screens.FIND(lang)) for lang in ("ru", "en"))
 
 
 async def _leave_find(message: Message, line: str) -> None:
@@ -1003,6 +1038,35 @@ async def handle_builder_find_cancel(
                 chat_settings_repo=chat_settings_repo,
             ),
         )
+
+
+@router.message(
+    _Finding(),
+    F.chat.type == "private",
+    F.forward_origin.is_(None),
+    F.text.func(lambda text: bare_label(text) in _FIND_LABELS),
+    IsAdmin(),
+)
+async def handle_builder_find_unsupported(
+    message: Message,
+    state: FSMContext,
+    message_repo: FromDishka[MessageRepository],
+) -> None:
+    """«🔍 Найти в Telegram» came back as text: this app has no person search.
+
+    Said plainly, the keyboard goes, and the chat's own people come back as
+    the inline picker, without the button that opened nothing; its «Отмена»
+    is the way back to the chat's rules.
+    """
+    data = await state.get_data()
+    lang = lang_of(data.get("lang"))
+    chat_id = await _finding_chat(state)
+    await state.set_state(None)
+    await state.update_data(rule_finding=None, rule_no_find=True)
+    logger.info("rule_who_search_unsupported")
+    await _leave_find(message, screens.WHO_UNSUPPORTED(lang))
+    if chat_id is not None:
+        await show(message, await _who(state, message_repo, lang, chat_id, 0))
 
 
 @router.callback_query(F.data.startswith("ar_b_n:"))

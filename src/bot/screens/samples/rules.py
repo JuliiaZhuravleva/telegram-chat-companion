@@ -277,6 +277,11 @@ def rule_who_empty(lang: Lang) -> Screen:
     return r.who_screen(lang, _CID, ())
 
 
+@_prompt("rule.who", title="Новое правило: приложение без поиска")
+def rule_who_no_find(lang: Lang) -> Screen:
+    return r.who_screen(lang, _CID, _PEOPLE, find=False)
+
+
 @_prompt("rule.who_find", title="Новое правило: поиск в Telegram", exempt=_FIND_EXEMPT)
 def rule_who_find(lang: Lang) -> Screen:
     return r.who_find_screen(lang)

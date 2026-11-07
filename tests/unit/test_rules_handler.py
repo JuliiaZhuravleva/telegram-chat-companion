@@ -325,6 +325,20 @@ class TestTheMasterSwitch:
         assert _same(_shown(callback), expected)
         assert _shown(callback)[0].startswith("<i>✓ Правила выключены</i>")
 
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    @pytest.mark.parametrize("stored", [True, False], ids=["on", "off"])
+    async def test_the_notice_repeats_the_switch_the_admin_now_sees(
+        self, stored: bool, lang: str
+    ) -> None:
+        """One name: the line over the list is the button under it, without its glyph."""
+        deps = _deps(enabled=stored, stored=stored)
+        callback = await _tap(handlers.handle_rules_all, f"ar_all:{lang}:{CHAT_ID}", _State(), deps)
+
+        text, markup = _shown(callback)
+        switch = _labels(markup)[0]
+        assert switch.startswith(("✅ ", "⚪ "))
+        assert text.startswith(f"<i>✓ {switch[2:]}</i>"), (text.splitlines()[0], switch)
+
     @pytest.mark.parametrize(
         ("stored", "says"),
         [(True, "<i>✓ Правила включены</i>"), (False, "<i>✓ Правила выключены</i>")],

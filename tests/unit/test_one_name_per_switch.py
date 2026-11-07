@@ -9,6 +9,12 @@ screen that stopped reading `chat.LABELS` fails here.
 
 The one allowed difference is the per-chat ``· общее`` suffix: on a chat's
 panel it says the value comes from the defaults.
+
+The rules switch lives on the rules area's own screens, not on the panel, and
+says its state in one word after the panel's noun («Правила включены»). That
+word is the same on the defaults screen, the chat's rules, a rule's card and
+the notice after a tap. The rules mode and the sticker tolerance are not
+switches, but the same holds: one line on every screen that shows them.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from src.bot.screens import rules, settings
 from src.bot.screens.chat import (
     COMMON,
     COMMUNITY_LINES,
@@ -104,7 +111,99 @@ def test_every_switch_on_both_screens_has_one_name(lang: str):
 def test_the_defaults_screen_reads_the_panel_labels(lang: str):
     """The rules switch is on the defaults screen only: it still has to be the panel's word."""
     defaults = _defaults(lang)
-    assert {c: n for c, n in defaults.items() if n != LABELS[c](lang)} == {}
+    assert {c: n for c, n in defaults.items() if c != "re" and n != LABELS[c](lang)} == {}
+    assert defaults["re"].startswith(f"{LABELS['re'](lang)} "), defaults["re"]
+
+
+_RULE = rules.RuleView(id=1, chat_id=fake.CHAT_ID, rule_type="spam_detect")
+
+
+def _defaults_rules(lang: str, enabled: bool, mode: str = "all") -> Any:
+    return defs_section_screen(lang, "rules", {KEY_OF["re"]: enabled, "rules_mode": mode})
+
+
+def _rules_area(lang: str, chat: rules.ChatRules) -> list[Any]:
+    """The chat's rules and a rule's card, as the rules area draws them."""
+    return [
+        rules.rules_screen(
+            lang, chat_id=fake.CHAT_ID, title=fake.CHAT_TITLE, chat=chat, rules=[_RULE]
+        ),
+        rules.rule_screen(lang, _RULE, chat=chat),
+    ]
+
+
+def _switch(screen: Any) -> list[str]:
+    return [
+        b.label
+        for row in screen.rows
+        for b in row
+        if b.callback and b.callback.startswith(("ar_all:", "adm_defs_tgl:"))
+    ]
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("enabled", [True, False], ids=["on", "off"])
+def test_the_rules_switch_has_one_name_on_every_surface(lang: str, enabled: bool):
+    (default,) = _switch(_defaults_rules(lang, enabled))
+    name = _name(default)
+    suffix = COMMON(lang)
+
+    seen: set[str] = set()
+    for common in (True, False):
+        for screen in _rules_area(lang, rules.ChatRules(enabled=enabled, common=common)):
+            seen.update(_switch(screen))
+    # Not vacuous: both the inherited and the chat's own form were drawn.
+    assert {glyphed.endswith(suffix) for glyphed in seen} == {True, False}, seen
+    assert {_name(label) for label in seen} == {name, name + suffix}
+    assert {label[:1] for label in seen} == {default[:1]}, "the state glyph differs"
+
+    notice = (rules.RULES_ON if enabled else rules.RULES_OFF)(lang)
+    assert notice == name, "the notice after a tap is not the switch's own words"
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("mode", ["highest_weight", "weighted_random"])
+def test_a_rules_mode_reads_the_same_on_the_chats_rules_and_on_the_defaults(lang: str, mode: str):
+    (line,) = settings._info_lines(lang, "rules", {"rules_mode": mode})
+    assert line in _defaults_rules(lang, True, mode).text
+    chat = rules.ChatRules(enabled=True, common=False, mode=mode)
+    assert line in _rules_area(lang, chat)[0].text.splitlines()
+
+
+@pytest.mark.parametrize("lang", LANGS)
+def test_every_mode_has_its_name_on_the_defaults(lang: str):
+    """``all`` is shown on the defaults only (the chat's rules show weights only for the others)."""
+    names = {
+        mode: _defaults_rules(lang, True, mode).text.splitlines()[-1]
+        for mode in ("all", *rules.MODES)
+    }
+    assert len(set(names.values())) == len(names), names
+    assert all(line.startswith(names["all"].split(":")[0] + ": ") for line in names.values())
+    assert "all" not in names["all"] and "highest_weight" not in names["highest_weight"]
+
+
+@pytest.mark.parametrize("lang", LANGS)
+@pytest.mark.parametrize("tol", [0.5, 0.0, 0.6], ids=["preset", "zero-preset", "custom"])
+def test_the_sticker_tolerance_reads_the_panels_value(lang: str, tol: float):
+    """The defaults show the panel's words for it (``0.5, обычно``), never a bare preset number."""
+    key = FIELDS_BY_CODE["tol"].key
+    view = ChatView(
+        chat_id=fake.CHAT_ID,
+        title=fake.CHAT_TITLE,
+        chat_type="supergroup",
+        values=config_values(ChatConfig(chat_id=fake.CHAT_ID, enabled=True), **{key: tol}),
+        row={key: tol},
+    )
+    (button,) = [
+        b.label
+        for row in SECTION_BUILDERS["stickers"](view, lang).rows
+        for b in row
+        if b.label.startswith("🔞")
+    ]
+    panel_value = button.split(": ", 1)[1]
+    prefix = settings._TOLERANCE(lang).format(v="")
+    lines = defs_section_screen(lang, "stickers", {key: tol}).text.splitlines()
+    assert prefix + panel_value in lines, (panel_value, lines)
 
 
 @pytest.mark.parametrize("lang", LANGS)
