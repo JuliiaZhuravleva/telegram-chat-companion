@@ -1,4 +1,8 @@
-"""FSM states for the admin panel."""
+"""FSM states for the admin panel, and the buttons each prompt calls its own."""
+
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Final
 
 from aiogram.fsm.state import State, StatesGroup
 
@@ -45,3 +49,62 @@ class AdminStates(StatesGroup):
     awaiting_rule_words = State()
     awaiting_rule_text = State()
     awaiting_rule_react = State()
+
+
+_OWN_TAPS: dict[State, tuple[str, ...]] = {
+    # The tolerance number prompt: its opener and its «Отмена».
+    AdminStates.awaiting_setting_value: ("adm_pnl_tol:", "adm_pnl_tolcancel:"),
+    # The instruction editor: its opener, «Отмена», and the preview's
+    # «Сохранить» / «Заново», which read the draft the state holds.
+    AdminStates.awaiting_system_prompt: (
+        "adm_pnl_sp:",
+        "adm_pnl_spx:",
+        "adm_pnl_spok:",
+        "adm_pnl_spre:",
+    ),
+    # The sticker score prompt: its opener and its «Отмена».
+    AdminStates.awaiting_sticker_score: ("adm_stk_expedit:", "adm_stk_expcancel:"),
+    # The organizer prompt: its opener, the buttons of its failure answer,
+    # and the participant list those lead to. The handlers that end it
+    # (back to the organizers, a picked name, «Отмена») need to see the
+    # state to take the reply keyboard away with it.
+    AdminStates.awaiting_kb_organizer: (
+        "adm_kb_org_add:",
+        "adm_kb_org_x:",
+        "adm_kb_org_list:",
+        "adm_kb_org_pick:",
+        "adm_kb_orgs:",
+    ),
+    # The rule prompts: every rules screen ends them itself, keeping the
+    # builder's answers when its next step needs them.
+    AdminStates.awaiting_rule_config: ("ar_",),
+    AdminStates.awaiting_rule_words: ("ar_",),
+    AdminStates.awaiting_rule_text: ("ar_",),
+    AdminStates.awaiting_rule_react: ("ar_",),
+    # Declared, never set: any tap ends them.
+    AdminStates.awaiting_sticker_edit: (),
+    AdminStates.awaiting_sticker: (),
+}
+
+
+def _key(state: State) -> str:
+    if state.state is None:  # only a State outside a StatesGroup has no name
+        raise ValueError(f"unnamed state {state!r}")
+    return state.state
+
+
+PROMPT_OWN_TAPS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {_key(state): taps for state, taps in _OWN_TAPS.items()}
+)
+"""State → the callback prefixes that do NOT end it (a prefix, or a family ending in ``_``).
+
+A prompt reads the admin's next message as its answer, and the panel is
+buttons on many messages: any tap outside this list ends the prompt before a
+handler runs (`src.bot.middleware.prompt_exit`). A new state needs a row here,
+or the routes test fails; an empty row means "every tap ends it".
+"""
+
+
+def is_own_tap(state: str, data: str) -> bool:
+    """Whether the payload ``data`` belongs to the prompt ``state`` (see `PROMPT_OWN_TAPS`)."""
+    return any(data.startswith(prefix) for prefix in PROMPT_OWN_TAPS.get(state, ()))

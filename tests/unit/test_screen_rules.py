@@ -746,3 +746,45 @@ def test_every_field_code_is_in_exactly_one_section():
     members = [code for codes in _MEMBERS.values() for code in codes]
     assert len(members) == len(set(members)), "a code sits in two sections"
     assert set(SECTION_OF) == set(FIELDS_BY_CODE)
+
+
+# ---------------------------------------------------------------------------
+# scripts/dump_screens.py: every variant, both languages
+# ---------------------------------------------------------------------------
+
+
+def _dump(lang: str) -> list[dict]:
+    from scripts.dump_screens import dump
+
+    document, _warnings = dump(lang)  # type: ignore[arg-type]
+    return document["screens"]
+
+
+def test_the_dump_has_one_item_per_variant_with_its_own_key():
+    """A renderer names its file after the key; by the screen id alone the
+    variants of one screen overwrite each other and only the last is drawn."""
+    items = _dump("ru")
+    keys = [item["key"] for item in items]
+    assert len(items) == len(REGISTERED)
+    assert len(keys) == len(set(keys))
+    assert len({item["id"] for item in items}) < len(items), "no screen has two variants"
+    assert all(item["key"].split("#")[0] == item["id"] for item in items)
+
+
+def test_the_dump_carries_both_languages_for_every_variant():
+    from scripts.dump_screens import _rows
+
+    items = _dump("en")
+    assert len(items) == len(REGISTERED)
+    differ = 0
+    for item, registered in zip(items, sorted_registered(), strict=True):
+        assert item["title"] == registered.title
+        assert item["rows_ru"] == _rows(registered.build("ru")), item["key"]
+        assert item["rows_en"] == _rows(registered.build("en")), item["key"]
+        assert item["rows"] == item["rows_en"], "--lang en: plain rows are English"
+        differ += item["rows_ru"] != item["rows_en"]
+    assert differ > len(items) // 2, "the English labels are the Russian ones"
+
+
+def sorted_registered() -> list[Sample]:
+    return [item for _id, variants in sorted(load_all().items()) for item in variants]
