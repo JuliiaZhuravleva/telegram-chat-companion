@@ -9,7 +9,7 @@ screen that stopped reading `chat.LABELS` fails here.
 
 No difference is allowed, not even for a value the chat takes from the
 defaults: its button reads exactly as the defaults screen's, and the text says
-where the value comes from («Как в общих настройках: …»). A suffix on the
+where the value comes from («Берутся из общих настроек: …»). A suffix on the
 button («⚪ … · общее») read as "off, or not set?" and hid the value.
 
 The rules switch lives on the rules area's own screens, not on the panel, and

@@ -2,7 +2,7 @@
 
 One sample per state that changes which rows a screen shows (a requests row or
 none, community mode on or off, reactions on or off, the bot an admin or not)
-or what its text says (the «Как в общих настройках» line or none, a preset or a
+or what its text says (the «Берутся из общих настроек» line or none, a preset or a
 custom number).
 Every value is invented (``fake.py``).
 """
@@ -50,7 +50,7 @@ _OWN_ROW: Final[dict[str, Any]] = {
     "image_comment_sticker_enabled": False,
     "tolerance_level": 0.6,
 }
-"""A chat that set every non-legacy toggle itself: no «Как в общих настройках» line."""
+"""A chat that set every non-legacy toggle itself: no «Берутся из общих настроек» line."""
 
 
 def _view(

@@ -10,6 +10,7 @@ community text says is on.
 from __future__ import annotations
 
 import itertools
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -158,7 +159,7 @@ class TestAButtonShowsTheValueAndTheTextItsOrigin:
         """Italics are what glare takes first; this caveat must survive it."""
         view = _view(_null(*INHERITING_CODES))
         line = _common_line(screens.SECTION_BUILDERS[section](view, "ru").text)
-        assert line.startswith("Как в общих настройках: "), section
+        assert line.startswith("Берутся из общих настроек: "), section
         assert "<i>" not in line and "</i>" not in line, line
 
     @pytest.mark.parametrize("lang", LANGS)
@@ -181,8 +182,8 @@ class TestAButtonShowsTheValueAndTheTextItsOrigin:
 
     def test_every_value_inherited_says_so_once(self) -> None:
         screen = screens.build_community(_view({}, community_enabled=True), "ru")
-        assert "Все значения на кнопках — как в общих настройках." in screen.text
-        assert "Как в общих настройках: " not in screen.text
+        assert "Все значения на кнопках берутся из общих настроек." in screen.text
+        assert "Берутся из общих настроек: " not in screen.text
 
 
 def _common_head(lang: str) -> str:
@@ -481,6 +482,23 @@ def test_every_switch_screen_says_what_the_two_marks_mean(name: str, lang: str) 
     assert _switches(screen), "the control: this screen has switches"
     assert screens.TAP_TOGGLES(lang) in screen.text
     assert screen.text.count(screens.TAP_TOGGLES(lang)) == 1
+
+
+@pytest.mark.parametrize("bot_is_admin", [None, True, False])
+@pytest.mark.parametrize("name", _SWITCH_SCREENS)
+def test_the_legend_is_the_first_line_under_the_title(name: str, bot_is_admin: bool | None) -> None:
+    """Round 5: read where it led the screen, "easy to miss" in a footer.
+
+    ``bot_is_admin`` is what the reactions handler always knows; after round 4
+    the legend was drawn only when it did not, i.e. for the samples alone.
+    """
+    view = replace(_view(_null("rg", "sr", "rx")), bot_is_admin=bot_is_admin)
+    screen = getattr(screens, f"build_{name}")(view, "ru")
+
+    body = screen.text.split("\n\n")
+    assert body[0].startswith(("🗣", "🧠", "🎙", "🎨", "😀")), body[0]
+    assert body[1].startswith(screens.TAP_TOGGLES("ru")), (name, body[1])
+    assert screen.text.count(screens.TAP_TOGGLES("ru")) == 1
 
 
 @pytest.mark.parametrize(

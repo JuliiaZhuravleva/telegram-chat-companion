@@ -65,7 +65,7 @@ def section_of_token(token: str) -> Section | None:
 
 
 def shows_common(field: FieldSpec, row: Mapping[str, Any]) -> bool:
-    """Whether this field may be named in the «Как в общих настройках» ("inherited") line.
+    """Whether this field may be named in the «Берутся из общих настроек» ("inherited") line.
 
     Only a field whose column has no SQL DEFAULT can honestly say it inherits:
     for the legacy columns a NULL never survives ``ensure_exists()``, so the

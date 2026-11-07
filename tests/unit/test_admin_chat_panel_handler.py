@@ -499,6 +499,9 @@ class TestSections:
 
         bot.get_chat_member.assert_awaited_once_with(CHAT_ID, BOT_ID)
         assert line in _edited(callback)[0]
+        # The legend at the call site, where the admin answer is always known:
+        # after round 4 it was drawn only when that answer was missing.
+        assert "✅ — включено, ⚪ — выключено. Нажатие переключает." in _edited(callback)[0]
 
     async def test_the_bot_id_singleton_spares_a_me_call(self) -> None:
         bot = _bot()
@@ -541,7 +544,7 @@ class TestSections:
 
         assert "✅ База знаний" in _labels(memory)
         (common,) = [
-            line for line in _edited(memory)[0].split("\n") if line.startswith("Как в общих")
+            line for line in _edited(memory)[0].split("\n") if line.startswith("Берутся из общих")
         ]
         assert "База знаний" in common
         assert "✅ Реакции в чате" in _labels(reactions)

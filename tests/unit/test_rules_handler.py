@@ -313,7 +313,7 @@ class TestTheMasterSwitch:
 
         text, markup = _shown(callback)
         assert "⚪ Правила выключены" in _labels(markup)
-        assert "Как в общих настройках: Правила." in text
+        assert "Берутся из общих настроек: Правила." in text
 
     async def test_a_value_set_for_the_chat_names_no_origin(self) -> None:
         deps = _deps(enabled=False)
@@ -322,7 +322,7 @@ class TestTheMasterSwitch:
         )
         callback = await _tap(handlers.handle_rules_list, f"ar_list:ru:{CHAT_ID}:0", _State(), deps)
 
-        assert "Как в общих настройках" not in _shown(callback)[0]
+        assert "Берутся из общих настроек" not in _shown(callback)[0]
 
     async def test_from_a_card_redraws_the_card_saying_what_changed(self) -> None:
         deps = _deps(_rule(), enabled=False, stored=False)

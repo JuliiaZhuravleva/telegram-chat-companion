@@ -12,7 +12,7 @@ called the same on both (tested). ``FieldSpec.label`` is not shown on either.
 
 A button shows the value that is in force, and only that: ✅ or ⚪ and the
 name. Where the value comes from is said once, in plain text under the screen
-(«Как в общих настройках: …»), never on the button — «⚪ … · общее» read as
+(«Берутся из общих настроек: …»), never on the button — «⚪ … · общее» read as
 "off, or not set?". Which values say it is `sections.shows_common` and nothing
 else: a legacy column always holds the chat's own value, so it never does.
 """
@@ -112,16 +112,20 @@ mode's, so its follower is «Ждать сообщения» (when the greeting 
 ⚪ «Новичок» read "no greeting" while the bot greeted every newcomer on joining."""
 
 COMMON_NOTE = Tr(
-    "Как в общих настройках: {names}. Изменение здесь касается только этого чата.",
-    "As in the general settings: {names}. A change here applies to this chat only.",
+    "Берутся из общих настроек: {names}. Изменение здесь касается только этого чата.",
+    "Taken from the general settings: {names}. A change here applies to this chat only.",
 )
 """The one line that says which values on a screen come from the general settings.
 
 Its second sentence answers what round 4 could not: which value wins once
-the reader taps one of them (this chat's, from then on, and nowhere else)."""
+the reader taps one of them (this chat's, from then on, and nowhere else).
+Round 5 changed the first: «Как в общих настройках» read as a comparison
+("the chat's value is checked against the general one") to two of five, and
+all five listed it as unclear; «берутся из» says where the value comes from."""
 _ALL_COMMON = Tr(
-    "Все значения на кнопках — как в общих настройках. Изменение здесь касается только этого чата.",
-    "Every value on the buttons is as in the general settings. "
+    "Все значения на кнопках берутся из общих настроек. "
+    "Изменение здесь касается только этого чата.",
+    "Every value on the buttons is taken from the general settings. "
     "A change here applies to this chat only.",
 )
 _COMMON_NAMES: Final[dict[str, Tr]] = {"tol": Tr("Откровенность", "Explicitness")}
@@ -130,8 +134,10 @@ TAP_TOGGLES = Tr(
     "✅ — включено, ⚪ — выключено. Нажатие переключает.",
     "✅ is on, ⚪ is off. A tap switches it.",
 )
-"""On every screen with yes/no switches: all five readers of round 4 had to guess
-that ⚪ means off, and none could tell it from "not set"."""
+"""On every screen with yes/no switches, as the first line under the title: all
+five readers of round 4 had to guess that ⚪ means off, and none could tell it
+from "not set". Round 5 read it where it led the screen (Memory: ⚪ went from
+five guesses to five sure answers) and called it easy to miss in a footer."""
 
 TOGGLED_ON = Tr("Включено: {label}", "On: {label}")
 TOGGLED_OFF = Tr("Выключено: {label}", "Off: {label}")
@@ -698,9 +704,10 @@ def build_behavior(view: ChatView, lang: str) -> Screen:
         id="behavior",
         text=_text(
             _header("behavior", view, lang),
+            TAP_TOGGLES(lang),
             facts,
             _WORDS_FIXED(lang),
-            _notes(view, codes, lang, TAP_TOGGLES(lang)),
+            _notes(view, codes, lang),
         ),
         rows=(
             (
@@ -896,8 +903,9 @@ def build_stickers(view: ChatView, lang: str) -> Screen:
         id="chat.stickers",
         text=_text(
             _header("stickers", view, lang),
+            TAP_TOGGLES(lang),
             "\n".join(lines),
-            _notes(view, codes, lang, TAP_TOGGLES(lang)),
+            _notes(view, codes, lang),
         ),
         rows=(
             (_toggle(view, "sl", lang),),
@@ -1238,14 +1246,19 @@ def build_tolerance_input(view: ChatView, lang: str, *, invalid: bool = False) -
 
 
 def build_reactions(view: ChatView, lang: str) -> Screen:
-    if view.bot_is_admin is None:
-        status = TAP_TOGGLES(lang)
-    else:
-        status = (_ADMIN_YES if view.bot_is_admin else _ADMIN_NO)(lang)
+    # The legend is not an alternative to the admin line: the handler always
+    # asks Telegram, so a legend shown only when the answer is unknown would be
+    # shown to nobody (it was, after round 4: the samples drew it, the chat did not).
+    admin = None if view.bot_is_admin is None else (_ADMIN_YES if view.bot_is_admin else _ADMIN_NO)
     codes = ("rx", "rh") if view.on("rx") else ("rx",)
     return Screen(
         id="reactions",
-        text=_text(_header("reactions", view, lang), status, _notes(view, codes, lang)),
+        text=_text(
+            _header("reactions", view, lang),
+            TAP_TOGGLES(lang),
+            admin(lang) if admin else None,
+            _notes(view, codes, lang),
+        ),
         rows=(*((_toggle(view, code, lang),) for code in codes), _back_to_chat(view, lang)),
     )
 

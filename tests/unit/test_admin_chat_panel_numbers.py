@@ -244,7 +244,7 @@ class TestStickerChances:
             "🎲 Стикер на стикер · 50 %",
             "🎲 Стикер к фото · 30 %",
         ]
-        assert "Как в общих настройках: Стикер на стикер, Стикер к фото." in screen.text
+        assert "Берутся из общих настроек: Стикер на стикер, Стикер к фото." in screen.text
         assert _payloads(screen)[:2] == [
             f"adm_pnl_pct:ru:{CID}:sx",
             f"adm_pnl_pct:ru:{CID}:ix",
