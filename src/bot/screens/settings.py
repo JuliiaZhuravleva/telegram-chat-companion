@@ -67,11 +67,11 @@ _NOTIF_TEXT = Tr(
     "🔔 <b>Notifications</b>\n\nWhat to send to your private chat. Bot failures always arrive.",
 )
 _REQUESTS_QUIET = Tr(
-    "Заявки чатов сейчас не присылаются: они ждут в «🗂 Чаты».",
-    "Chat requests are not sent now: they wait in «🗂 Chats».",
+    "Запросы доступа сейчас не присылаются: они ждут в «🗂 Чаты».",
+    "Access requests are not sent now: they wait in «🗂 Chats».",
 )
 _STICKERS = Tr("🖼 Новые стикеры: {mode}", "🖼 New stickers: {mode}")
-_REQUESTS = Tr("Заявки чатов", "Chat requests")
+_REQUESTS = Tr("Запросы доступа", "Access requests")
 
 
 def sticker_mode(settings: Mapping[str, Any]) -> str:

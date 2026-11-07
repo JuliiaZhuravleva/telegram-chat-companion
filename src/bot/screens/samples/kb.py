@@ -3,6 +3,9 @@
 One sample per state that changes the rows: a list, an empty list, a removal
 with ``↩️ Вернуть`` on a paged list (the six-row worst case), the participant
 list with current organizers marked, and every reason ``org.fail`` tells apart.
+
+Every one-page list shows three people, the count on the chat's root sample:
+a reader walking from «👥 Организаторы · 3» must land on three names.
 """
 
 from __future__ import annotations
@@ -61,7 +64,11 @@ _FAIL_EXEMPT: Final = {
 
 @sample("orgs", section="Чаты", title="Организаторы", nav="panel", user_data=_PEOPLE)
 def orgs_list(lang: Lang) -> Screen:
-    people = [(fake.USER_ID, fake.PERSON), (fake.USER_ID_OTHER, fake.PERSON_OTHER)]
+    people = [
+        (fake.USER_ID, fake.PERSON),
+        (fake.USER_ID_OTHER, fake.PERSON_OTHER),
+        (_THIRD_ID, _THIRD),
+    ]
     return orgs.orgs_screen(lang, _CID, fake.CHAT_TITLE, people)
 
 
@@ -91,7 +98,7 @@ def orgs_removed(lang: Lang) -> Screen:
     )
 
 
-@sample("orgs", section="Чаты", title="Один не в чате", nav="panel", user_data=_PEOPLE)
+@sample("orgs", section="Чаты", title="Двое не в чате", nav="panel", user_data=_PEOPLE)
 def orgs_not_in_chat(lang: Lang) -> Screen:
     people = [(fake.USER_ID, fake.PERSON), (_THIRD_ID, _THIRD), (_FOURTH_ID, _LONG)]
     return orgs.orgs_screen(lang, _CID, fake.CHAT_TITLE, people, absent={_THIRD_ID, _FOURTH_ID})
@@ -99,7 +106,11 @@ def orgs_not_in_chat(lang: Lang) -> Screen:
 
 @sample("orgs", section="Чаты", title="Добавлен", nav="panel", user_data=_PEOPLE)
 def orgs_added(lang: Lang) -> Screen:
-    people = [(fake.USER_ID, fake.PERSON), (fake.USER_ID_OTHER, fake.PERSON_OTHER)]
+    people = [
+        (fake.USER_ID, fake.PERSON),
+        (_THIRD_ID, _THIRD),
+        (fake.USER_ID_OTHER, fake.PERSON_OTHER),
+    ]
     return orgs.orgs_screen(
         lang,
         _CID,

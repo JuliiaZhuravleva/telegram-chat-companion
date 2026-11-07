@@ -373,7 +373,7 @@ async def handle_kb_organizers(
 ) -> None:
     """Show a page of the chat's organizers.
 
-    Reached from the memory screen, from the list's back button, and from an
+    Reached from the chat's root, from the list's back button, and from an
     old message while the add prompt is open — then it is a way out of the
     prompt and ends it like ``✖️ Отмена``.
     """

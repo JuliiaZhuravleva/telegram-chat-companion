@@ -90,7 +90,7 @@ def _chat_rows(*titles_counts: tuple[int, str, int]) -> list[dict[str, Any]]:
 @sample(
     "chats",
     section=_SECTION,
-    title="С заявками, две страницы",
+    title="Запрос доступа и отклонённые, две страницы",
     nav="panel",
     user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, *LONG_TITLE_CUTS),
 )
@@ -106,7 +106,7 @@ def chats_with_requests(lang: Lang) -> Screen:
 @sample(
     "chats",
     section=_SECTION,
-    title="Без заявок",
+    title="Без запросов доступа",
     nav="panel",
     user_data=(fake.CHAT_TITLE, fake.CHAT_TITLE_OTHER, fake.CHAT_TITLE_NEW),
 )
@@ -119,12 +119,24 @@ def chats_plain(lang: Lang) -> Screen:
     return screens.build_chats(lang, rows, total=3, page=0, pages=1)
 
 
+@sample(
+    "chats",
+    section=_SECTION,
+    title="Только отклонённые, последняя страница",
+    nav="panel",
+    user_data=(fake.CHAT_TITLE_NEW,),
+)
+def chats_last_page_rejected_only(lang: Lang) -> Screen:
+    rows = _chat_rows((fake.CHAT_ID_NEW, fake.CHAT_TITLE_NEW, 0))
+    return screens.build_chats(lang, rows, total=5, page=1, pages=2, rejected=1)
+
+
 @sample("chats.empty", section=_SECTION, title="Ни одного чата", nav="panel")
 def chats_empty(lang: Lang) -> Screen:
     return screens.build_chats(lang, [], total=0, page=0, pages=1)
 
 
-@sample("chats.empty", section=_SECTION, title="Ни одного чата, есть заявка", nav="panel")
+@sample("chats.empty", section=_SECTION, title="Ни одного чата, есть запрос доступа", nav="panel")
 def chats_empty_with_request(lang: Lang) -> Screen:
     return screens.build_chats(lang, [], total=0, page=0, pages=1, requests=1)
 
@@ -179,7 +191,7 @@ def panel_many_cut(lang: Lang) -> Screen:
 
 @sample("chat", section=_SECTION, title="Бот включён", nav="panel", user_data=_TITLES)
 def chat_on(lang: Lang) -> Screen:
-    return screens.build_chat(_view(rules=2), lang)
+    return screens.build_chat(_view(rules=2, organizers=3), lang)
 
 
 @sample("chat", section=_SECTION, title="Бот выключен", nav="panel", user_data=_TITLES)
@@ -211,7 +223,7 @@ def behavior_own(lang: Lang) -> Screen:
 
 @sample("memory", section=_SECTION, title="Значения общие", nav="panel", user_data=_TITLES)
 def memory_common(lang: Lang) -> Screen:
-    return screens.build_memory(_view(organizers=2), lang)
+    return screens.build_memory(_view(organizers=3), lang)
 
 
 @sample(

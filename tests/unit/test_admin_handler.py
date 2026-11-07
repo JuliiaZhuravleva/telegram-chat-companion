@@ -347,7 +347,7 @@ class TestHub:
         response_log.get_total_cost.assert_awaited_once_with(timedelta(hours=24))
         admin_repo.count_attempts.assert_awaited_once_with("pending")
         checker.run_check_now.assert_not_awaited()
-        assert _markup(cb).inline_keyboard[0][0].text == "🗂 Чаты · 2 заявки"
+        assert _markup(cb).inline_keyboard[0][0].text == "🗂 Чаты · 2 запроса доступа"
         assert payloads[0] == "adm_pnl:ru:0"
 
     @pytest.mark.asyncio
@@ -371,7 +371,7 @@ class TestHubRows:
             (
                 "ru",
                 [
-                    "🗂 Чаты · 1 заявка",
+                    "🗂 Чаты · 1 запрос доступа",
                     "📦 Паки стикеров",
                     "📊 Состояние",
                     "⚙️ Общие настройки",
@@ -381,7 +381,7 @@ class TestHubRows:
             (
                 "en",
                 [
-                    "🗂 Chats · 1 request",
+                    "🗂 Chats · 1 access request",
                     "📦 Sticker packs",
                     "📊 Status",
                     "⚙️ General settings",
@@ -431,7 +431,7 @@ class TestRequests:
         await handle_wl_pending(cb, admin_repo)
 
         text, payloads = _edited(cb)
-        assert "Заявка 1 из 1" in text
+        assert "Запрос доступа 1 из 1" in text
         assert "Test Chat" in text
         assert "@alice" in text
         assert "супергруппа" in text  # the chat type stays visible
@@ -472,7 +472,7 @@ class TestRequests:
         await handle_wl_pending(cb, admin_repo)
 
         assert admin_repo.get_pending_attempts_page.await_args_list == [call(5, 1), call(2, 1)]
-        assert "Заявка 3 из 3" in _edited(cb)[0]
+        assert "Запрос доступа 3 из 3" in _edited(cb)[0]
 
     @pytest.mark.asyncio
     async def test_a_missing_title_is_asked_from_telegram(self):
@@ -544,7 +544,7 @@ class TestApprove:
 
         show_chat.assert_not_awaited()
         chat_settings_repo.upsert.assert_not_awaited()
-        assert "This request was already handled" in _edited(cb)[0]
+        assert "The request is already resolved" in _edited(cb)[0]
 
     @pytest.mark.asyncio
     async def test_garbled_payload_is_stale(self):
@@ -599,7 +599,7 @@ class TestReject:
         await handle_wl_reject(cb, admin_repo)
 
         admin_repo.update_attempt_status.assert_not_awaited()
-        assert "Заявку уже разобрали" in _edited(cb)[0]
+        assert "Запрос уже решён" in _edited(cb)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +644,7 @@ class TestRejected:
         await handle_wl_restore(cb, admin_repo)
 
         admin_repo.update_attempt_status.assert_awaited_once_with(ATTEMPT_ID, "pending")
-        assert _edited(cb)[0].startswith("<i>✓ Заявка возвращена</i>")
+        assert _edited(cb)[0].startswith("<i>✓ Запрос возвращён</i>")
 
     @pytest.mark.asyncio
     async def test_restore_of_a_request_no_longer_rejected_writes_nothing(self):
@@ -657,8 +657,8 @@ class TestRejected:
 
         admin_repo.update_attempt_status.assert_not_awaited()
         text = _edited(cb)[0]
-        assert text.startswith("<i>✓ Заявку уже разобрали</i>"), text
-        assert "Заявка возвращена" not in text
+        assert text.startswith("<i>✓ Запрос уже решён</i>"), text
+        assert "Запрос возвращён" not in text
 
     @pytest.mark.asyncio
     async def test_restore_of_a_gone_record_says_so(self):
@@ -970,7 +970,7 @@ class TestNotifications:
 
         await handle_notifications_menu(cb, _make_admin_repo(unauthorized=False), AsyncMock())
 
-        assert "Заявки чатов сейчас не присылаются" in _edited(cb)[0]
+        assert "Запросы доступа сейчас не присылаются" in _edited(cb)[0]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

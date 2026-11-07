@@ -131,31 +131,25 @@ class TestOnlyInheritingSwitchesSayCommon:
         assert not [label for label in labels.values() if screens.COMMON(lang) in label]
 
 
-class TestTheKnowledgeBaseSaysCommonInTheText:
-    """«База знаний · общее» does not fit half a phone row next to the
-    organizers button, so the memory section says it in its footnote."""
+class TestTheKnowledgeBaseSaysCommonOnItsButton:
+    """With the organizers moved to the chat's root the switch has a row of
+    its own, so «· общее» goes on it like on every other switch."""
 
     def test_the_switch_is_named_as_everywhere_else(self) -> None:
         assert screens.LABELS["kb"]("ru") == "База знаний"
 
-    @pytest.mark.parametrize(
-        ("on", "line"),
-        [
-            (True, "База знаний включена в общих настройках."),
-            (False, "База знаний выключена в общих настройках."),
-        ],
-    )
-    def test_inherited_goes_to_the_footnote_with_its_value(self, on: bool, line: str) -> None:
+    @pytest.mark.parametrize("on", [True, False])
+    def test_inherited_is_marked_on_the_button(self, on: bool) -> None:
         screen = screens.build_memory(_view(_null("kb"), kb_enabled=on), "ru")
 
-        label = _switches(screen)["kb"]
-        assert label == f"{'✅' if on else '⚪'} База знаний"
-        assert line in screen.text
+        assert _switches(screen)["kb"] == f"{'✅' if on else '⚪'} База знаний · общее"
+        assert screens.COMMON_NOTE("ru") in screen.text
+        assert "общих настройках." not in screen.text.replace(screens.COMMON_NOTE("ru"), "")
 
     def test_set_for_the_chat_says_nothing_about_common(self) -> None:
         screen = screens.build_memory(_view({"kb_enabled": True}, kb_enabled=True), "ru")
 
-        assert "общих настройках" not in screen.text
+        assert _switches(screen)["kb"] == "✅ База знаний"
 
     @pytest.mark.parametrize("lang", LANGS)
     @pytest.mark.parametrize("on", [True, False])
@@ -172,3 +166,119 @@ class TestTheKnowledgeBaseSaysCommonInTheText:
             limit = clip_room(len(buttons))
             for b in buttons:
                 assert label_width_px(b.label) <= limit, (b.label, label_width_px(b.label))
+
+
+# ── the chat's root ───────────────────────────────────────────────────────
+
+
+def _callbacks(screen: Screen) -> list[str]:
+    return [b.callback for row in screen.rows for b in row if b.callback]
+
+
+class TestTheChatRoot:
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_the_organizers_are_on_the_root_and_not_under_memory(self, lang: str) -> None:
+        view = _view({}, organizers=3)
+        organizers = [
+            b
+            for row in screens.build_chat(view, lang).rows
+            for b in row
+            if b.callback == f"adm_kb_orgs:{lang}:{CHAT_ID}:0"
+        ]
+
+        assert [b.label for b in organizers] == [screens._ORGANIZERS(lang).format(n=3)]
+        assert not [c for c in _callbacks(screens.build_memory(view, lang)) if "adm_kb_orgs:" in c]
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_four_action_rows_of_up_to_three_that_fit_the_phone(self, lang: str) -> None:
+        """Two-digit counts on both counted buttons: the widest the root gets."""
+        view = ChatView(
+            chat_id=CHAT_ID,
+            title="Тестовый чат",
+            chat_type="supergroup",
+            values=config_values(ChatConfig(chat_id=CHAT_ID, enabled=True)),
+            row={},
+            rules=12,
+            organizers=12,
+        )
+        screen = screens.build_chat(view, lang)
+
+        *actions, last = screen.rows
+        assert len(actions) <= 4
+        assert [b.kind for b in last] == ["back"]
+        for buttons in actions:
+            assert len(buttons) <= 3
+            for b in buttons:
+                assert label_width_px(b.label) <= clip_room(len(buttons)), b.label
+
+    def test_newcomers_are_named_where_a_reader_looks_for_them(self) -> None:
+        """«Сообщество» was guessed by every reader looking for "greet newcomers"."""
+        title = screens.SECTION_TITLES["community"]
+        view = _view({})
+
+        assert title("ru") == "👋 Новички и уходы"
+        assert title("ru") in [b.label for row in screens.build_chat(view, "ru").rows for b in row]
+        assert screens.build_community(view, "ru").text.startswith("👋 <b>Новички и уходы</b> · ")
+        assert screens.build_community(view, "en").text.startswith(
+            "👋 <b>Joining and leaving</b> · "
+        )
+
+
+# ── the chat list ─────────────────────────────────────────────────────────
+
+
+def _chats(n: int) -> list[dict[str, Any]]:
+    return [{"chat_id": -1000 - i, "chat_title": f"Чат {i}"} for i in range(n)]
+
+
+class TestTheChatList:
+    @pytest.mark.parametrize(
+        ("lang", "page", "listed", "requests", "line"),
+        [
+            ("ru", 0, 3, 1, "Подключено: 5, показаны 1–3."),
+            ("ru", 1, 2, 1, "Подключено: 5, показаны 4–5."),
+            ("ru", 1, 1, 0, "Подключено: 5, показан 5-й."),
+            ("en", 0, 4, 0, "Connected: 5, showing 1–4."),
+        ],
+    )
+    def test_more_than_one_page_says_which_chats_this_one_lists(
+        self, lang: str, page: int, listed: int, requests: int, line: str
+    ) -> None:
+        screen = screens.build_chats(
+            lang, _chats(listed), total=5, page=page, pages=2, requests=requests
+        )
+
+        assert line in screen.text
+
+    def test_one_page_says_only_how_many(self) -> None:
+        screen = screens.build_chats("ru", _chats(3), total=3, page=0, pages=1, rejected=2)
+
+        assert "Подключено: 3." in screen.text
+        assert "показан" not in screen.text
+
+    @pytest.mark.parametrize("lang", LANGS)
+    def test_the_full_names_fit_with_two_digit_counts(self, lang: str) -> None:
+        """«🙏 Запросы доступа · 12» needs the row to itself; «🚫 Отклонённые»
+        shares the last row with the way back."""
+        for total in (0, 5):
+            screen = screens.build_chats(
+                lang,
+                _chats(3 if total else 0),
+                total=total,
+                page=0,
+                pages=2,
+                requests=12,
+                rejected=12,
+            )
+            assert [b.callback for b in screen.rows[0]] == [f"adm_wl_pending:{lang}:0"]
+            assert [b.callback for b in screen.rows[-1]] == [
+                f"adm_wl_rejected:{lang}:0",
+                f"adm_menu:{lang}",
+            ]
+            for buttons in screen.rows:
+                for b in buttons:
+                    assert label_width_px(b.label) <= clip_room(len(buttons)), b.label
+
+    def test_rejected_chats_cost_no_chat_row(self) -> None:
+        assert screens.chats_per_page(0, 0) == screens.chats_per_page(0, 3) == 4
+        assert screens.chats_per_page(2, 0) == screens.chats_per_page(2, 3) == 3

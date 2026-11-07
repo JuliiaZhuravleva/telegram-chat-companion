@@ -66,8 +66,9 @@ def _chats_label(lang: str, pending: int) -> str:
     if pending <= 0:
         return _CHATS(lang)
     if lang == "en":
-        return f"{_CHATS(lang)} · {pending} request{'' if pending == 1 else 's'}"
-    return f"{_CHATS(lang)} · {pending} {plural_ru(pending, 'заявка', 'заявки', 'заявок')}"
+        return f"{_CHATS(lang)} · {pending} access request{'' if pending == 1 else 's'}"
+    word = plural_ru(pending, "запрос доступа", "запроса доступа", "запросов доступа")
+    return f"{_CHATS(lang)} · {pending} {word}"
 
 
 def build_hub(
@@ -219,16 +220,19 @@ def _back_to_chats(lang: str) -> tuple[Button, ...]:
 # requests
 # ---------------------------------------------------------------------------
 
-_REQUEST_N = Tr("🙏 <b>Заявка {n} из {total}</b>", "🙏 <b>Request {n} of {total}</b>")
+_REQUEST_N = Tr(
+    "🙏 <b>Запрос доступа {n} из {total}</b>", "🙏 <b>Access request {n} of {total}</b>"
+)
 _REQUESTS_EMPTY = Tr(
-    "🙏 <b>Заявки</b>\n\nНовых заявок нет.", "🙏 <b>Requests</b>\n\nNo new requests."
+    "🙏 <b>Запросы доступа</b>\n\nНовых запросов нет.",
+    "🙏 <b>Access requests</b>\n\nNo new requests.",
 )
 _APPROVE = Tr("👍 Одобрить", "👍 Approve")
 _REJECT = Tr("❌ Отклонить", "❌ Reject")
 
 APPROVED: Final = Tr("Новый чат подключён", "New chat connected")
 REJECTED: Final = Tr("Отклонено", "Rejected")
-ALREADY_HANDLED: Final = Tr("Заявку уже разобрали", "This request was already handled")
+ALREADY_HANDLED: Final = Tr("Запрос уже решён", "The request is already resolved")
 
 
 def requests_screen(
@@ -275,20 +279,20 @@ def requests_screen(
 
 _REJECTED_TITLE = Tr("🚫 <b>Отклонённые</b>", "🚫 <b>Rejected</b>")
 _REJECTED_INTRO = Tr(
-    "Бот молчит в этих чатах и не присылает от них заявок.",
-    "The bot stays silent in these chats and sends no requests from them.",
+    "Бот молчит в этих чатах и не присылает от них запросов доступа.",
+    "The bot stays silent in these chats and sends no access requests from them.",
 )
 _REJECTED_EMPTY = Tr("Отклонённых чатов нет.", "No rejected chats.")
-_RESTORE = Tr("↩️ Вернуть в заявки", "↩️ Back to requests")
+_RESTORE = Tr("↩️ Вернуть в запросы", "↩️ Back to requests")
 _FORGET = Tr("🗑 Забыть", "🗑 Forget")
 _KEEP = Tr("⬅️ Не забывать", "⬅️ Keep it")
 _FORGET_TITLE = Tr("🗑 <b>Забыть отказ?</b>", "🗑 <b>Forget the rejection?</b>")
 _FORGET_BODY = Tr(
-    "Чат снова сможет писать боту, и вам снова придёт заявка.",
-    "The chat will be able to reach the bot again, and a new request will come to you.",
+    "Чат снова сможет писать боту, и вам снова придёт запрос доступа.",
+    "The chat will be able to reach the bot again, and a new access request will come to you.",
 )
 
-RESTORED: Final = Tr("Заявка возвращена", "Request restored")
+RESTORED: Final = Tr("Запрос возвращён", "Request restored")
 FORGOTTEN: Final = Tr("Отказ забыт", "Rejection forgotten")
 NOT_FOUND: Final = Tr("Запись не найдена", "Record not found")
 

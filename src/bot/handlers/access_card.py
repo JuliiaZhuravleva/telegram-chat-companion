@@ -48,7 +48,7 @@ router = Router(name="access_card")
 
 _NOT_ADMIN: Final = Tr("Нет доступа", "Access denied")
 _ALREADY_HANDLED: Final = Tr("Запрос уже решён", "The request is already resolved")
-_GONE: Final = Tr("Этой заявки больше нет", "This request no longer exists")
+_GONE: Final = Tr("Этого запроса больше нет", "This request no longer exists")
 
 TEXT_EDIT_WINDOW: Final = timedelta(hours=48)
 """A card older than this keeps its text; only its buttons change."""

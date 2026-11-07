@@ -406,8 +406,8 @@ class TestOrganizerList:
 
         text, markup = _edited(callback)
         assert text.startswith(f"{ORGS_HEAD} · Тестовый чат")
-        assert _labels(markup) == ["✖️ Аня", "✖️ Борис", "➕ Добавить", "⬅️ Память"]
-        assert _buttons(markup)[-1][1] == f"adm_pnl_grp:ru:{CHAT_ID}:memory"
+        assert _labels(markup) == ["✖️ Аня", "✖️ Борис", "➕ Добавить", "⬅️ Чат"]
+        assert _buttons(markup)[-1][1] == f"adm_pnl_menu:ru:{CHAT_ID}"
 
     async def test_the_empty_list_says_who_can_save_facts_anyway(self) -> None:
         callback = _make_callback(f"adm_kb_orgs:ru:{CHAT_ID}:0")
@@ -417,7 +417,7 @@ class TestOrganizerList:
 
         text, markup = _edited(callback)
         assert "Пока никого. Админы бота могут сохранять факты всегда." in text
-        assert _labels(markup) == ["➕ Добавить", "⬅️ Память"]
+        assert _labels(markup) == ["➕ Добавить", "⬅️ Чат"]
 
     async def test_an_old_button_with_an_origin_token_still_opens_the_list(self) -> None:
         callback = _make_callback(f"adm_kb_orgs:ru:{CHAT_ID}:0:p")

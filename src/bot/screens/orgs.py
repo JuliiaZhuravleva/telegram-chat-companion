@@ -2,9 +2,11 @@
 
 Four screens, built as plain data (``handlers/admin_kb.py`` sends them):
 
-* ``orgs`` — the organizers of one chat. A tap on ``✖️ {name}`` removes that
-  person at once and offers ``↩️ Вернуть`` on the result (undo over confirm).
-  Someone Telegram says is not in the group carries `` · не в чате``.
+* ``orgs`` — the organizers of one chat, reached from the chat's root. A tap
+  on ``✖️ {name}`` removes that person at once and offers ``↩️ Вернуть`` on the
+  result (undo over confirm); the screen says both before the tap. Someone
+  Telegram says is not in the group carries `` · не в чате``, explained in a
+  line of its own while the page shows one.
 * ``org.list`` — the chat's participants by activity; a tap adds. Current
   organizers carry ``✓`` and a tap on them only says so.
 * ``org.add`` — a NEW message with a reply keyboard: Telegram's own person
@@ -51,8 +53,14 @@ Reason = Literal["not_found", "hidden", "elsewhere", "channel"]
 
 ORGS_TITLE: Final = Tr("👥 <b>Организаторы</b> · {t}", "👥 <b>Organizers</b> · {t}")
 ORGS_BODY: Final = Tr(
-    "Могут сохранять факты командой /remember. Нажатие на имя убирает человека.",
-    "They can save facts with /remember. Tap a name to remove that person.",
+    "Могут сохранять факты командой /remember. Нажатие на имя сразу убирает человека, "
+    "а внизу появится «↩️ Вернуть», если ошиблись.",
+    "They can save facts with /remember. A tap on a name removes that person at once, "
+    "and «↩️ Undo» appears below in case it was a mistake.",
+)
+ORGS_ABSENT: Final = Tr(
+    "«Не в чате» — человека сейчас нет в группе, но он ещё организатор.",
+    "«Not in chat»: the person is not in the group now but is still an organizer.",
 )
 ORGS_EMPTY: Final = Tr(
     "Могут сохранять факты командой /remember.\n\n"
@@ -207,6 +215,8 @@ def orgs_screen(
     ids Telegram says are not in the group: still organizers, marked.
     """
     body = ORGS_BODY(lang) if people else ORGS_EMPTY(lang)
+    if any(uid in absent for uid, _ in people):
+        body += f"\n{ORGS_ABSENT(lang)}"
     rows: list[tuple[Button, ...]] = [
         (
             Button(
@@ -225,7 +235,7 @@ def orgs_screen(
         rows.append((Button(UNDO(lang), cb("adm_kb_org_undo:", lang, cid, uid, position)), add))
     else:
         rows.append((add,))
-    rows.append((back("memory", cb("adm_pnl_grp:", lang, cid, "memory"), lang),))
+    rows.append((back("chat", cb("adm_pnl_menu:", lang, cid), lang),))
     return Screen(
         id="orgs",
         text=f"{_title(ORGS_TITLE, lang, title, cid)}\n\n{body}",

@@ -241,8 +241,53 @@ class TestChatList:
 
         admin_repo.get_enabled_chats_page_by_activity.assert_awaited_once_with(0, 3)
         _, rows = _edited(callback)
-        assert rows[0] == ["adm_wl_pending:ru:0", "adm_wl_rejected:ru:0"]
-        assert _labels(callback)[:2] == ["🙏 Заявки · 2", "🚫 Отклонённые · 1"]
+        assert rows[0] == ["adm_wl_pending:ru:0"]
+        assert rows[-1] == ["adm_wl_rejected:ru:0", "adm_menu:ru"]
+        labels = _labels(callback)
+        assert labels[0] == "🙏 Запросы доступа · 2"
+        assert labels[-2:] == ["🚫 Отклонённые · 1", "⬅️ Панель"]
+
+    async def test_rejected_alone_shares_the_last_row_and_costs_no_chat(self) -> None:
+        """«🚫 Отклонённые» sits next to the way back, so it takes no chat's row."""
+        admin_repo = _admin_repo([{"chat_id": -1001, "chat_title": "Один"}], rejected=1)
+        callback = _callback("adm_pnl:ru:0")
+
+        await handle_chat_panel_picker(callback, admin_repo, _bot_config_repo())
+
+        admin_repo.get_enabled_chats_page_by_activity.assert_awaited_once_with(0, 4)
+        _, rows = _edited(callback)
+        assert rows == [["adm_pnl_menu:ru:-1001"], ["adm_wl_rejected:ru:0", "adm_menu:ru"]]
+
+    @pytest.mark.parametrize(
+        ("page", "listed", "pending", "line"),
+        [
+            ("0", 3, 1, "Подключено: 5, показаны 1–3."),
+            ("1", 2, 1, "Подключено: 5, показаны 4–5."),
+            ("1", 1, 0, "Подключено: 5, показан 5-й."),
+        ],
+    )
+    async def test_more_than_one_page_says_which_chats_this_one_lists(
+        self, page: str, listed: int, pending: int, line: str
+    ) -> None:
+        """«Подключено: 5» over three buttons read as three chats missing. The
+        range comes from the page size the handler fetched with."""
+        chats = [{"chat_id": -1000 - i, "chat_title": f"Чат {i}"} for i in range(listed)]
+        admin_repo = _admin_repo(chats, total=5, pending=pending)
+        callback = _callback(f"adm_pnl:ru:{page}")
+
+        await handle_chat_panel_picker(callback, admin_repo, _bot_config_repo())
+
+        assert line in _edited(callback)[0]
+
+    async def test_one_page_says_only_how_many(self) -> None:
+        chats = [{"chat_id": -1001, "chat_title": "Один"}, {"chat_id": -1002, "chat_title": "Два"}]
+        callback = _callback("adm_pnl:ru:0")
+
+        await handle_chat_panel_picker(callback, _admin_repo(chats), _bot_config_repo())
+
+        text = _edited(callback)[0]
+        assert "Подключено: 2." in text
+        assert "показан" not in text
 
     async def test_a_page_past_the_end_shows_the_last_page(self) -> None:
         admin_repo = _admin_repo([{"chat_id": -1001, "chat_title": "Один"}], total=5)
@@ -322,6 +367,25 @@ class TestChatRoot:
         assert "📏 Правила · 3" in _labels(callback)
         assert rows[-1] == ["adm_pnl:ru:0"]
 
+    async def test_the_organizers_are_one_tap_from_the_root_with_their_count(self) -> None:
+        """Both organizer tasks begin at the chat, not in a setting: removing the
+        one who left is this button, then the name."""
+        callback = _callback(f"adm_pnl_menu:ru:{CHAT_ID}")
+
+        await _open_chat(callback, {**ROW, "kb_organizer_ids": [11, 12, 13]})
+
+        _, rows = _edited(callback)
+        assert "👥 Организаторы · 3" in _labels(callback)
+        assert f"adm_kb_orgs:ru:{CHAT_ID}:0" in _flat(rows)
+
+    async def test_the_disconnect_button_reads_as_an_action(self) -> None:
+        """«🔌 Отключить» alone was read as the chat's state."""
+        callback = _callback(f"adm_pnl_menu:ru:{CHAT_ID}")
+
+        await _open_chat(callback)
+
+        assert "🔌 Отключить бота" in _labels(callback)
+
     async def test_says_when_the_bot_is_off_in_the_chat(self) -> None:
         callback = _callback(f"adm_pnl_menu:ru:{CHAT_ID}")
 
@@ -362,6 +426,14 @@ async def _open_section(
 
 
 class TestSections:
+    async def test_memory_has_no_organizers_button_any_more(self) -> None:
+        callback = _callback(f"adm_pnl_grp:ru:{CHAT_ID}:memory")
+
+        await _open_section(callback, {**ROW, "kb_organizer_ids": [11, 12]})
+
+        _, rows = _edited(callback)
+        assert not [data for data in _flat(rows) if data.startswith("adm_kb_orgs:")]
+
     @pytest.mark.parametrize(
         ("token", "title"),
         [
@@ -370,7 +442,7 @@ class TestSections:
             ("kb", "🧠 <b>Память</b>"),  # an old group button
             ("voice", "🎙 <b>Голос и фото</b>"),
             ("stickers", "🎨 <b>Стикеры</b>"),
-            ("community", "👋 <b>Сообщество</b>"),
+            ("community", "👋 <b>Новички и уходы</b>"),
         ],
     )
     async def test_token_opens_its_section(self, token: str, title: str) -> None:
@@ -467,7 +539,7 @@ class TestSections:
         reactions = _callback(f"adm_pnl_grp:ru:{CHAT_ID}:reactions")
         await _open_section(reactions, row, bot_config_repo=defaults, service=stale_cache)
 
-        assert "✅ База знаний" in _labels(memory)
+        assert "✅ База знаний · общее" in _labels(memory)
         assert "✅ Реакции в чате" in _labels(reactions)
         assert any(label.startswith("⚪ Запоминать реакции") for label in _labels(reactions))
 
@@ -643,7 +715,7 @@ class TestSwitches:
         repo.toggle_bool_field.assert_not_awaited()
         text, _ = _edited(callback)
         assert text.startswith(screens.COMMUNITY_OFF_TAP("ru"))
-        assert "👋 <b>Сообщество</b>" in text
+        assert "👋 <b>Новички и уходы</b>" in text
 
     async def test_a_community_switch_while_the_mode_is_on_writes(self) -> None:
         repo = _chat_settings_repo(ROW, toggled=True)
