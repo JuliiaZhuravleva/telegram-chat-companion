@@ -1,4 +1,5 @@
-"""A prompt ended by a tap elsewhere reads closed, and leads back to its screen.
+"""A prompt ended by a tap elsewhere, a command or a cancel reads closed, and
+leads back to its screen.
 
 `PromptExitMiddleware` clears a prompt when the admin taps a button that is not
 the prompt's own. Without more, the message that asked for the input still asks
@@ -8,6 +9,10 @@ saying no answer is awaited there (`CLOSED`), and one button back to the screen
 the prompt belongs to. These tests drive the real router (``deliver``) after a
 real `show()` put the prompt on screen, read what the bot was asked to send, and
 route that button with no FSM state at all.
+
+A typed command other than /cancel ends the prompt the same way (the line says a
+command was sent, `CLOSED_BY_COMMAND`), and /cancel or the leftover reply
+keyboard's «Отмена» close it saying it was cancelled (`CLOSED_BY_CANCEL`).
 """
 
 from __future__ import annotations
@@ -27,17 +32,29 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    ReplyKeyboardRemove,
     User,
 )
 
 import src.bot.states.admin as admin_states
-from src.bot.middleware.prompt_exit import CLOSED, CLOSED_ID
+from src.bot.middleware.prompt_exit import (
+    CLOSED,
+    CLOSED_BY_CANCEL,
+    CLOSED_BY_COMMAND,
+    CLOSED_ID,
+)
 from src.bot.screens.model import Screen
 from src.bot.screens.registry import Sample, load_all
 from src.bot.screens.render import show, show_markup
 from src.bot.screens.routes import CALLBACK_LIMIT, target_of
 from src.bot.screens.samples import fake
-from src.bot.states.admin import PROMPT_HOMES, PROMPT_SCREENS, AdminStates, title_line
+from src.bot.states.admin import (
+    PROMPT_HOMES,
+    PROMPT_SCREENS,
+    AdminStates,
+    reply_keyboard_up,
+    title_line,
+)
 from tests.unit.screen_routing import ADMIN_ID, FakeState, deliver
 
 PROMPT_ID = 10
@@ -451,3 +468,127 @@ async def test_every_prompt_screen_closes_with_one_way_back(state: str, item: Sa
 
     handler = await deliver("callback_query", _tap(data, OTHER_ID, _bot()), FakeState())
     assert handler is not None and not handler.startswith("stale."), (data, handler)
+
+
+# ---------------------------------------------------------------------------
+# Ended by typing: another command, /cancel, the leftover «Отмена»
+# ---------------------------------------------------------------------------
+
+
+def _typed(text: str, bot: AsyncMock) -> Message:
+    """A real message the admin typed in the DM."""
+    return Message(
+        message_id=60,
+        date=datetime(2026, 11, 7, 12, 1, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        text=text,
+    ).as_(bot)
+
+
+def _sends(bot: AsyncMock) -> list[SendMessage]:
+    return [c.args[0] for c in bot.await_args_list if isinstance(c.args[0], SendMessage)]
+
+
+def _admin_repo(lang: str) -> AsyncMock:
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value=lang)
+    return repo
+
+
+@pytest.mark.parametrize(("lang", "home"), [("ru", "⬅️ Стикеры"), ("en", "⬅️ Stickers")])
+async def test_a_typed_command_closes_the_prompts_message(lang: str, home: str):
+    """No payload to read a language from: the prompt's own buttons carry it."""
+    fsm = await _open("tol.in", AdminStates.awaiting_setting_value, lang=lang)
+    title = title_line(_sample("tol.in", lang).text)
+
+    bot = _bot()
+    await deliver("message", _typed("/admin", bot), fsm, bot=bot)
+
+    assert await fsm.get_state() is None
+    (edit,) = _edits(bot)
+    assert (edit.chat_id, edit.message_id) == (ADMIN_ID, PROMPT_ID)
+    assert edit.text == f"{title}\n{CLOSED_BY_COMMAND(lang)}"
+    button = _home(edit)
+    assert button.text == home
+    assert button.callback_data == f"adm_pnl_grp:{lang}:{fake.CHAT_ID}:stickers"
+
+
+async def test_a_typed_answer_leaves_the_prompts_message():
+    fsm = await _open("tol.in", AdminStates.awaiting_setting_value)
+    bot = _bot()
+    await deliver("message", _typed("0.5", bot), fsm, bot=bot)
+    assert await fsm.get_state() == AdminStates.awaiting_setting_value.state
+    assert _edits(bot) == []
+
+
+@pytest.mark.parametrize(("lang", "said"), [("ru", "Отменено."), ("en", "Cancelled.")])
+async def test_cancel_closes_the_prompts_message(lang: str, said: str):
+    """/cancel answers in the panel's language, and the closed line agrees."""
+    fsm = await _open("tol.in", AdminStates.awaiting_setting_value, lang="ru")
+    title = title_line(_sample("tol.in", "ru").text)
+
+    bot = _bot()
+    await deliver(
+        "message",
+        _typed("/cancel", bot),
+        fsm,
+        call=True,
+        bot=bot,
+        admin_repo=_admin_repo(lang),
+        bot_config_repo=AsyncMock(),
+    )
+
+    assert await fsm.get_state() is None
+    (sent,) = _sends(bot)
+    assert sent.text == said
+    (edit,) = _edits(bot)
+    assert (edit.chat_id, edit.message_id) == (ADMIN_ID, PROMPT_ID)
+    assert edit.text == f"{title}\n{CLOSED_BY_CANCEL(lang)}"
+    assert _home(edit).callback_data == f"adm_pnl_grp:{lang}:{fake.CHAT_ID}:stickers"
+
+
+async def test_cancel_with_nothing_armed_closes_nothing():
+    await _open("tol.in", AdminStates.awaiting_setting_value)
+    bot = _bot()
+    await deliver(
+        "message",
+        _typed("/cancel", bot),
+        FakeState(),
+        call=True,
+        bot=bot,
+        admin_repo=_admin_repo("ru"),
+        bot_config_repo=AsyncMock(),
+    )
+    (sent,) = _sends(bot)
+    assert sent.text == "Нечего отменять."
+    assert _edits(bot) == []
+
+
+async def test_the_leftover_keyboards_cancel_closes_the_prompt_armed_since():
+    """The organizer's keyboard is still up when the tolerance prompt opens; its
+    «✖️ Отмена» cancels that prompt, takes the keyboard away and closes the
+    message that asked."""
+    await show(_tap("adm_kb_orgs:ru:-100", OTHER_ID, _bot()), _sample("org.add"))
+    fsm = await _open("tol.in", AdminStates.awaiting_setting_value)
+    assert reply_keyboard_up(ADMIN_ID)
+
+    bot = _bot()
+    await deliver(
+        "message",
+        _typed("✖️ Отмена", bot),
+        fsm,
+        call=True,
+        bot=bot,
+        admin_repo=_admin_repo("ru"),
+        bot_config_repo=AsyncMock(),
+    )
+
+    assert await fsm.get_state() is None
+    (sent,) = _sends(bot)
+    assert sent.text == "Отменено."
+    assert isinstance(sent.reply_markup, ReplyKeyboardRemove)
+    assert not reply_keyboard_up(ADMIN_ID)
+    (edit,) = _edits(bot)
+    assert edit.message_id == PROMPT_ID
+    assert edit.text.endswith(f"\n{CLOSED_BY_CANCEL('ru')}")

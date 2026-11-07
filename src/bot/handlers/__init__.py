@@ -85,9 +85,11 @@ router = Router(name="main")
 install_container_alias(router)
 
 # A typed-input prompt ends when the admin taps a button that is not its own,
-# whichever router takes the tap: one outer middleware here instead of every
-# area closing every other area's prompt (`src/bot/middleware/prompt_exit.py`).
+# or types a command other than /cancel, whichever router takes the update: one
+# outer middleware per observer here instead of every area closing every other
+# area's prompt (`src/bot/middleware/prompt_exit.py`).
 router.callback_query.outer_middleware(PromptExitMiddleware())
+router.message.outer_middleware(PromptExitMiddleware())
 router.include_router(fsm_cancel_router)
 router.include_router(admin_sticker_router)
 router.include_router(admin_kb_router)

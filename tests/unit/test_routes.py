@@ -44,12 +44,21 @@ from src.bot.states.admin import (
     PROMPT_HOMES,
     PROMPT_OWN_TAPS,
     PROMPT_SCREENS,
+    REPLY_KEYBOARD_PROMPTS,
     STICKER_ANSWERS,
     AdminStates,
     is_own_tap,
+    reply_keyboard_up,
 )
 from src.models.rules import RuleType
-from tests.unit.screen_routing import FakeState, admin_tap, admin_text, deliver, first_match
+from tests.unit.screen_routing import (
+    ADMIN_ID,
+    FakeState,
+    admin_tap,
+    admin_text,
+    deliver,
+    first_match,
+)
 
 SRC_BOT = Path(__file__).resolve().parents[2] / "src" / "bot"
 
@@ -749,6 +758,257 @@ async def test_the_leftover_cancel_removes_the_keyboard():
     # The prompt is already gone: said so, and the keyboard taken away with it.
     assert method.text == "Нечего отменять."
     assert isinstance(method.reply_markup, ReplyKeyboardRemove)
+
+
+# ---------------------------------------------------------------------------
+# Leaving a typed-input prompt by typing another command
+# ---------------------------------------------------------------------------
+
+_COMMANDS: dict[str, str] = {
+    "/admin": "admin.handle_admin_command",
+    "/settings": "admin.handle_settings_command",
+    "/panel": "admin_chat_panel.handle_chat_panel_shortcut",
+}
+"""Commands that open a panel screen as a new message, and the handler of each."""
+
+
+@pytest.mark.parametrize("command", sorted(_COMMANDS))
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_a_typed_command_ends_the_prompt_before_its_handler(state: str, command: str):
+    """The command's own handler takes it, and sees no state: aiogram's copy of
+    the state (``raw_state``) is cleared with the prompt, as after a foreign tap."""
+    fsm = FakeState(state)
+    seen: dict[str, object] = {}
+    msg, _ = admin_text(command)
+    assert await deliver("message", msg, fsm, seen=seen) == _COMMANDS[command]
+    assert await fsm.get_state() is None
+    assert "raw_state" in seen and seen["raw_state"] is None
+
+
+@pytest.mark.parametrize("state", sorted(_PROMPT_INPUT))
+async def test_a_typed_message_after_a_typed_command_is_not_the_prompts_answer(state: str):
+    """The finding: an armed prompt, then /admin, then an ordinary text meant for
+    something else. The text is an ordinary DM message, not the prompt's answer."""
+    text = "0.5"
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(state)) == _PROMPT_INPUT[state], "control"
+
+    fsm = FakeState(state)
+    msg, _ = admin_text("/admin")
+    await deliver("message", msg, fsm)
+    msg, _ = admin_text(text)
+    taken = await deliver("message", msg, fsm)
+    assert taken != _PROMPT_INPUT[state]
+    assert taken == "message.handle_text_message"
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_cancel_is_left_to_its_own_handler(state: str):
+    """/cancel says what it cancelled, so it has to see the prompt still armed."""
+    seen: dict[str, object] = {}
+    msg, _ = admin_text("/cancel")
+    fsm = FakeState(state)
+    assert await deliver("message", msg, fsm, seen=seen) == "fsm_cancel.handle_cancel"
+    assert seen["raw_state"] == state
+    assert await fsm.get_state() == state
+
+
+def _forwarded(text: str) -> Message:
+    from aiogram.types import MessageOriginUser, User
+
+    msg, _ = admin_text(text)
+    return msg.model_copy(
+        update={
+            "forward_origin": MessageOriginUser(
+                date=datetime(2026, 11, 7, 11, 0, tzinfo=UTC),
+                sender_user=User(id=900001, is_bot=False, first_name="Тестовый"),
+            )
+        }
+    )
+
+
+async def test_a_forwarded_command_is_content_and_ends_nothing():
+    """The organizer prompt takes a forward as its answer whatever its text."""
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    taken = await deliver("message", _forwarded("/start"), fsm)
+    assert taken == "admin_kb.handle_kb_organizer_add_reply"
+    assert await fsm.get_state() == AdminStates.awaiting_kb_organizer.state
+
+
+async def test_a_command_under_a_photo_ends_the_prompt_too():
+    """aiogram reads a command from ``text or caption``; so does the middleware."""
+    from aiogram.types import PhotoSize
+
+    msg, _ = admin_text("x")
+    photo = msg.model_copy(
+        update={
+            "text": None,
+            "caption": "/admin",
+            "photo": [PhotoSize(file_id="p", file_unique_id="pu", width=1, height=1)],
+        }
+    )
+    fsm = FakeState(AdminStates.awaiting_system_prompt)
+    assert await deliver("message", photo, fsm) == "admin.handle_admin_command"
+    assert await fsm.get_state() is None
+
+
+async def test_ordinary_text_and_a_lone_slash_end_nothing():
+    """Only a command ends a prompt: «/» alone names none, and a word is an answer.
+    (A bare mention is `typed_command`'s test below: routing one asks the bot for
+    its own username.)"""
+    armed = AdminStates.awaiting_setting_value.state
+    for text in ("0.5", "/"):
+        fsm = FakeState(armed)
+        msg, _ = admin_text(text)
+        await deliver("message", msg, fsm)
+        assert await fsm.get_state() == armed, text
+
+
+def test_typed_command_reads_a_command_as_aiogram_does():
+    from aiogram.types import Chat
+
+    from src.bot.middleware.prompt_exit import typed_command
+
+    def typed(text: str) -> str | None:
+        msg, _ = admin_text(text)
+        return typed_command(msg)
+
+    assert typed("/admin") == "admin"
+    assert typed("/panel@some_bot СРАЗУ чат") == "panel"
+    assert typed("/Admin") == "Admin"
+    assert typed("/") is None
+    assert typed("/@some_bot") is None
+    assert typed("admin") is None
+    assert typed("слово /admin") is None
+    assert typed_command(_forwarded("/admin")) is None
+    msg, _ = admin_text("/admin")
+    group = msg.model_copy(update={"chat": Chat(id=-100500, type="supergroup")})
+    assert typed_command(group) is None
+
+
+# ---------------------------------------------------------------------------
+# A reply keyboard left under the input while another prompt is armed
+# ---------------------------------------------------------------------------
+
+
+async def _put_up_reply_keyboard(screen_id: str) -> None:
+    """Show ``screen_id`` (a prompt with a reply keyboard) through `show()`, as
+    its area does: the chat's keyboard is up from then on."""
+    from aiogram.methods import SendMessage, TelegramMethod
+    from aiogram.types import CallbackQuery, Chat, User
+
+    from src.bot.screens.registry import load_all
+    from src.bot.screens.render import show
+
+    async def answer(method: TelegramMethod[object], *_: object, **__: object) -> object:
+        if isinstance(method, SendMessage):
+            return Message(
+                message_id=40,
+                date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+                chat=Chat(id=int(method.chat_id), type="private"),
+                text=method.text,
+            )
+        return True
+
+    bot = AsyncMock(side_effect=answer)
+    anchor = Message(
+        message_id=10,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=1, is_bot=True, first_name="Bot"),
+        text="Экран",
+    ).as_(bot)
+    tap = CallbackQuery(
+        id="q10",
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        chat_instance="ci",
+        data="adm_menu:ru",
+        message=anchor,
+    ).as_(bot)
+    await show(tap, load_all()[screen_id][0].build("ru"))
+    assert reply_keyboard_up(ADMIN_ID), "the keyboard was sent"
+
+
+def test_the_reply_keyboard_prompts_are_the_ones_that_show_one():
+    """`REPLY_KEYBOARD_PROMPTS` against the screens each prompt shows: a prompt
+    whose screen carries a reply keyboard owns the «Отмена» on it."""
+    from src.bot.screens.registry import load_all
+
+    samples = load_all()
+    shows_one = {
+        state
+        for state, screen_ids in PROMPT_SCREENS.items()
+        for screen_id in screen_ids
+        for item in samples[screen_id]
+        if item.build("ru").reply is not None
+    }
+    assert shows_one == set(REPLY_KEYBOARD_PROMPTS)
+
+
+_ANSWERS_A_WORD = (
+    AdminStates.awaiting_rule_words.state,
+    AdminStates.awaiting_system_prompt.state,
+    AdminStates.awaiting_setting_value.state,
+    AdminStates.awaiting_rule_text.state,
+)
+
+
+@pytest.mark.parametrize("keyboard", ["org.add", "rule.who_find"])
+@pytest.mark.parametrize("state", _ANSWERS_A_WORD)
+@pytest.mark.parametrize("text", ["✖️ Отмена", "Отмена", "✖️ Cancel"])
+async def test_a_leftover_keyboards_cancel_is_not_another_prompts_answer(
+    keyboard: str, state: str, text: str
+):
+    """The finding: the organizer's keyboard (or the person search's) outlived its
+    prompt, the admin opened another prompt and tapped the «Отмена» still on
+    screen. It is a cancel, not that prompt's answer (a line of the instruction,
+    a rule's words)."""
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(state)) == _PROMPT_INPUT[state], (
+        "control: with no keyboard up the word is the prompt's answer"
+    )
+    await _put_up_reply_keyboard(keyboard)
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(state)) == "fsm_cancel.handle_leftover_cancel"
+
+
+async def test_a_reply_keyboards_own_prompt_keeps_its_cancel():
+    """While the prompt that put the keyboard up is armed, the button is its own."""
+    await _put_up_reply_keyboard("org.add")
+    msg, _ = admin_text("✖️ Отмена")
+    in_prompt = FakeState(AdminStates.awaiting_kb_organizer)
+    assert await deliver("message", msg, in_prompt) == "admin_kb.handle_kb_organizer_cancel_label"
+
+    await _put_up_reply_keyboard("rule.who_find")
+    open_search = FakeState(AdminStates.awaiting_rule_who)
+    await open_search.update_data(rule_finding=-100123, rule_type="user_specific")
+    msg, _ = admin_text("✖️ Отмена")
+    assert await deliver("message", msg, open_search) == "rules.handle_builder_find_cancel"
+
+
+async def test_the_leftover_cancel_ends_the_other_prompt_and_takes_the_keyboard_away():
+    """The whole path: organizer prompt, a tap elsewhere, the instruction editor,
+    «✖️ Отмена». The editor is cancelled, the keyboard taken away, and from then
+    on «Отмена» typed into a rule's words is those words again."""
+    await _put_up_reply_keyboard("org.add")
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    assert await fsm.get_state() is None
+    await fsm.set_state(AdminStates.awaiting_system_prompt)
+
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value="ru")
+    msg, bot = admin_text("✖️ Отмена")
+    await deliver("message", msg, fsm, call=True, admin_repo=repo, bot_config_repo=AsyncMock())
+    assert await fsm.get_state() is None
+    (method,) = [c.args[0] for c in bot.call_args_list]
+    assert method.text == "Отменено."
+    assert isinstance(method.reply_markup, ReplyKeyboardRemove)
+    assert not reply_keyboard_up(ADMIN_ID)
+
+    msg, _ = admin_text("Отмена")
+    in_rule = FakeState(AdminStates.awaiting_rule_words)
+    assert await deliver("message", msg, in_rule) == "rules.handle_rule_words_input"
 
 
 def _admin_sticker(emoji: str | None) -> Message:

@@ -271,9 +271,40 @@ async def _untouched(state: _FakeState, prompt: State, data: dict[str, object]) 
 
 
 class TestCommandsEscapeTheRulePrompts:
+    @pytest.mark.parametrize("shape", ["text", "caption"])
     @pytest.mark.parametrize("prompt", _RULE_PROMPTS, ids=lambda s: s.state)
-    async def test_a_typed_command_is_not_swallowed(self, prompt: State) -> None:
-        msg, data, bot = _make_message(text="/help")
+    async def test_a_typed_command_ends_the_prompt_and_is_not_swallowed(
+        self, prompt: State, shape: str
+    ) -> None:
+        """A typed command leaves the prompt (`PromptExitMiddleware`) before any
+        rules filter runs: the draft goes with it, nothing is created, and the
+        command is not answered as the prompt's input. Under a photo too:
+        aiogram reads a command from `text or caption`, and so does the middleware.
+        """
+        msg, data, bot = _make_message(**{shape: "/help"})
+        _with_rule_services(data)
+        state = await _armed(prompt)
+
+        await _propagate(msg, data, state)
+
+        assert await state.get_state() is None
+        assert await state.get_data() == {}
+        data["rules_repo"].create.assert_not_awaited()  # type: ignore[union-attr]
+        assert "Невалидный JSON. Попробуйте ещё раз." not in _sent_texts(bot)
+
+    @pytest.mark.parametrize("shape", ["text", "caption"])
+    @pytest.mark.parametrize("prompt", _RULE_PROMPTS, ids=lambda s: s.state)
+    async def test_a_forwarded_command_is_not_swallowed(self, prompt: State, shape: str) -> None:
+        """A forward is content, so the middleware leaves the prompt armed, and the
+        rules handlers' own slash guards are what keep `/help` out of it.
+
+        aiogram reads a command from `text or caption`, so `/help` under a photo
+        is a real command — and `~F.text.startswith("/")` returns True for it,
+        because `.text` is None. Measured before the caption guard: the rules
+        handler consumed it and answered «Невалидный JSON». This is the case
+        the text-only guard used elsewhere in the project cannot see.
+        """
+        msg, data, bot = _make_message(**{shape: "/help"}, forwarded=True)
         _with_rule_services(data)
         state = await _armed(prompt)
 
@@ -281,23 +312,6 @@ class TestCommandsEscapeTheRulePrompts:
 
         assert await _untouched(state, prompt, data)
         assert "Невалидный JSON. Попробуйте ещё раз." not in _sent_texts(bot)
-
-    @pytest.mark.parametrize("prompt", _RULE_PROMPTS, ids=lambda s: s.state)
-    async def test_a_command_in_a_photo_caption_is_not_swallowed(self, prompt: State) -> None:
-        """aiogram reads a command from `text or caption`.
-
-        So `/help` under a photo is a real command — and `~F.text.startswith("/")`
-        returns True for it, because `.text` is None. Measured before the fix:
-        the rules handler consumed it and answered «Невалидный JSON». This is
-        the case the text-only guard used elsewhere in the project cannot see.
-        """
-        msg, data, bot = _make_message(caption="/help")
-        _with_rule_services(data)
-        state = await _armed(prompt)
-
-        await _propagate(msg, data, state)
-
-        assert await _untouched(state, prompt, data)
 
     @pytest.mark.parametrize(
         ("prompt", "text"),

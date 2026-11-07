@@ -1,4 +1,4 @@
-"""A button anywhere else ends a typed-input prompt.
+"""A button anywhere else, or another command, ends a typed-input prompt.
 
 A prompt (`AdminStates`) reads the admin's next message as its answer, and the
 admin panel is buttons on many messages: the admin can leave a prompt by
@@ -14,6 +14,14 @@ to the states so a new prompt cannot be added without one), the prompt is
 cleared, ``raw_state`` with it, and the handler that takes the tap sees no
 state. A page counter (``noop``) changes nothing and ends nothing.
 
+A typed command leaves a prompt the same way: on the ``message`` observer, a
+private-chat message whose text (or caption) is a slash command ends the armed
+prompt before any handler's filters, so /admin, /settings or /panel opens its
+screen and the prompt is over, not left to read the next ordinary text as its
+answer. Not /cancel, which `fsm_cancel` answers itself (it has to see the state
+to say what it cancelled), and not a forwarded message: that is content, and
+the organizer prompt takes a forward as its answer whatever its text.
+
 The message that asked for the input would still be asking: the admin, back
 from the other screen, types the answer into a prompt that is gone, and it
 reaches the bot as an ordinary message. So the prompt's message is closed too,
@@ -24,16 +32,19 @@ and one button back to the screen the prompt belongs to (`PROMPT_HOMES`), named
 by where it goes: «⬅️ Поведение» under the instruction editor. That screen
 opens with no FSM state, so the button works whatever happened since; the id
 it needs (the chat's, the sticker's) is read off the prompt's own buttons when
-it is delivered. Not when the tapped message is that message (its handler is
-drawing a new screen there), and not when Telegram cannot edit it: a message
-carrying a reply keyboard (the organizer prompt, the rules person search) —
-that is logged and left.
+it is delivered, and so is the language a typed command does not carry. Not
+when the tapped message is that message (its handler is drawing a new screen
+there), and not when Telegram cannot edit it: a message carrying a reply
+keyboard (the organizer prompt, the rules person search) — that is logged and
+left. /cancel closes it the same way (`close_prompt_message`), with its own
+line.
 
-The organizer prompt's reply keyboard is not taken away here: that takes a
-message of its own, and one more message on every tap that leaves the prompt
-would be noise. It stays until its next use, and every use removes it: its
-person search is answered as out of date, its «Отмена» is answered by
-`fsm_cancel` like /cancel, and /cancel removes it too.
+A prompt's reply keyboard is not taken away here: that takes a message of its
+own, and one more message on every tap that leaves the prompt would be noise.
+It stays until its next use, and every use removes it: its person search is
+answered as out of date, and its «Отмена» is answered by `fsm_cancel` like
+/cancel — also while another prompt is armed, whose answer it is not
+(`reply_keyboard_up`); /cancel removes it too.
 """
 
 from __future__ import annotations
@@ -64,6 +75,10 @@ from src.bot.utils import safe_edit_text
 
 logger = structlog.get_logger(__name__)
 
+# Not an import of `fsm_cancel`: that module needs this one, and the name is
+# its command's, said once more where it is let through.
+_CANCEL_COMMAND = "cancel"
+
 CLOSED = Tr(
     "Здесь ответа больше не жду: нажата другая кнопка. Ничего не сохранено — "
     "чтобы начать заново, откройте экран кнопкой ниже.",
@@ -77,6 +92,23 @@ nothing.
 Round 4: «Вы нажали…» read as a scolding, and nobody could tell whether the
 half-done answer had been kept or what to do next, so it says both. "Nothing was
 saved" is this prompt's own answer: it was never given."""
+
+CLOSED_BY_COMMAND = Tr(
+    "Здесь ответа больше не жду: отправлена другая команда. Ничего не сохранено — "
+    "чтобы начать заново, откройте экран кнопкой ниже.",
+    "No longer waiting for an answer here: another command was sent. Nothing was saved; "
+    "to start again, open the screen with the button below.",
+)
+"""`CLOSED` for a prompt a typed command ended (/admin, /panel …): the same three
+parts, naming what happened instead of a tap."""
+
+CLOSED_BY_CANCEL = Tr(
+    "Здесь ответа больше не жду: ввод отменён. Ничего не сохранено — "
+    "чтобы начать заново, откройте экран кнопкой ниже.",
+    "No longer waiting for an answer here: the input was cancelled. Nothing was saved; "
+    "to start again, open the screen with the button below.",
+)
+"""`CLOSED` for a prompt /cancel (or the leftover keyboard's «Отмена») ended."""
 
 CLOSED_ID = "prompt.closed"
 
@@ -108,26 +140,36 @@ def home_button(state: str, key: str | None, lang: str) -> Button:
     return back("hub", cb("adm_menu:", lang), lang)
 
 
-def build_closed(title: str, home: Button, lang: str) -> Screen:
-    """What a prompt's message becomes once a tap elsewhere ended the prompt."""
+def build_closed(title: str, home: Button, lang: str, reason: Tr = CLOSED) -> Screen:
+    """What a prompt's message becomes once the prompt ended elsewhere: ``reason``
+    says how (`CLOSED`, `CLOSED_BY_COMMAND`, `CLOSED_BY_CANCEL`)."""
     return Screen(
         id=CLOSED_ID,
-        text=f"{title}\n{CLOSED(lang)}" if title else CLOSED(lang),
+        text=f"{title}\n{reason(lang)}" if title else reason(lang),
         rows=((home,),),
     )
 
 
+_Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
+
+
 class PromptExitMiddleware(BaseMiddleware):
-    """Clear a prompt state when a tap is not one of that prompt's own, and close its message."""
+    """Clear a prompt state when a tap is not one of that prompt's own, or a
+    command is typed, and close its message."""
 
     async def __call__(
         self,
-        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        handler: _Handler,
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
-        if not isinstance(event, CallbackQuery):
-            return await handler(event, data)
+        if isinstance(event, CallbackQuery):
+            return await self._tap(handler, event, data)
+        if isinstance(event, Message):
+            return await self._typed(handler, event, data)
+        return await handler(event, data)
+
+    async def _tap(self, handler: _Handler, event: CallbackQuery, data: dict[str, Any]) -> Any:
         ended = await leave_prompt_if_foreign(event.data, data)
         # Taken before the handler runs: a prompt it opens records its own message.
         left = _prompt_message_of(event, ended) if ended is not None else None
@@ -135,7 +177,21 @@ class PromptExitMiddleware(BaseMiddleware):
             return await handler(event, data)
         finally:
             if ended is not None and left is not None:
-                await _close(data.get("bot"), event, left, ended)
+                fields = (event.data or "").split(":")
+                lang = lang_of(fields[1] if len(fields) > 1 else None)
+                await close_prompt_message(data.get("bot"), left, ended, lang)
+
+    async def _typed(self, handler: _Handler, event: Message, data: dict[str, Any]) -> Any:
+        ended = await leave_prompt_on_command(event, data)
+        # Taken before the handler runs, for the same reason as a tap's.
+        left = take_prompt_message(event.chat.id, ended) if ended is not None else None
+        try:
+            return await handler(event, data)
+        finally:
+            if ended is not None and left is not None:
+                await close_prompt_message(
+                    data.get("bot"), left, ended, lang_of(left.lang), reason=CLOSED_BY_COMMAND
+                )
 
 
 async def leave_prompt_if_foreign(payload: str | None, data: dict[str, Any]) -> str | None:
@@ -158,6 +214,41 @@ async def leave_prompt_if_foreign(payload: str | None, data: dict[str, Any]) -> 
     return str(current)
 
 
+def typed_command(message: Message) -> str | None:
+    """The command ``message`` types (``admin`` for ``/admin@bot x``), or None.
+
+    Only in the private chat, where the panel and its prompts live, and only
+    when the admin typed it: a forward is content (the organizer prompt takes
+    one as its answer whatever it says). ``text or caption``, like aiogram's
+    ``Command`` filter, so a captioned photo reading /admin is a command too.
+    """
+    if message.chat.type != "private" or message.forward_origin is not None:
+        return None
+    # Parsed as ``Command`` parses it: the first word, its prefix, its mention.
+    words = (message.text or message.caption or "").split(maxsplit=1)
+    if not words or not words[0].startswith("/"):
+        return None
+    name = words[0][1:].partition("@")[0]
+    return name or None
+
+
+async def leave_prompt_on_command(message: Message, data: dict[str, Any]) -> str | None:
+    """End the prompt in ``data["state"]`` when ``message`` is a typed command
+    other than /cancel; the state it ended."""
+    command = typed_command(message)
+    state = data.get("state")
+    if command is None or command == _CANCEL_COMMAND or state is None:
+        return None
+    current = await state.get_state()
+    if current not in PROMPT_OWN_TAPS:
+        return None
+    await state.clear()
+    # The same copy of the state as a tap's: every filter downstream reads it.
+    data["raw_state"] = None
+    logger.info("Prompt left by a typed command", state=current, command=command)
+    return str(current)
+
+
 def _prompt_message_of(callback: CallbackQuery, state: str) -> PromptMessage | None:
     """The message still showing ``state``'s prompt, unless it is the one tapped."""
     tapped = callback.message
@@ -170,16 +261,26 @@ def _prompt_message_of(callback: CallbackQuery, state: str) -> PromptMessage | N
     return held
 
 
-async def _close(bot: Bot | None, callback: CallbackQuery, held: PromptMessage, state: str) -> None:
-    """Edit the prompt's message to its title, `CLOSED` and the one way back."""
+async def close_prompt_message(
+    bot: Bot | None,
+    held: PromptMessage,
+    state: str,
+    lang: str,
+    *,
+    reason: Tr = CLOSED,
+) -> None:
+    """Edit the prompt's message to its title, ``reason`` and the one way back.
+
+    ``held`` is the record `take_prompt_message` gave for ``state``, the prompt
+    that just ended; ``lang`` is what the closed message is written in. Never
+    raises a Telegram error: the prompt is over either way.
+    """
     if bot is None:
         return
     if not held.editable:
         logger.info("prompt_message_left_open", screen_id=held.screen_id, reason="reply keyboard")
         return
-    fields = (callback.data or "").split(":")
-    lang = lang_of(fields[1] if len(fields) > 1 else None)
-    screen = build_closed(held.title, home_button(state, held.home_key, lang), lang)
+    screen = build_closed(held.title, home_button(state, held.home_key, lang), lang, reason)
     markup = to_markup(screen)
     # Only the two ids reach Telegram; the admin panel lives in the private chat.
     chat = Chat(id=held.chat_id, type="private")

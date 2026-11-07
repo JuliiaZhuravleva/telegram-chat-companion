@@ -35,7 +35,7 @@ from src.bot.reply_flow import send_html_parts
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Button, ReplyButton, Screen
 from src.bot.screens.routes import BACK_NAMES, NOOP
-from src.bot.states.admin import note_screen
+from src.bot.states.admin import forget_reply_keyboard, note_screen
 from src.bot.utils import safe_edit_text
 from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length, split_html
 
@@ -343,6 +343,20 @@ async def show(
         disable_web_page_preview=not s.link_preview,
         title_from=s.text,
     )
+
+
+async def take_reply_keyboard_away(message: Message, text: str, **kwargs: Any) -> Message:
+    """Send ``text`` as a new message carrying ``ReplyKeyboardRemove``.
+
+    The one way a handler takes a reply keyboard away outside `show`: the chat's
+    keyboard is forgotten with it (`reply_keyboard_up`), so a later «Отмена»
+    typed into a prompt is that prompt's answer again. ``kwargs`` go to
+    ``message.answer`` (``parse_mode``).
+    """
+    sent = await message.answer(text, reply_markup=ReplyKeyboardRemove(), **kwargs)
+    # Like `note_screen`: a double without a chat id is not a chat.
+    forget_reply_keyboard(getattr(getattr(message, "chat", None), "id", None))
+    return sent
 
 
 # ---------------------------------------------------------------------------
