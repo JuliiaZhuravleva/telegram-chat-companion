@@ -228,7 +228,7 @@ def voice(lang: Lang) -> Screen:
 
 @sample("chat.stickers", section=_SECTION, title="Значения общие", nav="panel", user_data=_TITLES)
 def stickers_common(lang: Lang) -> Screen:
-    return screens.build_stickers(_view(), lang)
+    return screens.build_stickers(_view(sticker_learning_enabled=True), lang)
 
 
 @sample(
@@ -239,7 +239,19 @@ def stickers_common(lang: Lang) -> Screen:
     user_data=_TITLES,
 )
 def stickers_custom(lang: Lang) -> Screen:
-    return screens.build_stickers(_view(row=_OWN_ROW), lang)
+    return screens.build_stickers(_view(row={**_OWN_ROW, "sticker_learning_enabled": True}), lang)
+
+
+@sample(
+    "chat.stickers",
+    section=_SECTION,
+    title="Учиться на стикерах выключено",
+    nav="panel",
+    user_data=_TITLES,
+)
+def stickers_no_learning(lang: Lang) -> Screen:
+    """The default: learning off, so neither sticker answer fires whatever its switch says."""
+    return screens.build_stickers(_view(), lang)
 
 
 @sample("tol.prompt", section=_SECTION, title="Сейчас пресет", nav="panel")
@@ -359,13 +371,18 @@ def chance_joins_custom(lang: Lang) -> Screen:
 
 @sample("chance.prompt", section=_SECTION, title="Стикер на стикер выключен", nav="panel")
 def chance_sticker_off(lang: Lang) -> Screen:
-    row = {"sticker_reply_to_sticker_enabled": False}
+    row = {"sticker_reply_to_sticker_enabled": False, "sticker_learning_enabled": True}
     return screens.build_chance_prompt(_view(row=row), "sx", lang)
+
+
+@sample("chance.prompt", section=_SECTION, title="Учиться на стикерах выключено", nav="panel")
+def chance_sticker_no_learning(lang: Lang) -> Screen:
+    return screens.build_chance_prompt(_view(), "sx", lang)
 
 
 @sample("chance.stickers", section=_SECTION, title="Значения общие", nav="panel", user_data=_TITLES)
 def chance_stickers_common(lang: Lang) -> Screen:
-    return screens.build_sticker_chances(_view(), lang)
+    return screens.build_sticker_chances(_view(sticker_learning_enabled=True), lang)
 
 
 @sample(
@@ -376,8 +393,24 @@ def chance_stickers_common(lang: Lang) -> Screen:
     user_data=_TITLES,
 )
 def chance_stickers_own(lang: Lang) -> Screen:
-    own = {**_OWN_ROW, "sticker_reply_to_sticker_chance": 0.75, "image_comment_sticker_chance": 1.0}
+    own = {
+        **_OWN_ROW,
+        "sticker_learning_enabled": True,
+        "sticker_reply_to_sticker_chance": 0.25,
+        "image_comment_sticker_chance": 0.2,
+    }
     return screens.build_sticker_chances(_view(row=own), lang)
+
+
+@sample(
+    "chance.stickers",
+    section=_SECTION,
+    title="Учиться на стикерах выключено",
+    nav="panel",
+    user_data=_TITLES,
+)
+def chance_stickers_no_learning(lang: Lang) -> Screen:
+    return screens.build_sticker_chances(_view(), lang)
 
 
 @sample("chance.in", section=_SECTION, title="Встревает: ввод числа", nav="prompt")

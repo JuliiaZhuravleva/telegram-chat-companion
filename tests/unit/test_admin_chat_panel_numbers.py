@@ -17,16 +17,26 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Message
 
 import src.bot.handlers.admin_chat_panel as panel
 from src.bot.screens import chat as screens
+from src.bot.screens import deps
 from src.bot.screens.chat import ChatView, config_values
 from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Screen
 from src.bot.screens.registry import load_all
 from src.bot.screens.render import render_text
 from src.bot.states.admin import AdminStates
+from src.database.repositories.admin import AdminRepository
+from src.database.repositories.bot_config import BotConfigRepository
+from src.database.repositories.chat_settings import ChatSettingsRepository
+from src.database.repositories.rules import RulesRepository
 from src.models.chat_config import ChatConfig
+from src.services.chat_config import ChatConfigService
 from tests.unit.screen_routing import FakeState, admin_tap, admin_text, deliver, first_match
 from tests.unit.test_admin_chat_panel_handler import (
     CHAT_GONE,
@@ -175,10 +185,32 @@ class TestFrequencyPicker:
         assert last.label == "⬅️ Поведение"
         assert last.callback == f"adm_pnl_grp:ru:{CID}:behavior"
 
-    def test_an_off_preset_value_shows_as_current(self) -> None:
-        screen = screens.build_chance_prompt(_view(random_response_chance=0.003), "rc", "ru")
-        assert "Сейчас 0.3 %" in screen.text
+    @pytest.mark.parametrize(
+        ("stored", "ru", "en"),
+        [
+            (0.003, "Сейчас 0,3 %", "Now 0.3 %"),
+            # Written straight to the database, above what the panel lets you type.
+            (0.3, "Сейчас 30 %", "Now 30 %"),
+        ],
+    )
+    def test_an_off_preset_value_shows_as_current(self, stored: float, ru: str, en: str) -> None:
+        screen = screens.build_chance_prompt(_view(random_response_chance=stored), "rc", "ru")
+        assert ru in screen.text
         assert not any(label.startswith("• ") for label in _all_labels(screen))
+        assert (
+            en in screens.build_chance_prompt(_view(random_response_chance=stored), "rc", "en").text
+        )
+
+    def test_above_the_cap_the_behavior_screen_still_says_it(self) -> None:
+        screen = screens.build_behavior(_view(random_response_chance=0.3), "ru")
+        assert screen.rows[0][0].label == "🎲 Встревает · 30 %"
+
+    def test_a_russian_decimal_is_written_with_a_comma(self) -> None:
+        assert screens.chance_set("rc", 5.5, "ru") == "Встревает: 5,5 %"
+        assert screens.chance_set("rc", 5.5, "en") == "Joins in: 5.5 %"
+        screen = screens.build_behavior(_view(random_response_chance=0.055), "ru")
+        assert screen.rows[0][0].label == "🎲 Встревает · 5,5 %"
+        assert "5,5 % сообщений" in screen.text
 
     def test_it_says_why_there_is_a_limit(self) -> None:
         text = screens.build_chance_prompt(_view(), "rc", "ru").text
@@ -226,12 +258,53 @@ class TestStickerChances:
 
     def test_a_switched_off_answer_says_the_number_waits(self) -> None:
         screen = screens.build_chance_prompt(
-            _view({"sticker_reply_to_sticker_enabled": False}), "sx", "ru"
+            _view({"sticker_reply_to_sticker_enabled": False, "sticker_learning_enabled": True}),
+            "sx",
+            "ru",
         )
-        assert "выключен" in screen.text
+        assert "«Стикер на стикер» сейчас выключен" in screen.text
 
-    def test_a_sticker_answer_may_be_typed_up_to_100(self) -> None:
-        assert "от 0 до 100" in screens.build_chance_input(_view(), "ix", "ru").text
+    @pytest.mark.parametrize("code", ["sx", "ix"])
+    def test_a_sticker_answer_is_capped_and_says_why(self, code: str) -> None:
+        """Each sticker answer is an embedding request against a daily quota."""
+        assert "от 0 до 50" in screens.build_chance_input(_view(), code, "ru").text
+        picker = screens.build_chance_prompt(_view(), code, "ru")
+        assert "Больше 50 % нельзя: каждый такой ответ — запрос к модели" in picker.text
+        assert all(int(p.rsplit(":", 1)[1]) <= 50 for p in _payloads(picker) if "pctset" in p)
+
+
+class TestStickerAnswersNeedLearning:
+    """Both sticker answers run inside the learning handler: with «Учиться на
+    стикерах» off (the default) neither fires, whatever its own switch says."""
+
+    NO_LEARNING = "Пока выключено «Учиться на стикерах», бот стикерами не отвечает."
+    THERE = "бот стикерами не отвечает, что бы здесь ни стояло"
+
+    def test_the_stickers_screen_claims_no_percentage(self) -> None:
+        view = _view({"sticker_learning_enabled": False, "sticker_reply_to_sticker_enabled": True})
+        text = screens.build_stickers(view, "ru").text
+        assert self.NO_LEARNING in text
+        assert "Стикер на стикер: в" not in text
+        assert "do not answer" not in text
+        assert "does not answer with stickers" in screens.build_stickers(view, "en").text
+
+    def test_with_learning_on_the_percentages_are_said(self) -> None:
+        view = _view({"sticker_learning_enabled": True, "sticker_reply_to_sticker_enabled": True})
+        text = screens.build_stickers(view, "ru").text
+        assert "Стикер на стикер: в 50 %" in text
+        assert "не отвечает" not in text
+
+    def test_how_often_says_the_numbers_do_nothing(self) -> None:
+        off = screens.build_sticker_chances(_view({"sticker_learning_enabled": False}), "ru")
+        on = screens.build_sticker_chances(_view({"sticker_learning_enabled": True}), "ru")
+        assert self.THERE in off.text
+        assert self.THERE not in on.text
+
+    def test_the_picker_does_not_promise_a_switch_will_stop_it(self) -> None:
+        view = _view({"sticker_learning_enabled": False, "sticker_reply_to_sticker_enabled": True})
+        text = screens.build_chance_prompt(view, "sx", "ru").text
+        assert self.THERE in text
+        assert "Чтобы этого не было совсем" not in text
 
 
 class TestLanguagePicker:
@@ -244,6 +317,13 @@ class TestLanguagePicker:
             f"adm_pnl_lgset:ru:{CID}:en",
             f"adm_pnl_grp:ru:{CID}:behavior",
         ]
+
+    def test_it_says_voice_transcripts_follow_it(self) -> None:
+        """The setting is also the language hint sent with every voice message."""
+        text = screens.build_language_prompt(_view(language="ru"), "ru").text
+        assert "расшифровывает голосовые" in text
+        assert "расшифровки голосовых могут выйти с ошибками" in text
+        assert "voice transcripts" in screens.build_language_prompt(_view(), "en").text
 
     def test_an_unknown_stored_value_is_shown_and_not_marked(self) -> None:
         screen = screens.build_language_prompt(_view(language="<de>"), "ru")
@@ -335,18 +415,19 @@ class TestPresetSave:
 
     async def test_a_sticker_chance_returns_to_how_often(self) -> None:
         repo = _chat_settings_repo(ROW)
-        callback = _callback(f"adm_pnl_pctset:ru:{CHAT_ID}:sx:75")
+        callback = _callback(f"adm_pnl_pctset:ru:{CHAT_ID}:sx:40")
 
         await _set(callback, repo)
 
-        repo.set_field.assert_awaited_once_with(CHAT_ID, "sticker_reply_to_sticker_chance", 0.75)
+        repo.set_field.assert_awaited_once_with(CHAT_ID, "sticker_reply_to_sticker_chance", 0.4)
         text, _ = _edited(callback)
-        assert text.startswith("<i>✓ Стикер на стикер: 75 %</i>\n\n🎲 <b>Как часто</b>")
+        assert text.startswith("<i>✓ Стикер на стикер: 40 %</i>\n\n🎲 <b>Как часто</b>")
 
     @pytest.mark.parametrize(
         "data",
         [
             f"adm_pnl_pctset:ru:{CHAT_ID}:rc:25",  # above the cap
+            f"adm_pnl_pctset:ru:{CHAT_ID}:sx:75",  # above a sticker's cap
             f"adm_pnl_pctset:ru:{CHAT_ID}:rc:-1",
             f"adm_pnl_pctset:ru:{CHAT_ID}:rc:nan",
             f"adm_pnl_pctset:ru:{CHAT_ID}:sc:5",  # a column nothing reads
@@ -413,6 +494,17 @@ class TestOpening:
         assert order == ["armed", "shown"]
         assert _edited(callback)[1] == [[f"adm_pnl_pctx:ru:{CHAT_ID}:rc"]]
 
+    @pytest.mark.parametrize("tail", ["rc:zzz", "rc:in:x", "sx::"])
+    async def test_a_shape_it_never_draws_is_stale(self, tail: str, stale: AsyncMock) -> None:
+        state = _state()
+        callback = _callback(f"adm_pnl_pct:ru:{CHAT_ID}:{tail}")
+
+        await _open(callback, state)
+
+        stale.assert_awaited_once()
+        state.set_state.assert_not_awaited()
+        callback.message.edit_text.assert_not_awaited()
+
     @pytest.mark.parametrize("code", ["zz", "sc", "tol"])
     async def test_an_unknown_code_is_stale(self, code: str, stale: AsyncMock) -> None:
         state = _state()
@@ -451,7 +543,7 @@ class TestTypedNumber:
             ("rc", "20", "random_response_chance", 0.2),
             ("rc", "0", "random_response_chance", 0.0),
             ("rc", " 5,5 % ", "random_response_chance", 0.055),
-            ("sx", "100", "sticker_reply_to_sticker_chance", 1.0),
+            ("sx", "50", "sticker_reply_to_sticker_chance", 0.5),
             ("ix", "40", "image_comment_sticker_chance", 0.4),
         ],
     )
@@ -467,6 +559,22 @@ class TestTypedNumber:
         repo.set_field.assert_awaited_once_with(CHAT_ID, key, pytest.approx(value))
         message.answer.assert_awaited_once()
         assert _sent(message)[0].startswith("<i>✓ ")
+
+    async def test_a_russian_decimal_comes_back_with_a_comma(self) -> None:
+        message = _message("5.5")
+
+        await _type(message, _state(_armed("rc")))
+
+        assert _sent(message)[0].startswith("<i>✓ Встревает: 5,5 %</i>")
+
+    async def test_above_a_stickers_limit_it_says_why(self) -> None:
+        message = _message("51")
+        state = _state(_armed("sx"))
+
+        repo = await _type(message, state)
+
+        repo.set_field.assert_not_awaited()
+        assert _sent(message)[0].startswith("<i>Больше 50 % нельзя: каждый такой ответ")
 
     async def test_above_the_limit_it_says_what_the_limit_is(self) -> None:
         message = _message("21")
@@ -488,7 +596,7 @@ class TestTypedNumber:
         )
 
     @pytest.mark.parametrize(
-        ("code", "raw"), [("rc", "abc"), ("rc", "-1"), ("rc", "nan"), ("rc", "inf"), ("sx", "101")]
+        ("code", "raw"), [("rc", "abc"), ("rc", "-1"), ("rc", "nan"), ("rc", "inf"), ("sx", "abc")]
     )
     async def test_anything_else_asks_again(self, code: str, raw: str) -> None:
         message = _message(raw)
@@ -497,7 +605,7 @@ class TestTypedNumber:
         repo = await _type(message, state)
 
         repo.set_field.assert_not_awaited()
-        cap = 20 if code == "rc" else 100
+        cap = 20 if code == "rc" else 50
         assert _sent(message)[0].startswith(f"<i>Нужно число от 0 до {cap}")
 
     async def test_a_non_admin_value_is_dropped(self) -> None:
@@ -628,3 +736,64 @@ def test_render_keeps_the_notice_above_the_title() -> None:
     assert render_text(Screen(id=screen.id, text=screen.text, rows=(), notice="x")).startswith(
         "<i>✓ x</i>"
     )
+
+
+# ── The entries other areas call close this prompt too ─────────────────────
+
+
+def _entry_data(state: FSMContext, **repos: Any) -> dict[str, Any]:
+    container = MagicMock()
+    container.get = AsyncMock(side_effect=lambda dependency: repos[dependency.__name__])
+    return {deps.SCREEN_CONTAINER: container, deps.SCREEN_STATE: state}
+
+
+async def _percentage_prompt() -> FSMContext:
+    state = FSMContext(storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=1, user_id=1))
+    await state.set_state(ARMED_STATE)
+    await state.update_data(_armed())
+    return state
+
+
+def _empty_admin_repo() -> MagicMock:
+    repo = MagicMock(spec=AdminRepository)
+    repo.count_attempts = AsyncMock(return_value=0)
+    repo.get_enabled_chats_page_by_activity = AsyncMock(return_value=([], 0))
+    return repo
+
+
+async def test_show_chats_closes_the_percentage_prompt() -> None:
+    """Another area landing the admin on the list is leaving the prompt: a
+    number typed after it is not a percentage any more."""
+    state = await _percentage_prompt()
+    message = MagicMock(spec=Message)
+    message.answer = AsyncMock()
+
+    await panel.show_chats(
+        message, "ru", data=_entry_data(state, AdminRepository=_empty_admin_repo())
+    )
+
+    assert await state.get_state() is None
+
+
+async def test_show_chat_closes_the_percentage_prompt() -> None:
+    state = await _percentage_prompt()
+    settings = MagicMock(spec=ChatSettingsRepository)
+    settings.get = AsyncMock(return_value=None)
+    message = MagicMock(spec=Message)
+    message.answer = AsyncMock()
+
+    await panel.show_chat(
+        message,
+        "ru",
+        CHAT_ID,
+        data=_entry_data(
+            state,
+            ChatSettingsRepository=settings,
+            BotConfigRepository=MagicMock(spec=BotConfigRepository),
+            ChatConfigService=MagicMock(spec=ChatConfigService),
+            RulesRepository=MagicMock(spec=RulesRepository),
+            AdminRepository=_empty_admin_repo(),
+        ),
+    )
+
+    assert await state.get_state() is None

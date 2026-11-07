@@ -26,7 +26,9 @@ Handles:
   with a sticker (``sx``, ``ix``, from «Как часто» under stickers). Four presets
   that save on a tap, and «Своё число», which asks for a number in its own state
   (``AdminStates.awaiting_response_chance``). The typed limit is per field
-  (`screens.CHANCES`); a number above it is refused with the reason, not clamped.
+  (`screens.CHANCES`: 20 % for joining in, 50 % for a sticker, each a model
+  request); a number above it is refused with the reason, not clamped. The
+  `show_chat` / `show_chats` entries close this prompt too.
 - ``adm_pnl_lg:`` / ``adm_pnl_lgset:`` — the reply language: the languages the
   bot can answer in, saved on a tap.
 - ``adm_pnl_sp:`` / ``adm_pnl_spok:`` / ``adm_pnl_spre:`` / ``adm_pnl_spx:`` —
@@ -280,6 +282,7 @@ async def show_chat(
     rules_repo = await resolve(data, RulesRepository)
     admin_repo = await resolve(data, AdminRepository)
     await _close_number_prompt(state_of(data))
+    await _close_chance_prompt(state_of(data))
     return await _show_chat(
         target,
         _get_lang(lang),
@@ -330,6 +333,7 @@ async def show_chats(
     """Show the list of connected chats, the same way the ``adm_pnl:`` button does."""
     admin_repo = await resolve(data, AdminRepository)
     await _close_number_prompt(state_of(data))
+    await _close_chance_prompt(state_of(data))
     return await _show_chats(target, _get_lang(lang), page, admin_repo, notice=notice)
 
 
@@ -828,7 +832,8 @@ async def handle_chat_panel_chance_prompt(
     lang, chat_id = _parse_lang_chat(callback)
     parts = (callback.data or "").split(":")
     code = _chance_code(parts)
-    if chat_id is None or (len(parts) > 3 and code is None):
+    # Three shapes only: «Как часто», a picker, its number prompt (``…:in``).
+    if chat_id is None or (len(parts) > 3 and code is None) or parts[4:] not in ([], ["in"]):
         await show_stale(callback, lang, data=kwargs, state=state)
         return
     view = await _load_view(chat_id, chat_settings_repo, bot_config_repo, chat_config_service)
