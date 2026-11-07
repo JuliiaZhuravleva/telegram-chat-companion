@@ -62,13 +62,43 @@ ACTIONS: Final = {
 }
 """Builder action token → rule action."""
 
+PRIORITY: Final = Tr("приоритет", "weight")
+"""A rule's ``weight``, by a word readers know: one name on every rules screen.
+
+Russian says «приоритет»: «вес» read as nothing to a reader who has not seen the
+JSON. English keeps "weight", which the defaults screen's mode line also says."""
+MANDATORY: Final = Tr("обязательное", "required")
+"""A ``mandatory`` rule: it acts whatever the mode (`RuleEngine.evaluate`)."""
+
 MODES: Final = {
-    "highest_weight": Tr("одно правило с наибольшим весом", "one rule, highest weight"),
-    "weighted_random": Tr("одно случайное правило, по весу", "one random rule, by weight"),
+    "highest_weight": Tr("одно правило с наибольшим приоритетом", "one rule, highest weight"),
+    "weighted_random": Tr(
+        "одно случайное правило: чем выше приоритет, тем вероятнее",
+        "one random rule, by weight",
+    ),
 }
 """Rules modes other than ``all``. Only these change what a rule's weight means."""
 MODE_ALL: Final = Tr("все подходящие правила", "every matching rule")
 _MODE: Final = Tr("Режим", "Mode")
+
+_SEVERAL: Final = {
+    "all": Tr(
+        "Если сообщение подходит под несколько правил, срабатывают все.",
+        "If a message matches several rules, all of them act.",
+    ),
+    "highest_weight": Tr(
+        "Если сообщение подходит под несколько правил, срабатывают все обязательные "
+        "и одно из остальных — с наибольшим приоритетом.",
+        "If a message matches several rules, every required one acts, "
+        "and of the others only the one with the highest weight.",
+    ),
+    "weighted_random": Tr(
+        "Если сообщение подходит под несколько правил, срабатывают все обязательные "
+        "и одно случайное из остальных: чем выше приоритет, тем вероятнее.",
+        "If a message matches several rules, every required one acts, "
+        "and of the others one at random: the higher the weight, the likelier.",
+    ),
+}
 
 
 def mode_line(mode: str, lang: str) -> str:
@@ -80,6 +110,15 @@ def mode_line(mode: str, lang: str) -> str:
     else:
         name = escape(mode)
     return f"{_MODE(lang)}: {name}"
+
+
+def several_line(mode: str, lang: str) -> str:
+    """What acts when one message matches several rules, as `RuleEngine.evaluate` decides.
+
+    Every matching mandatory rule acts; the mode picks only among the others;
+    a mode the engine does not know runs as ``all``, and reads so here.
+    """
+    return _SEVERAL.get(mode, _SEVERAL["all"])(lang)
 
 
 WARN_FALLBACK: Final = Tr(
@@ -206,6 +245,32 @@ def _int(value: object, default: int) -> int:
 
 _SWITCH_STATE: Final = {True: Tr("включены", "on"), False: Tr("выключены", "off")}
 
+SWITCH: Final = Tr("выключатель", "switch")
+"""What the text calls the top button, so it reads as the thing a tap flips, not a state."""
+_SWITCH_HINT: Final = {
+    True: Tr(
+        "{top} — общий {switch}: после нажатия все правила будут {after}.",
+        "{top} is the master {switch}: tap it and all rules are {after}.",
+    ),
+    False: Tr(
+        "{top} — общий {switch}: после нажатия правила будут {after}, кроме тех, что {paused}.",
+        "{top} is the master {switch}: tap it and rules are {after}, except the {paused} ones.",
+    ),
+}
+"""By the switch's state now. Turning rules on flips the chat's switch only, so a
+paused rule stays paused, and the line says so rather than promise all of them."""
+_TOP: Final = Tr("Верхняя кнопка", "The top button")
+
+
+def switch_hint(enabled: bool, lang: str) -> str:
+    """The line that names the top button a switch and says what a tap leaves."""
+    return _SWITCH_HINT[enabled](lang).format(
+        top=_TOP(lang),
+        switch=SWITCH(lang),
+        after=_SWITCH_STATE[not enabled](lang),
+        paused=_PAUSED(lang),
+    )
+
 
 def switch_name(enabled: bool, lang: str) -> str:
     """The rules switch by name: the panel's noun and one state word, on every surface."""
@@ -219,18 +284,21 @@ def master_label(chat: ChatRules, lang: str) -> str:
 
 
 def _row_parts(rule: RuleView, chat: ChatRules, lang: str) -> tuple[str, str, str]:
-    if rule.enabled:
-        head, status = "📏 ", f" · {_ON(lang)}" if chat.enabled else ""
+    """A row's glyph, its name cut to the room left, and one tag.
+
+    The tag is «на паузе» for a paused rule; under a priority mode a working rule
+    shows the fact the mode reads (mandatory, or its priority) and not «работает»,
+    which the 📏 glyph already says. Two tags cut the builder's own names
+    («Сообщения: 20 за…»); a paused rule's priority does not matter while it is
+    paused, and «обязательное» on it would read as "always acts".
+    """
+    if not rule.enabled:
+        head, tail = "⏸ ", f" · {_PAUSED(lang)}"
+    elif chat.mode in MODES:
+        head = "📏 "
+        tail = f" · {MANDATORY(lang)}" if rule.mandatory else f" · {PRIORITY(lang)} {rule.weight}"
     else:
-        head, status = "⏸ ", f" · {_PAUSED(lang)}"
-    extra = ""
-    if chat.mode in MODES:
-        extra = (
-            f" · {Tr('обязательное', 'required')(lang)}"
-            if rule.mandatory
-            else f" · {Tr('вес', 'weight')(lang)} {rule.weight}"
-        )
-    tail = status + extra
+        head, tail = "📏 ", f" · {_ON(lang)}" if chat.enabled else ""
     room = _room(1) - label_width_px(head + tail)
     return head, fit(rule_name(rule, lang), room), tail
 
@@ -256,24 +324,21 @@ def rules_screen(
     notice: str | None = None,
     notice_raw: str | None = None,
 ) -> Screen:
-    """``rules``: one chat's rules, three a page, with the switch for all of them."""
-    if rules or page:
-        hint = (
-            Tr(
-                "Нажмите правило, чтобы открыть. Верхняя кнопка выключает все сразу.",
-                "Tap a rule to open it. The top button turns all of them off at once.",
-            )
-            if chat.enabled
-            else Tr(
-                "Нажмите правило, чтобы открыть. Верхняя кнопка включает все сразу.",
-                "Tap a rule to open it. The top button turns all of them on at once.",
-            )
-        )(lang)
+    """``rules``: one chat's rules, three a page, with the switch for all of them.
+
+    Under a list with rules, what acts when one message matches several of them:
+    the mode by name (only when it is not ``all``) and the outcome in words.
+    """
+    listed = bool(rules or page)
+    lines = [f"📏 <b>{_TITLE(lang)}</b> · {escape(title)}", ""]
+    if listed:
+        lines += [switch_hint(chat.enabled, lang), _OPEN_HINT(lang), ""]
     else:
-        hint = Tr("Правил пока нет.", "No rules yet.")(lang)
-    lines = [f"📏 <b>{_TITLE(lang)}</b> · {escape(title)}", "", hint]
+        lines.append(Tr("Правил пока нет.", "No rules yet.")(lang))
     if chat.mode in MODES:
         lines.append(mode_line(chat.mode, lang))
+    if listed:
+        lines.append(several_line(chat.mode, lang))
 
     rows: list[tuple[Button, ...]] = [
         (Button(master_label(chat, lang), cb("ar_all:", lang, chat_id)),)
@@ -295,6 +360,8 @@ def rules_screen(
         id="rules", text="\n".join(lines), rows=tuple(rows), notice=notice, notice_raw=notice_raw
     )
 
+
+_OPEN_HINT: Final = Tr("Нажмите правило, чтобы открыть его.", "Tap a rule to open it.")
 
 GONE_NOTICE: Final = Tr("<i>Этого правила уже нет.</i>", "<i>This rule is gone.</i>")
 """The line ``rule.gone`` puts over the list (trusted HTML, no ✓: nothing was done)."""
@@ -469,8 +536,7 @@ def rule_screen(
     if chat.mode in MODES:
         required = Tr("да", "yes")(lang) if rule.mandatory else Tr("нет", "no")(lang)
         lines.append(
-            f"{Tr('Вес', 'Weight')(lang)}: {rule.weight} · "
-            f"{Tr('обязательное', 'required')(lang)}: {required}"
+            f"{PRIORITY(lang).capitalize()}: {rule.weight} · {MANDATORY(lang)}: {required}"
         )
     if not chat.enabled:
         lines += [
@@ -479,6 +545,7 @@ def rule_screen(
                 "Правила этого чата выключены, поэтому оно не сработает.",
                 "Rules are off in this chat, so it will not fire.",
             )(lang),
+            switch_hint(chat.enabled, lang),
         ]
     if show_json:
         lines += ["", f"<pre>{config_json(rule.config)}</pre>"]
@@ -770,12 +837,55 @@ def count_screen(lang: str, chat_id: int, kind: str) -> Screen:
     )
 
 
+_ACTION_CHOICES: Final = (
+    (
+        "n",
+        Tr("🔔 Написать админу", "🔔 Message the admin"),
+        Tr(
+            "бот пришлёт админам бота в личку, кто и что написал, а в чате промолчит.",
+            "the bot tells its admins in a private message who wrote what, "
+            "and says nothing in the chat.",
+        ),
+    ),
+    (
+        "w",
+        Tr("⚠️ Предупредить автора", "⚠️ Warn the author"),
+        Tr(
+            "бот ответит автору в чате коротким предупреждением; текст выберете "
+            "из готовых («{preset}») или напишете сами.",
+            "the bot replies to the author in the chat with a short warning; you pick "
+            "a ready text («{preset}») or write your own.",
+        ),
+    ),
+    (
+        "c",
+        Tr("💬 Ответить своим текстом", "💬 Reply with my text"),
+        Tr(
+            "бот ответит автору в чате вашим текстом и может назвать автора по имени.",
+            "the bot replies to the author in the chat with your text, and can name the author.",
+        ),
+    ),
+    (
+        "r",
+        Tr("😀 Поставить реакцию", "😀 Add a reaction"),
+        Tr(
+            "бот поставит эмодзи на сообщение и ничего не напишет.",
+            "the bot puts an emoji on the message and writes nothing.",
+        ),
+    ),
+)
+"""Builder action token, its button, and what the bot then sends, one line each.
+
+The warning and the reply both answer the author in the chat; what tells them
+apart is the ready texts (a warning) and the author's name filled in (a reply)."""
+
+
 def action_screen(lang: str, chat_id: int, name: str) -> Screen:
-    """``rule.action``: what the rule does. Messaging the admin needs nothing more."""
-
-    def act(label: Tr, token: str) -> tuple[Button, ...]:
-        return (Button(label(lang), cb("ar_b_act:", lang, chat_id, token)),)
-
+    """``rule.action``: what the rule does, a line each. Messaging the admin needs nothing more."""
+    said = [
+        f"{label(lang)} — {what(lang).format(preset=WARN_PRESETS[0](lang))}"
+        for _, label, what in _ACTION_CHOICES
+    ]
     return Screen(
         id="rule.action",
         text=(
@@ -784,12 +894,14 @@ def action_screen(lang: str, chat_id: int, name: str) -> Screen:
                 "Что сделать, когда сработает? Выберите одно. «Написать админу» сразу сохранит правило.",
                 "What should happen when it fires? Pick one. “Message the admin” saves the rule at once.",
             )(lang)
+            + "\n\n"
+            + "\n".join(said)
         ),
         rows=(
-            act(Tr("🔔 Написать админу", "🔔 Message the admin"), "n"),
-            act(Tr("⚠️ Предупредить автора", "⚠️ Warn the author"), "w"),
-            act(Tr("💬 Ответить своим текстом", "💬 Reply with my text"), "c"),
-            act(Tr("😀 Поставить реакцию", "😀 Add a reaction"), "r"),
+            *(
+                (Button(label(lang), cb("ar_b_act:", lang, chat_id, token)),)
+                for token, label, _ in _ACTION_CHOICES
+            ),
             (cancel(_list_cb(lang, chat_id), lang),),
         ),
     )
@@ -894,9 +1006,12 @@ def cfg_screen(lang: str, chat_id: int, rule_type: str | None = None) -> Screen:
         text=(
             f"🧩 <b>{Tr('Правило в JSON', 'Rule in JSON')(lang)}</b>\n\n"
             + Tr(
-                "Для того, чего нет в кнопках: регулярные выражения, исключения, вес. Пример:",
-                "For what the buttons do not cover: regular expressions, exclusions, weight. Example:",
-            )(lang)
+                "Для того, чего нет в кнопках: регулярные выражения, исключения, "
+                "{priority} (<code>weight</code>), {mandatory} правило "
+                "(<code>mandatory</code>). Пример:",
+                "For what the buttons do not cover: regular expressions, exclusions, "
+                "<code>weight</code>, a {mandatory} rule (<code>mandatory</code>). Example:",
+            )(lang).format(priority=PRIORITY(lang), mandatory=MANDATORY(lang))
             + f"\n<code>{escape(_CFG_EXAMPLE(lang))}</code>\n\n{kind}\n{actions}"
         ),
         rows=(
