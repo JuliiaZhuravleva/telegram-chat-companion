@@ -116,6 +116,7 @@ ROUTES: Final[dict[str, Route]] = {
     "ar_b_type:": Route("rule.words | rule.who | rule.flood | rule.spam", "new"),
     "ar_b_match:": Route("rule.action", "new"),
     "ar_b_who:": Route("rule.action", "new"),
+    "ar_b_find:": Route("rule.who_find", "new"),
     "ar_b_n:": Route("rule.action", "new"),
     "ar_b_act:": Route("rule.text | rule.react", "new"),
     "ar_b_txt:": Route("rule", "new"),

@@ -8,6 +8,7 @@ functions themselves, so a test fails on a wrong screen, not on wording.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Iterator
 from dataclasses import replace
@@ -108,10 +109,13 @@ def _callback(data: str) -> MagicMock:
     return callback
 
 
-def _typed(text: str | None = None, *, caption: str | None = None) -> MagicMock:
+def _typed(
+    text: str | None = None, *, caption: str | None = None, sticker: Any = None
+) -> MagicMock:
     message = MagicMock(spec=Message)
     message.text = text
     message.caption = caption
+    message.sticker = sticker
     message.chat = Chat(id=1001, type="private")
     message.date = datetime(2026, 11, 1, tzinfo=UTC)
     message.bot = MagicMock()
@@ -309,23 +313,49 @@ class TestTheMasterSwitch:
 
         assert "⚪ Правила выключены · общее" in _labels(_shown(callback)[1])
 
-    async def test_from_a_card_redraws_the_card(self) -> None:
-        deps = _deps(_rule(), enabled=False)
+    async def test_from_a_card_redraws_the_card_saying_what_changed(self) -> None:
+        deps = _deps(_rule(), enabled=False, stored=False)
         callback = await _tap(
             handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}:{RULE_ID}", _State(), deps
         )
 
-        expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_OFF)
+        expected = screens.rule_screen(
+            "ru", screens.rule_view(_rule()), chat=_OFF, notice=screens.RULES_OFF("ru")
+        )
         assert _same(_shown(callback), expected)
+        assert _shown(callback)[0].startswith("<i>✓ Правила выключены</i>")
 
-    async def test_from_a_card_whose_rule_is_gone_shows_the_list_saying_so(self) -> None:
+    @pytest.mark.parametrize(
+        ("stored", "says"),
+        [(True, "<i>✓ Правила включены</i>"), (False, "<i>✓ Правила выключены</i>")],
+        ids=["on", "off"],
+    )
+    async def test_from_the_list_redraws_it_saying_what_changed(
+        self, stored: bool, says: str
+    ) -> None:
+        deps = _deps(enabled=stored, stored=stored)
+        callback = await _tap(handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}", _State(), deps)
+
+        notice = (screens.RULES_ON if stored else screens.RULES_OFF)("ru")
+        chat = _ON if stored else _OFF
+        expected = screens.rules_screen(
+            "ru", chat_id=CHAT_ID, title=TITLE, chat=chat, rules=[], notice=notice
+        )
+        assert _same(_shown(callback), expected)
+        assert _shown(callback)[0].startswith(says)
+
+    async def test_from_a_card_whose_rule_is_gone_shows_the_list_saying_both(self) -> None:
         deps = _deps(None)
         callback = await _tap(
             handlers.handle_rules_all, f"ar_all:ru:{CHAT_ID}:{RULE_ID}", _State(), deps
         )
 
-        expected = screens.gone_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
+        expected = screens.gone_screen(
+            "ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[], notice=screens.RULES_ON("ru")
+        )
         assert _same(_shown(callback), expected)
+        text = _shown(callback)[0]
+        assert text.startswith("<i>✓ Правила включены</i>\n" + screens.GONE_NOTICE("ru"))
 
     async def test_no_settings_row_is_stale_and_logged(self, stale: AsyncMock) -> None:
         deps = _deps(stored=None)
@@ -480,6 +510,7 @@ class TestDeleteAsk:
             f"ar_del:ru:{RULE_ID}:{CHAT_ID}",
             f"ar_view:ru:{RULE_ID}:{CHAT_ID}",
         ]
+        assert _labels(_shown(callback)[1]) == ["🗑 Удалить", "⬅️ Не удалять"]
 
     async def test_english(self) -> None:
         callback = await _tap(
@@ -741,6 +772,18 @@ class TestBuilderPerson:
         expected = screens.who_screen("ru", CHAT_ID, [screens.Person(7009, "Ира")], page=1, pages=2)
         assert _same(_shown(callback), expected)
 
+    async def test_a_long_name_is_cut_like_any_rule_name(self) -> None:
+        people = [{"user_id": 7001, "first_name": "Я" * 64, "username": "u" * 32}]
+        deps, state = _deps(people=people), _State()
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:u", state, deps)
+
+        await _tap(handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:7001", state, deps)
+
+        name = state.data["rule_name"]
+        assert len(name) == handlers._NAME_CHARS
+        assert name == "Я" * (handlers._NAME_CHARS - 1) + "…"
+
     async def test_a_person_for_a_rule_of_another_kind_is_stale(self, stale: AsyncMock) -> None:
         state = _State(rule_chat_id=CHAT_ID, rule_type="spam_detect")
         await _tap(handlers.handle_builder_who, f"ar_b_who:ru:{CHAT_ID}:7001", state, _deps())
@@ -872,9 +915,11 @@ class TestBuilderTypedAnswers:
         [
             ("   ", screens.TEXT_EMPTY("ru")),
             (None, screens.TEXT_EMPTY("ru")),
-            ("я" * 4097, screens.TEXT_TOO_LONG("ru").format(n=4096)),
+            ("я" * 4097, screens.text_too_long("ru", 1)),
+            # 2049 code points, 4098 UTF-16 units: Telegram counts the latter.
+            ("😀" * 2049, screens.text_too_long("ru", 2)),
         ],
-        ids=["blank", "a-photo-without-caption", "too-long"],
+        ids=["blank", "a-photo-without-caption", "too-long", "astral-too-long"],
     )
     async def test_an_unusable_text_keeps_the_prompt(self, text: str | None, error: str) -> None:
         deps, state = _deps(), _State()
@@ -896,6 +941,109 @@ class TestBuilderTypedAnswers:
         await handlers.handle_rule_text_input(_typed("я" * 4096), state, **_services(deps))
 
         assert len(_created(deps)["config"]["warning_message"]) == 4096
+
+    async def test_astral_text_of_exactly_the_cap_is_accepted(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:w", state, deps)
+
+        await handlers.handle_rule_text_input(_typed("😀" * 2048), state, **_services(deps))
+
+        assert _created(deps)["config"]["warning_message"] == "😀" * 2048
+
+    @pytest.mark.parametrize(
+        ("text", "over"),
+        [
+            # 4012 as typed; 4128 once a 64-character astral first name is put in.
+            ("{first_name}" + "a" * 4000, 32),
+            # The rule's own name goes in too («Сообщения: 40 за минуту», 23).
+            ("{rule_name}{first_name}" + "a" * 3960, 15),
+        ],
+        ids=["first-name", "rule-name"],
+    )
+    async def test_a_reply_that_overflows_once_a_name_is_put_in_keeps_the_prompt(
+        self, text: str, over: int
+    ) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:c", state, deps)
+        message = _typed(text)
+
+        await handlers.handle_rule_text_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert _sent(message)[0] == screens.text_too_long("ru", over, filled=True)
+        assert "С подставленным именем" in _sent(message)[0]
+        assert state.current == AdminStates.awaiting_rule_text.state
+
+    async def test_a_reply_that_fits_with_the_longest_name_is_accepted(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:c", state, deps)
+        text = "{first_name}" + "a" * 3968  # 128 + 3968 = 4096 at worst
+
+        await handlers.handle_rule_text_input(_typed(text), state, **_services(deps))
+
+        assert _created(deps)["config"]["response_template"] == text
+
+    async def test_a_sticker_answers_the_reaction_prompt_with_its_emoji(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:ri", state, deps)
+
+        await handlers.handle_rule_react_input(
+            _typed(sticker=MagicMock(emoji="👍")), state, **_services(deps)
+        )
+
+        config = _created(deps)["config"]
+        assert config["action"] == "set_reaction"
+        assert config["emoji"] == "👍"
+        assert state.current is None
+
+    @pytest.mark.parametrize("emoji", ["🚀", None, ""], ids=["not-a-reaction", "none", "empty"])
+    async def test_a_sticker_without_a_usable_emoji_keeps_the_prompt(
+        self, emoji: str | None
+    ) -> None:
+        deps, state = _deps(), _State()
+        await self._to_action(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:ri", state, deps)
+        message = _typed(sticker=MagicMock(emoji=emoji))
+
+        await handlers.handle_rule_react_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert _sent(message)[0] == screens.EMOJI_BAD("ru")
+        assert state.current == AdminStates.awaiting_rule_react.state
+
+    async def test_an_incomplete_draft_says_no_rule_was_made(self, retire: AsyncMock) -> None:
+        """The last answer typed, but a step before it is missing: never silence."""
+        state = _State(
+            AdminStates.awaiting_rule_text,
+            rule_chat_id=CHAT_ID,
+            rule_type="keyword_trigger",
+            rule_action="warn_user",
+            rule_name="w",
+            rule_prompt_id=PROMPT_ID,
+            lang="ru",
+        )
+        deps = _deps()
+        message = _typed("Не надо так")
+
+        await handlers.handle_rule_text_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        expected = screens.rules_screen(
+            "ru",
+            chat_id=CHAT_ID,
+            title=TITLE,
+            chat=_ON,
+            rules=[],
+            notice_raw=handlers.NOT_CREATED("ru"),
+        )
+        assert _same(_sent(message), expected)
+        assert _sent(message)[0].startswith("<i>Правило не создано: начните заново.</i>")
+        assert state.current is None
+        assert retire.await_args.args[0].message_id == PROMPT_ID
 
     async def test_created_while_the_chats_rules_are_off_says_so_and_offers_the_switch(
         self,
@@ -1104,7 +1252,103 @@ class TestTheJsonPrompt:
         assert state.current == AdminStates.awaiting_rule_config.state
         text, markup = _sent(message)
         assert says in text
-        assert _datas(markup) == [f"ar_add:ru:{CHAT_ID}"]
+        assert _datas(markup) == [f"ar_list:ru:{CHAT_ID}:0"]
+
+    @pytest.mark.parametrize(
+        ("typed", "says"),
+        [
+            ('{"type": ["spam_detect"]}', "Неизвестный тип <code>[&quot;spam_detect&quot;]</code>"),
+            ('{"type": {"a": 1}}', "Неизвестный тип <code>{&quot;a&quot;: 1}</code>"),
+            (
+                '{"keywords": ["kw"], "action": ["warn_user"]}',
+                "Неизвестное действие <code>[&quot;warn_user&quot;]</code>",
+            ),
+            (
+                '{"keywords": ["kw"], "action": {"x": 1}}',
+                "Неизвестное действие <code>{&quot;x&quot;: 1}</code>",
+            ),
+        ],
+        ids=["type-list", "type-object", "action-list", "action-object"],
+    )
+    async def test_a_type_or_action_that_is_not_text_is_refused_not_a_crash(
+        self, typed: str, says: str
+    ) -> None:
+        """A list or an object is unhashable: a frozenset membership test raised TypeError."""
+        deps = _deps()
+        state = await _cfg(deps)
+        message = _typed(typed)
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert state.current == AdminStates.awaiting_rule_config.state
+        text, markup = _sent(message)
+        assert text.startswith(says)
+        assert _datas(markup) == [f"ar_list:ru:{CHAT_ID}:0"]
+
+    @pytest.mark.parametrize(
+        ("config", "error"),
+        [
+            ({"name": ["x"], "keywords": ["kw"]}, screens.CFG_NOT_TEXT("ru").format(key="name")),
+            (
+                {"keywords": ["kw"], "action": "warn_user", "warning_message": 5},
+                screens.CFG_NOT_TEXT("ru").format(key="warning_message"),
+            ),
+            (
+                {"keywords": ["kw"], "action": "warn_user", "warning_message": "😀" * 2049},
+                screens.text_too_long("ru", 2),
+            ),
+            (
+                {
+                    "keywords": ["kw"],
+                    "action": "custom_response",
+                    "response_template": "{first_name}" + "a" * 4000,
+                },
+                screens.text_too_long("ru", 32, filled=True),
+            ),
+        ],
+        ids=["name-not-text", "warning-not-text", "warning-too-long", "reply-too-long-filled"],
+    )
+    async def test_a_text_field_that_cannot_be_sent_is_refused(
+        self, config: dict[str, Any], error: str
+    ) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+        message = _typed(json.dumps(config, ensure_ascii=False))
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert _sent(message)[0] == error
+        assert state.current == AdminStates.awaiting_rule_config.state
+
+    async def test_a_reply_naming_an_unnamed_rule_is_measured_with_its_longest_id(self) -> None:
+        """No name: ``{rule_name}`` becomes «Rule #<id>», counted at the longest id."""
+        deps = _deps()
+        state = await _cfg(deps)
+        template = "{rule_name}" + "a" * 4080  # 11 + 4080 typed; 25 + 4080 once filled
+        message = _typed(
+            json.dumps(
+                {"keywords": ["kw"], "action": "custom_response", "response_template": template}
+            )
+        )
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert _sent(message)[0] == screens.text_too_long("ru", 9, filled=True)
+
+    async def test_a_long_name_is_cut_like_the_builders(self) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+
+        await handlers.handle_rule_config_input(
+            _typed(json.dumps({"name": "n" * 200, "keywords": ["kw"]})), state, **_services(deps)
+        )
+
+        name = _created(deps)["config"]["name"]
+        assert len(name) == handlers._NAME_CHARS
+        assert name == "n" * (handlers._NAME_CHARS - 1) + "…"
 
     async def test_its_cancel_returns_to_the_builder_and_ends_the_prompt(self) -> None:
         """The prompt stays armed on a refused answer, so leaving must not need valid JSON."""
@@ -1161,3 +1405,91 @@ class TestRetirePrompt:
 
         logger.info.assert_called_once()
         assert logger.info.call_args.args[0] == "rule_prompt_keyboard_kept"
+
+
+# ---------------------------------------------------------------------------
+# A double tap on a last step makes one rule
+# ---------------------------------------------------------------------------
+
+
+def _slow_create(deps: dict[str, Any]) -> None:
+    """``create`` yields to the loop, as the real INSERT does, so two handlers interleave."""
+
+    async def create(**_kwargs: Any) -> int:
+        await asyncio.sleep(0)
+        return RULE_ID
+
+    deps["rules_repo"].create = AsyncMock(side_effect=create)
+
+
+class TestOneRulePerAnswer:
+    """Telegram delivers a double tap as two updates, handled concurrently.
+
+    The draft is claimed before the write, so the second copy finds none.
+    """
+
+    async def _to_last_step(self, deps: dict[str, Any], state: _State) -> None:
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:ru:{CHAT_ID}:s", state, deps)
+        await _tap(handlers.handle_builder_count, f"ar_b_n:ru:{CHAT_ID}:40", state, deps)
+
+    @pytest.mark.parametrize(
+        ("handler", "data", "before"),
+        [
+            (handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", None),
+            (handlers.handle_builder_preset_text, f"ar_b_txt:ru:{CHAT_ID}:0", "w"),
+            (handlers.handle_builder_preset_reaction, f"ar_b_rx:ru:{CHAT_ID}:0", "r"),
+        ],
+        ids=["notify-admin", "ready-warning", "ready-reaction"],
+    )
+    async def test_two_taps_at_once_make_one_rule(
+        self, handler: Any, data: str, before: str | None, stale: AsyncMock
+    ) -> None:
+        deps, state = _deps(), _State()
+        await self._to_last_step(deps, state)
+        if before is not None:
+            await _tap(
+                handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:{before}", state, deps
+            )
+        _slow_create(deps)
+
+        await asyncio.gather(_tap(handler, data, state, deps), _tap(handler, data, state, deps))
+
+        deps["rules_repo"].create.assert_awaited_once()
+        stale.assert_awaited_once()
+
+    async def test_a_second_tap_after_the_first_is_stale(self, stale: AsyncMock) -> None:
+        deps, state = _deps(), _State()
+        await self._to_last_step(deps, state)
+
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", state, deps)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:n", state, deps)
+
+        deps["rules_repo"].create.assert_awaited_once()
+        stale.assert_awaited_once()
+
+    async def test_a_typed_answer_sent_twice_at_once_makes_one_rule(self) -> None:
+        deps, state = _deps(), _State()
+        await self._to_last_step(deps, state)
+        await _tap(handlers.handle_builder_action, f"ar_b_act:ru:{CHAT_ID}:w", state, deps)
+        _slow_create(deps)
+
+        await asyncio.gather(
+            handlers.handle_rule_text_input(_typed("Тише"), state, **_services(deps)),
+            handlers.handle_rule_text_input(_typed("Тише"), state, **_services(deps)),
+        )
+
+        deps["rules_repo"].create.assert_awaited_once()
+
+    async def test_json_sent_twice_at_once_makes_one_rule(self) -> None:
+        deps = _deps()
+        state = await _cfg(deps)
+        _slow_create(deps)
+        typed = '{"name": "x", "keywords": ["kw"]}'
+
+        await asyncio.gather(
+            handlers.handle_rule_config_input(_typed(typed), state, **_services(deps)),
+            handlers.handle_rule_config_input(_typed(typed), state, **_services(deps)),
+        )
+
+        deps["rules_repo"].create.assert_awaited_once()

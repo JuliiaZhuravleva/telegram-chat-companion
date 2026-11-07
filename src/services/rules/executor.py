@@ -14,6 +14,7 @@ from src.models.rules import RuleAction
 from src.services.modules.reactions.responder import set_reaction
 from src.services.modules.reactions.selector import ReactionSelector
 from src.services.rules.engine import RuleActionResult
+from src.services.rules.reply_text import fill, fit_one_message
 from src.utils import parse_admin_ids
 
 if TYPE_CHECKING:
@@ -133,16 +134,18 @@ class RuleActionExecutor:
         """Reply with a warning message (plain text to avoid HTML injection).
 
         A rule without its own text posts the Russian default: it lands in the
-        chat, whose language the bot does not know.
+        chat, whose language the bot does not know. A text that is not a string
+        (hand-written JSON) counts as none, and one over Telegram's limit is cut
+        to fit rather than rejected whole.
         """
         from src.bot.screens.rules import WARN_FALLBACK
 
         warning = (
-            action.params.get("warning_message")
-            or action.rule.config.get("warning_message")
+            _text(action.params.get("warning_message"))
+            or _text(action.rule.config.get("warning_message"))
             or WARN_FALLBACK("ru")
         )
-        await message.reply(warning, parse_mode=None)
+        await message.reply(fit_one_message(warning, rule_id=action.rule.id), parse_mode=None)
 
     @staticmethod
     async def _set_reaction(
@@ -183,24 +186,26 @@ class RuleActionExecutor:
 
         Sent with ``parse_mode=None``, so the values go in as they are: escaping
         them here showed a name like ``Tom & Jerry`` as ``Tom &amp; Jerry``, and
-        plain text cannot carry markup to inject.
+        plain text cannot carry markup to inject. The values go in in one pass
+        (`reply_text.fill`), and the filled text is cut to one message: a long
+        name can push a text that fit when typed over Telegram's limit.
         """
-        template = (
-            action.params.get("response_template")
-            or action.rule.config.get("response_template")
-            or ""
+        template = _text(action.params.get("response_template")) or _text(
+            action.rule.config.get("response_template")
         )
         if not template:
             return
 
         user = message.from_user
-        substitutions = {
-            "{first_name}": user.first_name if user else "Unknown",
-            "{username}": (user.username or "") if user else "",
-            "{rule_name}": str(action.rule.config.get("name", f"Rule #{action.rule.id}")),
-        }
-        text = template
-        for placeholder, value in substitutions.items():
-            text = text.replace(placeholder, value)
+        text = fill(
+            template,
+            first_name=user.first_name if user else "Unknown",
+            username=(user.username or "") if user else "",
+            rule_name=str(action.rule.config.get("name", f"Rule #{action.rule.id}")),
+        )
+        await message.reply(fit_one_message(text, rule_id=action.rule.id), parse_mode=None)
 
-        await message.reply(text, parse_mode=None)
+
+def _text(value: object) -> str:
+    """A text field from rule JSON: the string, or empty for anything else."""
+    return value if isinstance(value, str) else ""

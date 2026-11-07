@@ -18,15 +18,15 @@ from typing import Any, Final
 from src.bot.custom_emoji import fence
 from src.bot.screens.i18n import Tr, plural_ru
 from src.bot.screens.lint import budget, label_width_px
-from src.bot.screens.model import Button, Screen
-from src.bot.screens.render import back, cancel, pager
-from src.bot.screens.routes import cb
+from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
+from src.bot.screens.render import CANCEL, back, cancel, pager
+from src.bot.screens.routes import REQUEST_IDS, cb
 
 PER_PAGE: Final = 3
 """Rules per list page: three rows of rules keep the list to six rows with its pager."""
 
 WHO_PER_PAGE: Final = 4
-"""People per picker page: four names, the pager and Cancel are six rows."""
+"""People per picker page: four names, the pager and the Find/Cancel row are six rows."""
 
 FLOOD_CHOICES: Final = (5, 10, 20)
 FLOOD_SUGGESTED: Final = 10
@@ -40,8 +40,6 @@ WARN_PRESETS: Final = (
 
 MAX_WORDS: Final = 20
 MAX_WORD_CHARS: Final = 64
-MAX_TEXT_CHARS: Final = 4096
-"""A warning or reply is one Telegram message, and the rule sends it as plain text."""
 
 _JSON_SHOWN_CHARS: Final = 3000
 _EXCERPT_CHARS: Final = 100
@@ -291,6 +289,10 @@ def rules_screen(
 GONE_NOTICE: Final = Tr("<i>Этого правила уже нет.</i>", "<i>This rule is gone.</i>")
 """The line ``rule.gone`` puts over the list (trusted HTML, no ✓: nothing was done)."""
 
+RULES_ON: Final = Tr("Правила включены", "Rules turned on")
+RULES_OFF: Final = Tr("Правила выключены", "Rules turned off")
+"""The notice after the switch for all of a chat's rules."""
+
 
 def gone_screen(
     lang: str,
@@ -301,8 +303,14 @@ def gone_screen(
     rules: Sequence[RuleView],
     page: int = 0,
     pages: int = 1,
+    notice: str | None = None,
 ) -> Screen:
-    """``rule.gone``: the rule a button pointed at was deleted meanwhile; its chat's list."""
+    """``rule.gone``: the rule a button pointed at was deleted meanwhile; its chat's list.
+
+    ``notice`` is what the tap did anyway (the switch for all rules still
+    flips), shown as the ✓ line above the gone line.
+    """
+    gone = GONE_NOTICE(lang)
     screen = rules_screen(
         lang,
         chat_id=chat_id,
@@ -311,7 +319,7 @@ def gone_screen(
         rules=rules,
         page=page,
         pages=pages,
-        notice_raw=GONE_NOTICE(lang),
+        notice_raw=f"<i>✓ {escape(notice)}</i>\n{gone}" if notice is not None else gone,
     )
     return replace(screen, id="rule.gone")
 
@@ -507,10 +515,14 @@ def delete_ask_screen(lang: str, rule: RuleView) -> Screen:
                 Button(
                     Tr("🗑 Удалить", "🗑 Delete")(lang), cb("ar_del:", lang, rule.id, rule.chat_id)
                 ),
-                back("rule", cb("ar_view:", lang, rule.id, rule.chat_id), lang),
+                back("rule", cb("ar_view:", lang, rule.id, rule.chat_id), lang, name=_KEEP(lang)),
             ),
         ),
     )
+
+
+_KEEP: Final = Tr("Не удалять", "Keep it")
+"""``rule.del_ask``'s way back says what it does: the rule stays."""
 
 
 # ---------------------------------------------------------------------------
@@ -616,14 +628,29 @@ class Person:
         return " ".join(parts) if parts else str(self.user_id)
 
 
+FIND: Final = Tr("🔍 Найти в Telegram", "🔍 Find in Telegram")
+"""Telegram's own person search (``request_users``): anyone, not only who has written."""
+FIND_PLACEHOLDER: Final = Tr("Выберите человека", "Pick a person")
+
+
 def who_screen(
     lang: str, chat_id: int, people: Sequence[Person], *, page: int = 0, pages: int = 1
 ) -> Screen:
-    """``rule.who``: whose messages, picked from the chat's most active people."""
+    """``rule.who``: whose messages, picked from the chat's most active people.
+
+    «🔍 Найти в Telegram» opens ``rule.who_find`` for anyone else, and is the
+    way on when nobody has written in the chat yet.
+    """
     hint = (
-        Tr("Чьи? Нажмите имя.", "Whose? Tap a name.")
+        Tr(
+            "Чьи? Нажмите имя или найдите человека в Telegram.",
+            "Whose? Tap a name or find the person in Telegram.",
+        )
         if people
-        else Tr("В этом чате пока никто не писал.", "Nobody has written in this chat yet.")
+        else Tr(
+            "В этом чате пока никто не писал. Найдите человека в Telegram.",
+            "Nobody has written in this chat yet. Find the person in Telegram.",
+        )
     )(lang)
     rows: list[tuple[Button, ...]] = [
         (
@@ -637,12 +664,55 @@ def who_screen(
     nav = pager(page, pages, lambda p: cb("ar_b_type:", lang, chat_id, "u", p))
     if nav is not None:
         rows.append(nav)
-    rows.append((cancel(_list_cb(lang, chat_id), lang),))
+    rows.append(
+        (
+            Button(FIND(lang), cb("ar_b_find:", lang, chat_id)),
+            cancel(_list_cb(lang, chat_id), lang),
+        )
+    )
     return Screen(
         id="rule.who",
-        text=f"{_new_title('👤', Tr('сообщения одного человека', 'one person’s messages')(lang), lang)}\n\n{hint}",
+        text=f"{_who_title(lang)}\n\n{hint}",
         rows=tuple(rows),
     )
+
+
+def _who_title(lang: str) -> str:
+    return _new_title("👤", Tr("сообщения одного человека", "one person’s messages")(lang), lang)
+
+
+def who_find_screen(lang: str) -> Screen:
+    """``rule.who_find``: Telegram's person search under the input.
+
+    A new message, since only a sent message can carry a reply keyboard. Its
+    ``request_id`` is the rules picker's own, so a pick lands here and never
+    in the knowledge base's organizer picker, and the other way round.
+    """
+    return Screen(
+        id="rule.who_find",
+        text=(
+            f"{_who_title(lang)}\n\n"
+            + Tr(
+                "Нажмите «🔍 Найти в Telegram» внизу и выберите человека.",
+                "Tap «🔍 Find in Telegram» below and pick the person.",
+            )(lang)
+        ),
+        reply=(
+            (ReplyButton(FIND(lang), RequestUsers(request_id=REQUEST_IDS.RULE_WHO)),),
+            (ReplyButton(CANCEL(lang)),),
+        ),
+        placeholder=FIND_PLACEHOLDER(lang),
+    )
+
+
+WHO_PICKED: Final = Tr("Выбран человек: {name}", "Person picked: {name}")
+WHO_CANCELLED: Final = Tr("Правило не создано.", "The rule was not created.")
+WHO_STALE: Final = Tr(
+    "Этот поиск уже закрыт. Начните правило заново.",
+    "This search is closed. Start the rule again.",
+)
+"""The short lines that take the reply keyboard away (a message carrying
+``ReplyKeyboardRemove`` cannot carry inline buttons too)."""
 
 
 def count_screen(lang: str, chat_id: int, kind: str) -> Screen:
@@ -845,9 +915,34 @@ WORDS_TOO_LONG: Final = Tr(
     "Слово длиннее {n} символов: {w}. Попробуйте ещё раз.",
     "A word is longer than {n} characters: {w}. Please try again.",
 )
-TEXT_TOO_LONG: Final = Tr(
-    "Текст длиннее {n} символов. Сократите и отправьте ещё раз.",
-    "The text is longer than {n} characters. Shorten it and send again.",
+
+
+def text_too_long(lang: str, over: int, *, filled: bool = False) -> str:
+    """The text, as the rule would send it, does not fit one Telegram message.
+
+    ``over`` is how much to cut, in Telegram's own count. ``filled`` says the
+    overflow comes from a name the rule puts in, not from the text as typed.
+    """
+    if lang == "ru":
+        unit = plural_ru(over, "знак", "знака", "знаков")
+        head = (
+            "С подставленным именем текст может не поместиться в одно сообщение Telegram."
+            if filled
+            else "Текст не поместится в одно сообщение Telegram."
+        )
+        return f"{head} Сократите его на {over} {unit} и отправьте ещё раз."
+    unit = "character" if over == 1 else "characters"
+    head = (
+        "With a name filled in, the text may not fit one Telegram message."
+        if filled
+        else "The text does not fit one Telegram message."
+    )
+    return f"{head} Shorten it by {over} {unit} and send again."
+
+
+CFG_NOT_TEXT: Final = Tr(
+    "Поле <code>{key}</code> должно быть текстом. Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be text. Please try again.",
 )
 TEXT_EMPTY: Final = Tr(
     "Нужен текст. Напишите его сообщением.", "Text is needed. Type it as a message."
