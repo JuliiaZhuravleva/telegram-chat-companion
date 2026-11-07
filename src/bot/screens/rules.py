@@ -22,6 +22,7 @@ from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
 from src.bot.screens.render import CANCEL, back, cancel, pager
 from src.bot.screens.routes import REQUEST_IDS, cb
+from src.models.rules import stored_weight
 
 PER_PAGE: Final = 3
 """Rules per list page: three rows of rules keep the list to six rows with its pager."""
@@ -210,7 +211,7 @@ def rule_view(row: Mapping[str, Any]) -> RuleView:
         rule_type=str(row.get("rule_type") or ""),
         config=parse_config(row.get("config")),
         enabled=bool(row.get("enabled", True)),
-        weight=int(row.get("weight") or 1),
+        weight=stored_weight(row.get("weight")),  # the weight the engine acts on
         mandatory=bool(row.get("mandatory", False)),
         trigger_count=int(row.get("trigger_count") or 0),
     )
@@ -1157,6 +1158,49 @@ CFG_NOT_TEXT: Final = Tr(
     "Поле <code>{key}</code> должно быть текстом. Попробуйте ещё раз.",
     "The <code>{key}</code> field must be text. Please try again.",
 )
+CFG_BAD_WEIGHT: Final = Tr(
+    "Поле <code>weight</code> ({priority}) должно быть целым числом от 1 до "
+    "<code>{max}</code>. Попробуйте ещё раз.",
+    "The <code>weight</code> field ({priority}) must be a whole number from 1 to "
+    "<code>{max}</code>. Please try again.",
+)
+"""The column is an ``INT``, and a weight mode cannot pick among rules weighing 0.
+The top is in ``<code>``: Telegram links a bare ten-digit number as a phone."""
+CFG_NOT_BOOL: Final = Tr(
+    "Поле <code>{key}</code> должно быть <code>true</code> или <code>false</code>. "
+    "Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be <code>true</code> or <code>false</code>. "
+    "Please try again.",
+)
+CFG_NOT_NUMBER: Final = Tr(
+    "Поле <code>{key}</code> должно быть целым числом. Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be a whole number. Please try again.",
+)
+CFG_NOT_IDS: Final = Tr(
+    "Поле <code>{key}</code> должно быть списком id участников — целых чисел. Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be a list of member ids, as whole numbers. "
+    "Please try again.",
+)
+CFG_BAD_CONDITIONS: Final = Tr(
+    "Поле <code>conditions</code> должно быть объектом, например "
+    '<code>{"any_message": true}</code>. Попробуйте ещё раз.',
+    "The <code>conditions</code> field must be an object, e.g. "
+    '<code>{"any_message": true}</code>. Please try again.',
+)
+CFG_NOT_WORDS: Final = Tr(
+    'Поле <code>{key}</code> должно быть списком слов, например <code>["привет"]</code>. '
+    "Попробуйте ещё раз.",
+    'The <code>{key}</code> field must be a list of words, e.g. <code>["hello"]</code>. '
+    "Please try again.",
+)
+CFG_BAD_MATCH: Final = Tr(
+    "Неизвестный способ сравнения <code>{m}</code> в поле <code>match_type</code>. "
+    "Доступные: {valid}. Попробуйте ещё раз.",
+    "Unknown match type <code>{m}</code> in <code>match_type</code>. "
+    "Available: {valid}. Please try again.",
+)
+MATCH_TYPES: Final = ("contains", "exact", "regex")
+"""The ``match_type`` values `RuleEngine._eval_keyword` acts on; any other never fires."""
 TEXT_EMPTY: Final = Tr(
     "Нужен текст. Напишите его сообщением.", "Text is needed. Type it as a message."
 )

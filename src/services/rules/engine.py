@@ -18,7 +18,7 @@ import structlog
 from aiogram.types import Message
 
 from src.database.repositories.rules import RulesRepository
-from src.models.rules import Rule, RuleAction, RuleMatch, RulesMode, RuleType
+from src.models.rules import Rule, RuleAction, RuleMatch, RulesMode, RuleType, stored_weight
 
 logger = structlog.get_logger(__name__)
 
@@ -131,7 +131,9 @@ class RuleEngine:
             else json.loads(row["config"])
             if isinstance(row["config"], str)
             else {},
-            weight=row.get("weight", 1),
+            # Read, not trusted: a stored 0, negative or NULL weight made
+            # `_apply_mode` raise, and with it every rule of the message.
+            weight=stored_weight(row.get("weight")),
             mandatory=row.get("mandatory", False),
             enabled=row.get("enabled", True),
             status=row.get("status", "active"),
