@@ -344,13 +344,27 @@ def kb_group(lang: Lang, *, total: int, body: str, page: int, pages: int) -> Scr
     return _kb("kb.group", lang, label=_facts(lang, total), body=body, page=page, pages=pages)
 
 
-def kb_dm(lang: Lang, *, title: str | None, total: int, body: str, page: int, pages: int) -> Screen:
-    """``/kb`` in a DM: the chat's name on top, facts by topic with who and when; same pager.
+_KB_PRIVATE: Final = Tr("личный чат", "private chat")
 
+
+def kb_dm(
+    lang: Lang,
+    *,
+    title: str | None,
+    total: int,
+    body: str,
+    page: int,
+    pages: int,
+    private: bool = False,
+) -> Screen:
+    """``/kb`` in a DM: which chat on top, facts by topic with who and when; same pager.
+
+    ``private``: the facts are the private chat's own, and the heading says
+    «личный чат» -- the chat's only name there is the reader's own. Otherwise
     ``title`` is the chat's name as Telegram gives it (raw, escaped here); a
     chat with no name shows the fact count instead.
     """
-    label = _kb_label(title, lang, total)
+    label = _KB_PRIVATE(lang) if private else _kb_label(title, lang, total)
     return _kb("kb.dm", lang, label=label, body=body, page=page, pages=pages)
 
 

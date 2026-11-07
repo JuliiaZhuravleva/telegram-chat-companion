@@ -1236,11 +1236,12 @@ def _slice_page(
 
 
 def _kb_chat_name(chat: Chat) -> str | None:
-    """The DM heading's name: the chat's title, else -- a private chat has none -- the
-    person's first and last name. Whatever is not a non-empty string is skipped."""
-    parts = [chat.title] if chat.title else [chat.first_name, chat.last_name]
-    name = " ".join(p.strip() for p in parts if isinstance(p, str) and p.strip())
-    return name or None
+    """The DM heading's name: the chat's title, or None when it has none.
+
+    A private chat has no title, and its heading does not name the person:
+    ``entry.kb_dm(private=True)`` says «личный чат» instead.
+    """
+    return chat.title if isinstance(chat.title, str) else None
 
 
 async def _render_kb_dm(
@@ -1282,6 +1283,7 @@ async def _render_kb_dm(
         body=body,
         page=page,
         pages=total_pages,
+        private=chat.type == "private",
     )
 
 
