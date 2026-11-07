@@ -216,8 +216,10 @@ async def _close_number_prompt(state: FSMContext | None) -> None:
 
     ``tol.in`` is edited in place, so the admin can leave it by a button on any
     older panel message; left armed, the state would read their next text as a
-    tolerance value. Only this prompt's state is cleared: the instruction
-    editor keeps a draft that a «Save» has to confirm anyway.
+    tolerance value. Only this prompt's state is cleared here. The instruction
+    editor is not an exception: `PromptExitMiddleware` ends
+    ``awaiting_system_prompt`` and its draft on any tap outside
+    ``adm_pnl_sp:``/``spx:``/``spok:``/``spre:``, before this runs.
     """
     if state is not None and await state.get_state() == AdminStates.awaiting_setting_value.state:
         await state.clear()

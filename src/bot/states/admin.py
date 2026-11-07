@@ -1,8 +1,13 @@
-"""FSM states for the admin panel, and the buttons each prompt calls its own."""
+"""FSM states for the admin panel: the buttons each prompt calls its own, the
+screens it shows and the message showing it now, and the prompts that take a
+sticker as their answer."""
 
+import html
+import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final
+from typing import Final, Literal
 
 from aiogram.fsm.state import State, StatesGroup
 
@@ -113,3 +118,150 @@ or the routes test fails; an empty row means "every tap ends it".
 def is_own_tap(state: str, data: str) -> bool:
     """Whether the payload ``data`` belongs to the prompt ``state`` (see `PROMPT_OWN_TAPS`)."""
     return any(data.startswith(prefix) for prefix in PROMPT_OWN_TAPS.get(state, ()))
+
+
+# ---------------------------------------------------------------------------
+# The screens each prompt shows, and the message that shows it now
+# ---------------------------------------------------------------------------
+
+_SCREENS: dict[State, tuple[str, ...]] = {
+    AdminStates.awaiting_setting_value: ("tol.in", "tol.invalid"),
+    AdminStates.awaiting_system_prompt: ("sp.prompt", "sp.preview", "sp.refused", "sp.redo"),
+    AdminStates.awaiting_sticker_score: ("stk.score_in",),
+    AdminStates.awaiting_kb_organizer: ("org.add", "org.fail", "org.list"),
+    AdminStates.awaiting_rule_config: ("rule.cfg", "rule.cfg_bad"),
+    AdminStates.awaiting_rule_words: ("rule.words",),
+    AdminStates.awaiting_rule_text: ("rule.text",),
+    AdminStates.awaiting_rule_react: ("rule.react", "rule.react_in"),
+    AdminStates.awaiting_rule_who: ("rule.who_find",),
+    # Declared, never set: no screen asks for them.
+    AdminStates.awaiting_sticker_edit: (),
+    AdminStates.awaiting_sticker: (),
+}
+
+PROMPT_SCREENS: Final[Mapping[str, tuple[str, ...]]] = MappingProxyType(
+    {_key(state): ids for state, ids in _SCREENS.items()}
+)
+"""State → the screens shown while it is armed (their buttons must be its own taps).
+
+The routes test requires a row for every state, and a non-empty one for every
+state the bot sets. `PromptExitMiddleware` uses it to find the message that
+still asks for input when a tap elsewhere ends the prompt.
+"""
+
+_PROMPT_SCREEN_IDS: Final[frozenset[str]] = frozenset(
+    screen_id for ids in _SCREENS.values() for screen_id in ids
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptMessage:
+    """The message a prompt screen was last delivered into."""
+
+    chat_id: int
+    message_id: int
+    screen_id: str
+    title: str
+    """The screen's title line (`title_line`); empty for an error reply."""
+    editable: bool
+    """False for a message sent with a reply keyboard: Telegram refuses to edit those."""
+
+
+# Process-local, one entry per chat: the FSM storage is `MemoryStorage` (what
+# `Dispatcher()` in main.py builds by default), which lives in the process too,
+# so a restart loses a prompt and the record of its message together and
+# neither can outlive the other.
+_ON_SCREEN: dict[int, PromptMessage] = {}
+
+_TAG = re.compile(r"<(/?)([a-zA-Z][\w-]*)[^>]*>")
+_TITLE_MAX = 200
+
+
+def title_line(text: str) -> str:
+    """The title of the screen in HTML ``text``: its first line, safe to send alone.
+
+    A screen's title is bold. A first line without ``<b>`` is an error reply's
+    reason («… отправьте ещё раз»), which a closed prompt must not repeat: that
+    gives "". A line whose tags do not close on it (a ``<blockquote>`` that goes
+    on) or that runs past `_TITLE_MAX` characters comes back as escaped plain text.
+    """
+    line = next((part.strip() for part in text.split("\n") if part.strip()), "")
+    if "<b>" not in line:
+        return ""
+    open_tags: list[str] = []
+    balanced = True
+    for match in _TAG.finditer(line):
+        closing, name = match.group(1), match.group(2).lower()
+        if not closing:
+            open_tags.append(name)
+        elif not open_tags or open_tags.pop() != name:
+            balanced = False
+            break
+    plain = html.unescape(_TAG.sub("", line))
+    if balanced and not open_tags and len(plain) <= _TITLE_MAX:
+        return line
+    if len(plain) > _TITLE_MAX:
+        plain = plain[: _TITLE_MAX - 1].rstrip() + "…"
+    return html.escape(plain, quote=False)
+
+
+def note_screen(message: object, screen_id: str, text: str, *, editable: bool = True) -> None:
+    """Record that ``message`` now shows ``screen_id`` (called by every delivery).
+
+    A prompt screen becomes its chat's record; any other screen delivered into
+    the recorded message means that message no longer asks for input, and the
+    record goes. Anything without integer ids (a test double) is ignored.
+    """
+    chat_id = getattr(getattr(message, "chat", None), "id", None)
+    message_id = getattr(message, "message_id", None)
+    if not isinstance(chat_id, int) or not isinstance(message_id, int):
+        return
+    if screen_id in _PROMPT_SCREEN_IDS:
+        _ON_SCREEN[chat_id] = PromptMessage(
+            chat_id, message_id, screen_id, title_line(text), editable
+        )
+        return
+    held = _ON_SCREEN.get(chat_id)
+    if held is not None and held.message_id == message_id:
+        del _ON_SCREEN[chat_id]
+
+
+def take_prompt_message(chat_id: int, state: str) -> PromptMessage | None:
+    """Forget ``chat_id``'s prompt message; return it if it shows ``state``'s prompt.
+
+    A prompt that ended through its own handler (an answer, its «Отмена») leaves
+    its record behind; the next prompt screen replaces it, and the state check
+    here keeps a record of another prompt from being taken for this one.
+    """
+    held = _ON_SCREEN.pop(chat_id, None)
+    if held is None or held.screen_id not in PROMPT_SCREENS.get(state, ()):
+        return None
+    return held
+
+
+# ---------------------------------------------------------------------------
+# Which prompts take a sticker as their answer
+# ---------------------------------------------------------------------------
+
+_TAKES_A_STICKER: dict[State, Literal["any", "forwarded"]] = {
+    # The reaction prompt: a sticker stands for its emoji.
+    AdminStates.awaiting_rule_react: "any",
+    # The stickers area's score prompt: its own handler answers a sticker
+    # with "the number goes in as text" (it is also registered first).
+    AdminStates.awaiting_sticker_score: "any",
+    # The organizer prompt: a forward names its sender, whatever it carries.
+    # A sticker the admin sends themself is neither a forward nor a @username.
+    AdminStates.awaiting_kb_organizer: "forwarded",
+}
+
+STICKER_ANSWERS: Final[Mapping[str, Literal["any", "forwarded"]]] = MappingProxyType(
+    {_key(state): which for state, which in _TAKES_A_STICKER.items()}
+)
+"""Prompts whose handler reads a sticker as an answer; every other prompt leaves a
+sticker to the stickers area's DM check, exactly as with no prompt open."""
+
+
+def takes_a_sticker(state: str | None, *, forwarded: bool) -> bool:
+    """Whether the prompt ``state`` answers a sticker (``forwarded``: it came as a forward)."""
+    which = STICKER_ANSWERS.get(state) if state is not None else None
+    return which == "any" or (which == "forwarded" and forwarded)

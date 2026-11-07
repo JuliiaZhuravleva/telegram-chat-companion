@@ -74,6 +74,7 @@ class _Stop(BaseMiddleware):
 
     def __init__(self) -> None:
         self.taken: list[str] = []
+        self.data: dict[str, Any] = {}
 
     async def __call__(
         self,
@@ -83,6 +84,7 @@ class _Stop(BaseMiddleware):
     ) -> Any:
         func = data["handler"].callback
         self.taken.append(f"{func.__module__.rsplit('.', 1)[-1]}.{func.__name__}")
+        self.data = dict(data)
         return None
 
 
@@ -118,13 +120,15 @@ async def deliver(
     state: FakeState,
     *,
     call: bool = False,
+    seen: dict[str, Any] | None = None,
     **data: Any,
 ) -> str | None:
     """Propagate ``event`` through the main router with ``state``; the handler that took it.
 
     ``raw_state`` is read off ``state`` as aiogram's FSM middleware would. With
     ``call=False`` the handler is named and not run; with ``call=True`` it runs
-    for real on whatever ``data`` carries.
+    for real on whatever ``data`` carries. ``seen`` (with ``call=False``) is
+    filled with the data the handler would have been called with.
     """
     data.setdefault("is_admin", True)
     data.setdefault("bot", event.bot if isinstance(event, Message) else AsyncMock())
@@ -140,4 +144,6 @@ async def deliver(
     finally:
         if not call:
             observer.middleware.unregister(stop)
+    if seen is not None:
+        seen.update(stop.data)
     return stop.taken[0] if stop.taken else None

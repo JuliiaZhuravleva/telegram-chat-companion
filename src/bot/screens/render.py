@@ -32,6 +32,7 @@ from src.bot.reply_flow import send_html_parts
 from src.bot.screens.i18n import Tr
 from src.bot.screens.model import Button, ReplyButton, Screen
 from src.bot.screens.routes import BACK_NAMES, NOOP
+from src.bot.states.admin import note_screen
 from src.bot.utils import safe_edit_text
 from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length, split_html
 
@@ -188,6 +189,7 @@ async def show_markup(
     new_message: bool = False,
     parse_mode: str | None | Default = Default("parse_mode"),
     disable_web_page_preview: bool | None | Default = Default("link_preview_is_disabled"),
+    title_from: str | None = None,
 ) -> Message | None:
     """`show()`'s delivery for text and markup that are not (yet) a `Screen`.
 
@@ -196,9 +198,43 @@ async def show_markup(
     area that converts its screen to a builder calls `show()` instead. The
     ``parse_mode``/``disable_web_page_preview`` defaults inherit the bot's
     defaults, exactly like `safe_edit_text`.
-    """
-    is_new_only = new_message or not (markup is None or isinstance(markup, InlineKeyboardMarkup))
 
+    The message the screen lands in is noted (`note_screen`): a prompt screen's
+    message is closed by `PromptExitMiddleware` when a tap elsewhere ends the
+    prompt. ``title_from`` is the text whose first line names the screen there
+    (`show()` passes the screen text without its notice); default ``text``.
+    """
+    editable = markup is None or isinstance(markup, InlineKeyboardMarkup)
+    shown = await _deliver(
+        target,
+        text,
+        markup,
+        screen_id=screen_id,
+        toast=toast,
+        alert=alert,
+        answered=answered,
+        new_message=new_message or not editable,
+        parse_mode=parse_mode,
+        disable_web_page_preview=disable_web_page_preview,
+    )
+    note_screen(shown, screen_id, text if title_from is None else title_from, editable=editable)
+    return shown
+
+
+async def _deliver(
+    target: CallbackQuery | Message,
+    text: str,
+    markup: Markup | None,
+    *,
+    screen_id: str,
+    toast: str | None,
+    alert: bool,
+    answered: bool,
+    new_message: bool,
+    parse_mode: str | None | Default,
+    disable_web_page_preview: bool | None | Default,
+) -> Message | None:
+    """`show_markup` without the note: edit in place when possible, else a new message."""
     if not _is_callback(target):
         message: Message = target  # type: ignore[assignment]  # narrowed by _is_callback
         return await _send_new(
@@ -224,7 +260,7 @@ async def show_markup(
         return None
 
     too_long = parsed_length(text) > TELEGRAM_MESSAGE_LIMIT
-    if isinstance(anchor, Message) and not (is_new_only or too_long):
+    if isinstance(anchor, Message) and not (new_message or too_long):
         inline = markup if isinstance(markup, InlineKeyboardMarkup) else None
         try:
             await safe_edit_text(
@@ -286,6 +322,7 @@ async def show(
         new_message=new_message or s.reply is not None or s.remove_reply,
         parse_mode="HTML",
         disable_web_page_preview=not s.link_preview,
+        title_from=s.text,
     )
 
 

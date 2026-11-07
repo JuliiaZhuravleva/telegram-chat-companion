@@ -113,6 +113,11 @@ async def handle_cancel(
     # in any other prompt the word is that prompt's answer: «Отмена» is a word
     # a rule may well be asked to watch for.
     StateFilter(None),
+    # A tap on a reply-keyboard button is never a reply. A REPLY «Отмена» is
+    # typed under one of the bot's messages, and that message's handler reads
+    # it: an admin's reply to a sticker card is the card's answer
+    # (admin_sticker.handle_admin_sticker_reply, on the router after this one).
+    F.reply_to_message.is_(None),
     # Only an admin was ever shown that keyboard; anyone else's «Отмена» is
     # an ordinary message to the bot.
     IsAdmin(),
@@ -125,8 +130,9 @@ async def handle_leftover_cancel(
 ) -> None:
     """«✖️ Отмена» from the organizer prompt's reply keyboard after the prompt ended.
 
-    A tap on another screen's button ends that prompt without a message, so
-    the keyboard outlives it (`src/bot/middleware/prompt_exit.py`). Its
+    A tap on another screen's button ends that prompt, and a reply keyboard
+    cannot be taken away by an edit, so it outlives the prompt
+    (`src/bot/middleware/prompt_exit.py`). Its
     «Отмена» then means what /cancel means, and is answered the same way,
     keyboard removed — not passed on to the bot as a chat message.
     """

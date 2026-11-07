@@ -485,7 +485,7 @@ class TestAdminDmSlashCommandReachesCommandHandlers:
 
 
 # ---------------------------------------------------------------------------
-# A sticker sent while a prompt is open answers that prompt
+# A sticker sent while a prompt is open answers that prompt, if it reads one
 # ---------------------------------------------------------------------------
 
 
@@ -501,7 +501,8 @@ class TestAdminDmStickerYieldsToAnOpenPrompt:
     """admin_sticker's router is included before every other FSM-owning
     router, so its catalogue check must not take a sticker that is the
     answer to another screen's prompt — the rules reaction prompt asks for
-    exactly that."""
+    exactly that. A prompt that reads no sticker does not hide one from it:
+    the sticker would fall through to media.py's silent learn."""
 
     @pytest.mark.asyncio()
     async def test_the_check_does_not_match_inside_the_rules_reaction_prompt(self) -> None:
@@ -513,6 +514,17 @@ class TestAdminDmStickerYieldsToAnOpenPrompt:
 
         assert result is UNHANDLED
         msg.reply.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_prompt_that_reads_no_sticker_leaves_it_to_the_check(self) -> None:
+        msg, data = _make_router_message(is_admin=True, sticker_known=True)
+
+        result = await admin_sticker_router.propagate_event(
+            "message", msg, raw_state=AdminStates.awaiting_system_prompt.state, **data
+        )
+
+        assert result is not UNHANDLED
+        msg.reply.assert_awaited_once()
 
     @pytest.mark.asyncio()
     async def test_control_with_no_prompt_open_the_check_matches(self) -> None:
