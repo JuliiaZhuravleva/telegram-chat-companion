@@ -157,20 +157,33 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 
 ### Admin panel
 
-`/admin` in a direct message opens the bot's control panel (bot admins only):
+`/admin` in a direct message opens the bot's control panel (bot admins only). The panel is
+one message that changes in place; every screen has one back button named by where it leads,
+and a button left over from an older screen redraws the panel with a notice instead of doing
+anything.
 
-- **Chat settings** — one grouped panel per whitelisted chat covering every per-chat
-  option: behaviour, modules, stickers, rules, plus links into the knowledge-base and
-  reactions sub-panels. Options a chat has not overridden are marked *inherited*, so it
-  is always clear whether a value is the chat's own or comes from the global layer.
-  Approving a new chat offers a direct link into its settings. The chat picker lists the
-  most active chats first (messages in the last 24h, with the count in the caption), and
-  `/panel <link or title>` jumps straight to one chat's panel — ambiguous titles offer a
-  list to pick from, and only whitelisted chats are reachable either way.
+- **Chat settings** — one panel per whitelisted chat, split into sections (behaviour, memory,
+  voice and photos, stickers, reactions, community, rules). A button shows the value in force
+  (`✅` on, `⚪` off); the values a chat takes from the global layer are named in a line of
+  text, so it is always clear which values are the chat's own. Common values are picked with
+  buttons, with typed input behind a «✏️» button. «🔌 Отключить бота» applies at once and
+  offers «↩️ Вернуть» instead of a confirmation. Approving a new chat opens its settings. The
+  chat list puts the most active chats first (messages in the last 24h), and
+  `/panel <link or title>` jumps straight to one chat's panel — ambiguous titles offer a list
+  to pick from, and only whitelisted chats are reachable either way.
 - **Global settings** — the values applied to every chat that has no value of its own,
   existing chats included; a chat's own setting always wins.
-- Whitelist, custom rules, sticker management, usage statistics, spend, health and
-  notification controls.
+- **Rules** — a chat's rules as a list and a card per rule, built with buttons; JSON stays
+  available for advanced rules and is checked the way the rules engine reads it.
+- **Knowledge-base organizers** — picked from the people the bot has seen in the chat, or
+  through Telegram's own user search («✏️ Нет в списке», `request_users`). Their names are
+  stored, so an organizer who has not written in the chat still shows by name.
+- Whitelist, sticker management, usage statistics, spend, health and notification controls.
+
+**Drawn icons (optional).** A bot that has uploaded its own custom emoji sets can show them on
+buttons and at the start of panel lines: set `CUSTOM_EMOJI_BUTTONS` and `CUSTOM_EMOJI_MARKS`
+(see `config/.env.example`). Without them the panel uses plain emoji. Model answers,
+transcripts and summaries are never touched.
 
 ## Configuration
 

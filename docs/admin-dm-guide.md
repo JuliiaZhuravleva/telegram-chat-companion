@@ -83,14 +83,17 @@ Every switchable notification goes to *all* admins. Health alerts go to one.
 ### F.3 Reading a panel screen
 
 The panel is a single message that is edited in place as you navigate — one screen at a
-time, "◀️ Назад / Back" walks up one level, "✖️ Закрыть / Close" deletes the message.
-A few screens (a sticker card, an FSM prompt) intentionally send new messages instead.
+time. Each screen has one back button, named by where it leads (`⬅️ Панель`, `⬅️ Чаты`,
+`⬅️ Чат`), never a bare "Назад"; "✖️ Закрыть / Close" deletes the message. A few screens
+(a sticker card, an FSM prompt) intentionally send new messages instead.
 
 Conventions used throughout:
 
-- `✅` / `⚫` — a boolean is on / off.
-- `· унаследовано` / `· inherited` — this chat has no value of its own; it is currently
-  following the global layer, and a global change will move it (§A1.4).
+- `✅` / `⚪` — a switch is on / off. Every screen with switches says so in its first line
+  under the title («✅ — включено, ⚪ — выключено. Нажатие переключает.»).
+- A button shows only the value in force. Where it comes from is said once, in a line of
+  text: «Берутся из общих настроек: …» names the values this chat has no setting of its own
+  for. Those follow the global layer, and a global change will move them (§A1.4).
 - A row with no visible effect when tapped is a read-only value (an unlabeled section
   header, a page counter, or a setting whose editor is not built yet).
 - Numbered buttons (`1 ✅`, `2 ❌`) line up with the numbered entries in the message body
@@ -321,7 +324,7 @@ It has the same seven sections as a chat's own panel — 🗣 Поведение
 switches (✅ on, ⚪ off; a switch redraws the same section) and its other values as lines of
 text — sticker and photo chances, sticker frankness, which rules apply — which are set via
 config or the database. Only the options that can honestly be set globally appear; the
-legacy ones are left out for the reason given in §A2.1 (the `· inherited` note).
+legacy ones are left out for the reason given in §A2.1 (the «Берутся из общих настроек» line).
 
 ### A1.5 ⚙️ General settings → notifications and language
 
@@ -393,12 +396,13 @@ back button goes to the chat list.
   and 😀 Реакции. They used to be links to separate pickers; those pickers are gone.
 - **Values that are shown but not switched** (words, percentages, intervals, language) change
   only in the database for now; the section says so in one line.
-- **`· общее`** (`· all`) marks a value the chat takes from the global settings. Only the 21
-  options whose per-chat column can be empty can show it. The other 13 are older columns that
-  always hold a value of their own, so they can never honestly claim to inherit, and for the
-  same reason they are absent from the global screen. The knowledge base says it in the
-  section's footnote instead (`База знаний включена в общих настройках.`): its button shares
-  a row with `👥 Организаторы · N`, and the marker does not fit half a phone row.
+- **«Берутся из общих настроек: …»** (`Taken from the general settings: …`), a line of text
+  under the section, names the values the chat takes from the global settings; the buttons
+  themselves show only the value in force. A suffix on the button (`⚪ … · общее`) was read as
+  "off for everyone" and was removed. Only the 21 options whose per-chat column can be empty
+  can be named in that line. The other 13 are older columns that always hold a value of their
+  own, so they can never honestly claim to inherit, and for the same reason they are absent
+  from the global screen.
 - **A chat that has no settings row** (it left, or was never connected) opens the chat list
   instead, with a line saying nothing changed. A switch or an explicitness value tapped or
   typed for such a chat lands there too; nothing is written.
@@ -454,11 +458,13 @@ A small per-chat rules engine. 📏 Правила on a chat's screen opens that
 
 - **One switch for all of the chat's rules** sits at the top: «✅ Все правила включены» /
   «⚪ Правила выключены». It is the same `rules_enabled` value as on the chat settings panel.
-  While the chat has no value of its own the label ends in «· общее» and the global default
-  applies; a tap writes the chat's own value, the opposite of what the chat was doing.
+  While the chat has no value of its own, the global default applies and a line of text says
+  the switch is taken from the general settings; a tap writes the chat's own value, the
+  opposite of what the chat was doing.
 - The mode (how several matching rules combine) is a line of text. A rule's weight shows in its
   row only under a weight mode, the only place it means anything.
-- A row shows ✅/⏸ and the rule's name and opens the rule's card: what sets it off and what it
+- A row shows 📏 (working) or ⏸ (paused), the rule's name and one tag — «работает» or
+  «на паузе», or under a priority mode «обязательное» / «приоритет N» — and opens the rule's card: what sets it off and what it
   does in words, how often it fired, and **🧩 Как записано (JSON)**, which shows the rule as
   the bot stores it — its `type`, its config, and `weight` / `mandatory` when they are not the
   defaults — under one line saying what that is: the lines above give the gist of the same rule
