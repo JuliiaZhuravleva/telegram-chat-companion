@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -94,13 +94,30 @@ class TestGetTodayTotal:
         assert result == Decimal("0.0250")
 
     @pytest.mark.asyncio
-    async def test_queries_24h_interval(self):
-        from datetime import timedelta
-
+    async def test_counts_since_utc_midnight(self):
+        """The window is the UTC day the card claims, not a rolling 24 h."""
         svc = _make_service(today_total=Decimal("0"))
-        await svc.get_today_total()
+        await svc.get_today_total(datetime(2026, 11, 3, 14, 5, tzinfo=UTC))
         call_args = svc._response_log.get_total_cost.call_args.args
-        assert call_args[0] == timedelta(hours=24)
+        assert call_args[0] == timedelta(hours=14, minutes=5)
+
+    @pytest.mark.asyncio
+    async def test_another_zone_is_read_on_the_utc_axis(self):
+        """01:30 in UTC+3 is 22:30 UTC the evening before: 22.5 h into that day."""
+        svc = _make_service(today_total=Decimal("0"))
+        moment = datetime(2026, 11, 4, 1, 30, tzinfo=timezone(timedelta(hours=3)))
+        await svc.get_today_total(moment)
+        call_args = svc._response_log.get_total_cost.call_args.args
+        assert call_args[0] == timedelta(hours=22, minutes=30)
+
+    @pytest.mark.asyncio
+    async def test_the_clock_default_stays_within_one_day(self):
+        svc = _make_service(today_total=Decimal("0"))
+        before = datetime.now(UTC)
+        await svc.get_today_total()
+        interval = svc._response_log.get_total_cost.call_args.args[0]
+        since = before - before.replace(hour=0, minute=0, second=0, microsecond=0)
+        assert since <= interval < since + timedelta(minutes=1)
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +311,94 @@ class TestNotifyAdminsIfExceeded:
 
         assert await svc.notify_admins_if_exceeded(None, now=_NOW) == 0
         assert config.sets == []
+
+
+class _Log:
+    """``response_log`` over time: ``get_total_cost`` is its SQL with the test's clock.
+
+    ``WHERE created_at > NOW() - $1::interval`` — ``now`` stands in for NOW().
+    """
+
+    def __init__(self, *rows: tuple[datetime, str]) -> None:
+        self.rows = [(at, Decimal(cost)) for at, cost in rows]
+        self.now = _NOW
+
+    async def get_total_cost(self, interval: timedelta) -> Decimal:
+        return sum((c for at, c in self.rows if at > self.now - interval), Decimal("0"))
+
+
+class TestTheDayIsOneAxis:
+    """The total and the claim are the same UTC day (review stickers-services-4)."""
+
+    @pytest.mark.asyncio
+    async def test_last_evenings_overrun_is_not_a_new_days_card(self) -> None:
+        log = _Log(
+            (datetime(2026, 11, 7, 22, 0, tzinfo=UTC), "0.65"),
+            (datetime(2026, 11, 7, 23, 49, tzinfo=UTC), "0.65"),
+        )
+        config = _Config(**{_DAILY_LIMIT_KEY: 1.0, "admin_ids": "111,222"})
+        svc = SpendLimitService(log, config)  # type: ignore[arg-type]
+        bot = _bot()
+
+        results = []
+        for moment in (
+            datetime(2026, 11, 7, 23, 50, tzinfo=UTC),
+            datetime(2026, 11, 7, 23, 55, tzinfo=UTC),
+            datetime(2026, 11, 8, 0, 5, tzinfo=UTC),
+        ):
+            log.now = moment
+            results.append(await svc.notify_admins_if_exceeded(bot, now=moment))
+
+        assert results == [2, 0, 0]
+        assert bot.send_message.await_count == 2
+        assert [v for k, v in config.sets if k == SENT_DAY_KEY] == ["2026-11-07"]
+
+    @pytest.mark.asyncio
+    async def test_a_new_overrun_after_midnight_still_sends_that_days_card(self) -> None:
+        """The control: the narrower window does not refuse a real overrun of the new day."""
+        log = _Log(
+            (datetime(2026, 11, 7, 23, 49, tzinfo=UTC), "1.30"),
+            (datetime(2026, 11, 8, 0, 30, tzinfo=UTC), "1.10"),
+        )
+        config = _Config(**{_DAILY_LIMIT_KEY: 1.0, "admin_ids": "111", SENT_DAY_KEY: "2026-11-07"})
+        svc = SpendLimitService(log, config)  # type: ignore[arg-type]
+        bot = _bot()
+        log.now = datetime(2026, 11, 8, 0, 40, tzinfo=UTC)
+
+        assert await svc.notify_admins_if_exceeded(bot, now=log.now) == 1
+        assert "$1.10 при лимите $1.00" in bot.send_message.await_args.args[1]
+        assert config.values[SENT_DAY_KEY] == "2026-11-08"
+
+
+class _FlakySettings(_Config):
+    """``bot_config`` whose ``admin_settings`` read fails while ``broken`` is set."""
+
+    broken = True
+
+    async def get(self, key: str) -> object:
+        if key == "admin_settings" and self.broken:
+            raise RuntimeError("pool timeout")
+        return await super().get(key)
+
+
+class TestEveryReadComesBeforeTheClaim:
+    @pytest.mark.asyncio
+    async def test_a_failed_settings_read_leaves_the_day_unclaimed(self) -> None:
+        config = _FlakySettings(**{_DAILY_LIMIT_KEY: 1.0, "admin_ids": "111,222"})
+        log = AsyncMock()
+        log.get_total_cost = AsyncMock(return_value=Decimal("1.27"))
+        svc = SpendLimitService(log, config)  # type: ignore[arg-type]
+        bot = _bot()
+
+        first = await svc.notify_admins_if_exceeded(bot, now=_NOW)
+        assert first == 0
+        assert SENT_DAY_KEY not in config.values, "a card never sent must not claim the day"
+
+        config.broken = False
+        second = await svc.notify_admins_if_exceeded(bot, now=_NOW + timedelta(minutes=1))
+
+        assert second == 2
+        assert config.values[SENT_DAY_KEY] == "2026-11-03"
 
 
 class TestFinishReplyCallSite:

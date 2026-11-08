@@ -632,10 +632,19 @@ vestigial).
   admin's latest sticker" would delete a notification that arrived while browsing. Failures
   are suppressed — a message the admin already deleted must not break navigation.
 - **`handle_admin_sticker_reply` consumes every text reply in an admin DM** (filters:
-  `F.reply_to_message, F.text, private, IsAdmin, StateFilter(None)`). When it cannot resolve
-  a `file_unique_id` it returns early — and, because aiogram has already consumed the update,
-  no other handler sees it. Any future "reply to X in the admin DM" feature has to be
-  registered before this handler or fold into it.
+  `F.reply_to_message, F.text, private, IsAdmin, StateFilter(None)`). It resolves the
+  `file_unique_id` from the notification record, then the `🆔` line, then the card's own
+  buttons (`adm_stk_reanalyze:` / `adm_stk_clr_ask:` / `adm_stk_score:` carry it, so a brief
+  card with no `🆔` line still resolves when its record is lost). When none of them names a
+  sticker it answers `build_stk_reply(lang, "unknown")` and logs `sticker reply matched no
+  card` — because aiogram has already consumed the update, no other handler sees it. Any
+  future "reply to X in the admin DM" feature has to be registered before this handler or
+  fold into it.
+- **`✏️ Своё число` carries the pack card's sticker.** The typed score arrives as a new card;
+  the prompt stores the old card's sticker message id in FSM data (`exp_sticker_msg`, looked
+  up only when the card is not a reply) and the new card is recorded with it, so leaving the
+  new card still deletes that sticker. A notification card stores 0: its sticker is the
+  admin's.
 
 ### F.9 Rate limits and cooldowns
 
@@ -1152,7 +1161,15 @@ admin DM (§F.8) — are shared-machinery facts and stay there.
   `adm_stk_back:` is retired, and an old one gets the stale answer.
 - **Re-score is reset plus one re-analysis.** A NULL score means the bot never sends the
   sticker, so `reset_explicitness_to_auto` alone would silence it until something else
-  re-analysed it.
+  re-analysed it. An analysis that succeeds without a usable `explicit` (omitted, cut off,
+  out of range) is `ok` to `learn()`, and `save_sticker` keeps the NULL the reset wrote — so
+  `_analyse_into_card` treats a NULL score after a re-score like a failure: the prior score is
+  put back (`_put_back`) and the card's top line is `rescore_without_score`, never
+  "✓ Оценка пересчитана".
+- **After the analysis, everything is guarded too.** The ⏳ placeholder has no buttons and the
+  callback is already answered, so a failure while building the card (a repo read, `show`)
+  becomes the `internal` error screen with its Retry, logged as `sticker card after analysis
+  failed` — in `_analyse_into_card` and in the DM check's first learn alike.
 - **Analysis errors carry their reason** (`download`, `vision`, `content_filter`, `empty`)
   from `ReanalyzeResult.reason` / `StickerLearningResult.failure_reason` to `build_stk_error`.
   The DM variant retries through `adm_stk_dmchk:`; once a row exists it re-analyses rather
@@ -1295,6 +1312,10 @@ KV row, no migration). The day is **claimed before sending**, under a process-wi
 not retried that day — a retry on every reply is exactly how the health alert once sent 37
 messages in a day. Per-admin failures are logged (`spend_card_send_failed`); the check runs
 after `post_send` has written the reply's own cost row. Nothing is posted into the group.
+The total it compares is the **same UTC day** it claims: spend since 00:00 UTC, not a rolling
+24 h, which still held the previous evening's overrun after midnight and sent the card a second
+time. Every read the card needs (`admin_settings` included) happens before the claim, so a
+failed read leaves the day unclaimed instead of claimed with nothing sent.
 
 **Health card.** `_send_alert` renders `cards.health_card` / `cards.recovered_card` in the
 language from `admin_settings` (now part of `_load_config`), splits the text with `split_html`
@@ -1321,4 +1342,4 @@ so the deploy causes no extra alert. The
 
 The sticker notification sends the sticker first, then the description as a reply to it, and
 records the pair in `admin_sticker_notifications` so a later text reply resolves to the right
-`file_unique_id` (with a regex over the `🆔` line as a fallback).
+`file_unique_id` (with a regex over the `🆔` line, then the card's own buttons, as fallbacks).

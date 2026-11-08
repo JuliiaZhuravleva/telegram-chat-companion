@@ -9,6 +9,9 @@ the hub, which belongs to another module.
 from __future__ import annotations
 
 import hashlib
+import html
+import io
+import re
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +19,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import Chat, InlineKeyboardMarkup, Message
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Chat, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from structlog.testing import capture_logs
 
 from src.bot.handlers.admin_sticker import (
     _extract_file_unique_id_from_reply,
@@ -41,6 +48,7 @@ from src.bot.handlers.admin_sticker import (
 )
 from src.bot.handlers.admin_sticker import router as admin_sticker_router
 from src.bot.screens.model import Screen
+from src.bot.screens.render import render_text, to_markup
 from src.bot.screens.stickers import (
     ERROR_REASONS,
     PRESETS,
@@ -48,6 +56,7 @@ from src.bot.screens.stickers import (
     PackRow,
     SetsPage,
     StickerFacts,
+    build_card_sticker,
     build_stk_card,
     build_stk_clear_ask,
     build_stk_error,
@@ -61,6 +70,8 @@ from src.bot.screens.stickers import (
     score_line,
 )
 from src.bot.states.admin import AdminStates
+from src.services.ai.base import EmbeddingResult, VisionResult
+from src.services.modules.sticker.learning import StickerLearningService
 from src.services.modules.sticker.models import ReanalyzeResult, StickerLearningResult
 from src.utils.telegram import TelegramFileError
 
@@ -259,11 +270,19 @@ CARD_BUTTONS: Buttons = [
 # ---------------------------------------------------------------------------
 
 
-def _reply_target(text: str | None = None, caption: str | None = None) -> MagicMock:
+def _reply_target(
+    text: str | None = None,
+    caption: str | None = None,
+    *,
+    markup: InlineKeyboardMarkup | None = None,
+    sticker: object | None = None,
+) -> MagicMock:
     msg = MagicMock()
     msg.text = text
     msg.caption = caption
     msg.message_id = 100
+    msg.reply_markup = markup
+    msg.sticker = sticker
     return msg
 
 
@@ -324,13 +343,18 @@ def _admin_reply(
     text: str = "better description",
     reply_text: str | None = f"🆔 {FUID}",
     reply_caption: str | None = None,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_sticker: object | None = None,
 ) -> MagicMock:
     msg = MagicMock()
     msg.text = text
     msg.chat.id = ADMIN
     msg.from_user.id = ADMIN
     msg.reply = AsyncMock()
-    msg.reply_to_message = _reply_target(text=reply_text, caption=reply_caption)
+    msg.reply_to_message = _reply_target(
+        text=reply_text, caption=reply_caption, markup=reply_markup, sticker=reply_sticker
+    )
     return msg
 
 
@@ -384,13 +408,63 @@ class TestHandleAdminStickerReply:
         await _run_reply(msg, _sticker_repo(), svc)
         svc.merge_admin_description.assert_awaited_once_with("CaptionID456", "better description")
 
+    @staticmethod
+    def _kb(data: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="x", callback_data=data)]]
+        )
+
     @pytest.mark.asyncio()
-    async def test_a_reply_to_anything_else_is_left_alone(self) -> None:
+    @pytest.mark.parametrize(
+        ("markup", "sticker"),
+        [
+            pytest.param("adm_stk_packs:ru", None, id="a sticker screen without the sticker's id"),
+            pytest.param(None, object(), id="the sticker itself"),
+        ],
+    )
+    async def test_an_unresolved_reply_about_a_sticker_says_which_is_unclear(
+        self, markup: str | None, sticker: object | None
+    ) -> None:
+        """The update is consumed here, so silence would be the only answer it ever gets."""
         svc = _service()
-        msg = _admin_reply(reply_text="No ID here")
+        msg = _admin_reply(
+            reply_text="No ID here",
+            reply_markup=self._kb(markup) if markup else None,
+            reply_sticker=sticker,
+        )
         await _run_reply(msg, _sticker_repo(), svc)
         svc.merge_admin_description.assert_not_awaited()
+        msg.reply.assert_awaited_once()
+        text = msg.reply.call_args.args[0]
+        assert text == (
+            "⚠️ <b>Описание не обновлено</b>\n\n"
+            "Не получилось понять, о каком стикере речь. "
+            "Ответьте на карточку стикера или пришлите сам стикер."
+        )
+        assert msg.reply.call_args.kwargs == {"parse_mode": "HTML"}
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize(
+        "markup",
+        [
+            pytest.param("adm_costs:ru", id="the spend card"),
+            pytest.param(None, id="the bot's own answer"),
+        ],
+    )
+    async def test_a_reply_to_any_other_screen_gets_no_sticker_message(
+        self, markup: str | None
+    ) -> None:
+        """A reply to the spend card is not a description correction: saying one failed is false."""
+        svc = _service()
+        msg = _admin_reply(
+            reply_text="No ID here", reply_markup=self._kb(markup) if markup else None
+        )
+        with capture_logs() as logs:
+            await _run_reply(msg, _sticker_repo(), svc)
+        svc.merge_admin_description.assert_not_awaited()
         msg.reply.assert_not_awaited()
+        (seen,) = [e for e in logs if e["event"] == "sticker reply matched no card"]
+        assert seen["about_a_sticker"] is False
 
     @pytest.mark.asyncio()
     async def test_blank_text_is_ignored(self) -> None:
@@ -958,6 +1032,7 @@ class TestHandleStickerExplicitnessEditPrompt:
         assert state.update_data.await_args_list[0].kwargs == {
             "exp_file_unique_id": FUID,
             "exp_lang": "ru",
+            "exp_sticker_msg": 0,
         }
         assert state.update_data.await_args_list[1].kwargs == {"exp_prompt_id": 200}
         text, buttons = _edit(cb)
@@ -1899,3 +1974,559 @@ class TestScorePromptGetsMedia:
         assert "Send the number as text. To leave, tap" in text
         assert "“✖️ Cancel”" in text
         assert buttons == [("✖️ Cancel", f"adm_stk_expcancel:en:{FUID}")]
+
+
+# ---------------------------------------------------------------------------
+# Stateful doubles for the findings below: the row and the card memory change
+# under the handler the way their SQL changes them
+# ---------------------------------------------------------------------------
+
+
+def _live_repo(**row: Any) -> tuple[MagicMock, dict[str, Any]]:
+    """`_sticker_repo` whose ``sticker_knowledge`` row is written by the calls on it.
+
+    Each write mirrors its SQL; ``save_sticker`` is the UPSERT's score rule:
+    ``CASE WHEN explicitness_is_manual THEN old ELSE COALESCE(EXCLUDED, old)``.
+    """
+    live = {"is_animated": False, "is_video": False, **_row(**row)}
+    repo = _sticker_repo()
+
+    async def read(fuid: str) -> dict[str, Any] | None:
+        return dict(live) if fuid == live["file_unique_id"] else None
+
+    async def reset(_fuid: str) -> bool:
+        live.update(explicitness_score=None, explicitness_is_manual=False)
+        return True
+
+    async def set_manual(_fuid: str, score: float) -> bool:
+        live.update(explicitness_score=score, explicitness_is_manual=True)
+        return True
+
+    async def set_auto(_fuid: str, score: float) -> None:
+        live["explicitness_score"] = score
+
+    async def clear(_fuid: str) -> None:
+        for column in ("visual_description", "emotion", "character_or_meme"):
+            live[column] = None
+        live.update(suggested_contexts=None, analysis_failed=False)
+
+    async def save(**kw: Any) -> int:
+        for column in ("visual_description", "emotion", "suggested_contexts", "character_or_meme"):
+            live[column] = kw.get(column)
+        live["analysis_failed"] = kw.get("analysis_failed", False)
+        if not live["explicitness_is_manual"] and kw.get("explicitness_score") is not None:
+            live["explicitness_score"] = kw["explicitness_score"]
+        return 1
+
+    repo.get_by_file_unique_id = AsyncMock(side_effect=read)
+    repo.reset_explicitness_to_auto = AsyncMock(side_effect=reset)
+    repo.set_manual_explicitness_score = AsyncMock(side_effect=set_manual)
+    repo.update_explicitness_score = AsyncMock(side_effect=set_auto)
+    repo.clear_analysis = AsyncMock(side_effect=clear)
+    repo.save_sticker = AsyncMock(side_effect=save)
+    repo.get_pack_context = AsyncMock(return_value=[])
+    repo.get_dedup_candidates = AsyncMock(return_value=[])
+    repo.update_embedding = AsyncMock()
+    return repo, live
+
+
+def _card_memory(repo: MagicMock) -> list[dict[str, Any]]:
+    """``admin_sticker_notifications`` behind `repo`, by the SQL of its three methods."""
+    rows: list[dict[str, Any]] = []
+
+    async def save(**kw: Any) -> int:  # admin_id is stored too, and read by no one here
+        row = {
+            "fuid": kw["file_unique_id"],
+            "chat_id": kw["chat_id"],
+            "message_id": kw["message_id"],
+            "sticker_msg_id": kw["sticker_msg_id"],
+        }
+        for i, r in enumerate(rows):  # the existing row for (chat, message, sticker)
+            if (r["chat_id"], r["message_id"], r["fuid"]) == (
+                row["chat_id"],
+                row["message_id"],
+                row["fuid"],
+            ):
+                return i
+        rows.append(row)
+        return len(rows) - 1
+
+    async def sticker_of(chat_id: int, message_id: int) -> int | None:
+        # WHERE chat_id = $1 AND message_id = $2 AND sticker_msg_id > 0 ORDER BY id DESC
+        for r in reversed(rows):
+            if (r["chat_id"], r["message_id"]) == (chat_id, message_id) and r["sticker_msg_id"] > 0:
+                return int(r["sticker_msg_id"])
+        return None
+
+    async def release(chat_id: int, message_id: int) -> None:
+        for r in rows:
+            if (r["chat_id"], r["message_id"]) == (chat_id, message_id):
+                r["message_id"] = None
+
+    repo.save_notification = AsyncMock(side_effect=save)
+    repo.get_card_sticker_msg = AsyncMock(side_effect=sticker_of)
+    repo.release_card = AsyncMock(side_effect=release)
+    return rows
+
+
+def _fsm() -> FSMContext:
+    """aiogram's own FSM over memory: what one handler stores, the next one reads."""
+    return FSMContext(
+        storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=ADMIN, user_id=ADMIN)
+    )
+
+
+def _vision(text: str) -> MagicMock:
+    """The AI router as `StickerLearningService` uses it: vision text, a 768-dim embedding."""
+    ai = MagicMock()
+    ai.analyze_image = AsyncMock(
+        return_value=VisionResult(text=text, model="gemini-3-flash", provider="gemini")
+    )
+    ai.generate_embedding = AsyncMock(
+        return_value=EmbeddingResult(
+            embedding=[0.0] * 768, model="gemini-embedding-001", provider="gemini", dimensions=768
+        )
+    )
+    ai.generate_text = AsyncMock()
+    return ai
+
+
+def _downloading_bot() -> MagicMock:
+    bot = MagicMock()
+    file = MagicMock()
+    file.file_path = "stickers/x.webp"
+    bot.get_file = AsyncMock(return_value=file)
+    bot.download_file = AsyncMock(return_value=io.BytesIO(b"RIFF....WEBPVP8 not-a-real-image"))
+    return bot
+
+
+async def _route(event_type: str, event: MagicMock, **data: Any) -> Any:
+    """One update through the real router: filters decide, as in production."""
+    return await admin_sticker_router.propagate_event(
+        event_type,
+        event,
+        is_admin=True,
+        event_from_user=event.from_user,
+        **{
+            "bot": MagicMock(),
+            "admin_repo": _admin_repo(),
+            "bot_config_repo": _bot_config_repo(),
+            "state": _state(),
+            "raw_state": None,
+            **data,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# A re-score that gives no score keeps the old one (review stickers-services-1)
+# ---------------------------------------------------------------------------
+
+
+_VISION_WITHOUT_A_SCORE = {
+    "omitted": (
+        '{"visual": "Кот машет лапой", "emotion": "радость", "contexts": [], '
+        '"tags": [], "character": null}'
+    ),
+    "cut_off": (
+        '{"visual": "Кот машет лапой, приветствие", "emotion": "радость", '
+        '"contexts": ["привет", "пока"], "tags": ["cute"], "character": null, "expl'
+    ),
+    "out_of_range": (
+        '{"visual": "Кот машет лапой", "emotion": "радость", "contexts": [], '
+        '"tags": [], "character": null, "explicit": 70}'
+    ),
+}
+
+
+class TestRescoreWithoutAScore:
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("vision", list(_VISION_WITHOUT_A_SCORE), ids=str)
+    async def test_through_the_real_analysis_the_manual_score_survives(self, vision: str) -> None:
+        """🔁 Пересчитать, routed, real `StickerLearningService`: ``ok`` and no score.
+
+        ``learn()`` calls an analysis with a description a success, score or no
+        score, and ``save_sticker`` keeps the NULL the reset wrote — so the
+        sticker was left unscored, i.e. never sent, under "✓ Оценка пересчитана".
+        """
+        repo, live = _live_repo(explicitness_score=0.3, explicitness_is_manual=True)
+        svc = StickerLearningService(_vision(_VISION_WITHOUT_A_SCORE[vision]), repo)
+        tap = _callback(f"adm_stk_expreset:ru:{FUID}")
+
+        result = await _route(
+            "callback_query", tap, bot=_downloading_bot(), sticker_service=svc, sticker_repo=repo
+        )
+
+        assert result is not UNHANDLED
+        assert (live["explicitness_score"], live["explicitness_is_manual"]) == (0.3, True)
+        text, buttons = _edit(tap)
+        assert text.startswith(
+            "<i>Модель не вернула оценку. Оценка осталась прежней: 0.30.</i>\n\n"
+        )
+        assert "пересчитана" not in text
+        assert "не оценена" not in text
+        assert buttons == CARD_BUTTONS
+
+    @pytest.mark.asyncio()
+    async def test_a_real_score_is_still_the_new_score(self) -> None:
+        """The control: a vision answer with a valid score replaces the old one."""
+        repo, live = _live_repo(explicitness_score=0.3, explicitness_is_manual=True)
+        good = _VISION_WITHOUT_A_SCORE["omitted"][:-1] + ', "explicit": 0.1}'
+        svc = StickerLearningService(_vision(good), repo)
+        tap = _callback(f"adm_stk_expreset:ru:{FUID}")
+
+        await _route(
+            "callback_query", tap, bot=_downloading_bot(), sticker_service=svc, sticker_repo=repo
+        )
+
+        assert (live["explicitness_score"], live["explicitness_is_manual"]) == (0.1, False)
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        assert _edit(tap)[0].startswith("<i>✓ Оценка пересчитана</i>")
+
+    @pytest.mark.asyncio()
+    async def test_an_automatic_score_comes_back_automatic(self) -> None:
+        repo, live = _live_repo(explicitness_score=0.25, explicitness_is_manual=False)
+
+        cb = await _rescore(repo, _service())  # ok, and nothing wrote a score
+
+        repo.update_explicitness_score.assert_awaited_once_with(FUID, 0.25)
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        assert (live["explicitness_score"], live["explicitness_is_manual"]) == (0.25, False)
+        assert _edit(cb)[0].startswith(
+            "<i>Модель не вернула оценку. Оценка осталась прежней: 0.25.</i>"
+        )
+
+    @pytest.mark.asyncio()
+    async def test_when_putting_it_back_fails_the_card_says_it_is_gone(self) -> None:
+        repo, live = _live_repo(explicitness_score=0.8, explicitness_is_manual=True)
+        repo.set_manual_explicitness_score.side_effect = RuntimeError("db down")
+
+        cb = await _rescore(repo, _service())
+
+        assert live["explicitness_score"] is None
+        text, buttons = _edit(cb)
+        assert text.startswith(
+            "<i>Модель не вернула оценку. Оценка сброшена, и пока её нет, бот этот стикер "
+            "не отправит. Задайте её вручную: 🔞 Откровенность.</i>\n\n"
+        )
+        assert "пересчитана" not in text
+        assert buttons == CARD_BUTTONS
+
+    @pytest.mark.asyncio()
+    async def test_an_unscored_sticker_has_nothing_to_put_back(self) -> None:
+        repo, _ = _live_repo(explicitness_score=None)
+
+        cb = await _rescore(repo, _service())
+
+        repo.update_explicitness_score.assert_not_awaited()
+        repo.set_manual_explicitness_score.assert_not_awaited()
+        assert _edit(cb)[0].startswith("<i>Модель не вернула оценку.</i>\n\n")
+
+    @pytest.mark.asyncio()
+    async def test_english(self) -> None:
+        repo, _ = _live_repo(explicitness_score=0.8, explicitness_is_manual=True)
+        cb = _callback(f"adm_stk_expreset:en:{FUID}")
+
+        await handle_sticker_explicitness_reset(
+            cb, MagicMock(), _service(), repo, _admin_repo("en"), _bot_config_repo(), _state()
+        )
+
+        assert _edit(cb)[0].startswith(
+            "<i>The model returned no score. The score is unchanged: 0.80.</i>\n\n"
+        )
+
+    @pytest.mark.asyncio()
+    async def test_a_plain_reanalysis_without_a_score_keeps_its_notice(self) -> None:
+        """Only a re-score drops a score first; a plain 🔁 Разобрать заново has none to lose."""
+        repo, _ = _live_repo(explicitness_score=None)
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+
+        await handle_run_analysis(
+            cb, MagicMock(), _service(), repo, _admin_repo(), _bot_config_repo(), _state()
+        )
+
+        assert _edit(cb)[0].startswith("<i>✓ Разбор обновлён</i>")
+        repo.update_explicitness_score.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# After a successful analysis, a failure is still an error screen (stickers-services-3)
+# ---------------------------------------------------------------------------
+
+
+class TestAfterTheAnalysis:
+    @pytest.mark.asyncio()
+    async def test_a_failed_read_is_the_error_screen_not_a_frozen_placeholder(self) -> None:
+        repo = _sticker_repo()
+        repo.get_by_file_unique_id = AsyncMock(side_effect=[_row(), RuntimeError("pool timeout")])
+        cb = _callback(f"adm_stk_reanalyze:ru:{FUID}")
+
+        with capture_logs() as logs:
+            await handle_run_analysis(
+                cb, MagicMock(), _service(), repo, _admin_repo(), _bot_config_repo(), _state()
+            )
+
+        assert "⏳" in _edit(cb, 0)[0]
+        text, buttons = _edit(cb)
+        assert "⚠️ <b>Не получилось разобрать стикер</b>" in text
+        assert ERROR_REASONS["internal"]("ru") in text
+        assert buttons == _RETRY_AND_BACK
+        failed = [e for e in logs if e["event"] == "sticker card after analysis failed"]
+        assert [e["log_level"] for e in failed] == ["error"]
+        repo.save_notification.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_failed_rescore_card_retries_the_rescore(self) -> None:
+        repo = _sticker_repo(_row(explicitness_score=0.8, explicitness_is_manual=True))
+        repo.get_by_file_unique_id = AsyncMock(
+            side_effect=[_row(explicitness_score=0.8), RuntimeError("pool timeout")]
+        )
+
+        cb = await _rescore(repo, _service())
+
+        text, buttons = _edit(cb)
+        assert ERROR_REASONS["internal"]("ru") in text
+        assert buttons == _RESCORE_AND_BACK
+
+    @pytest.mark.asyncio()
+    async def test_a_failed_card_in_the_dm_check_offers_the_check_again(self) -> None:
+        """The DM check learns a new sticker on its own path; the same guard holds there."""
+        repo = _sticker_repo()
+        repo.get_by_file_unique_id = AsyncMock(side_effect=[None, RuntimeError("pool timeout")])
+        cb = _dm_tap()
+
+        with (
+            patch(f"{MOD}.download_telegram_file", new=AsyncMock(return_value=b"webp")),
+            capture_logs() as logs,
+        ):
+            await _dm_analyze(cb, _service(), repo)
+
+        assert "⏳" in _edit(cb, 0)[0]
+        text, buttons = _edit(cb)
+        assert ERROR_REASONS["internal"]("ru") in text
+        assert buttons == [("🔁 Повторить", f"adm_stk_dmchk:ru:{FUID}")]
+        assert any(e["event"] == "sticker card after analysis failed" for e in logs)
+
+
+# ---------------------------------------------------------------------------
+# ✏️ Своё число keeps the pack card's sticker with the card (stickers-services-2)
+# ---------------------------------------------------------------------------
+
+
+def _typed_routed(text: str) -> MagicMock:
+    """A typed answer as aiogram sees it: no caption, no sticker, not a reply."""
+    msg = _typed(text)
+    msg.caption = None
+    msg.sticker = None
+    msg.reply_to_message = None
+    return msg
+
+
+class TestTypedScoreKeepsThePackSticker:
+    async def _type_a_score(self, repo: MagicMock, state: FSMContext, card: MagicMock) -> MagicMock:
+        """🔞 Откровенность → ✏️ Своё число on `card` → "0.4", routed; returns the new card 301."""
+        await handle_sticker_score(card, repo, _admin_repo(), _bot_config_repo(), state)
+        prompt = _callback(f"adm_stk_expedit:ru:{FUID}", message_id=card.message.message_id)
+        prompt.message.reply_to_message = card.message.reply_to_message
+        await handle_sticker_explicitness_edit_prompt(
+            prompt, repo, _admin_repo(), _bot_config_repo(), state
+        )
+        typed = _typed_routed("0.4")
+        with patch(f"{MOD}.safe_edit_reply_markup", new=AsyncMock()):
+            result = await _route(
+                "message",
+                typed,
+                sticker_repo=repo,
+                state=state,
+                raw_state=await state.get_state(),
+            )
+        assert result is not UNHANDLED
+        assert _new(typed.answer)[0].startswith("<i>✓ Откровенность 0.40</i>")
+        return typed
+
+    @pytest.mark.asyncio()
+    async def test_leaving_the_new_card_takes_the_pack_sticker(self) -> None:
+        repo = _sticker_repo()
+        rows = _card_memory(repo)
+        state = _fsm()
+        view = _callback(f"adm_stk_view:ru:{FUID}", message_id=100)  # sticker 101, card 102
+        await handle_sticker_view(view, repo, _admin_repo(), _bot_config_repo(), state)
+        assert rows == [{"fuid": FUID, "chat_id": ADMIN, "message_id": 102, "sticker_msg_id": 101}]
+
+        await self._type_a_score(repo, state, _callback(f"adm_stk_score:ru:{FUID}", message_id=102))
+        leave = _callback(f"adm_stk_pk:ru:{KEY}:0", message_id=301)
+        await handle_sticker_pack(leave, repo, state)
+
+        leave.bot.delete_message.assert_awaited_once_with(chat_id=ADMIN, message_id=101)
+
+    @pytest.mark.asyncio()
+    async def test_a_notification_card_does_not_hand_its_sticker_on(self) -> None:
+        """A reply card's sticker is the admin's: the new card, no reply, would delete it."""
+        repo = _sticker_repo()
+        rows = _card_memory(repo)
+        await repo.save_notification(
+            file_unique_id=FUID, admin_id=ADMIN, message_id=501, sticker_msg_id=500, chat_id=ADMIN
+        )
+        state = _fsm()
+        card = _callback(f"adm_stk_score:ru:{FUID}", message_id=501, reply_to=MagicMock())
+
+        await self._type_a_score(repo, state, card)
+        assert rows[-1] == {"fuid": FUID, "chat_id": ADMIN, "message_id": 301, "sticker_msg_id": 0}
+        leave = _callback(f"adm_stk_pk:ru:{KEY}:0", message_id=301)
+        await handle_sticker_pack(leave, repo, state)
+
+        leave.bot.delete_message.assert_not_awaited()
+
+    @pytest.mark.asyncio()
+    async def test_a_new_prompt_does_not_inherit_the_last_ones_sticker(self) -> None:
+        """Every prompt writes its own value, so a stale one cannot ride along in the FSM."""
+        state = _fsm()
+        await state.update_data(exp_sticker_msg=101)
+        cb = _callback(f"adm_stk_expedit:ru:{FUID}", message_id=777)
+
+        await handle_sticker_explicitness_edit_prompt(
+            cb, _sticker_repo(card_sticker_msg=None), _admin_repo(), _bot_config_repo(), state
+        )
+
+        assert (await state.get_data())["exp_sticker_msg"] == 0
+
+
+# ---------------------------------------------------------------------------
+# A reply to a card whose record is lost (stickers-services-5)
+# ---------------------------------------------------------------------------
+
+
+def _wire(**fields: Any) -> Message:
+    """A message as Telegram delivers it in ``reply_to_message``: parsed by aiogram."""
+    return Message.model_validate(
+        {
+            "message_id": 501,
+            "date": 1_767_225_600,
+            "chat": {"id": ADMIN, "type": "private"},
+            "from": {"id": 1, "is_bot": True, "first_name": "Bot"},
+            **fields,
+        }
+    )
+
+
+def _brief_card_on_the_wire() -> Message:
+    """The bot's brief sticker card (notification mode "on"), as Telegram returns it."""
+    card = build_card_sticker("ru", facts_from_row(_row(), pack=PACK_ROW))
+    markup = to_markup(card)
+    assert markup is not None
+    plain = html.unescape(re.sub(r"<[^>]+>", "", render_text(card)))
+    return _wire(text=plain, reply_markup=markup.model_dump(exclude_none=True))
+
+
+def _dm_text_reply(reply_to: Message, text: str = "это не кот, а лиса") -> MagicMock:
+    msg = MagicMock()
+    msg.text = text
+    msg.caption = None
+    msg.sticker = None
+    msg.message_id = 600
+    msg.chat = Chat(id=ADMIN, type="private")
+    msg.from_user.id = ADMIN
+    msg.reply = AsyncMock()
+    msg.reply_to_message = reply_to
+    return msg
+
+
+class TestReplyToACardWithoutARecord:
+    @pytest.mark.asyncio()
+    async def test_the_brief_card_is_found_by_its_buttons(self) -> None:
+        card = _brief_card_on_the_wire()
+        assert "🆔" not in (card.text or ""), "precondition: the brief card has no 🆔 line"
+        repo = _sticker_repo()  # get_notification_by_reply → None: the record was never saved
+        svc = _service()
+        msg = _dm_text_reply(card)
+
+        result = await _route("message", msg, bot=_bot(), sticker_repo=repo, sticker_service=svc)
+
+        assert result is not UNHANDLED
+        repo.get_notification_by_reply.assert_awaited_once_with(ADMIN, 501)
+        svc.merge_admin_description.assert_awaited_once_with(FUID, "это не кот, а лиса")
+        assert "✓ <b>Описание обновлено</b>" in msg.reply.call_args.args[0]
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize("lang", ["ru", "en"])
+    async def test_a_sticker_screen_that_names_no_sticker_is_answered(self, lang: str) -> None:
+        pack_screen = _wire(
+            text="🗂 Набор",
+            reply_markup={
+                "inline_keyboard": [[{"text": "⬅️", "callback_data": f"adm_stk_pk:ru:{KEY}:0"}]]
+            },
+        )
+        svc = _service()
+        msg = _dm_text_reply(pack_screen)
+
+        with capture_logs() as logs:
+            result = await _route(
+                "message",
+                msg,
+                bot=_bot(),
+                sticker_repo=_sticker_repo(),
+                sticker_service=svc,
+                admin_repo=_admin_repo(lang),
+            )
+
+        assert result is not UNHANDLED
+        svc.merge_admin_description.assert_not_awaited()
+        expected = {
+            "ru": "Не получилось понять, о каком стикере речь. "
+            "Ответьте на карточку стикера или пришлите сам стикер.",
+            "en": "Could not tell which sticker this is about. "
+            "Reply to the sticker's card or send the sticker itself.",
+        }[lang]
+        msg.reply.assert_awaited_once()
+        assert msg.reply.call_args.args[0].endswith(f"</b>\n\n{expected}")
+        assert [e["log_level"] for e in logs if e["event"] == "sticker reply matched no card"] == [
+            "info"
+        ]
+
+    @pytest.mark.asyncio()
+    async def test_a_reply_to_the_spend_card_is_not_called_a_sticker_correction(self) -> None:
+        """The spend card is not about a sticker; «description not updated» would be false."""
+        spend_card = _wire(
+            text="💰 Дневной лимит расходов превышен",
+            reply_markup={
+                "inline_keyboard": [[{"text": "💰", "callback_data": "adm_costs:ru:24h"}]]
+            },
+        )
+        svc = _service()
+        msg = _dm_text_reply(spend_card)
+
+        with capture_logs() as logs:
+            await _route(
+                "message", msg, bot=_bot(), sticker_repo=_sticker_repo(), sticker_service=svc
+            )
+
+        svc.merge_admin_description.assert_not_awaited()
+        msg.reply.assert_not_awaited()
+        (seen,) = [e for e in logs if e["event"] == "sticker reply matched no card"]
+        assert seen["about_a_sticker"] is False
+
+    def test_buttons_of_another_screen_name_no_sticker(self) -> None:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️", callback_data=f"adm_stk_pk:ru:{KEY}:0")],
+                [InlineKeyboardButton(text="🔗", url="https://example.org")],
+            ]
+        )
+        assert _extract_file_unique_id_from_reply(_wire(text="x", reply_markup=markup)) is None
+
+    def test_a_malformed_card_button_names_no_sticker(self) -> None:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔞", callback_data="adm_stk_score:ru:a b")]
+            ]
+        )
+        assert _extract_file_unique_id_from_reply(_wire(text="x", reply_markup=markup)) is None
+
+    def test_the_id_line_still_wins_over_the_buttons(self) -> None:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="🔞", callback_data="adm_stk_score:ru:Other")]
+            ]
+        )
+        reply = _wire(text=f"🆔 {FUID}", reply_markup=markup)
+        assert _extract_file_unique_id_from_reply(reply) == FUID

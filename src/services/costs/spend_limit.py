@@ -9,7 +9,10 @@ most once per UTC day, and never into the chat whose message happened to tip
 the total over: the members there can do nothing about it, and the warning
 used to repeat under every reply for the rest of the day. The day the card
 went out is remembered in ``bot_config`` under ``spend_card_sent_day``, so a
-restart does not send it again.
+restart does not send it again. The total it compares is the same day's: the
+spend since 00:00 UTC, not a rolling 24 h — a rolling total still holds last
+evening's overrun after midnight, which claimed a new day and sent the same
+card twice.
 
 Example — set a $2/day limit via the admin bot-config API::
 
@@ -43,6 +46,12 @@ SENT_DAY_KEY = "spend_card_sent_day"
 _CARD_LOCK = asyncio.Lock()
 
 
+def _utc(now: datetime | None) -> datetime:
+    """``now`` (default: the clock) on the UTC axis; a naive value is taken as UTC."""
+    moment = now or datetime.now(UTC)
+    return moment.replace(tzinfo=UTC) if moment.tzinfo is None else moment.astimezone(UTC)
+
+
 class SpendLimitService:
     """Checks today's AI spend against the configurable daily limit.
 
@@ -70,11 +79,20 @@ class SpendLimitService:
             logger.warning("Invalid daily_spend_limit_usd in bot_config", value=raw)
             return None
 
-    async def get_today_total(self) -> Decimal:
-        """Return today's total AI spend (last 24 h) from ``response_log``."""
-        return await self._response_log.get_total_cost(timedelta(hours=24))
+    async def get_today_total(self, now: datetime | None = None) -> Decimal:
+        """Return today's total AI spend from ``response_log``: since 00:00 UTC.
 
-    async def check(self) -> tuple[Decimal | None, Decimal, bool]:
+        ``now`` fixes the moment (default: the clock); the window is the UTC
+        day it falls in, the same day `notify_admins_if_exceeded` claims.
+        """
+        moment = _utc(now)
+        midnight = moment.replace(hour=0, minute=0, second=0, microsecond=0)
+        # get_total_cost counts ``created_at > NOW() - interval``: the interval
+        # since midnight puts the window's start at midnight.
+        since_midnight: timedelta = moment - midnight
+        return await self._response_log.get_total_cost(since_midnight)
+
+    async def check(self, now: datetime | None = None) -> tuple[Decimal | None, Decimal, bool]:
         """Return ``(limit, today_total, is_exceeded)``.
 
         If no limit is configured, ``is_exceeded`` is always ``False``.
@@ -83,7 +101,7 @@ class SpendLimitService:
         import asyncio
 
         limit_task = asyncio.ensure_future(self.get_daily_limit())
-        total_task = asyncio.ensure_future(self.get_today_total())
+        total_task = asyncio.ensure_future(self.get_today_total(now))
 
         limit, today_total = await asyncio.gather(limit_task, total_task)
 
@@ -104,25 +122,30 @@ class SpendLimitService:
 
         Cheap on the common path: once today's card is out, each call is one
         ``bot_config`` read and no ``response_log`` aggregate.
+
+        The claim is the last read-or-write before sending: every read the card
+        needs comes first, so a failed read leaves the day unclaimed, to be
+        tried again on the next reply, instead of claimed with nothing sent.
         """
         if bot is None:
             return 0
-        today = (now or datetime.now(UTC)).date().isoformat()
+        moment = _utc(now)
+        today = moment.date().isoformat()
         try:
             async with _CARD_LOCK:
                 if await self._bot_config.get(SENT_DAY_KEY) == today:
                     return 0
-                limit, total, exceeded = await self.check()
+                limit, total, exceeded = await self.check(moment)
                 if not exceeded or limit is None:
                     return 0
                 admin_ids = parse_admin_ids(await self._bot_config.get("admin_ids"))
                 if not admin_ids:
                     logger.warning("spend_card_no_admins", total=str(total), limit=str(limit))
                     return 0
+                raw_settings = await self._bot_config.get("admin_settings")
                 await self._bot_config.set(
                     SENT_DAY_KEY, today, description="UTC day the spend card was last sent"
                 )
-                raw_settings = await self._bot_config.get("admin_settings")
         except Exception:
             logger.warning("spend_card_check_failed", exc_info=True)
             return 0

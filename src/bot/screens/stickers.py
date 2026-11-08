@@ -45,7 +45,7 @@ CONTEXTS_SHOWN: Final = 5
 DEFAULT_EMOJI: Final = "🖼"
 
 ErrorReason = Literal["download", "vision", "content_filter", "empty", "internal"]
-ReplyKind = Literal["ok", "note_saved", "content_filter", "failed"]
+ReplyKind = Literal["ok", "note_saved", "content_filter", "failed", "unknown"]
 
 # ── Copy ────────────────────────────────────────────────────────────────
 
@@ -201,6 +201,14 @@ _REPLY_BODY: Final[Mapping[str, Tr]] = {
         "Не получилось обновить описание. Попробуйте ещё раз.",
         "Could not update the description. Try again.",
     ),
+    # The reply's target is neither a remembered card nor one that names its
+    # sticker: answered, so the correction is not dropped in silence.
+    "unknown": Tr(
+        "Не получилось понять, о каком стикере речь. "
+        "Ответьте на карточку стикера или пришлите сам стикер.",
+        "Could not tell which sticker this is about. "
+        "Reply to the sticker's card or send the sticker itself.",
+    ),
 }
 
 NOTICE_SCORE = Tr("Откровенность {v}", "Explicitness {v}")
@@ -208,6 +216,7 @@ NOTICE_CLEARED = Tr("Разбор очищен", "Analysis cleared")
 NOTICE_ANALYZED = Tr("Разбор обновлён", "Analysis updated")
 NOTICE_LEARNED = Tr("Стикер разобран", "Sticker analysed")
 NOTICE_RESCORED = Tr("Оценка пересчитана", "Score recalculated")
+_RESCORE_NO_SCORE = Tr("Модель не вернула оценку.", "The model returned no score.")
 
 # "Object gone" is not a stale button: the parent screen says what happened,
 # without the ✓ a notice carries (nothing was done).
@@ -525,8 +534,33 @@ def build_stk_set(lang: Lang, data: PackPage, *, notice: str | None = None) -> S
     return Screen(id="stk.set", text=f"{head}\n\n{body}", rows=tuple(rows), notice=notice)
 
 
-def build_stk_card(lang: Lang, facts: StickerFacts, *, notice: str | None = None) -> Screen:
-    """A sticker in the catalogue: title, full description, facts, actions, back to its pack."""
+def rescore_without_score(lang: Lang, *, kept: float | None, lost: bool) -> str:
+    """The card's top line after a re-score whose analysis gave no usable score.
+
+    No ✓: the score was not recalculated. ``kept``: the score the re-score had
+    dropped was put back (and is this value); ``lost``: putting it back failed
+    too, so the sticker is unscored and the bot will not send it.
+    """
+    line = _RESCORE_NO_SCORE(lang)
+    if lost:
+        line += f" {_ERROR_SCORE_LOST(lang)}"
+    elif kept is not None:
+        line += f" {_ERROR_SCORE_KEPT(lang).format(v=_score(kept))}"
+    return f"<i>{line}</i>"
+
+
+def build_stk_card(
+    lang: Lang,
+    facts: StickerFacts,
+    *,
+    notice: str | None = None,
+    notice_raw: str | None = None,
+) -> Screen:
+    """A sticker in the catalogue: title, full description, facts, actions, back to its pack.
+
+    ``notice_raw``: a trusted, already-formatted top line instead of the ✓ notice
+    (`rescore_without_score`).
+    """
     title = _title_of(facts, lang)
     lines = [f"{fence(_emoji(facts))} <b>{html.escape(title)}</b>"]
     if facts.failed:
@@ -540,7 +574,13 @@ def build_stk_card(lang: Lang, facts: StickerFacts, *, notice: str | None = None
     lines += ["", *_facts_lines(facts, lang, pack_line=False, used=True), "", _CARD_HINT(lang)]
     rows = _card_rows(facts, lang)
     rows.append((_card_back(facts, lang),))
-    return Screen(id="stk.card", text="\n".join(lines), rows=tuple(rows), notice=notice)
+    return Screen(
+        id="stk.card",
+        text="\n".join(lines),
+        rows=tuple(rows),
+        notice=notice,
+        notice_raw=notice_raw,
+    )
 
 
 def build_card_sticker(lang: Lang, facts: StickerFacts) -> Screen:
