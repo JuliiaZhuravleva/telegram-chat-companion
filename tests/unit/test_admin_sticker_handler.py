@@ -270,11 +270,19 @@ CARD_BUTTONS: Buttons = [
 # ---------------------------------------------------------------------------
 
 
-def _reply_target(text: str | None = None, caption: str | None = None) -> MagicMock:
+def _reply_target(
+    text: str | None = None,
+    caption: str | None = None,
+    *,
+    markup: InlineKeyboardMarkup | None = None,
+    sticker: object | None = None,
+) -> MagicMock:
     msg = MagicMock()
     msg.text = text
     msg.caption = caption
     msg.message_id = 100
+    msg.reply_markup = markup
+    msg.sticker = sticker
     return msg
 
 
@@ -335,13 +343,18 @@ def _admin_reply(
     text: str = "better description",
     reply_text: str | None = f"🆔 {FUID}",
     reply_caption: str | None = None,
+    *,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    reply_sticker: object | None = None,
 ) -> MagicMock:
     msg = MagicMock()
     msg.text = text
     msg.chat.id = ADMIN
     msg.from_user.id = ADMIN
     msg.reply = AsyncMock()
-    msg.reply_to_message = _reply_target(text=reply_text, caption=reply_caption)
+    msg.reply_to_message = _reply_target(
+        text=reply_text, caption=reply_caption, markup=reply_markup, sticker=reply_sticker
+    )
     return msg
 
 
@@ -395,11 +408,30 @@ class TestHandleAdminStickerReply:
         await _run_reply(msg, _sticker_repo(), svc)
         svc.merge_admin_description.assert_awaited_once_with("CaptionID456", "better description")
 
+    @staticmethod
+    def _kb(data: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="x", callback_data=data)]]
+        )
+
     @pytest.mark.asyncio()
-    async def test_a_reply_to_anything_else_says_the_sticker_is_unclear(self) -> None:
+    @pytest.mark.parametrize(
+        ("markup", "sticker"),
+        [
+            pytest.param("adm_stk_packs:ru", None, id="a sticker screen without the sticker's id"),
+            pytest.param(None, object(), id="the sticker itself"),
+        ],
+    )
+    async def test_an_unresolved_reply_about_a_sticker_says_which_is_unclear(
+        self, markup: str | None, sticker: object | None
+    ) -> None:
         """The update is consumed here, so silence would be the only answer it ever gets."""
         svc = _service()
-        msg = _admin_reply(reply_text="No ID here")
+        msg = _admin_reply(
+            reply_text="No ID here",
+            reply_markup=self._kb(markup) if markup else None,
+            reply_sticker=sticker,
+        )
         await _run_reply(msg, _sticker_repo(), svc)
         svc.merge_admin_description.assert_not_awaited()
         msg.reply.assert_awaited_once()
@@ -410,6 +442,29 @@ class TestHandleAdminStickerReply:
             "Ответьте на карточку стикера или пришлите сам стикер."
         )
         assert msg.reply.call_args.kwargs == {"parse_mode": "HTML"}
+
+    @pytest.mark.asyncio()
+    @pytest.mark.parametrize(
+        "markup",
+        [
+            pytest.param("adm_costs:ru", id="the spend card"),
+            pytest.param(None, id="the bot's own answer"),
+        ],
+    )
+    async def test_a_reply_to_any_other_screen_gets_no_sticker_message(
+        self, markup: str | None
+    ) -> None:
+        """A reply to the spend card is not a description correction: saying one failed is false."""
+        svc = _service()
+        msg = _admin_reply(
+            reply_text="No ID here", reply_markup=self._kb(markup) if markup else None
+        )
+        with capture_logs() as logs:
+            await _run_reply(msg, _sticker_repo(), svc)
+        svc.merge_admin_description.assert_not_awaited()
+        msg.reply.assert_not_awaited()
+        (seen,) = [e for e in logs if e["event"] == "sticker reply matched no card"]
+        assert seen["about_a_sticker"] is False
 
     @pytest.mark.asyncio()
     async def test_blank_text_is_ignored(self) -> None:
@@ -2394,15 +2449,15 @@ class TestReplyToACardWithoutARecord:
 
     @pytest.mark.asyncio()
     @pytest.mark.parametrize("lang", ["ru", "en"])
-    async def test_a_reply_that_names_no_sticker_is_answered(self, lang: str) -> None:
-        other = _wire(
-            text="💰 Дневной лимит расходов превышен",
+    async def test_a_sticker_screen_that_names_no_sticker_is_answered(self, lang: str) -> None:
+        pack_screen = _wire(
+            text="🗂 Набор",
             reply_markup={
-                "inline_keyboard": [[{"text": "💰", "callback_data": "adm_costs:ru:24h"}]]
+                "inline_keyboard": [[{"text": "⬅️", "callback_data": f"adm_stk_pk:ru:{KEY}:0"}]]
             },
         )
         svc = _service()
-        msg = _dm_text_reply(other)
+        msg = _dm_text_reply(pack_screen)
 
         with capture_logs() as logs:
             result = await _route(
@@ -2427,6 +2482,28 @@ class TestReplyToACardWithoutARecord:
         assert [e["log_level"] for e in logs if e["event"] == "sticker reply matched no card"] == [
             "info"
         ]
+
+    @pytest.mark.asyncio()
+    async def test_a_reply_to_the_spend_card_is_not_called_a_sticker_correction(self) -> None:
+        """The spend card is not about a sticker; «description not updated» would be false."""
+        spend_card = _wire(
+            text="💰 Дневной лимит расходов превышен",
+            reply_markup={
+                "inline_keyboard": [[{"text": "💰", "callback_data": "adm_costs:ru:24h"}]]
+            },
+        )
+        svc = _service()
+        msg = _dm_text_reply(spend_card)
+
+        with capture_logs() as logs:
+            await _route(
+                "message", msg, bot=_bot(), sticker_repo=_sticker_repo(), sticker_service=svc
+            )
+
+        svc.merge_admin_description.assert_not_awaited()
+        msg.reply.assert_not_awaited()
+        (seen,) = [e for e in logs if e["event"] == "sticker reply matched no card"]
+        assert seen["about_a_sticker"] is False
 
     def test_buttons_of_another_screen_name_no_sticker(self) -> None:
         markup = InlineKeyboardMarkup(

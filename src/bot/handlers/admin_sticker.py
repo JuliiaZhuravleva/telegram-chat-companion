@@ -127,6 +127,25 @@ def _fuid_from_buttons(markup: object) -> str | None:
     return None
 
 
+def _is_about_a_sticker(reply_msg: Message) -> bool:
+    """Whether a replied-to message is a sticker or one of the sticker screens.
+
+    Only then is «which sticker?» the right answer to a reply nobody resolved:
+    a reply to the spend card, a KB screen or the bot's own AI answer is not a
+    description correction, and telling the admin one failed would be false.
+    """
+    if reply_msg.sticker is not None:
+        return True
+    markup = reply_msg.reply_markup
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return False
+    return any(
+        (button.callback_data or "").startswith("adm_stk")
+        for row in markup.inline_keyboard
+        for button in row
+    )
+
+
 def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
     """The sticker a replied-to card is about, read off the message itself.
 
@@ -392,14 +411,18 @@ async def handle_admin_sticker_reply(
         file_unique_id = _extract_file_unique_id_from_reply(message.reply_to_message)
 
     if not file_unique_id:
-        # Silence here would read as "the bot ignored my correction": this
-        # handler has already consumed the update (aiogram), so nobody else
-        # will answer it either.
+        about_a_sticker = _is_about_a_sticker(message.reply_to_message)
         logger.info(
             "sticker reply matched no card",
             reply_to=message.reply_to_message.message_id,
             admin_id=message.from_user.id if message.from_user else None,
+            about_a_sticker=about_a_sticker,
         )
+        if not about_a_sticker:
+            return
+        # Silence here would read as "the bot ignored my correction": this
+        # handler has already consumed the update (aiogram), so nobody else
+        # will answer it either.
         lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
         await message.reply(render_text(build_stk_reply(lang, "unknown")), parse_mode="HTML")
         return

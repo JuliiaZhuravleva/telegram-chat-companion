@@ -687,10 +687,12 @@ the merge failed and the note was saved (re-run the analysis to use it), the mod
 because of the content (the score can be set by hand), or something else failed (try again).
 
 Once a card has turned into a list, a reply to that message is no longer a correction.
-A card whose record is lost is still recognised by its own buttons. A text reply to
-*anything else* in the admin DM gets "⚠️ Описание не обновлено" with "Не получилось понять,
-о каком стикере речь…": the reply is consumed by this handler, so silence would be the only
-answer it ever got.
+A card whose record is lost is still recognised by its own buttons. A text reply that names
+no sticker gets "⚠️ Описание не обновлено" with "Не получилось понять, о каком стикере речь…"
+only when it answers a sticker or a sticker screen (any `adm_stk` button): the reply is consumed
+by this handler, so silence would be the only answer it ever got. A reply to any other message
+(the spend card, a KB screen, the bot's own answer) is logged and left unanswered, because
+telling the admin a sticker description was not updated would be false there.
 
 ### A5.5 The new-sticker notification
 
