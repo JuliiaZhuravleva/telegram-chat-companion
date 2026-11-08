@@ -21,7 +21,7 @@ bot:
 # AI Provider Configuration (January 2026)
 #
 # COST POLICY: Always use the cheapest model that covers the task.
-# Expensive models (gpt-5.2, gemini-3-pro, claude-opus, grok-4, o4-mini)
+# Expensive models (gpt-5.2, gemini-3-pro, claude-opus, grok-4, gpt-5.4-mini)
 # require explicit approval — never set them as defaults.
 ai:
   # Default provider for text generation
