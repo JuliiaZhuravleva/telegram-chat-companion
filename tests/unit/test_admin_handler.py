@@ -908,13 +908,32 @@ class TestTurnOff:
         data = {"dishka_container": _Container({ChatConfigService: service})}
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo, _bot_config(), **data)
+            await handle_wl_remove(
+                cb, chat_settings_repo, _rejected_before(False), _bot_config(), **data
+            )
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "enabled", False)
         service.invalidate.assert_called_once_with(CHAT_ID)
         chats.assert_awaited_once_with(
-            cb, "ru", 2, notice="Бот отключён в чате «Test Chat»", undo=CHAT_ID, data=data
+            cb,
+            "ru",
+            2,
+            notice="Бот отключён в чате «Test Chat»",
+            undo=CHAT_ID,
+            undo_rejected=False,
+            data=data,
         )
+
+    @pytest.mark.asyncio
+    async def test_a_rejection_on_record_before_the_turn_off_marks_the_undo(self):
+        """The undo then knows that rejection is not one made after the tap."""
+        cb = _make_callback(f"adm_wl_rm:ru:{CHAT_ID}:0")
+
+        with patch.object(A, "show_chats", new=AsyncMock()) as chats:
+            await handle_wl_remove(cb, _settings(_ON), _rejected_before(True), _bot_config())
+
+        assert chats.call_args.kwargs["undo"] == CHAT_ID
+        assert chats.call_args.kwargs["undo_rejected"] is True
 
     @pytest.mark.asyncio
     async def test_a_chat_already_off_is_not_turned_off_again_and_offers_no_undo(self):
@@ -926,7 +945,9 @@ class TestTurnOff:
         data = {"dishka_container": _Container({ChatConfigService: service})}
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo, _bot_config(), **data)
+            await handle_wl_remove(
+                cb, chat_settings_repo, _rejected_before(False), _bot_config(), **data
+            )
 
         chat_settings_repo.set_field.assert_not_awaited()
         service.invalidate.assert_not_called()
@@ -944,7 +965,9 @@ class TestTurnOff:
         row = {"chat_title": "Админ", "chat_type": "private", "enabled": True}
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, _settings(row), _bot_config(USER_ID))
+            await handle_wl_remove(
+                cb, _settings(row), _rejected_before(False), _bot_config(USER_ID)
+            )
 
         assert chats.call_args.kwargs["notice"] == (
             "Чат «Админ» убран из «🗂 Чаты», бот отвечает в нём, как раньше"
@@ -958,7 +981,7 @@ class TestTurnOff:
         chat_settings_repo = _settings(None, written=False)
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
+            await handle_wl_remove(cb, chat_settings_repo, _rejected_before(False), _bot_config())
 
         chat_settings_repo.set_field.assert_not_awaited()
         assert chats.call_args.kwargs.get("undo") is None
@@ -972,7 +995,7 @@ class TestTurnOff:
         chat_settings_repo = _settings(_ON, written=False)
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
+            await handle_wl_remove(cb, chat_settings_repo, _rejected_before(False), _bot_config())
 
         chat_settings_repo.set_field.assert_awaited_once()
         assert chats.call_args.kwargs.get("undo") is None
@@ -985,7 +1008,7 @@ class TestTurnOff:
         chat_settings_repo = _settings({"chat_type": "supergroup", "enabled": True})
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
+            await handle_wl_remove(cb, chat_settings_repo, _rejected_before(False), _bot_config())
 
         chat_settings_repo.set_field.assert_awaited_once()
         assert chats.call_args.kwargs["notice"] == f"The bot is off in «{CHAT_ID}»"
@@ -996,10 +1019,18 @@ class TestTurnOff:
         chat_settings_repo = AsyncMock()
 
         with patch.object(A, "show_stale", new=AsyncMock()) as stale:
-            await handle_wl_remove(cb, chat_settings_repo, _bot_config())
+            await handle_wl_remove(cb, chat_settings_repo, _rejected_before(False), _bot_config())
 
         stale.assert_awaited_once()
         chat_settings_repo.set_field.assert_not_awaited()
+
+
+def _bot_in_the_chat() -> MagicMock:
+    """A bot that Telegram says is still a member of every chat it is asked about."""
+    bot = MagicMock()
+    bot.id = 4242
+    bot.get_chat_member = AsyncMock(return_value=SimpleNamespace(status="member"))
+    return bot
 
 
 class TestTurnBackOn:
@@ -1008,6 +1039,7 @@ class TestTurnBackOn:
     @pytest.mark.asyncio
     async def test_turns_on_and_shows_the_list_without_an_undo(self):
         cb = _make_callback(f"adm_wl_on:ru:{CHAT_ID}:1")
+        cb.bot = _bot_in_the_chat()
         chat_settings_repo = AsyncMock()
         chat_settings_repo.get = AsyncMock(
             return_value={"chat_title": "Test Chat", "enabled": False}
@@ -1016,7 +1048,7 @@ class TestTurnBackOn:
         data = {"dishka_container": _Container({ChatConfigService: service})}
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_on(cb, chat_settings_repo, **data)
+            await handle_wl_on(cb, chat_settings_repo, _rejected_before(False), **data)
 
         chat_settings_repo.set_field.assert_awaited_once_with(CHAT_ID, "enabled", True)
         service.invalidate.assert_called_once_with(CHAT_ID)
@@ -1031,7 +1063,7 @@ class TestTurnBackOn:
         chat_settings_repo.get = AsyncMock(return_value={"chat_title": None, "enabled": True})
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_on(cb, chat_settings_repo)
+            await handle_wl_on(cb, chat_settings_repo, _rejected_before(False))
 
         chat_settings_repo.set_field.assert_not_awaited()
         assert chats.call_args.kwargs["notice"] == f"The bot is back on in «{CHAT_ID}»"
@@ -1044,7 +1076,7 @@ class TestTurnBackOn:
         chat_settings_repo.get = AsyncMock(return_value=None)
 
         with patch.object(A, "show_chats", new=AsyncMock()) as chats:
-            await handle_wl_on(cb, chat_settings_repo)
+            await handle_wl_on(cb, chat_settings_repo, _rejected_before(False))
 
         chat_settings_repo.set_field.assert_not_awaited()
         assert chats.call_args.kwargs["notice_raw"].startswith("<i>Этого чата нет в настройках")
@@ -1058,7 +1090,7 @@ class TestTurnBackOn:
         chat_settings_repo = AsyncMock()
 
         with patch.object(A, "show_stale", new=AsyncMock()) as stale:
-            await handle_wl_on(cb, chat_settings_repo)
+            await handle_wl_on(cb, chat_settings_repo, _rejected_before(False))
 
         stale.assert_awaited_once()
         chat_settings_repo.get.assert_not_awaited()

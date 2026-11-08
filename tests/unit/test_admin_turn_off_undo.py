@@ -10,19 +10,40 @@ Ways back covered here: «↩️ Вернуть» on the list right after «🔌
 the chat's screen asks), and «🙏 Запросы · N» on the hub (the requests in one tap).
 Also what must NOT offer a way back: a chat that was off before the tap, whose
 «↩️ Вернуть» would turn it on, and ▶ from the undo render, which must not skip
-a chat (`SHORT_PAGES`).
+a chat (`SHORT_PAGES`). And what «↩️ Вернуть» must not do when it is tapped
+late: turn on a chat rejected since the turn-off (`REJECTED_BEFORE` keeps an
+older rejection from counting), or one the bot was removed from since, which
+would let the next re-add skip its access request.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNetworkError,
+)
+from aiogram.methods import GetChatMember
+from aiogram.types import (
+    Chat,
+    ChatMemberBanned,
+    ChatMemberLeft,
+    ChatMemberMember,
+    ChatMemberRestricted,
+    ChatMemberUpdated,
+    User,
+)
+from structlog.testing import capture_logs
 
 from src.bot.handlers import admin as A
 from src.bot.screens import cards
-from src.bot.screens.chat import SHORT_PAGES, build_chats, chats_per_page
+from src.bot.screens.chat import REJECTED_BEFORE, SHORT_PAGES, build_chats, chats_per_page
 from src.bot.screens.hub import build_hub
 from src.bot.screens.lint import check_screen
 from src.bot.screens.routes import ROUTES, cb
@@ -37,6 +58,8 @@ from tests.unit.screen_routing import ADMIN_ID, FakeState, admin_tap, deliver, f
 CHAT_ID = fake.CHAT_ID
 OTHERS = (fake.CHAT_ID_SHORT, fake.CHAT_ID_OTHER, fake.CHAT_ID_NEW, -1001234567890)
 TITLE = fake.CHAT_TITLE
+BOT_ID = 4242  # invented
+BOT_USER = User(id=BOT_ID, is_bot=True, first_name="Bot")
 
 
 class _Settings:
@@ -57,6 +80,10 @@ class _Settings:
         self.rows[chat_id][field] = value
         return True
 
+    async def ensure_exists(self, chat_id: int, title: Any, chat_type: Any) -> dict[str, Any]:
+        """What the bot being added again reads (`chat_events`): the row as it is."""
+        return dict(self.rows[chat_id])
+
 
 class _BotConfig:
     """`BotConfigRepository.get` for ``admin_ids``: the tapping admin is the one admin."""
@@ -73,13 +100,24 @@ class _Admin:
         self._settings = settings
         self._counts = {"pending": pending, "rejected": rejected}
         self.rejected_before = False
+        self.attempts: dict[int, dict[str, Any]] = {}
         self.fetched: list[tuple[int, int]] = []
 
     async def count_attempts(self, status: str) -> int:
         return self._counts[status]
 
     async def has_rejected_attempt(self, chat_id: int) -> bool:
-        return self.rejected_before
+        return self.rejected_before or any(
+            a["chat_id"] == chat_id and a["status"] == "rejected" for a in self.attempts.values()
+        )
+
+    async def get_attempt(self, attempt_id: int) -> dict[str, Any] | None:
+        attempt = self.attempts.get(attempt_id)
+        return dict(attempt) if attempt is not None else None
+
+    async def update_attempt_status(self, attempt_id: int, status: str) -> dict[str, Any]:
+        self.attempts[attempt_id]["status"] = status
+        return dict(self.attempts[attempt_id])
 
     async def get_enabled_chats_page_by_activity(
         self, page: int, per_page: int = 10
@@ -147,9 +185,30 @@ def _world(*, enabled: bool = True) -> tuple[_Settings, _Admin, MagicMock, dict[
     return settings, admin, service, data
 
 
-async def _tap(payload: str, data: dict[str, Any]) -> MagicMock:
+class _Bot:
+    """`Bot.get_chat_member`, the one Bot API call the undo makes.
+
+    ``answer`` is what Telegram says about the bot in any chat it is asked
+    about: a `ChatMember`, or an exception it raises. Every question is kept.
+    """
+
+    id = BOT_ID
+
+    def __init__(self, answer: Any = None) -> None:
+        self.answer = ChatMemberMember(user=BOT_USER) if answer is None else answer
+        self.asked: list[tuple[int, int]] = []
+
+    async def get_chat_member(self, chat_id: int, user_id: int) -> Any:
+        self.asked.append((chat_id, user_id))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+async def _tap(payload: str, data: dict[str, Any], *, bot: _Bot | None = None) -> MagicMock:
+    """Deliver a tap; Telegram says the bot is in the chat unless ``bot`` says otherwise."""
     tap = admin_tap(payload)
-    tap.bot = None
+    tap.bot = bot if bot is not None else _Bot()
     tap.message.edit_text = AsyncMock()
     await deliver("callback_query", tap, FakeState(), call=True, **data)
     return tap
@@ -269,10 +328,279 @@ def test_the_undo_prefix_is_its_own() -> None:
 
 
 def test_the_longest_undo_payload_fits_telegram() -> None:
-    payload = cb("adm_wl_on:", "ru", -1009999999999, 99)
+    payload = cb("adm_wl_on:", "ru", -1009999999999, 99, REJECTED_BEFORE)
 
-    assert payload == "adm_wl_on:ru:-1009999999999:99"
+    assert payload == "adm_wl_on:ru:-1009999999999:99:r"
     assert len(payload.encode()) <= 64
+
+
+# ── «↩️ Вернуть» tapped late ───────────────────────────────────────────────
+#
+# The undo row stays on its message while the admin works elsewhere: a card for
+# the same chat may arrive and be rejected, or the chat may remove the bot. The
+# old button must then write nothing and say why.
+
+
+def _refusals(logs: list[dict[str, Any]]) -> list[tuple[Any, Any]]:
+    return [(e["chat_id"], e["reason"]) for e in logs if e["event"] == "undo_refused"]
+
+
+def _request_while_off(admin: _Admin) -> None:
+    """Someone wrote in the chat after the turn-off: a request is waiting."""
+    admin.attempts[fake.ATTEMPT_ID] = {
+        "id": fake.ATTEMPT_ID,
+        "chat_id": CHAT_ID,
+        "chat_title": TITLE,
+        "chat_type": "supergroup",
+        "status": "pending",
+        "user_id": fake.USER_ID,
+        "user_first_name": "Аня",
+        "user_username": None,
+        "message_text": "привет",
+        "created_at": None,
+    }
+
+
+async def test_undo_after_the_chat_was_rejected_writes_nothing() -> None:
+    """Off, then its request rejected on the card, then the old «↩️ Вернуть»."""
+    settings, admin, service, data = _world()
+    off = await _tap(cb("adm_wl_rm:", "ru", CHAT_ID, 0), data)
+    undo = _payload(off, "↩️ Вернуть")
+    _request_while_off(admin)
+    card = admin_tap(cb("adm_reject:", "ru", fake.ATTEMPT_ID))
+    card.bot, card.message.text, card.message.date = None, "card", datetime.now(UTC)
+    card.message.edit_text = AsyncMock()
+    reject = card.data
+    assert first_match(reject) == "access_card.handle_reject_notification"
+    await deliver("callback_query", card, FakeState(), call=True, **data)
+    assert admin.attempts[fake.ATTEMPT_ID]["status"] == "rejected", "the real card handler ran"
+    writes, bot = len(settings.writes), _Bot()
+    service.reset_mock()
+
+    with capture_logs() as logs:
+        on = await _tap(undo, data, bot=bot)
+
+    assert settings.writes[writes:] == []
+    assert settings.rows[CHAT_ID]["enabled"] is False
+    service.invalidate.assert_not_called()
+    assert _text(on).splitlines()[0] == (
+        f"<i>Чат «{TITLE}» отклонили после отключения, ничего не изменилось. Чтобы вернуть "
+        "бота, перенесите чат из «🚫 Отклонённые» в запросы и одобрите.</i>"
+    )
+    assert "↩️ Вернуть" not in sum(_labels(on), [])
+    assert _refusals(logs) == [(CHAT_ID, "rejected_since")]
+    assert bot.asked == [], "refused before Telegram is asked anything"
+
+
+async def test_a_rejection_older_than_the_turn_off_does_not_block_the_undo() -> None:
+    """A chat approved after an earlier rejection: the rule must not refuse it."""
+    settings, admin, _, data = _world()
+    admin.rejected_before = True
+
+    off = await _tap(cb("adm_wl_rm:", "en", CHAT_ID, 0), data)
+    undo = _payload(off, "↩️ Undo")
+    assert undo == f"adm_wl_on:en:{CHAT_ID}:0:{REJECTED_BEFORE}"
+    assert first_match(undo) == "admin.handle_wl_on"
+    on = await _tap(undo, data)
+
+    assert settings.rows[CHAT_ID]["enabled"] is True
+    assert _text(on).splitlines()[0] == f"<i>✓ The bot is back on in «{TITLE}»</i>"
+
+
+async def test_the_same_old_rejection_without_the_mark_is_refused() -> None:
+    """Control for the one above: the mark is what lets it through."""
+    settings, admin, _, data = _world(enabled=False)
+    admin.rejected_before = True
+
+    on = await _tap(cb("adm_wl_on:", "en", CHAT_ID, 0), data)
+
+    assert settings.writes == []
+    assert _text(on).splitlines()[0].startswith(f"<i>«{TITLE}» was rejected after the bot")
+
+
+def _bot_update(old: Any, new: Any) -> ChatMemberUpdated:
+    return ChatMemberUpdated(
+        chat=Chat(id=CHAT_ID, type="supergroup", title=TITLE),
+        from_user=User(id=fake.USER_ID, is_bot=False, first_name="Аня"),
+        date=datetime(2026, 11, 8, 12, 0, tzinfo=UTC),
+        old_chat_member=old,
+        new_chat_member=new,
+    )
+
+
+_KICKED = ChatMemberBanned(user=BOT_USER, until_date=datetime(1970, 1, 1, tzinfo=UTC))
+
+
+async def test_undo_after_the_bot_was_kicked_writes_nothing_and_the_re_add_asks() -> None:
+    """Off, then kicked, then the old «↩️ Вернуть», then added back by anyone.
+
+    The kick writes only what the turn-off wrote already, so Telegram is asked.
+    Had the undo turned the chat on, the re-add would have filed no request.
+    """
+    settings, _, _, data = _world()
+    off = await _tap(cb("adm_wl_rm:", "ru", CHAT_ID, 0), data)
+    undo = _payload(off, "↩️ Вернуть")
+    access = MagicMock()
+    access.submit = AsyncMock()
+    events = {
+        "chat_settings_repo": settings,
+        "chat_config_service": MagicMock(spec=ChatConfigService),
+        "access_requests": access,
+    }
+    kick = _bot_update(ChatMemberMember(user=BOT_USER), _KICKED)
+    assert await deliver("my_chat_member", kick, FakeState()) == (
+        "chat_events.handle_my_chat_member"
+    )
+    await deliver("my_chat_member", kick, FakeState(), call=True, **events)
+    assert settings.writes[-1] == (CHAT_ID, "enabled", False), "all a kick records"
+    writes, bot = len(settings.writes), _Bot(_KICKED)
+
+    with capture_logs() as logs:
+        on = await _tap(undo, data, bot=bot)
+
+    assert settings.writes[writes:] == []
+    assert settings.rows[CHAT_ID]["enabled"] is False
+    assert bot.asked == [(CHAT_ID, BOT_ID)]
+    assert _text(on).splitlines()[0] == (
+        f"<i>Бота уже нет в чате «{TITLE}», ничего не изменилось. Чтобы вернуть, снова "
+        "добавьте его в чат.</i>"
+    )
+    assert "↩️ Вернуть" not in sum(_labels(on), [])
+    assert _refusals(logs) == [(CHAT_ID, "bot_gone")]
+
+    readd = _bot_update(_KICKED, ChatMemberMember(user=BOT_USER))
+    await deliver("my_chat_member", readd, FakeState(), call=True, **events)
+    access.submit.assert_awaited_once()
+
+
+def _restricted(*, is_member: bool) -> ChatMemberRestricted:
+    rights = {
+        name: False
+        for name, field in ChatMemberRestricted.model_fields.items()
+        if field.is_required() and name.startswith("can_")
+    }
+    return ChatMemberRestricted(
+        user=BOT_USER,
+        is_member=is_member,
+        until_date=datetime(1970, 1, 1, tzinfo=UTC),
+        **rights,
+    )
+
+
+_ASK = GetChatMember(chat_id=CHAT_ID, user_id=BOT_ID)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        ChatMemberLeft(user=BOT_USER),
+        _KICKED,
+        _restricted(is_member=False),
+        TelegramForbiddenError(_ASK, "Forbidden: bot was kicked from the supergroup chat"),
+        TelegramBadRequest(_ASK, "Bad Request: chat not found"),
+        # A group upgraded while off: its old id answers with the new one. Before, this
+        # fell to "Telegram did not answer" and the undo offered «try again» for ever.
+        TelegramMigrateToChat(
+            _ASK, "Bad Request: group chat was upgraded to a supergroup chat", -1009999999998
+        ),
+    ],
+    ids=["left", "kicked", "restricted-out", "forbidden", "bad-request", "migrated"],
+)
+async def test_every_answer_that_the_bot_is_gone_keeps_the_chat_off(answer: Any) -> None:
+    settings, _, _, data = _world(enabled=False)
+    settings.rows[CHAT_ID]["chat_title"] = "<b>x</b> & y"
+
+    on = await _tap(cb("adm_wl_on:", "en", CHAT_ID, 0), data, bot=_Bot(answer))
+
+    assert settings.writes == []
+    assert _text(on).splitlines()[0] == (
+        "<i>The bot is no longer in «&lt;b&gt;x&lt;/b&gt; &amp; y», nothing changed. To bring "
+        "it back, add it to the chat again.</i>"
+    )
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [ChatMemberMember(user=BOT_USER), _restricted(is_member=True)],
+    ids=["member", "restricted-in"],
+)
+async def test_every_answer_that_the_bot_is_there_turns_it_on(answer: Any) -> None:
+    """The rule must not refuse a chat the bot is still in, restricted or not."""
+    settings, _, _, data = _world(enabled=False)
+
+    await _tap(cb("adm_wl_on:", "ru", CHAT_ID, 0), data, bot=_Bot(answer))
+
+    assert settings.writes == [(CHAT_ID, "enabled", True)]
+
+
+@pytest.mark.parametrize("marked", [False, True])
+async def test_undo_when_telegram_does_not_answer_writes_nothing_and_stays(marked: bool) -> None:
+    """Fail closed: nothing is known, so nothing is written, and the undo is offered again."""
+    settings, admin, _, data = _world(enabled=False)
+    admin.rejected_before = marked
+    undo = cb("adm_wl_on:", "ru", CHAT_ID, 1, *([REJECTED_BEFORE] if marked else []))
+    down = _Bot(TelegramNetworkError(_ASK, "Request timeout error"))
+
+    with capture_logs() as logs:
+        on = await _tap(undo, data, bot=down)
+
+    assert settings.writes == []
+    assert _text(on).splitlines()[0] == (
+        f"<i>Не получилось проверить, что бот ещё в чате «{TITLE}», ничего не изменилось. "
+        "Попробуйте «↩️ Вернуть» ещё раз.</i>"
+    )
+    assert _payload(on, "↩️ Вернуть") == undo, "the same button, mark and page included"
+    assert _refusals(logs) == [(CHAT_ID, "membership_unknown")]
+    await _tap(_payload(on, "↩️ Вернуть"), data)
+    assert settings.writes == [(CHAT_ID, "enabled", True)], "the retry works once Telegram answers"
+
+
+async def test_the_normal_undo_asks_telegram_with_the_bots_own_id() -> None:
+    settings, _, _, data = _world()
+    off = await _tap(cb("adm_wl_rm:", "ru", CHAT_ID, 0), data)
+    bot = _Bot()
+
+    await _tap(_payload(off, "↩️ Вернуть"), data, bot=bot)
+
+    assert bot.asked == [(CHAT_ID, BOT_ID)]
+    assert settings.rows[CHAT_ID]["enabled"] is True
+
+
+async def test_a_private_chat_is_not_asked_about() -> None:
+    """A DM has no membership to lose; the answer would refuse it, so asking would show."""
+    settings, _, _, data = _world()
+    _admin_dm(settings)
+    off = await _tap(cb("adm_wl_rm:", "ru", ADMIN_ID, 0), data)
+    bot = _Bot(_KICKED)
+
+    await _tap(_payload(off, "↩️ Вернуть"), data, bot=bot)
+
+    assert bot.asked == []
+    assert settings.rows[ADMIN_ID]["enabled"] is True
+
+
+class _RowGoneBeforeTheWrite(_Settings):
+    """The row is read, then deleted before the write lands (``set_field`` → False)."""
+
+    async def get(self, chat_id: int) -> dict[str, Any] | None:
+        row = await super().get(chat_id)
+        self.rows.pop(chat_id, None)
+        return row
+
+
+async def test_undo_whose_write_matched_no_row_does_not_say_back_on() -> None:
+    settings, _, service, data = _world(enabled=False)
+    gone = _RowGoneBeforeTheWrite(settings.rows)
+    data["chat_settings_repo"] = gone
+
+    on = await _tap(cb("adm_wl_on:", "ru", CHAT_ID, 0), data)
+
+    assert gone.writes == [(CHAT_ID, "enabled", True)], "the write was tried"
+    service.invalidate.assert_not_called()
+    assert _text(on).splitlines()[0] == (
+        "<i>Этого чата нет в настройках, ничего не изменилось. Вот подключённые чаты.</i>"
+    )
+    assert "снова работает" not in _text(on)
 
 
 # ── a chat that was off before the tap ─────────────────────────────────────
