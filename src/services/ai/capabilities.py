@@ -130,7 +130,8 @@ EXPENSIVE_MODELS = [
     # OpenAI
     "gpt-5.2",
     "gpt-5-mini",  # use gpt-5-nano instead
-    "o4-mini",
+    "gpt-5.4-mini",  # approved for sticker merge (replaced o4-mini, 2026-11-08)
+    "o4-mini",  # OpenAI answers 404 "deprecated" since 2026-11-08
     # Gemini
     "gemini-3-pro-preview",
     # Anthropic

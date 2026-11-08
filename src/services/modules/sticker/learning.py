@@ -767,7 +767,10 @@ class StickerLearningService:
                     "Правки админа всегда приоритетнее автоматического описания. "
                     "Результат: 2-3 предложения без повторов. Отвечай только JSON."
                 ),
-                model="o4-mini",
+                # o4-mini answers 404 "deprecated" since 2026-11-08. gpt-5.4-mini
+                # honours temperature=0.4 (gpt-5-mini rejects it with a 400) and
+                # spends no reasoning tokens: tens of output tokens per merge.
+                model="gpt-5.4-mini",
                 max_tokens=4096,
                 temperature=0.4,
                 response_mime_type="application/json",

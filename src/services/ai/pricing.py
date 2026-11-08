@@ -46,6 +46,12 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_per_1m=Decimal("1.75"),
         output_per_1m=Decimal("14.00"),
     ),
+    # Verified 2026-11-08 on openai.com (GPT-5.4 mini announcement).
+    "gpt-5.4-mini": ModelPricing(
+        input_per_1m=Decimal("0.75"),
+        output_per_1m=Decimal("4.50"),
+    ),
+    # OpenAI answers 404 "deprecated" since 2026-11-08; kept for old rows.
     "o4-mini": ModelPricing(
         input_per_1m=Decimal("1.10"),
         output_per_1m=Decimal("4.40"),

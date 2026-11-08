@@ -65,7 +65,7 @@ def sticker_service():
     ai_router.generate_text = AsyncMock(
         return_value=TextGenerationResult(
             text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
-            model="o4-mini",
+            model="gpt-5.4-mini",
             provider="openai",
             tokens_input=150,
             tokens_output=60,
@@ -435,7 +435,7 @@ class TestParseVisionResponse:
 class TestMergeAdminDescription:
     @pytest.mark.asyncio
     async def test_merge_passes_model_and_json_params(self, sticker_service):
-        """merge_admin_description passes model=o4-mini, temperature=0.4 and response_mime_type."""
+        """merge_admin_description passes model=gpt-5.4-mini, temperature=0.4 and response_mime_type."""
         from src.services.ai.base import TextGenerationResult
 
         sticker_service._repo.get_by_file_unique_id = AsyncMock(
@@ -452,7 +452,7 @@ class TestMergeAdminDescription:
         sticker_service._ai.generate_text = AsyncMock(
             return_value=TextGenerationResult(
                 text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
-                model="o4-mini",
+                model="gpt-5.4-mini",
                 provider="openai",
             )
         )
@@ -461,7 +461,7 @@ class TestMergeAdminDescription:
         await sticker_service.merge_admin_description("unique-123", "also happy")
 
         call_kwargs = sticker_service._ai.generate_text.call_args.kwargs
-        assert call_kwargs["model"] == "o4-mini"
+        assert call_kwargs["model"] == "gpt-5.4-mini"
         assert call_kwargs["temperature"] == 0.4
         assert call_kwargs["response_mime_type"] == "application/json"
 
@@ -484,7 +484,7 @@ class TestMergeAdminDescription:
         sticker_service._ai.generate_text = AsyncMock(
             return_value=TextGenerationResult(
                 text='{"visual": "Anime girl waving hello", "emotion": "happy", "contexts": ["greeting"]}',
-                model="o4-mini",
+                model="gpt-5.4-mini",
                 provider="openai",
             )
         )
@@ -516,7 +516,7 @@ class TestMergeAdminDescription:
         sticker_service._ai.generate_text = AsyncMock(
             return_value=TextGenerationResult(
                 text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
-                model="o4-mini",
+                model="gpt-5.4-mini",
                 provider="openai",
             )
         )
@@ -547,7 +547,7 @@ class TestMergeAdminDescription:
         sticker_service._ai.generate_text = AsyncMock(
             return_value=TextGenerationResult(
                 text='{"visual": "A happy cat", "emotion": "joy", "contexts": ["greeting"]}',
-                model="o4-mini",
+                model="gpt-5.4-mini",
                 provider="openai",
             )
         )
