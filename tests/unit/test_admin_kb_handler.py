@@ -193,7 +193,8 @@ class FakeNames:
     async def remember_seen(self, chat_id: int, user_id: int) -> bool:
         assert chat_id == CHAT_ID
         self.calls.append(("remember_seen", user_id))
-        if user_id not in self.seen:
+        # The SQL is ON CONFLICT DO NOTHING: a name already stored is kept.
+        if user_id not in self.seen or user_id in self.stored:
             return False
         self.stored[user_id] = self.seen[user_id]
         return True

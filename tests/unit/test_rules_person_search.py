@@ -37,7 +37,7 @@ from src.bot.screens.render import render_text, to_markup
 from src.bot.screens.routes import REQUEST_IDS
 from src.bot.states.admin import AdminStates
 from src.models.chat_config import ChatConfig
-from tests.unit.kb_organizer_fakes import written
+from tests.unit.kb_organizer_fakes import no_organizer_write, written
 from tests.unit.test_fsm_escape import _connected, _FakeState, _make_message, _propagate
 from tests.unit.test_rules_handler import CHAT_ID, _callback, _deps, _State, _tap
 
@@ -208,7 +208,7 @@ class TestAPickReachesItsOwnPicker:
         assert line.text == "Выбран человек: Аня @anya"
         assert isinstance(line.reply_markup, ReplyKeyboardRemove)
         assert screen.text == render_text(screens.action_screen("ru", GROUP_ID, "Аня @anya"))
-        assert written(data["chat_settings_repo"], -100123) is None
+        assert no_organizer_write(data["chat_settings_repo"])
 
     async def test_a_rules_pick_after_the_kb_prompt_took_over_is_stale_and_not_the_kbs(
         self,
@@ -224,7 +224,7 @@ class TestAPickReachesItsOwnPicker:
 
         assert state._data.get("rule_user") is None
         assert [s.text for s in _sends(bot)] == [screens.WHO_STALE("ru")]
-        assert written(data["chat_settings_repo"], -100123) is None
+        assert no_organizer_write(data["chat_settings_repo"])
         assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
 
     async def test_a_kb_pick_is_the_kbs_while_the_rules_search_is_open(self) -> None:

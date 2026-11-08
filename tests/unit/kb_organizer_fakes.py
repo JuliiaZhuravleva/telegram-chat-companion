@@ -72,9 +72,12 @@ def wire_organizer_writers(repo: MagicMock) -> MagicMock:
 
 
 def written(repo: Any, chat_id: int) -> list[int] | None:
-    """The organizers the one write left stored for ``chat_id``; None when nothing wrote.
+    """The organizers the one write left stored for ``chat_id``; None when nothing wrote
+    or the write found no row (the writers return None for a missing row too).
 
-    Fails on more than one write, or a write to another chat.
+    Fails on more than one write, or a write to another chat. With no row wired
+    (``repo.get`` not a dict), None cannot tell «nothing wrote» from «a write found
+    no row»: assert `no_organizer_write` there instead.
     """
     writers = [getattr(repo, name) for name in WRITERS]
     assert all(isinstance(w, AsyncMock) for w in writers), "wire_organizer_writers(repo) first"
@@ -85,3 +88,8 @@ def written(repo: Any, chat_id: int) -> list[int] | None:
     assert calls[0].args[0] == chat_id, calls[0]
     row = repo.get.return_value
     return parse_user_id_list(row.get("kb_organizer_ids")) if isinstance(row, dict) else None
+
+
+def no_organizer_write(repo: Any) -> bool:
+    """True when none of the organizer writers was awaited, whatever row the fake holds."""
+    return not any(getattr(repo, name).await_count for name in WRITERS)

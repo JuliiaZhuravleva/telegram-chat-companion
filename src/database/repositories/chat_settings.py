@@ -57,9 +57,12 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
 
 
 # `kb_organizer_ids` as the writers below build on it: the stored list when it is
-# a JSON array of numbers, else an empty one. `parse_user_id_list` reads anything
-# else as "nobody", so an add on top of a malformed value would store a list that
-# still reads as nobody; starting from an empty one stores the person.
+# a JSON array of numbers, else an empty one. An add on top of a value that
+# `parse_user_id_list` reads as "nobody" would store a list that still reads as
+# nobody; starting from an empty one stores the person. The two disagree on one
+# shape: digit strings (["123"]), which the parser reads as ids and these writers
+# drop. No writer has ever stored strings (every one wrote json.dumps(list[int])),
+# so it is latent; a writer that starts storing strings must change this first.
 _ORGANIZERS = (
     "(CASE WHEN jsonb_typeof(kb_organizer_ids) = 'array'"
     " AND NOT jsonb_path_exists(kb_organizer_ids, '$[*] ? (@.type() != \"number\")')"
