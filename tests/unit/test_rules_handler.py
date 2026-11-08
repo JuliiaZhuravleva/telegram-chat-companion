@@ -21,7 +21,7 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.state import State
 from aiogram.methods import EditMessageReplyMarkup
-from aiogram.types import Chat, Message
+from aiogram.types import Chat, Document, Message, PhotoSize, User
 
 from src.bot.handlers import rules as handlers
 from src.bot.screens import rules as screens
@@ -33,6 +33,9 @@ from src.database.repositories.rules import RulesRepository
 from src.models.chat_config import ChatConfig
 from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
+from src.services.rules.engine import RuleEngine
+from src.utils.telegram_text import TELEGRAM_MESSAGE_LIMIT, parsed_length
+from tests.unit.screen_routing import ADMIN_ID, deliver
 
 CHAT_ID = -1009999999999  # invented
 OTHER_CHAT = -1008888888888  # invented
@@ -484,6 +487,56 @@ class TestTheCard:
         expected = screens.rule_screen("ru", screens.rule_view(_rule()), chat=_ON)
         assert _same(_sent(callback.message), expected)
 
+    @pytest.mark.parametrize(
+        ("handler", "payload"),
+        [
+            (handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}"),
+            (handlers.handle_rule_view, f"ar_view:ru:{RULE_ID}:{CHAT_ID}:j"),
+            (handlers.handle_rule_delete_ask, f"ar_del_ask:ru:{RULE_ID}:{CHAT_ID}"),
+        ],
+        ids=["card", "json", "delete-ask"],
+    )
+    async def test_an_unnamed_rule_of_three_hundred_words_opens_in_place(
+        self, handler: Any, payload: str
+    ) -> None:
+        """A JSON rule bounds no word, and without a name it is named by all of
+        them: the head of its card and of the delete question ran past 4096, so
+        the tap no longer edited the screen but sent it again as several new
+        messages, the first of them nothing but the rule's words."""
+        words = [f"нецензурное{i:03d}" for i in range(300)]
+        assert parsed_length(", ".join(words)) > TELEGRAM_MESSAGE_LIMIT
+        rule = _rule(config={"keywords": words, "action": "notify_admin"})
+        callback = await _tap(handler, payload, _State(), _deps(rule))
+
+        callback.message.answer.assert_not_awaited()
+        text = _shown(callback)[0]
+        assert parsed_length(text) <= TELEGRAM_MESSAGE_LIMIT, parsed_length(text)
+        shown = screens.cap_name(", ".join(words))
+        assert shown == ", ".join(words)[: screens.NAME_CHARS - 1] + "…"
+        assert html.escape(shown, quote=False) in text
+
+    async def test_the_alert_cards_button_on_a_deleted_rule_leaves_the_card(self) -> None:
+        """The card a fired rule sends stays the record of what fired: once the
+        rule is gone its button put the chat's list over that card, who wrote
+        what and all, instead of under it."""
+        card = screens.rule_card(
+            "ru",
+            rule_id=RULE_ID,
+            chat_id=CHAT_ID,
+            name="spam-words",
+            chat_title=None,
+            first_name="Alice",
+            username=None,
+            match_detail="contains:spam",
+            excerpt="buy spam",
+        )
+        (button,) = [b for row in card.rows for b in row]
+        callback = await _tap(handlers.handle_rule_view, button.callback, _State(), _deps(None))
+
+        callback.message.edit_text.assert_not_awaited()
+        expected = screens.gone_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
+        assert _same(_sent(callback.message), expected)
+
     async def test_a_config_stored_as_a_string_is_read(self) -> None:
         rule = _rule(config=json.dumps({"name": "json-rule", "keywords": ["x"]}))
         callback = await _tap(
@@ -725,6 +778,49 @@ class TestBuilderKeywords:
         assert text.startswith("<i>✓ Правило создано</i>\n\n")
         assert f"ar_tog:ru:{RULE_ID}:{CHAT_ID}:0" in _datas(markup)
         assert all(state.data[k] is None for k in handlers._DRAFT_KEYS), "the draft is spent"
+
+    @pytest.mark.parametrize(
+        ("lang", "inside", "longer"),
+        [("ru", "внутри слова", "«закотка»"), ("en", "inside a word", "“superкотs”")],
+    )
+    async def test_the_anywhere_button_says_it_reaches_inside_a_word(
+        self, lang: str, inside: str, longer: str
+    ) -> None:
+        """The engine's ``contains`` is a substring test: the rule the first
+        button makes for «кот» fires on «который», so the button, its example
+        and the card say the word is caught even inside another word."""
+        deps, state = _deps(), _State()
+        await _start(deps, state)
+        await _tap(handlers.handle_builder_type, f"ar_b_type:{lang}:{CHAT_ID}:k", state, deps)
+        typed = _typed("кот")
+        await handlers.handle_rule_words_input(typed, state)
+        text, markup = _sent(typed)
+        assert f"{inside}: {longer}" in text, "the example shows the word inside another"
+        anywhere = [
+            b.callback_data for row in markup.inline_keyboard for b in row if inside in b.text
+        ]
+        assert len(anywhere) == 1, _labels(markup)
+
+        await _tap(handlers.handle_builder_match, anywhere[0], state, deps)
+        callback = await _tap(
+            handlers.handle_builder_action, f"ar_b_act:{lang}:{CHAT_ID}:n", state, deps
+        )
+
+        created = _created(deps)
+        repo = MagicMock(spec=RulesRepository)
+        repo.get_active_rules = AsyncMock(
+            return_value=[{"id": RULE_ID, "chat_id": CHAT_ID, **created, "enabled": True}]
+        )
+        repo.record_trigger = AsyncMock()
+        fired = await RuleEngine(repo).evaluate(
+            chat_id=CHAT_ID,
+            user_id=7,
+            message=MagicMock(text="который час?", caption=None, sticker=None),
+            rules_mode="all",
+        )
+        assert [a.rule.id for a in fired] == [RULE_ID], "«кот» inside «который» fires"
+        assert f"«кот» — {screens.CONTAINS_HOW(lang)}" in _shown(callback)[0]
+        assert inside in screens.CONTAINS_HOW(lang)
 
     async def test_a_long_list_of_words_is_named_by_its_start(self) -> None:
         words = [f"слово{i:02d}" for i in range(15)]
@@ -1384,6 +1480,35 @@ class TestTheJsonPrompt:
         deps["rules_repo"].create.assert_awaited_once()
 
     @pytest.mark.parametrize(
+        "attached",
+        [
+            {"document": Document(file_id="d", file_unique_id="du", file_name="rule.json")},
+            {"photo": [PhotoSize(file_id="p", file_unique_id="pu", width=90, height=90)]},
+        ],
+        ids=["document", "photo"],
+    )
+    async def test_the_json_in_a_caption_is_the_rule(self, attached: dict[str, Any]) -> None:
+        """A file or a photo carries its words as a caption: valid JSON there
+        was answered «Невалидный JSON», because only the text was read."""
+        deps = _deps()
+        state = await _cfg(deps)
+        message = Message(
+            message_id=900,
+            date=datetime(2026, 11, 1, tzinfo=UTC),
+            chat=Chat(id=ADMIN_ID, type="private"),
+            from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+            caption='{"keywords": ["spam"], "action": "warn_user"}',
+            **attached,
+        ).as_(AsyncMock())
+
+        # aiogram's own filters pick the handler: no media handler takes it first.
+        assert await deliver("message", message, state) == "rules.handle_rule_config_input"
+        await deliver("message", message, state, call=True, **_services(deps))
+
+        config = _created(deps)["config"]
+        assert (config["keywords"], config["action"]) == (["spam"], "warn_user")
+
+    @pytest.mark.parametrize(
         ("typed", "says"),
         [
             ("not json at all", "Невалидный JSON"),
@@ -1544,6 +1669,289 @@ class TestTheJsonPrompt:
         assert state.current is None
         expected = screens.rules_screen("ru", chat_id=CHAT_ID, title=TITLE, chat=_ON, rules=[])
         assert _same(_shown(callback), expected)
+
+
+class _Unbindable(Exception):
+    """What asyncpg raises, as ``DataError``, for a value its encoder cannot bind."""
+
+
+def _bind_like_asyncpg(**kwargs: Any) -> int:
+    """`RulesRepository.create` as the database answers it, not as a mock does.
+
+    ``mandatory`` is a ``BOOLEAN``: pgproto's ``bool_encode`` takes a bool and
+    nothing else, and None is NULL (the column is nullable, no CHECK). ``weight``
+    is an ``INT``: ``int4_encode`` truncates anything with ``__int__`` (``True``
+    is 1, ``2.5`` is 2), refuses the rest and anything past int32; None is NULL.
+    What was refused here raised after the prompt was already claimed; what was
+    taken was stored as typed.
+    """
+    mandatory, weight = kwargs["mandatory"], kwargs["weight"]
+    if mandatory is not None and not isinstance(mandatory, bool):
+        raise _Unbindable(f"a boolean is required (got type {type(mandatory).__name__})")
+    if weight is None:
+        return RULE_ID
+    if type(weight) is not int and hasattr(type(weight), "__int__"):
+        weight = int(weight)
+    if not isinstance(weight, int):
+        raise _Unbindable(f"an integer is required (got type {type(weight).__name__})")
+    if not -(2**31) <= weight < 2**31:
+        raise _Unbindable("value out of int32 range")
+    return RULE_ID
+
+
+async def _strict_cfg(rule_type: str | None = None) -> tuple[dict[str, Any], _State]:
+    deps = _deps()
+    deps["rules_repo"].create.side_effect = _bind_like_asyncpg
+    return deps, await _cfg(deps, rule_type)
+
+
+_WEIGHT_SAYS = "Поле <code>weight</code> (приоритет) должно быть целым числом от 1 до"
+_MANDATORY_SAYS = (
+    "Поле <code>mandatory</code> должно быть <code>true</code> или <code>false</code>."
+)
+
+
+class TestTheJsonColumns:
+    """``weight`` and ``mandatory`` are columns, bound by asyncpg's strict
+    encoders after the prompt is claimed: one of the wrong type raised there,
+    and the admin got no answer and no prompt. A weight below 1 was stored and
+    then made a weight mode raise for every rule of the chat's messages."""
+
+    @pytest.mark.parametrize(
+        ("field", "says"),
+        [
+            ('"mandatory": 1', _MANDATORY_SAYS),
+            ('"mandatory": "true"', _MANDATORY_SAYS),
+            ('"mandatory": null', _MANDATORY_SAYS),
+            ('"weight": "5"', _WEIGHT_SAYS),
+            ('"weight": 0', _WEIGHT_SAYS),
+            ('"weight": -3', _WEIGHT_SAYS),
+            ('"weight": null', _WEIGHT_SAYS),
+            ('"weight": 3000000000', _WEIGHT_SAYS),
+            ('"weight": 2147483648', _WEIGHT_SAYS),
+            ('"weight": true', _WEIGHT_SAYS),
+            ('"weight": 2.5', _WEIGHT_SAYS),
+        ],
+        ids=[
+            "mandatory-1",
+            "mandatory-text",
+            "mandatory-null",
+            "weight-text",
+            "weight-0",
+            "weight-negative",
+            "weight-null",
+            "weight-past-int32",
+            "weight-int32-plus-one",
+            "weight-true",
+            "weight-fraction",
+        ],
+    )
+    async def test_a_column_of_the_wrong_type_is_refused_and_the_prompt_stays(
+        self, field: str, says: str
+    ) -> None:
+        deps, state = await _strict_cfg()
+        message = _typed('{"keywords": ["kw"], ' + field + "}")
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert state.current == AdminStates.awaiting_rule_config.state
+        assert state.data["rule_chat_id"] == CHAT_ID, "the draft is still there to retry"
+        text, markup = _sent(message)
+        assert says in text, text
+        assert _datas(markup) == [f"ar_list:ru:{CHAT_ID}:0"]
+
+    async def test_the_weight_refusal_reads_in_english_and_names_the_top(self) -> None:
+        deps, state = await _strict_cfg()
+        await state.update_data(lang="en")
+        message = _typed('{"keywords": ["kw"], "weight": 0}')
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        assert _sent(message)[0] == (
+            "The <code>weight</code> field (priority) must be a whole number from 1 to "
+            "<code>2147483647</code>. Please try again."
+        )
+
+    @pytest.mark.parametrize(
+        ("field", "weight", "mandatory"),
+        [
+            ("", 1, False),
+            ('"weight": 1', 1, False),
+            ('"weight": 2147483647', 2147483647, False),
+            ('"mandatory": false', 1, False),
+            ('"weight": 7, "mandatory": true', 7, True),
+        ],
+        ids=["defaults", "weight-1", "weight-int32-top", "not-mandatory", "both"],
+    )
+    async def test_a_column_the_database_takes_is_not_refused(
+        self, field: str, weight: int, mandatory: bool
+    ) -> None:
+        """Control: the edges of what the columns hold still make the rule."""
+        deps, state = await _strict_cfg()
+        message = _typed('{"keywords": ["kw"]' + (", " + field if field else "") + "}")
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        created = _created(deps)
+        assert (created["weight"], created["mandatory"]) == (weight, mandatory)
+        assert state.current is None
+        assert _sent(message)[0].startswith("<i>✓ Правило создано</i>")
+
+
+class TestTheJsonEngineFields:
+    """A field the engine compares or looks up, typed so it cannot: the rule
+    was «Правило создано» and then raised, quietly, on every message (or never
+    matched), so it never fired."""
+
+    @pytest.mark.parametrize(
+        ("typed", "says"),
+        [
+            (
+                '{"type": "spam_detect", "max_messages": "20"}',
+                "Поле <code>max_messages</code> должно быть целым числом.",
+            ),
+            (
+                '{"type": "spam_detect", "time_window_seconds": true}',
+                "Поле <code>time_window_seconds</code> должно быть целым числом.",
+            ),
+            (
+                '{"type": "spam_detect", "max_chars_per_message": null}',
+                "Поле <code>max_chars_per_message</code> должно быть целым числом.",
+            ),
+            (
+                '{"type": "sticker_flood", "max_stickers_per_interval": "5"}',
+                "Поле <code>max_stickers_per_interval</code> должно быть целым числом.",
+            ),
+            (
+                '{"type": "sticker_flood", "interval_seconds": [60]}',
+                "Поле <code>interval_seconds</code> должно быть целым числом.",
+            ),
+            (
+                '{"type": "sticker_flood", "interval_seconds": 30.5}',
+                "Поле <code>interval_seconds</code> должно быть целым числом.",
+            ),
+            (
+                '{"type": "user_specific", "user_ids": "7"}',
+                "Поле <code>user_ids</code> должно быть списком id участников",
+            ),
+            (
+                '{"type": "user_specific", "user_ids": ["7"]}',
+                "Поле <code>user_ids</code> должно быть списком id участников",
+            ),
+            (
+                '{"keywords": ["kw"], "target_users": [true]}',
+                "Поле <code>target_users</code> должно быть списком id участников",
+            ),
+            (
+                '{"keywords": ["kw"], "exclude_users": 5}',
+                "Поле <code>exclude_users</code> должно быть списком id участников",
+            ),
+            (
+                '{"keywords": ["kw"], "match_type": "startswith"}',
+                "Неизвестный способ сравнения <code>startswith</code> в поле "
+                "<code>match_type</code>. Доступные: <code>contains</code>, "
+                "<code>exact</code>, <code>regex</code>.",
+            ),
+            (
+                '{"keywords": ["kw"], "match_type": ["exact"]}',
+                "Неизвестный способ сравнения <code>[&quot;exact&quot;]</code>",
+            ),
+            (
+                '{"keywords": ["kw"], "match_type": "<b>"}',
+                "Неизвестный способ сравнения <code>&lt;b&gt;</code>",
+            ),
+            (
+                '{"keywords": ["kw"], "case_sensitive": "yes"}',
+                "Поле <code>case_sensitive</code> должно быть <code>true</code> или "
+                "<code>false</code>.",
+            ),
+            (
+                '{"type": "user_specific", "user_ids": [7], "conditions": ["any_message"]}',
+                "Поле <code>conditions</code> должно быть объектом",
+            ),
+            (
+                '{"type": "user_specific", "user_ids": [7], "conditions": {"keywords": "hi"}}',
+                "Поле <code>conditions.keywords</code> должно быть списком слов",
+            ),
+            (
+                '{"type": "user_specific", "user_ids": [7], "conditions": {"keywords": [5]}}',
+                "Поле <code>conditions.keywords</code> должно быть списком слов",
+            ),
+        ],
+        ids=[
+            "spam-count-text",
+            "spam-window-bool",
+            "spam-length-null",
+            "flood-count-text",
+            "flood-interval-list",
+            "flood-interval-fraction",
+            "user-ids-text",
+            "user-ids-of-text",
+            "target-users-bool",
+            "exclude-users-number",
+            "match-type-unknown",
+            "match-type-list",
+            "match-type-escaped",
+            "case-sensitive-text",
+            "conditions-list",
+            "condition-words-text",
+            "condition-words-numbers",
+        ],
+    )
+    async def test_a_field_the_engine_cannot_read_is_refused(self, typed: str, says: str) -> None:
+        deps, state = await _strict_cfg()
+        message = _typed(typed)
+
+        await handlers.handle_rule_config_input(message, state, **_services(deps))
+
+        deps["rules_repo"].create.assert_not_awaited()
+        assert state.current == AdminStates.awaiting_rule_config.state
+        text, markup = _sent(message)
+        assert says in text, text
+        assert _datas(markup) == [f"ar_list:ru:{CHAT_ID}:0"]
+
+    @pytest.mark.parametrize(
+        "typed",
+        [
+            '{"type": "spam_detect", "max_messages": 5, "time_window_seconds": 60, '
+            '"max_chars_per_message": 0}',
+            '{"type": "sticker_flood", "max_stickers_per_interval": 3, "interval_seconds": 60}',
+            '{"type": "user_specific", "user_ids": [11, 12], "conditions": {"keywords": ["hi"]}}',
+            '{"type": "user_specific", "user_ids": [11], "conditions": {"any_message": true}}',
+            '{"keywords": ["kw"], "match_type": "regex", "case_sensitive": true, '
+            '"target_users": [11], "exclude_users": []}',
+            '{"keywords": ["kw"], "match_type": "exact", "case_sensitive": false}',
+            '{"type": "spam_detect", "user_ids": "not this type\'s field"}',
+            '{"type": "sticker_flood", "max_stickers_per_interval": 3, "interval_seconds": 60.0}',
+            '{"type": "spam_detect", "max_messages": 5.0, "time_window_seconds": 90.0}',
+        ],
+        ids=[
+            "spam",
+            "flood",
+            "user-words",
+            "user-any",
+            "keyword-all-fields",
+            "keyword-exact",
+            "another-types-field",
+            "flood-whole-float",
+            "spam-whole-floats",
+        ],
+    )
+    async def test_every_field_typed_as_the_engine_reads_it_makes_the_rule(
+        self, typed: str
+    ) -> None:
+        """Control: each check refuses only what the engine cannot read, and
+        only for the type that reads it."""
+        deps, state = await _strict_cfg()
+
+        await handlers.handle_rule_config_input(_typed(typed), state, **_services(deps))
+
+        created = _created(deps)
+        assert created["config"] == {
+            k: v for k, v in json.loads(typed).items() if k not in ("type", "weight", "mandatory")
+        }
+        assert state.current is None
 
 
 # ---------------------------------------------------------------------------

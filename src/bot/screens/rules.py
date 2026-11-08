@@ -22,6 +22,7 @@ from src.bot.screens.lint import clip_room, label_width_px
 from src.bot.screens.model import Button, ReplyButton, RequestUsers, Screen
 from src.bot.screens.render import CANCEL, back, cancel, pager
 from src.bot.screens.routes import REQUEST_IDS, cb
+from src.models.rules import stored_weight
 
 PER_PAGE: Final = 3
 """Rules per list page: three rows of rules keep the list to six rows with its pager."""
@@ -159,6 +160,20 @@ _ON: Final = Tr("работает", "on")
 _PAUSED: Final = Tr("на паузе", "paused")
 _NEW: Final = Tr("Новое правило:", "New rule:")
 _ELLIPSIS: Final = "…"
+NAME_CHARS: Final = 60
+"""A rule's name is cut here, whoever wrote it: it heads the rule's card and the
+alert every admin gets, and an unnamed JSON rule is named by all of its words."""
+
+
+def cap_name(name: str) -> str:
+    """A rule's name as stored and shown: trimmed, and cut with ``…`` past `NAME_CHARS`."""
+    name = name.strip()
+    return name if len(name) <= NAME_CHARS else name[: NAME_CHARS - 1].rstrip() + _ELLIPSIS
+
+
+def _clip(text: str) -> str:
+    """Someone's words as the alert quotes them: at most `_EXCERPT_CHARS`, then ``…``."""
+    return text if len(text) <= _EXCERPT_CHARS else text[:_EXCERPT_CHARS] + _ELLIPSIS
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +225,7 @@ def rule_view(row: Mapping[str, Any]) -> RuleView:
         rule_type=str(row.get("rule_type") or ""),
         config=parse_config(row.get("config")),
         enabled=bool(row.get("enabled", True)),
-        weight=int(row.get("weight") or 1),
+        weight=stored_weight(row.get("weight")),  # the weight the engine acts on
         mandatory=bool(row.get("mandatory", False)),
         trigger_count=int(row.get("trigger_count") or 0),
     )
@@ -231,7 +246,9 @@ def rule_name(rule: RuleView, lang: str) -> str:
         return name.strip()
     words = _str_list(rule.config.get("keywords"))
     if rule.rule_type == "keyword_trigger" and words:
-        return ", ".join(words)
+        # Capped like the builder's `_words_name`: a JSON rule has no word limit,
+        # and three hundred words made an alert Telegram refused for every admin.
+        return cap_name(", ".join(words))
     kind = _TYPE_NAMES.get(rule.rule_type)
     return kind(lang) if kind else f"#{rule.id}"
 
@@ -448,6 +465,11 @@ def _quote(text: str, limit: int = _CAUGHT_CHARS) -> str:
     return f"«{escape(text)}»"
 
 
+CONTAINS_HOW: Final = Tr("где угодно, даже внутри слова", "anywhere, even inside a word")
+"""What ``contains`` catches. It is a substring test, «кот» in «который» too, and
+«слово внутри сообщения» read as a whole word to the admin who picked it."""
+
+
 def catches(rule: RuleView, lang: str) -> str:
     """What sets a rule off, in words."""
     cfg = rule.config
@@ -458,7 +480,7 @@ def catches(rule: RuleView, lang: str) -> str:
             "regex": Tr("регулярное выражение", "regular expression"),
         }.get(
             str(cfg.get("match_type", "contains")),
-            Tr("слово внутри сообщения", "a word inside a message"),
+            CONTAINS_HOW,
         )
         return f"{_quote(words)} — {how(lang)}"
     if rule.rule_type == "user_specific":
@@ -725,11 +747,17 @@ def words_screen(lang: str, chat_id: int) -> Screen:
 
 
 def match_screen(lang: str, chat_id: int, words: Sequence[str]) -> Screen:
-    """``rule.match``: a word anywhere in a message, or the message being just the word."""
+    """``rule.match``: the word anywhere in a message, or the message being just the word.
+
+    "Anywhere" is the engine's ``contains`` (`CONTAINS_HOW`), and the button and
+    its example say it reaches inside a word: «Слово внутри сообщения» read as a
+    whole word, and a warning then landed on whoever wrote «который» for «кот».
+    """
     first = words[0] if words else ""
     example = Tr(
-        "Слово внутри: «тут {w} и ещё текст»\nТолько слово: «{w}»",
-        "Word inside: “there is {w} and more text”\nWord alone: “{w}”",
+        "Где угодно: «тут {w} и ещё текст», даже внутри слова: «за{w}ка»\nТолько слово: «{w}»",
+        "Anywhere: “there is {w} and more text”, even inside a word: “super{w}s”\n"
+        "Word alone: “{w}”",
     )(lang).format(w=escape(first))
     return Screen(
         id="rule.match",
@@ -741,7 +769,7 @@ def match_screen(lang: str, chat_id: int, words: Sequence[str]) -> Screen:
         rows=(
             (
                 Button(
-                    Tr("Слово внутри сообщения", "Word inside a message")(lang),
+                    Tr("Где угодно, даже внутри слова", "Anywhere, even inside a word")(lang),
                     cb("ar_b_match:", lang, chat_id, "c"),
                 ),
             ),
@@ -1157,6 +1185,49 @@ CFG_NOT_TEXT: Final = Tr(
     "Поле <code>{key}</code> должно быть текстом. Попробуйте ещё раз.",
     "The <code>{key}</code> field must be text. Please try again.",
 )
+CFG_BAD_WEIGHT: Final = Tr(
+    "Поле <code>weight</code> ({priority}) должно быть целым числом от 1 до "
+    "<code>{max}</code>. Попробуйте ещё раз.",
+    "The <code>weight</code> field ({priority}) must be a whole number from 1 to "
+    "<code>{max}</code>. Please try again.",
+)
+"""The column is an ``INT``, and a weight mode cannot pick among rules weighing 0.
+The top is in ``<code>``: Telegram links a bare ten-digit number as a phone."""
+CFG_NOT_BOOL: Final = Tr(
+    "Поле <code>{key}</code> должно быть <code>true</code> или <code>false</code>. "
+    "Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be <code>true</code> or <code>false</code>. "
+    "Please try again.",
+)
+CFG_NOT_NUMBER: Final = Tr(
+    "Поле <code>{key}</code> должно быть целым числом. Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be a whole number. Please try again.",
+)
+CFG_NOT_IDS: Final = Tr(
+    "Поле <code>{key}</code> должно быть списком id участников — целых чисел. Попробуйте ещё раз.",
+    "The <code>{key}</code> field must be a list of member ids, as whole numbers. "
+    "Please try again.",
+)
+CFG_BAD_CONDITIONS: Final = Tr(
+    "Поле <code>conditions</code> должно быть объектом, например "
+    '<code>{"any_message": true}</code>. Попробуйте ещё раз.',
+    "The <code>conditions</code> field must be an object, e.g. "
+    '<code>{"any_message": true}</code>. Please try again.',
+)
+CFG_NOT_WORDS: Final = Tr(
+    'Поле <code>{key}</code> должно быть списком слов, например <code>["привет"]</code>. '
+    "Попробуйте ещё раз.",
+    'The <code>{key}</code> field must be a list of words, e.g. <code>["hello"]</code>. '
+    "Please try again.",
+)
+CFG_BAD_MATCH: Final = Tr(
+    "Неизвестный способ сравнения <code>{m}</code> в поле <code>match_type</code>. "
+    "Доступные: {valid}. Попробуйте ещё раз.",
+    "Unknown match type <code>{m}</code> in <code>match_type</code>. "
+    "Available: {valid}. Please try again.",
+)
+MATCH_TYPES: Final = ("contains", "exact", "regex")
+"""The ``match_type`` values `RuleEngine._eval_keyword` acts on; any other never fires."""
 TEXT_EMPTY: Final = Tr(
     "Нужен текст. Напишите его сообщением.", "Text is needed. Type it as a message."
 )
@@ -1183,14 +1254,15 @@ def error_screen(screen_id: str, text: str, cancel_cb: str, lang: str) -> Screen
 def _match_line(detail: str, lang: str) -> str | None:
     kind, _, rest = detail.partition(":")
     if kind in ("contains", "exact", "regex"):
-        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(rest)}"
+        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(_clip(rest))}"
     if kind == "user":
         _, _, keyword = rest.partition(",kw:")
-        return f"{Tr('Совпало', 'Matched')(lang)}: {escape(keyword)}" if keyword else None
+        matched = Tr("Совпало", "Matched")(lang)
+        return f"{matched}: {escape(_clip(keyword))}" if keyword else None
     if kind == "stickers":
         count, _, limit = rest.partition("/")
         return Tr("Стикеров: {n}, порог {m}", "Stickers: {n}, limit {m}")(lang).format(
-            n=escape(count), m=escape(limit)
+            n=escape(_clip(count)), m=escape(_clip(limit))
         )
     if kind == "spam":
         what, _, numbers = rest.partition("=")
@@ -1200,8 +1272,8 @@ def _match_line(detail: str, lang: str) -> str | None:
             if what == "chars"
             else Tr("Сообщений: {n}, порог {m}", "Messages: {n}, limit {m}")
         )
-        return label(lang).format(n=escape(count), m=escape(limit))
-    return escape(detail) if detail else None
+        return label(lang).format(n=escape(_clip(count)), m=escape(_clip(limit)))
+    return escape(_clip(detail)) if detail else None
 
 
 def rule_card(
@@ -1223,7 +1295,7 @@ def rule_card(
     """
     where = f"<code>{chat_id_text(chat_id)}</code>"
     lines = [
-        f"📏 <b>{Tr('Сработало правило:', 'Rule fired:')(lang)}</b> {escape(name)}",
+        f"📏 <b>{Tr('Сработало правило:', 'Rule fired:')(lang)}</b> {escape(cap_name(name))}",
         "",
         f"{Tr('Чат', 'Chat')(lang)}: {escape(chat_title) + ' ' if chat_title else ''}{where}",
     ]
@@ -1236,8 +1308,7 @@ def rule_card(
     if match:
         lines.append(match)
     if excerpt:
-        cut = excerpt if len(excerpt) <= _EXCERPT_CHARS else excerpt[:_EXCERPT_CHARS] + _ELLIPSIS
-        lines.append(f"💬 {escape(cut)}")
+        lines.append(f"💬 {escape(_clip(excerpt))}")
     return Screen(
         id="card.rule",
         text="\n".join(lines),

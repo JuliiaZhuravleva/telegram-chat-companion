@@ -165,10 +165,14 @@ and 1. The line is pinned word for word: a sentence that keeps the keywords and
 says something else («срабатывает одно обязательное…») must not pass."""
 
 
-async def _acting(mode: str) -> list[int]:
-    """Which of the three rules the real engine fires for one message matching all three."""
+async def _acting(mode: str, optional: tuple[object, ...] = (3, 1)) -> list[int]:
+    """Which rules the real engine fires for one message matching all of them.
 
-    def row(rule_id: int, *, weight: int, mandatory: bool = False) -> dict[str, object]:
+    Rule 1 is mandatory with priority 1; rules 2, 3, ... are optional and stored
+    with ``optional``'s weights, as the column holds them.
+    """
+
+    def row(rule_id: int, *, weight: object, mandatory: bool = False) -> dict[str, object]:
         return {
             "id": rule_id,
             "chat_id": fake.CHAT_ID,
@@ -183,7 +187,10 @@ async def _acting(mode: str) -> list[int]:
 
     repo = AsyncMock()
     repo.get_active_rules = AsyncMock(
-        return_value=[row(1, weight=1, mandatory=True), row(2, weight=3), row(3, weight=1)]
+        return_value=[
+            row(1, weight=1, mandatory=True),
+            *(row(n, weight=w) for n, w in enumerate(optional, start=2)),
+        ]
     )
     message = MagicMock(text="x", caption=None, sticker=None)
     actions = await RuleEngine(repo).evaluate(
@@ -200,6 +207,22 @@ async def test_the_several_rules_line_says_what_the_engine_does(mode: str):
         assert (always <= set(acting), len(acting)) == (True, count), (mode, acting)
     assert rules.several_line(mode, "ru") == said
     assert said in _list("ru", mode).text.splitlines()
+
+
+@pytest.mark.parametrize("stored", [(0,), (None,), (0, None), (-2, 0)], ids=repr)
+@pytest.mark.parametrize("mode", WEIGHT_MODES)
+async def test_a_stored_weight_below_one_does_not_silence_the_mandatory_rule(
+    mode: str, stored: tuple[object, ...]
+):
+    """«срабатывают все обязательные» holds for weights the column still holds.
+
+    It is nullable with no CHECK, and the JSON prompt stored 0, negatives and
+    null as typed: ``random.choices`` refused weights summing to 0 and ``max``
+    could not compare None, and the raise took every rule of the message with
+    it, the mandatory one included. Such a weight now reads as 1."""
+    for _ in range(8):  # weighted_random draws
+        acting = await _acting(mode, stored)
+        assert (1 in acting, len(acting)) == (True, 2), (mode, stored, acting)
 
 
 @pytest.mark.parametrize("lang", LANGS)

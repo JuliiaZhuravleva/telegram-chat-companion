@@ -12,7 +12,7 @@ Callback routes (all DM-only, admin-only):
 - ``ar_del:{lang}:{rule_id}[:{chat_id}]``      — delete it, back to the list
 - ``ar_add:{lang}:{chat_id}``                 — the builder's first step: what sets it off
 - ``ar_b_type:{lang}:{chat_id}:{k|u|f|s}[:{page}]`` — words, a person, stickers, messages
-- ``ar_b_match:{lang}:{chat_id}:{c|e}``       — a word inside a message or the word alone
+- ``ar_b_match:{lang}:{chat_id}:{c|e}``       — the word anywhere, even inside a word, or alone
 - ``ar_b_who:{lang}:{chat_id}:{user_id}``     — whose messages
 - ``ar_b_find:{lang}:{chat_id}``              — whose messages, found with Telegram's
   own person search: a new message with a reply keyboard (``request_users``)
@@ -67,7 +67,13 @@ from src.bot.utils import safe_edit_reply_markup
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.messages import MessageRepository
 from src.database.repositories.rules import RulesRepository
-from src.models.rules import _VALID_RULE_ACTIONS, _VALID_RULE_TYPES, RuleAction
+from src.models.rules import (
+    _VALID_RULE_ACTIONS,
+    _VALID_RULE_TYPES,
+    MAX_WEIGHT,
+    RuleAction,
+    is_weight,
+)
 from src.services.chat_config import ChatConfigService
 from src.services.modules.reactions.selector import ReactionSelector
 from src.services.rules.reply_text import sent_length, worst_length
@@ -86,7 +92,7 @@ CREATED: Final = Tr("Правило создано", "Rule created")
 DELETED: Final = Tr("Правило удалено", "Rule deleted")
 SPAM_NAME: Final = Tr("Сообщения: {n} за минуту", "Messages: {n} a minute")
 FLOOD_NAME: Final = Tr("Стикеры: {n} за минуту", "Stickers: {n} a minute")
-_NAME_CHARS: Final = 60
+_NAME_CHARS: Final = screens.NAME_CHARS
 """A rule's name is cut here, whoever wrote it: the name heads its card."""
 _SHOWN_WORD_CHARS: Final = 30
 """An over-long word is quoted back cut to this, so the error stays one line."""
@@ -474,6 +480,7 @@ async def handle_rule_view(
             rules_repo=rules_repo,
             chat_config_service=chat_config_service,
             chat_settings_repo=chat_settings_repo,
+            new_message=flag == "n",
         )
         return
     screen = await _card(
@@ -496,11 +503,13 @@ async def _show_gone(
     rules_repo: RulesRepository,
     chat_config_service: ChatConfigService,
     chat_settings_repo: ChatSettingsRepository,
+    new_message: bool = False,
 ) -> None:
     """The rule a button points at is gone: its chat's list says so.
 
     An old button that carries no chat id cannot say which list; that one is
-    a stale button and gets the hub.
+    a stale button and gets the hub. ``new_message`` is the alert card's
+    button: the list goes under it, and the card stays the record of what fired.
     """
     if chat_id is None:
         await show_stale(callback, lang, data=data, state=state)
@@ -516,6 +525,7 @@ async def _show_gone(
             chat_settings_repo=chat_settings_repo,
             gone=True,
         ),
+        new_message=new_message,
     )
 
 
@@ -838,7 +848,7 @@ async def handle_builder_match(
     state: FSMContext,
     **kwargs: Any,
 ) -> None:
-    """A word inside a message, or the message being only the word."""
+    """The word anywhere in a message (even inside a longer word), or only the word."""
     if await _denied(callback, kwargs):
         return
     await _leave_config_prompt(state, keep_draft=True)
@@ -1392,9 +1402,8 @@ def _split_words(text: str) -> list[str]:
 
 
 def _cap_name(name: str) -> str:
-    """A rule's name as stored: trimmed, and cut with ``…`` past `_NAME_CHARS`."""
-    name = name.strip()
-    return name if len(name) <= _NAME_CHARS else name[: _NAME_CHARS - 1].rstrip() + "…"
+    """A rule's name as stored: `screens.cap_name`, the cut its card and alert show."""
+    return screens.cap_name(name)
 
 
 def _words_name(words: list[str]) -> str:
@@ -1634,7 +1643,8 @@ async def handle_rule_config_input(
     cancel_cb = cb("ar_list:", lang, chat_id, 0)
 
     try:
-        config = json.loads(message.text or "")
+        # A file or photo carries its words as a caption: the JSON may be there.
+        config = json.loads(message.text or message.caption or "")
         if not isinstance(config, dict):
             raise ValueError  # noqa: TRY301
     except ValueError:
@@ -1681,6 +1691,15 @@ async def handle_rule_config_input(
     if text_error is not None:
         await _reject(message, state, "rule.cfg_bad", text_error, cancel_cb, lang)
         return
+    # Checked here, before the prompt is claimed below: asyncpg refuses a weight
+    # or "mandatory" of the wrong type at the INSERT, after `state.clear()`, and
+    # the admin got no answer and no prompt to try again in.
+    _whole_floats_to_int(str(rule_type), config)
+    field_error = _cfg_field_error(str(rule_type), config, lang) or _cfg_column_error(config, lang)
+    if field_error is not None:
+        logger.info("rule_cfg_refused", chat_id=chat_id, rule_type=rule_type)
+        await _reject(message, state, "rule.cfg_bad", field_error, cancel_cb, lang)
+        return
     if "name" in config:
         config["name"] = _cap_name(config["name"])
 
@@ -1702,8 +1721,8 @@ async def handle_rule_config_input(
         chat_id=chat_id,
         rule_type=str(rule_type),
         config=config,
-        weight=weight if isinstance(weight, int) and not isinstance(weight, bool) else 1,
-        mandatory=bool(mandatory),
+        weight=weight,
+        mandatory=mandatory,
     )
     screen = await _card(
         lang,
@@ -1756,4 +1775,84 @@ def _cfg_text_error(config: Mapping[str, Any], lang: str) -> str | None:
             error = _too_long(text, template=template, rule_name=rule_name, lang=lang)
             if error is not None:
                 return error
+    return None
+
+
+_NUMBER_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
+    "sticker_flood": ("max_stickers_per_interval", "interval_seconds"),
+    "spam_detect": ("max_messages", "time_window_seconds", "max_chars_per_message"),
+}
+"""The numbers the engine compares counts with, by rule type."""
+_ID_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
+    "keyword_trigger": ("target_users", "exclude_users"),
+    "user_specific": ("user_ids",),
+}
+"""The lists the engine looks a sender's id up in, by rule type."""
+
+
+def _whole(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _whole_floats_to_int(rule_type: str, config: dict[str, Any]) -> None:
+    """``60.0`` in a number field is 60: JSON does not tell the two apart, the admin neither.
+
+    The engine read such a value before the guard existed, so refusing it would refuse a
+    rule that worked. A fractional value stays refused: the card shows whole numbers only.
+    """
+    for key in _NUMBER_FIELDS.get(rule_type, ()):
+        value = config.get(key)
+        if isinstance(value, float) and value.is_integer():
+            config[key] = int(value)
+
+
+def _cfg_field_error(rule_type: str, config: Mapping[str, Any], lang: str) -> str | None:
+    """Why a field the engine reads for ``rule_type`` cannot be read, or None.
+
+    The engine takes these as written. A number typed as text raises in its
+    comparison on every message, and per-rule error handling turns that into
+    a log line; an id written as text is never equal to a sender's id; an
+    unknown ``match_type`` matches nothing. Each is «Правило создано» and a
+    rule that never fires.
+    """
+    for key in _NUMBER_FIELDS.get(rule_type, ()):
+        if key in config and not _whole(config[key]):
+            return screens.CFG_NOT_NUMBER(lang).format(key=key)
+    for key in _ID_FIELDS.get(rule_type, ()):
+        ids = config.get(key)
+        if key in config and not (isinstance(ids, list) and all(_whole(i) for i in ids)):
+            return screens.CFG_NOT_IDS(lang).format(key=key)
+    if rule_type == "keyword_trigger":
+        match = config.get("match_type", "contains")
+        if not isinstance(match, str) or match not in screens.MATCH_TYPES:
+            return screens.CFG_BAD_MATCH(lang).format(
+                m=_quoted(match),
+                valid=", ".join(f"<code>{m}</code>" for m in screens.MATCH_TYPES),
+            )
+        if "case_sensitive" in config and not isinstance(config["case_sensitive"], bool):
+            return screens.CFG_NOT_BOOL(lang).format(key="case_sensitive")
+    if rule_type == "user_specific" and "conditions" in config:
+        conditions = config["conditions"]
+        if not isinstance(conditions, dict):
+            return screens.CFG_BAD_CONDITIONS(lang)
+        words = conditions.get("keywords")
+        if "keywords" in conditions and not (
+            isinstance(words, list) and all(isinstance(w, str) for w in words)
+        ):
+            return screens.CFG_NOT_WORDS(lang).format(key="conditions.keywords")
+    return None
+
+
+def _cfg_column_error(config: Mapping[str, Any], lang: str) -> str | None:
+    """Why ``weight`` or ``mandatory`` cannot be stored as typed, or None.
+
+    They are columns, not config: asyncpg binds them to an ``INT`` and a
+    ``BOOLEAN`` and refuses ``"5"``, ``1`` for true, or a weight past int32. A
+    weight below 1 would be stored, and a weight mode cannot choose among rules
+    that weigh nothing.
+    """
+    if "weight" in config and not is_weight(config["weight"]):
+        return screens.CFG_BAD_WEIGHT(lang).format(priority=screens.PRIORITY(lang), max=MAX_WEIGHT)
+    if "mandatory" in config and not isinstance(config["mandatory"], bool):
+        return screens.CFG_NOT_BOOL(lang).format(key="mandatory")
     return None

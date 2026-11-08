@@ -469,7 +469,7 @@ A small per-chat rules engine. 📏 Правила on a chat's screen opens that
   undone. While the chat's rules are off the card says so and carries the same switch.
 - **➕ Новое правило** builds a rule with buttons:
   - what sets it off — words (typed, by comma or line, up to 20 words of up to 64 characters,
-    then "inside a message" or "the word alone"), a person (picked from the chat's most active
+    then "anywhere, even inside a word" or "the word alone"), a person (picked from the chat's most active
     writers; the rule fires on each of their messages), stickers in the chat a minute (5, 10, 20)
     or messages from one person a minute (10, 20, 40);
   - what it does — tell the admins, warn (a ready text or a typed one), reply with a typed text
