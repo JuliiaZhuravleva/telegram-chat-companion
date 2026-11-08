@@ -359,36 +359,112 @@ class TestNotifiedIsNotAssumed:
 
     @pytest.mark.asyncio
     async def test_no_bot_object_reports_not_sent(self) -> None:
-        sent = await self._notifier().notify_unauthorized(
-            chat_id=GROUP_ID, chat_title="A group", user_id=1, bot=None
-        )
+        sent = await self._notifier().notify_unauthorized(chat_id=GROUP_ID, text="card", bot=None)
         assert sent is False
 
     @pytest.mark.asyncio
     async def test_the_notification_type_switched_off_reports_not_sent(self) -> None:
         sent = await self._notifier(enabled=False).notify_unauthorized(
-            chat_id=GROUP_ID, chat_title="A group", user_id=1, bot=AsyncMock()
+            chat_id=GROUP_ID, text="card", bot=AsyncMock()
         )
         assert sent is False
 
     @pytest.mark.asyncio
     async def test_no_admins_configured_reports_not_sent(self) -> None:
         sent = await self._notifier(admin_ids="").notify_unauthorized(
-            chat_id=GROUP_ID, chat_title="A group", user_id=1, bot=AsyncMock()
+            chat_id=GROUP_ID, text="card", bot=AsyncMock()
         )
         assert sent is False
 
     @pytest.mark.asyncio
-    async def test_a_delivered_card_reports_sent_and_says_it_was_an_add(self) -> None:
+    async def test_a_delivered_card_reports_sent(self) -> None:
         bot = AsyncMock()
 
-        sent = await self._notifier().notify_unauthorized(
-            chat_id=GROUP_ID, chat_title="A group", user_id=1, reason="added", bot=bot
-        )
+        sent = await self._notifier().notify_unauthorized(chat_id=GROUP_ID, text="card", bot=bot)
 
         assert sent is True
-        text = bot.send_message.await_args.args[1]
-        assert "Unauthorized access" not in text, (
-            "a card produced by an ADD must not be headed as an access attempt"
-        )
-        assert "added" in text.lower()
+        assert bot.send_message.await_args.args[1] == "card"
+
+
+@pytest.mark.asyncio
+async def test_the_card_goes_out_in_the_admin_language_and_says_it_was_an_add() -> None:
+    """Through the real service and notifier: the card a bot admin actually gets."""
+    admin_repo = AsyncMock()
+    admin_repo.has_rejected_attempt = AsyncMock(return_value=False)
+    admin_repo.log_unauthorized = AsyncMock(return_value=42)
+    admin_repo.get_admin_language = AsyncMock(return_value="en")
+    config = AsyncMock()
+
+    async def _get(key: str) -> object:
+        return "500042" if key == "admin_ids" else None
+
+    config.get = AsyncMock(side_effect=_get)
+    service = AccessRequestService(
+        admin_repo=admin_repo,
+        bot_config_repo=config,
+        notifier=AbuseNotificationService(config),
+        cooldown=NotifyCooldown(),
+    )
+    bot = AsyncMock()
+
+    result = await service.submit(
+        AccessRequest(chat_id=GROUP_ID, chat_title="A group", reason="added"), bot=bot
+    )
+
+    assert result.notified and result.suppressed is None
+    text = bot.send_message.await_args.args[1]
+    assert text.startswith("➕ <b>The bot was added to a new chat</b>")
+    markup = bot.send_message.await_args.kwargs["reply_markup"]
+    assert [b.callback_data for row in markup.inline_keyboard for b in row] == [
+        "adm_approve:en:42",
+        "adm_reject:en:42",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_what_the_applicant_typed_is_escaped_on_the_card() -> None:
+    """Name, surname, username, chat title and message are all theirs, not ours.
+
+    The card goes out with ``parse_mode=HTML``: an unescaped ``<`` in any of
+    them is either markup the stranger wrote into the admin's DM or, more
+    likely, a "can't parse entities" rejection -- no card at all.
+    """
+    admin_repo = AsyncMock()
+    admin_repo.has_rejected_attempt = AsyncMock(return_value=False)
+    admin_repo.log_unauthorized = AsyncMock(return_value=42)
+    admin_repo.get_admin_language = AsyncMock(return_value="ru")
+    config = AsyncMock()
+
+    async def _get(key: str) -> object:
+        return "500042" if key == "admin_ids" else None
+
+    config.get = AsyncMock(side_effect=_get)
+    service = AccessRequestService(
+        admin_repo=admin_repo,
+        bot_config_repo=config,
+        notifier=AbuseNotificationService(config),
+        cooldown=NotifyCooldown(),
+    )
+    bot = AsyncMock()
+
+    await service.submit(
+        AccessRequest(
+            chat_id=GROUP_ID,
+            chat_title="<i>T&T</i>",
+            chat_type="supergroup",
+            user_id=500001,
+            user_first_name="<b>Ann",
+            user_last_name="&Co</b>",
+            user_username="ann_<x>",
+            message_text='<a href="tg://x">hi</a> & bye',
+        ),
+        bot=bot,
+    )
+
+    text = bot.send_message.await_args.args[1]
+    for raw in ("<b>Ann", "&Co</b>", "<i>T&T</i>", "<x>", '<a href="tg://x">'):
+        assert raw not in text, raw
+    assert "&lt;b&gt;Ann &amp;Co&lt;/b&gt;" in text
+    assert "&lt;i&gt;T&amp;T&lt;/i&gt;" in text
+    assert "@ann_&lt;x&gt;" in text
+    assert "💬 &lt;a href=&quot;tg://x&quot;&gt;hi&lt;/a&gt; &amp; bye" in text

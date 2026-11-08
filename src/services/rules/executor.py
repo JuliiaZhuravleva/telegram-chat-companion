@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from html import escape
+import json
+from typing import TYPE_CHECKING
 
 import structlog
 from aiogram import Bot
@@ -13,7 +14,11 @@ from src.models.rules import RuleAction
 from src.services.modules.reactions.responder import set_reaction
 from src.services.modules.reactions.selector import ReactionSelector
 from src.services.rules.engine import RuleActionResult
+from src.services.rules.reply_text import fill, fit_one_message
 from src.utils import parse_admin_ids
+
+if TYPE_CHECKING:
+    from src.bot.screens.model import Screen
 
 logger = structlog.get_logger(__name__)
 
@@ -54,6 +59,22 @@ class RuleActionExecutor:
         raw = await self._bot_config_repo.get("admin_ids")
         return parse_admin_ids(raw)
 
+    async def _admin_lang(self) -> str:
+        """The admin panel's language, read where the panel reads it.
+
+        ``admin_settings.lang`` (``AdminRepository.get_admin_language``); the card
+        goes to admins, so the chat's own language plays no part. Anything
+        unreadable is Russian, the panel's default.
+        """
+        from src.bot.screens.i18n import lang_of
+
+        raw = await self._bot_config_repo.get("admin_settings")
+        try:
+            data = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            return "ru"
+        return lang_of(data.get("lang") if isinstance(data, dict) else None)
+
     async def _notify_admin(
         self,
         action: RuleActionResult,
@@ -61,16 +82,21 @@ class RuleActionExecutor:
         message: Message,
         bot: Bot,
     ) -> None:
-        """Send alert to all admin IDs."""
+        """Send the rule's card to every admin, in the panel's language."""
         admin_ids = await self._get_admin_ids()
         if not admin_ids:
             return
 
-        text = self._format_notification(action, message)
+        # Imported here: the screens are the bot layer's, and this service is
+        # constructed by the DI container long before any of them is needed.
+        from src.bot.screens.render import render_text, to_markup
+
+        card = self._card(action, message, await self._admin_lang())
+        text, markup = render_text(card), to_markup(card)
 
         for admin_id in admin_ids:
             try:
-                await bot.send_message(admin_id, text, parse_mode="HTML")
+                await bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=markup)
             except Exception as exc:
                 logger.warning(
                     "Failed to notify admin about rule",
@@ -79,37 +105,47 @@ class RuleActionExecutor:
                 )
 
     @staticmethod
-    def _format_notification(action: RuleActionResult, message: Message) -> str:
-        """Build HTML notification for a triggered rule."""
+    def _card(action: RuleActionResult, message: Message, lang: str) -> Screen:
+        """``card.rule`` for one firing: the screen builder escapes every value."""
+        from src.bot.screens.rules import RuleView, rule_card, rule_name
+
+        rule = action.rule
+        view = RuleView(
+            id=rule.id, chat_id=rule.chat_id, rule_type=str(rule.rule_type), config=rule.config
+        )
         user = message.from_user
-        user_display = escape(user.first_name) if user else "Unknown"
-        username = f" (@{escape(user.username)})" if user and user.username else ""
-        rule_name = escape(action.rule.config.get("name", f"Rule #{action.rule.id}"))
-        excerpt = escape((message.text or message.caption or "")[:100])
-        match_detail = escape(action.params.get("match_detail", ""))
-
-        lines = [
-            f"📋 <b>Rule triggered:</b> {rule_name}",
-            f"<b>Type:</b> {escape(action.rule.rule_type)}",
-            f"<b>Chat:</b> <code>{message.chat.id}</code>",
-            f"<b>User:</b> {user_display}{username}",
-        ]
-        if match_detail:
-            lines.append(f"<b>Match:</b> {match_detail}")
-        if excerpt:
-            lines.append(f"<b>Message:</b> {excerpt}")
-
-        return "\n".join(lines)
+        title = message.chat.title
+        detail = action.params.get("match_detail")
+        return rule_card(
+            lang,
+            rule_id=rule.id,
+            chat_id=message.chat.id,
+            name=rule_name(view, lang),
+            # A private chat or a test double has no title: the id stands alone.
+            chat_title=title if isinstance(title, str) else None,
+            first_name=user.first_name if user else None,
+            username=user.username if user else None,
+            match_detail=detail if isinstance(detail, str) else "",
+            excerpt=message.text or message.caption or "",
+        )
 
     @staticmethod
     async def _warn_user(action: RuleActionResult, *, message: Message) -> None:
-        """Reply with a warning message (plain text to avoid HTML injection)."""
+        """Reply with a warning message (plain text to avoid HTML injection).
+
+        A rule without its own text posts the Russian default: it lands in the
+        chat, whose language the bot does not know. A text that is not a string
+        (hand-written JSON) counts as none, and one over Telegram's limit is cut
+        to fit rather than rejected whole.
+        """
+        from src.bot.screens.rules import WARN_FALLBACK
+
         warning = (
-            action.params.get("warning_message")
-            or action.rule.config.get("warning_message")
-            or "Warning: you triggered an automated rule."
+            _text(action.params.get("warning_message"))
+            or _text(action.rule.config.get("warning_message"))
+            or WARN_FALLBACK("ru")
         )
-        await message.reply(warning, parse_mode=None)
+        await message.reply(fit_one_message(warning, rule_id=action.rule.id), parse_mode=None)
 
     @staticmethod
     async def _set_reaction(
@@ -146,23 +182,30 @@ class RuleActionExecutor:
 
     @staticmethod
     async def _custom_response(action: RuleActionResult, *, message: Message) -> None:
-        """Reply with a template-substituted custom response."""
-        template = (
-            action.params.get("response_template")
-            or action.rule.config.get("response_template")
-            or ""
+        """Reply with a template-substituted custom response.
+
+        Sent with ``parse_mode=None``, so the values go in as they are: escaping
+        them here showed a name like ``Tom & Jerry`` as ``Tom &amp; Jerry``, and
+        plain text cannot carry markup to inject. The values go in in one pass
+        (`reply_text.fill`), and the filled text is cut to one message: a long
+        name can push a text that fit when typed over Telegram's limit.
+        """
+        template = _text(action.params.get("response_template")) or _text(
+            action.rule.config.get("response_template")
         )
         if not template:
             return
 
         user = message.from_user
-        substitutions = {
-            "{first_name}": escape(user.first_name) if user else "Unknown",
-            "{username}": escape(user.username or "") if user else "",
-            "{rule_name}": escape(action.rule.config.get("name", f"Rule #{action.rule.id}")),
-        }
-        text = template
-        for placeholder, value in substitutions.items():
-            text = text.replace(placeholder, value)
+        text = fill(
+            template,
+            first_name=user.first_name if user else "Unknown",
+            username=(user.username or "") if user else "",
+            rule_name=str(action.rule.config.get("name", f"Rule #{action.rule.id}")),
+        )
+        await message.reply(fit_one_message(text, rule_id=action.rule.id), parse_mode=None)
 
-        await message.reply(text, parse_mode=None)
+
+def _text(value: object) -> str:
+    """A text field from rule JSON: the string, or empty for anything else."""
+    return value if isinstance(value, str) else ""

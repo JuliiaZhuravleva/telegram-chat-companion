@@ -1,0 +1,1132 @@
+"""The callback grammar (`src.bot.screens.routes`) against the REAL handler tree.
+
+What a failure here means in production:
+
+* a payload over 64 bytes → Telegram rejects the WHOLE message (400), so the
+  screen never appears;
+* a prefix without its trailing ``:`` → ``startswith`` also matches a longer
+  sibling and the wrong handler consumes the tap (CLAUDE.md gotcha);
+* a payload no handler takes → the button spins until Telegram gives up — the
+  failure the stale catch-all exists to make impossible.
+
+`first_match` walks ``src.bot.handlers.router`` exactly as aiogram does
+(own handlers, then sub-routers in include order) without a bot or database.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+from aiogram.types import Message, ReplyKeyboardRemove
+
+from src.bot.handlers import router as main_router
+from src.bot.screens.chat import REJECTED_BEFORE, SHORT_PAGES
+from src.bot.screens.routes import (
+    CALLBACK_LIMIT,
+    LEGACY_SAMPLES,
+    NOOP,
+    ROUTES,
+    WRITABLE,
+    CallbackTooLong,
+    UnknownRoute,
+    cb,
+    parse,
+    prefix_of,
+    target_of,
+)
+from src.bot.screens.sections import SECTIONS
+from src.bot.settings_fields import FIELDS_BY_CODE
+from src.bot.states.admin import (
+    PROMPT_HOMES,
+    PROMPT_OWN_TAPS,
+    PROMPT_SCREENS,
+    REPLY_KEYBOARD_PROMPTS,
+    STICKER_ANSWERS,
+    AdminStates,
+    is_own_tap,
+    reply_keyboard_up,
+)
+from src.models.rules import RuleType
+from tests.unit.screen_routing import (
+    ADMIN_ID,
+    FakeState,
+    admin_tap,
+    admin_text,
+    deliver,
+    first_match,
+)
+
+SRC_BOT = Path(__file__).resolve().parents[2] / "src" / "bot"
+
+# Worst cases, not typical values: the longest shape each field can take.
+LANG = "en"  # same length as "ru"; spelled out so the intent is visible
+CID = -1009999999999  # longest supergroup id shape
+UID = 9999999999  # Telegram user ids are up to 10 digits today; 52 bits in principle
+INT4 = 2147483647  # SERIAL / INTEGER primary keys (rule, attempt, fact ids)
+PAGE = 999
+FUID = "AgAD" + "Z" * 28  # file_unique_id: undocumented length; observed ~16-20
+PACK_REF = "0123456789ab"
+CODE = max(FIELDS_BY_CODE, key=len)
+SECTION = max(SECTIONS, key=len)
+RULE_TYPE = max((t.value for t in RuleType), key=len)
+ARG16 = "x" * 16
+"""Envelope for a new prefix whose argument shape its area has not fixed yet:
+the test proves the prefix leaves room for lang + chat id + a 16-byte token."""
+
+WORST_CASE: dict[str, tuple[object, ...]] = {
+    "adm_menu:": (LANG,),
+    "adm_close:": (LANG,),
+    "adm_pnl:": (LANG, PAGE, SHORT_PAGES),
+    "adm_pnl_menu:": (LANG, CID),
+    "adm_pnl_grp:": (LANG, CID, SECTION),
+    "adm_pnl_tgl:": (LANG, CID, CODE),
+    "adm_pnl_tol:": (LANG, CID, "in"),
+    "adm_pnl_tolset:": (LANG, CID, "0.95"),
+    "adm_pnl_tolcancel:": (LANG, CID),
+    "adm_pnl_pct:": (LANG, CID, CODE, "in"),
+    "adm_pnl_pctset:": (LANG, CID, CODE, "100"),
+    "adm_pnl_pctx:": (LANG, CID, CODE),
+    "adm_pnl_lg:": (LANG, CID),
+    "adm_pnl_lgset:": (LANG, CID, "ru"),
+    "adm_pnl_sp:": (LANG, CID),
+    "adm_pnl_spok:": (LANG, CID, INT4),  # the draft's revision: a message id
+    "adm_pnl_spre:": (LANG, CID, INT4),
+    "adm_pnl_spx:": (LANG, CID),
+    "adm_wl_rm_ask:": (LANG, CID, PAGE),
+    "adm_wl_rm:": (LANG, CID, PAGE),
+    "adm_wl_on:": (LANG, CID, PAGE, REJECTED_BEFORE),
+    "adm_wl_pending:": (LANG, PAGE),
+    "adm_wl_apr:": (LANG, INT4, PAGE),
+    "adm_wl_rej:": (LANG, INT4, PAGE),
+    "adm_wl_rejected:": (LANG, PAGE),
+    "adm_wl_restore:": (LANG, INT4, PAGE),
+    "adm_wl_del_ask:": (LANG, INT4, PAGE),
+    "adm_wl_del:": (LANG, INT4, PAGE),
+    "adm_approve:": (LANG, INT4),
+    "adm_reject:": (LANG, INT4),
+    "ar_list:": (LANG, CID, PAGE),
+    "ar_all:": (LANG, CID, INT4),
+    "ar_view:": (LANG, INT4, CID, "j"),
+    "ar_tog:": (LANG, INT4, CID, PAGE),
+    "ar_del_ask:": (LANG, INT4, CID),
+    "ar_del:": (LANG, INT4, CID),
+    "ar_add:": (LANG, CID),
+    "ar_type:": (LANG, CID, RULE_TYPE),
+    "ar_cancel:": (LANG, CID),
+    "ar_b_type:": (LANG, CID, "u", PAGE),
+    "ar_b_match:": (LANG, CID, ARG16),
+    "ar_b_who:": (LANG, CID, ARG16),
+    "ar_b_find:": (LANG, CID),
+    "ar_b_n:": (LANG, CID, ARG16),
+    "ar_b_act:": (LANG, CID, ARG16),
+    "ar_b_txt:": (LANG, CID, ARG16),
+    "ar_b_rx:": (LANG, CID, ARG16),
+    "ar_cfg:": (LANG, CID),
+    "adm_kb_orgs:": (LANG, CID, PAGE),
+    "adm_kb_org:": (LANG, CID, UID),
+    "adm_kb_org_inv:": (LANG, CID, UID),
+    "adm_kb_org_dm:": (LANG, CID, UID),
+    "adm_kb_org_rm:": (LANG, CID, UID),
+    # The removed person's place in the list: nothing caps the list, so the
+    # widest integer the other ids use.
+    "adm_kb_org_undo:": (LANG, CID, UID, INT4),
+    "adm_kb_org_list:": (LANG, CID, PAGE),
+    "adm_kb_org_pick:": (LANG, CID, UID),
+    "adm_kb_org_add:": (LANG, CID),
+    "adm_stk_sets:": (LANG, PAGE),
+    "adm_stk_pk:": (LANG, PACK_REF, PAGE),
+    "adm_stk_view:": (LANG, FUID),
+    "adm_stk_card:": (LANG, FUID),
+    "adm_stk_score:": (LANG, FUID),
+    "adm_stk_reanalyze:": (LANG, FUID),
+    "adm_stk_clr_ask:": (LANG, FUID),
+    "adm_stk_clr:": (LANG, FUID),
+    "adm_stk_dmchk:": (LANG, FUID),
+    "adm_stk_expset:": (LANG, FUID, 9),
+    "adm_stk_expedit:": (LANG, FUID),
+    "adm_stk_expcancel:": (LANG, FUID),
+    "adm_stk_expreset:": (LANG, FUID),
+    "adm_health:": (LANG, "now"),
+    "adm_stats:": (LANG, "30d"),
+    "adm_costs:": (LANG, "30d"),
+    "adm_costs_verify:": (LANG, "30d"),
+    "adm_settings:": (LANG,),
+    "adm_defs:": (LANG, PAGE),
+    "adm_defs_sec:": (LANG, SECTION),
+    "adm_defs_tgl:": (LANG, CODE),
+    "adm_notif:": (LANG,),
+    "adm_nstk:": (LANG,),
+    "adm_ntog:": (LANG, "unauthorized"),
+    "adm_lang:": (LANG,),
+    "adm_lang_set:": (LANG, LANG),
+    "help_summary:": (UID, 500),
+    "help_close:": (UID,),
+    "help_dm:": (LANG, "start"),
+    "help_callme:": (LANG, "acc"),
+    "kb_view:": (LANG, PAGE),
+    "kb_undo:": (INT4, UID),
+}
+
+
+def _by_status(*statuses: str) -> list[str]:
+    return [prefix for prefix, route in ROUTES.items() if route.status in statuses]
+
+
+# ---------------------------------------------------------------------------
+# Shape of the table
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("prefix", list(ROUTES))
+def test_every_prefix_ends_with_a_colon(prefix: str):
+    assert prefix.endswith(":")
+    assert prefix.count(":") == 1, "a prefix is one segment; arguments come after it"
+
+
+def test_no_prefix_is_a_prefix_of_another():
+    clashes = [(a, b) for a in ROUTES for b in ROUTES if a != b and b.startswith(a)]
+    assert clashes == []
+
+
+def test_the_colon_is_what_keeps_siblings_apart():
+    """The control for the test above: drop the colons and the clashes appear."""
+    bare = [p.rstrip(":") for p in ROUTES]
+    assert any(b.startswith(a) for a in bare for b in bare if a != b)
+
+
+def test_every_writable_prefix_has_a_worst_case():
+    assert set(WORST_CASE) == set(_by_status(*WRITABLE))
+
+
+@pytest.mark.parametrize("prefix", list(WORST_CASE))
+def test_worst_case_payload_fits(prefix: str):
+    data = cb(prefix, *WORST_CASE[prefix])  # cb() raises past 64 bytes
+    assert len(data.encode()) <= CALLBACK_LIMIT
+
+
+def test_longest_payloads_measured():
+    """Sizes measured, not hand-counted (a hand count once ran a byte high), and
+    pinned so a change to an id shape shows up as a diff. The undo payload is
+    the longest of all: a chat id, a user id and a place in the list."""
+    assert len(cb("adm_kb_org_undo:", "en", CID, UID, INT4)) == 55
+    assert len(cb("adm_pnl_grp:", "en", CID, "community")) == 39
+    assert len(cb("ar_view:", "en", INT4, CID, "j")) == 38
+    assert max(WORST_CASE, key=lambda p: len(cb(p, *WORST_CASE[p]))) == "adm_kb_org_undo:"
+
+
+def _written_payloads() -> dict[str, set[str]]:
+    """Every payload the registered samples write, both languages, by prefix."""
+    from src.bot.screens.registry import load_all
+
+    payloads: list[str] = []
+    for variants in load_all().values():
+        for item in variants:
+            for lang in ("ru", "en"):
+                payloads += [b.callback for row in item.build(lang).rows for b in row]
+    by_prefix: dict[str, set[str]] = {}
+    for data in payloads:
+        prefix = prefix_of(data) if data and data != NOOP else None
+        if prefix is not None:
+            by_prefix.setdefault(prefix, set()).add(data)
+    return by_prefix
+
+
+def test_worst_cases_have_the_shape_the_screens_write():
+    """A worst case with fewer fields than the screens write measures a shorter
+    payload than the one sent: ``adm_kb_org_undo:``'s row had no place in the
+    list, so the longest payload of all was counted eleven bytes short."""
+    written = _written_payloads()
+    assert len(written) > 60, "the samples were not walked"
+    short: list[str] = []
+    for prefix, datas in sorted(written.items()):
+        worst = [str(f) for f in WORST_CASE[prefix]]
+        for data in sorted(datas):
+            fields = data[len(prefix) :].split(":")
+            if len(fields) > len(worst):
+                short.append(f"{data}: {len(fields)} fields, worst case has {len(worst)}")
+            short += [
+                f"{data}: field {i} {got!r} wider than {want!r}"
+                for i, (got, want) in enumerate(zip(fields, worst, strict=False))
+                if len(got) > len(want)
+            ]
+    assert short == []
+
+
+def test_the_shape_check_sees_a_missing_field():
+    """The control: the undo row as it was, without the place in the list."""
+    payload = cb("adm_kb_org_undo:", "ru", -100123, 555, 1)
+    assert len(payload[len("adm_kb_org_undo:") :].split(":")) > len((LANG, CID, UID))
+    assert any(d.count(":") == 4 for d in _written_payloads()["adm_kb_org_undo:"])
+
+
+# ---------------------------------------------------------------------------
+# The source agrees with the table
+# ---------------------------------------------------------------------------
+
+_FILTER_RE = re.compile(r"""F\.data\.startswith\(\s*["']([a-z_]+:?)["']""")
+_WRITE_RE = re.compile(r"""(?:\bcallback(?:_data)?\s*=\s*f?["']|\bcb\(\s*["'])([a-z][a-z_]*:)""")
+"""A payload written into a button: aiogram's ``callback_data=``, a screen
+`Button`'s ``callback=``, or `routes.cb`."""
+OWN_PREFIXES = ("adm_", "ar_", "help_", "kb_")
+
+
+def _scan(pattern: re.Pattern[str]) -> dict[str, list[str]]:
+    """prefix → the files under ``src/bot`` that match it, relative to it."""
+    found: dict[str, list[str]] = {}
+    for path in sorted(SRC_BOT.rglob("*.py")):
+        for match in pattern.finditer(path.read_text(encoding="utf-8")):
+            found.setdefault(match.group(1), []).append(path.relative_to(SRC_BOT).as_posix())
+    return found
+
+
+def test_the_scanners_see_the_source():
+    """Known positives, so an empty scan is not mistaken for a clean one: one
+    from the tree (a kept prefix, so it outlives every area's change) and one
+    per write form the regex claims to read."""
+    assert "adm_pnl_menu:" in _scan(_FILTER_RE)
+    assert "adm_pnl_menu:" in _scan(_WRITE_RE)
+    for line in (
+        'InlineKeyboardButton(text=t, callback_data=f"adm_wl:{lang}")',
+        'Button(_WHITELIST(lg), callback=f"adm_wl:{lg}")',
+        'Button(label, callback=cb("adm_wl:", lg))',
+    ):
+        assert [m.group(1) for m in _WRITE_RE.finditer(line)] == ["adm_wl:"], line
+
+
+def test_every_filter_prefix_is_routed():
+    filters = {p: files for p, files in _scan(_FILTER_RE).items() if p.startswith(OWN_PREFIXES)}
+    unknown = {p: files for p, files in filters.items() if p not in ROUTES}
+    assert unknown == {}, "a handler filters on a prefix routes.ROUTES does not know"
+
+
+def test_every_filter_prefix_has_its_colon():
+    """``startswith("adm_foo")`` would also take ``adm_foo_bar:``."""
+    bare = {p: files for p, files in _scan(_FILTER_RE).items() if not p.endswith(":")}
+    assert bare == {}
+
+
+def test_every_written_prefix_is_routed():
+    written = {p: files for p, files in _scan(_WRITE_RE).items() if p.startswith(OWN_PREFIXES)}
+    unknown = {p: files for p, files in written.items() if p not in ROUTES}
+    assert unknown == {}, "a keyboard writes a prefix routes.ROUTES does not know"
+
+
+RETIRED_WRITES_TODAY: frozenset[tuple[str, str]] = frozenset()
+"""Where a ``retired`` or ``compat`` prefix is still written on the base the
+areas start from. A ratchet: each area deletes its own pairs (and may then
+delete them here); nothing may add one. A retired write is a button that
+reaches the catch-all the day its area merges."""
+
+
+def _unwritable_writes(scan: dict[str, list[str]]) -> set[tuple[str, str]]:
+    return {
+        (path, prefix)
+        for prefix, paths in scan.items()
+        if prefix in ROUTES and ROUTES[prefix].status not in WRITABLE
+        for path in paths
+    }
+
+
+def test_no_new_retired_or_compat_writes():
+    new = _unwritable_writes(_scan(_WRITE_RE)) - RETIRED_WRITES_TODAY
+    assert new == set(), "a file writes a retired or compat prefix; its button would go stale"
+
+
+def test_the_retired_write_ratchet_says_no():
+    """Its control: one more file writing ``adm_wl:``, or one more retired
+    prefix in a file already listed, is refused."""
+    scan = {
+        "adm_wl:": ["keyboards/new.py"],
+        "adm_stk_back:": ["screens/hub.py"],
+        "adm_pnl:": ["x.py"],
+    }
+    assert _unwritable_writes(scan) - RETIRED_WRITES_TODAY == {
+        ("keyboards/new.py", "adm_wl:"),
+        ("screens/hub.py", "adm_stk_back:"),
+    }
+
+
+_INVALID_RE = re.compile(r"""answer\(\s*["']Invalid (?:data|type|preset|chat ID)["']""")
+INVALID_ALERTS_TODAY = {}
+"""Untranslated ``"Invalid data"`` popups a live handler shows for a payload it
+cannot parse, on the base the areas start from. A payload a handler cannot
+parse is a stale button and owes the user `screens.stale.show_stale` — the
+panel as it is now, in their language — not an English alert. A ratchet:
+counts only go down."""
+
+
+def _invalid_alerts() -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in sorted(SRC_BOT.rglob("*.py")):
+        n = len(_INVALID_RE.findall(path.read_text(encoding="utf-8")))
+        if n:
+            counts[path.relative_to(SRC_BOT).as_posix()] = n
+    return counts
+
+
+def test_no_new_invalid_data_alerts():
+    grown = {
+        path: (n, INVALID_ALERTS_TODAY.get(path, 0))
+        for path, n in _invalid_alerts().items()
+        if n > INVALID_ALERTS_TODAY.get(path, 0)
+    }
+    assert grown == {}, "file: (now, allowed) — call show_stale on a payload you cannot parse"
+
+
+def test_the_invalid_alert_scan_sees_both_quotes():
+    for line in (
+        'await callback.answer("Invalid data", show_alert=True)',
+        "await callback.answer('Invalid preset', show_alert=True)",
+        'await callback.answer(\n            "Invalid type",\n            show_alert=True)',
+    ):
+        assert _INVALID_RE.search(line), line
+    assert not _INVALID_RE.search('await callback.answer("Invalid callback data.")')
+
+
+# ---------------------------------------------------------------------------
+# Every payload lands
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_samples_cover_every_prefix_that_can_be_sitting_in_a_dm():
+    assert set(LEGACY_SAMPLES) == set(ROUTES) - set(_by_status("new"))
+
+
+@pytest.mark.parametrize(("prefix", "data"), list(LEGACY_SAMPLES.items()))
+def test_legacy_sample_is_its_prefix(prefix: str, data: str):
+    assert prefix_of(data) == prefix
+    assert len(data.encode()) <= CALLBACK_LIMIT
+
+
+@pytest.mark.parametrize(("prefix", "data"), list(LEGACY_SAMPLES.items()))
+def test_legacy_payloads_land(prefix: str, data: str):
+    """No spinner, ever: every payload an old button can carry reaches a handler,
+    live or the catch-all.
+
+    A kept prefix must reach its live handler: the catch-all would make a
+    working button look out of date. So must a legacy prefix while some file
+    still writes it; once its area stops writing it (``ar_cancel:`` may be
+    replaced) the handler may go and old buttons fall to the catch-all.
+    Retired and compat prefixes may reach either while their area is mid-change.
+    """
+    handler = first_match(data)
+    assert handler is not None, f"{data!r} reaches no handler"
+    status = ROUTES[prefix].status
+    if status == "kept" or (status == "legacy" and prefix in _scan(_WRITE_RE)):
+        assert not handler.startswith("stale."), f"{data!r} fell to {handler}"
+
+
+@pytest.mark.parametrize("prefix", _by_status("new"))
+def test_new_prefixes_land(prefix: str):
+    """Until its area lands the handler, a new prefix reaches the catch-all."""
+    data = cb(prefix, *WORST_CASE[prefix])
+    assert first_match(data) is not None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        "adm_",
+        "adm_nonexistent:ru",
+        "ar_nonexistent:ru:1",
+        "adm_pnl_menu",  # a prefix without its colon
+    ],
+)
+def test_garbled_admin_payloads_reach_the_catch_all(data: str):
+    """A payload no live prefix claims. One a live prefix DOES claim but cannot
+    parse (``ar_view:`` with empty fields) reaches that live handler, which owes
+    the user `show_stale` itself — an area's job, not the router's."""
+    assert first_match(data) == "stale.handle_stale"
+
+
+def test_a_foreign_payload_reaches_nothing():
+    """The walk's own control: it can say "no handler"."""
+    assert first_match("zz_unknown:ru") is None
+
+
+def test_access_card_payloads_reach_the_access_card():
+    assert first_match(LEGACY_SAMPLES["adm_approve:"]) == (
+        "access_card.handle_approve_notification"
+    )
+    assert first_match(LEGACY_SAMPLES["adm_reject:"]) == "access_card.handle_reject_notification"
+
+
+def test_noop_reaches_a_handler():
+    assert first_match(NOOP) is not None
+
+
+# ---------------------------------------------------------------------------
+# Router order (docs/admin-dm-internals.md, F.2)
+# ---------------------------------------------------------------------------
+
+ROUTER_ORDER = (
+    "fsm_cancel",
+    "admin_sticker",
+    "admin_kb",
+    "admin_chat_panel",
+    "admin_defaults",
+    "access_card",
+    "admin",
+    "rules",
+    "stale",
+    "commands",
+    "callbacks",
+    "chat_events",
+    "community",
+    "reactions",
+    "media",
+    "message",
+)
+
+
+def _router_module(sub) -> str:
+    observers = sub.observers.values()
+    for observer in observers:
+        for handler in observer.handlers:
+            return handler.callback.__module__.rsplit(".", 1)[-1]
+    return sub.name
+
+
+def test_router_include_order():
+    assert tuple(_router_module(sub) for sub in main_router.sub_routers) == ROUTER_ORDER
+
+
+# ---------------------------------------------------------------------------
+# cb / parse / prefix_of / target_of
+# ---------------------------------------------------------------------------
+
+
+def test_cb_builds():
+    assert cb("adm_pnl_menu:", "ru", -100) == "adm_pnl_menu:ru:-100"
+    assert cb("adm_menu:", "en") == "adm_menu:en"
+
+
+@pytest.mark.parametrize("prefix", ["adm_stk_set:", "adm_wl:", "adm_stk_back:", "zz_unknown:"])
+def test_cb_refuses_what_must_not_be_written(prefix: str):
+    with pytest.raises(UnknownRoute):
+        cb(prefix, "ru")
+
+
+def test_cb_refuses_past_64_bytes():
+    with pytest.raises(CallbackTooLong, match="65 bytes"):
+        cb("adm_menu:", "ru:" + "x" * 53)
+    assert len(cb("adm_menu:", "ru:" + "x" * 52)) == 64
+
+
+def test_cb_counts_bytes():
+    with pytest.raises(CallbackTooLong):
+        cb("adm_menu:", "я" * 28)  # 28 characters, 56 + 9 = 65 bytes
+
+
+@pytest.mark.parametrize(
+    ("data", "n", "expected"),
+    [
+        ("adm_pnl_menu:ru:-100", 2, ["ru", "-100"]),
+        ("adm_kb_orgs:ru:-100:0:p", 3, ["ru", "-100", "0"]),  # trailing origin token ignored
+        ("adm_pnl_menu:ru", 2, None),  # too short
+        ("adm_pnl_menu:ru::", 2, None),  # empty field
+        ("adm_pnl_menu::-100", 2, None),
+        ("", 1, None),
+        (None, 1, None),
+    ],
+)
+def test_parse(data, n, expected):
+    assert parse(data, n) == expected
+
+
+def test_prefix_of_takes_the_longest_match():
+    assert prefix_of("adm_pnl:ru:0") == "adm_pnl:"
+    assert prefix_of("adm_pnl_menu:ru:-100") == "adm_pnl_menu:"
+    assert prefix_of("adm_wl_rm_ask:ru:-100:0") == "adm_wl_rm_ask:"
+    assert prefix_of("zz:ru") is None
+
+
+def test_target_of():
+    assert target_of("adm_menu:ru", "chat") == "hub"
+    assert target_of(NOOP, "chat") == "нет действия"
+    assert target_of("zz:ru", "chat") == "?"
+    assert target_of("adm_pnl_tgl:ru:-100:sm", "memory") == "memory"
+    assert target_of("adm_pnl_tgl:ru:-100:tol", "chat") == "chat.stickers"
+    assert target_of("adm_pnl_grp:ru:-100:modules", "chat") == "memory"  # legacy group token
+    assert target_of("adm_pnl_grp:ru:-100", "chat") == "chat"
+
+
+# ---------------------------------------------------------------------------
+# Leaving a typed-input prompt by another screen's button
+# ---------------------------------------------------------------------------
+
+_PROMPT_INPUT: dict[str, str] = {
+    AdminStates.awaiting_setting_value.state: "admin_chat_panel.handle_chat_panel_tolerance_input",
+    AdminStates.awaiting_system_prompt.state: "admin_chat_panel.handle_chat_panel_sp_input",
+    AdminStates.awaiting_sticker_score.state: "admin_sticker.handle_sticker_explicitness_input",
+    AdminStates.awaiting_kb_organizer.state: "admin_kb.handle_kb_organizer_add_reply",
+    AdminStates.awaiting_rule_config.state: "rules.handle_rule_config_input",
+    AdminStates.awaiting_rule_words.state: "rules.handle_rule_words_input",
+    AdminStates.awaiting_rule_text.state: "rules.handle_rule_text_input",
+    AdminStates.awaiting_rule_react.state: "rules.handle_rule_react_input",
+}
+"""Each armed prompt → the handler that reads the admin's next message as its answer."""
+
+_ALL_STATES = [s.state for s in AdminStates.__all_states__]
+
+
+def test_every_prompt_state_has_an_allowlist():
+    assert set(PROMPT_OWN_TAPS) == set(_ALL_STATES)
+
+
+def test_every_prompt_state_lists_its_screens():
+    """`PROMPT_SCREENS` (next to the allowlists in states/admin.py) is the one list
+    of the screens a prompt shows: the middleware closes the message showing one."""
+    assert set(PROMPT_SCREENS) == set(_ALL_STATES)
+
+
+def test_every_prompt_state_has_a_home():
+    """`PROMPT_HOMES` names where a closed prompt's message leads back: a row for
+    every state, and a screen for every state that shows one. Its button is built
+    from the prompt's own key, so its prefix must take ``lang:key`` first and land
+    where the row says (the closed-message test routes each one for real)."""
+    assert set(PROMPT_HOMES) == set(_ALL_STATES)
+    for state, screens in PROMPT_SCREENS.items():
+        home = PROMPT_HOMES[state]
+        assert (home is not None) is bool(screens), state
+        if home is not None:
+            data = cb(home.prefix, "ru", WORST_CASE[home.prefix][1], *home.tail)
+            assert target_of(data, "prompt.closed") == home.screen_id, (state, data)
+
+
+_SET_STATE = re.compile(r"set_state\(\s*AdminStates\.(\w+)")
+
+
+def _states_set_in(source: str) -> set[str]:
+    return {f"AdminStates:{name}" for name in _SET_STATE.findall(source)}
+
+
+def test_every_state_the_bot_sets_shows_a_screen():
+    """A prompt the bot arms puts a screen up, and that screen is listed: an
+    empty row is only for a state nothing sets."""
+    source = "\n".join(p.read_text() for p in sorted(Path("src").rglob("*.py")))
+    armed = _states_set_in(source)
+    # The scan sees the source: these two are set by the panel and the rules.
+    assert {"AdminStates:awaiting_setting_value", "AdminStates:awaiting_rule_who"} <= armed
+    assert _states_set_in("await state.set_state(\n    AdminStates.awaiting_rule_text)") == {
+        "AdminStates:awaiting_rule_text"
+    }
+    assert armed <= set(_ALL_STATES)
+    assert [state for state in sorted(armed) if not PROMPT_SCREENS[state]] == []
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+def test_an_allowlist_names_routes(state: str):
+    """An entry is a routed prefix, or a family (``ar_``) that covers some."""
+    for entry in PROMPT_OWN_TAPS[state]:
+        assert entry != NOOP
+        if entry.endswith(":"):
+            assert entry in ROUTES, entry
+        else:
+            assert entry.endswith("_") and any(p.startswith(entry) for p in ROUTES), entry
+
+
+@pytest.mark.parametrize("state", sorted(PROMPT_SCREENS))
+def test_a_prompt_screen_does_not_end_its_prompt(state: str):
+    from src.bot.screens.registry import load_all
+
+    samples = load_all()
+    for screen_id in PROMPT_SCREENS[state]:
+        assert screen_id in samples, screen_id
+        for item in samples[screen_id]:
+            for row in item.build("ru").rows:
+                for button in row:
+                    if button.callback != NOOP:
+                        assert is_own_tap(state, button.callback), (item.title, button.callback)
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_a_foreign_tap_ends_the_prompt_and_its_own_taps_keep_it(state: str):
+    """Every writable payload, through the real router: a prompt's own taps keep
+    it armed, every other tap clears it before the handler that takes it."""
+    kept, cleared, wrong = [], [], []
+    for prefix, args in WORST_CASE.items():
+        data = cb(prefix, *args)
+        fsm = FakeState(state)
+        taken = await deliver("callback_query", admin_tap(data), fsm)
+        assert taken is not None, data
+        own = is_own_tap(state, data)
+        now = await fsm.get_state()
+        (kept if now == state else cleared).append(prefix)
+        if (now == state) != own:
+            wrong.append((data, taken, now))
+    assert wrong == []
+    assert cleared, "no tap ended the prompt"
+    assert "adm_menu:" in cleared and "adm_close:" in cleared
+    assert all(is_own_tap(state, p) for p in kept)
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_the_handler_after_a_foreign_tap_sees_no_state(state: str):
+    """aiogram read ``raw_state`` before the middleware cleared the prompt and
+    hands that copy to every filter: it is cleared with the prompt."""
+    seen: dict[str, object] = {}
+    await deliver("callback_query", admin_tap("adm_menu:ru"), FakeState(state), seen=seen)
+    assert "raw_state" in seen and seen["raw_state"] is None
+    # The control: the prompt's own tap keeps it, and the handler sees it.
+    own = next((cb(p, *a) for p, a in WORST_CASE.items() if is_own_tap(state, cb(p, *a))), None)
+    if own is not None:
+        seen = {}
+        await deliver("callback_query", admin_tap(own), FakeState(state), seen=seen)
+        assert seen["raw_state"] == state
+
+
+async def test_a_page_counter_does_not_end_a_prompt():
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    assert await deliver("callback_query", admin_tap(NOOP), fsm) == "admin.handle_noop"
+    assert await fsm.get_state() == AdminStates.awaiting_kb_organizer.state
+
+
+async def test_a_foreign_tap_ends_the_prompt_and_its_handler_still_runs():
+    """No stop at the handler: ``✖️ Закрыть`` closes the message as always."""
+    fsm = FakeState(AdminStates.awaiting_setting_value)
+    tap = admin_tap("adm_close:ru")
+    await deliver("callback_query", tap, fsm, call=True)
+    assert await fsm.get_state() is None
+    tap.answer.assert_awaited_once()
+    tap.message.delete.assert_awaited_once()
+
+
+@pytest.mark.parametrize("state", sorted(_PROMPT_INPUT))
+async def test_a_typed_message_after_a_foreign_tap_is_not_the_prompts_answer(state: str):
+    text = "0.5"
+    armed = FakeState(state)
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, armed) == _PROMPT_INPUT[state], "control"
+
+    fsm = FakeState(state)
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    msg, _ = admin_text(text)
+    taken = await deliver("message", msg, fsm)
+    assert taken != _PROMPT_INPUT[state]
+    assert taken == "message.handle_text_message"
+
+
+@pytest.mark.parametrize("text", ["✖️ Отмена", "Отмена", "✖️ Cancel", "Cancel"])
+async def test_the_organizer_keyboard_cancel_after_its_prompt_is_a_cancel(text: str):
+    """The reply keyboard outlives a prompt ended by another screen's button; its
+    «Отмена» is answered like /cancel, not passed to the bot as a chat message."""
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState()) == "fsm_cancel.handle_leftover_cancel"
+    msg, _ = admin_text(text)
+    in_prompt = FakeState(AdminStates.awaiting_kb_organizer)
+    assert await deliver("message", msg, in_prompt) == "admin_kb.handle_kb_organizer_cancel_label"
+    msg, _ = admin_text(text)
+    in_rule = FakeState(AdminStates.awaiting_rule_words)
+    assert await deliver("message", msg, in_rule) == "rules.handle_rule_words_input"
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(), is_admin=False) != (
+        "fsm_cancel.handle_leftover_cancel"
+    )
+
+
+async def test_the_rules_person_search_ends_on_a_foreign_tap_and_its_cancel_follows():
+    """The search is a prompt like the others: its «Отмена» is the rules' while it
+    is open; after another screen's button ended it, the leftover keyboard's
+    «Отмена» is a plain cancel and a pick from it is stale."""
+    open_search = FakeState(AdminStates.awaiting_rule_who)
+    await open_search.update_data(rule_finding=-100123, rule_type="user_specific")
+    msg, _ = admin_text("✖️ Отмена")
+    assert await deliver("message", msg, open_search) == "rules.handle_builder_find_cancel"
+
+    fsm = FakeState(AdminStates.awaiting_rule_who)
+    await fsm.update_data(rule_finding=-100123, rule_type="user_specific")
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    assert await fsm.get_state() is None
+    msg, _ = admin_text("✖️ Отмена")
+    assert await deliver("message", msg, fsm) == "fsm_cancel.handle_leftover_cancel"
+
+
+async def test_the_leftover_cancel_removes_the_keyboard():
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value="ru")
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    assert await fsm.get_state() is None
+    msg, bot = admin_text("✖️ Отмена")
+    await deliver("message", msg, fsm, call=True, admin_repo=repo, bot_config_repo=AsyncMock())
+    (method,) = [c.args[0] for c in bot.call_args_list]
+    # The prompt is already gone: said so, and the keyboard taken away with it.
+    assert method.text == "Нечего отменять."
+    assert isinstance(method.reply_markup, ReplyKeyboardRemove)
+
+
+# ---------------------------------------------------------------------------
+# Leaving a typed-input prompt by typing another command
+# ---------------------------------------------------------------------------
+
+_COMMANDS: dict[str, str] = {
+    "/admin": "admin.handle_admin_command",
+    "/settings": "admin.handle_settings_command",
+    "/panel": "admin_chat_panel.handle_chat_panel_shortcut",
+}
+"""Commands that open a panel screen as a new message, and the handler of each."""
+
+
+@pytest.mark.parametrize("command", sorted(_COMMANDS))
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_a_typed_command_ends_the_prompt_before_its_handler(state: str, command: str):
+    """The command's own handler takes it, and sees no state: aiogram's copy of
+    the state (``raw_state``) is cleared with the prompt, as after a foreign tap."""
+    fsm = FakeState(state)
+    seen: dict[str, object] = {}
+    msg, _ = admin_text(command)
+    assert await deliver("message", msg, fsm, seen=seen) == _COMMANDS[command]
+    assert await fsm.get_state() is None
+    assert "raw_state" in seen and seen["raw_state"] is None
+
+
+@pytest.mark.parametrize("state", sorted(_PROMPT_INPUT))
+async def test_a_typed_message_after_a_typed_command_is_not_the_prompts_answer(state: str):
+    """The finding: an armed prompt, then /admin, then an ordinary text meant for
+    something else. The text is an ordinary DM message, not the prompt's answer."""
+    text = "0.5"
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(state)) == _PROMPT_INPUT[state], "control"
+
+    fsm = FakeState(state)
+    msg, _ = admin_text("/admin")
+    await deliver("message", msg, fsm)
+    msg, _ = admin_text(text)
+    taken = await deliver("message", msg, fsm)
+    assert taken != _PROMPT_INPUT[state]
+    assert taken == "message.handle_text_message"
+
+
+@pytest.mark.parametrize("state", _ALL_STATES)
+async def test_cancel_is_left_to_its_own_handler(state: str):
+    """/cancel says what it cancelled, so it has to see the prompt still armed."""
+    seen: dict[str, object] = {}
+    msg, _ = admin_text("/cancel")
+    fsm = FakeState(state)
+    assert await deliver("message", msg, fsm, seen=seen) == "fsm_cancel.handle_cancel"
+    assert seen["raw_state"] == state
+    assert await fsm.get_state() == state
+
+
+def _forwarded(text: str) -> Message:
+    from aiogram.types import MessageOriginUser, User
+
+    msg, _ = admin_text(text)
+    return msg.model_copy(
+        update={
+            "forward_origin": MessageOriginUser(
+                date=datetime(2026, 11, 7, 11, 0, tzinfo=UTC),
+                sender_user=User(id=900001, is_bot=False, first_name="Тестовый"),
+            )
+        }
+    )
+
+
+async def test_a_forwarded_command_is_content_and_ends_nothing():
+    """The organizer prompt takes a forward as its answer whatever its text."""
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    taken = await deliver("message", _forwarded("/start"), fsm)
+    assert taken == "admin_kb.handle_kb_organizer_add_reply"
+    assert await fsm.get_state() == AdminStates.awaiting_kb_organizer.state
+
+
+async def test_a_command_under_a_photo_ends_the_prompt_too():
+    """aiogram reads a command from ``text or caption``; so does the middleware."""
+    from aiogram.types import PhotoSize
+
+    msg, _ = admin_text("x")
+    photo = msg.model_copy(
+        update={
+            "text": None,
+            "caption": "/admin",
+            "photo": [PhotoSize(file_id="p", file_unique_id="pu", width=1, height=1)],
+        }
+    )
+    fsm = FakeState(AdminStates.awaiting_system_prompt)
+    assert await deliver("message", photo, fsm) == "admin.handle_admin_command"
+    assert await fsm.get_state() is None
+
+
+async def test_ordinary_text_and_a_lone_slash_end_nothing():
+    """Only a command ends a prompt: «/» alone names none, and a word is an answer.
+    (A bare mention is `typed_command`'s test below: routing one asks the bot for
+    its own username.)"""
+    armed = AdminStates.awaiting_setting_value.state
+    for text in ("0.5", "/"):
+        fsm = FakeState(armed)
+        msg, _ = admin_text(text)
+        await deliver("message", msg, fsm)
+        assert await fsm.get_state() == armed, text
+
+
+def test_typed_command_reads_a_command_as_aiogram_does():
+    from aiogram.types import Chat
+
+    from src.bot.middleware.prompt_exit import typed_command
+
+    def typed(text: str) -> str | None:
+        msg, _ = admin_text(text)
+        return typed_command(msg)
+
+    assert typed("/admin") == "admin"
+    assert typed("/panel@some_bot СРАЗУ чат") == "panel"
+    assert typed("/Admin") == "Admin"
+    assert typed("/") is None
+    assert typed("/@some_bot") is None
+    assert typed("admin") is None
+    assert typed("слово /admin") is None
+    assert typed_command(_forwarded("/admin")) is None
+    msg, _ = admin_text("/admin")
+    group = msg.model_copy(update={"chat": Chat(id=-100500, type="supergroup")})
+    assert typed_command(group) is None
+
+
+# ---------------------------------------------------------------------------
+# A reply keyboard left under the input while another prompt is armed
+# ---------------------------------------------------------------------------
+
+
+async def _put_up_reply_keyboard(screen_id: str) -> None:
+    """Show ``screen_id`` (a prompt with a reply keyboard) through `show()`, as
+    its area does: the chat's keyboard is up from then on."""
+    from aiogram.methods import SendMessage, TelegramMethod
+    from aiogram.types import CallbackQuery, Chat, User
+
+    from src.bot.screens.registry import load_all
+    from src.bot.screens.render import show
+
+    async def answer(method: TelegramMethod[object], *_: object, **__: object) -> object:
+        if isinstance(method, SendMessage):
+            return Message(
+                message_id=40,
+                date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+                chat=Chat(id=int(method.chat_id), type="private"),
+                text=method.text,
+            )
+        return True
+
+    bot = AsyncMock(side_effect=answer)
+    anchor = Message(
+        message_id=10,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=1, is_bot=True, first_name="Bot"),
+        text="Экран",
+    ).as_(bot)
+    tap = CallbackQuery(
+        id="q10",
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        chat_instance="ci",
+        data="adm_menu:ru",
+        message=anchor,
+    ).as_(bot)
+    await show(tap, load_all()[screen_id][0].build("ru"))
+    assert reply_keyboard_up(ADMIN_ID), "the keyboard was sent"
+
+
+def test_the_reply_keyboard_prompts_are_the_ones_that_show_one():
+    """`REPLY_KEYBOARD_PROMPTS` against the screens each prompt shows: a prompt
+    whose screen carries a reply keyboard owns the «Отмена» on it."""
+    from src.bot.screens.registry import load_all
+
+    samples = load_all()
+    shows_one = {
+        state
+        for state, screen_ids in PROMPT_SCREENS.items()
+        for screen_id in screen_ids
+        for item in samples[screen_id]
+        if item.build("ru").reply is not None
+    }
+    assert shows_one == set(REPLY_KEYBOARD_PROMPTS)
+
+
+_ANSWERS_A_WORD = (
+    AdminStates.awaiting_rule_words.state,
+    AdminStates.awaiting_system_prompt.state,
+    AdminStates.awaiting_setting_value.state,
+    AdminStates.awaiting_rule_text.state,
+)
+
+
+@pytest.mark.parametrize("keyboard", ["org.add", "rule.who_find"])
+@pytest.mark.parametrize("state", _ANSWERS_A_WORD)
+@pytest.mark.parametrize("text", ["✖️ Отмена", "Отмена", "✖️ Cancel"])
+async def test_a_leftover_keyboards_cancel_is_not_another_prompts_answer(
+    keyboard: str, state: str, text: str
+):
+    """The finding: the organizer's keyboard (or the person search's) outlived its
+    prompt, the admin opened another prompt and tapped the «Отмена» still on
+    screen. It is a cancel, not that prompt's answer (a line of the instruction,
+    a rule's words)."""
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(state)) == _PROMPT_INPUT[state], (
+        "control: with no keyboard up the word is the prompt's answer"
+    )
+    await _put_up_reply_keyboard(keyboard)
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState(state)) == "fsm_cancel.handle_leftover_cancel"
+
+
+async def test_a_reply_keyboards_own_prompt_keeps_its_cancel():
+    """While the prompt that put the keyboard up is armed, the button is its own."""
+    await _put_up_reply_keyboard("org.add")
+    msg, _ = admin_text("✖️ Отмена")
+    in_prompt = FakeState(AdminStates.awaiting_kb_organizer)
+    assert await deliver("message", msg, in_prompt) == "admin_kb.handle_kb_organizer_cancel_label"
+
+    await _put_up_reply_keyboard("rule.who_find")
+    open_search = FakeState(AdminStates.awaiting_rule_who)
+    await open_search.update_data(rule_finding=-100123, rule_type="user_specific")
+    msg, _ = admin_text("✖️ Отмена")
+    assert await deliver("message", msg, open_search) == "rules.handle_builder_find_cancel"
+
+
+async def test_the_leftover_cancel_ends_the_other_prompt_and_takes_the_keyboard_away():
+    """The whole path: organizer prompt, a tap elsewhere, the instruction editor,
+    «✖️ Отмена». The editor is cancelled, the keyboard taken away, and from then
+    on «Отмена» typed into a rule's words is those words again."""
+    await _put_up_reply_keyboard("org.add")
+    fsm = FakeState(AdminStates.awaiting_kb_organizer)
+    await deliver("callback_query", admin_tap("adm_menu:ru"), fsm)
+    assert await fsm.get_state() is None
+    await fsm.set_state(AdminStates.awaiting_system_prompt)
+
+    repo = AsyncMock()
+    repo.get_admin_language = AsyncMock(return_value="ru")
+    msg, bot = admin_text("✖️ Отмена")
+    await deliver("message", msg, fsm, call=True, admin_repo=repo, bot_config_repo=AsyncMock())
+    assert await fsm.get_state() is None
+    (method,) = [c.args[0] for c in bot.call_args_list]
+    assert method.text == "Отменено."
+    assert isinstance(method.reply_markup, ReplyKeyboardRemove)
+    assert not reply_keyboard_up(ADMIN_ID)
+
+    msg, _ = admin_text("Отмена")
+    in_rule = FakeState(AdminStates.awaiting_rule_words)
+    assert await deliver("message", msg, in_rule) == "rules.handle_rule_words_input"
+
+
+def _admin_sticker(emoji: str | None) -> Message:
+    from aiogram.types import Chat, Sticker, User
+
+    from tests.unit.screen_routing import ADMIN_ID
+
+    return Message(
+        message_id=2,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        sticker=Sticker(
+            file_id="fake-file",
+            file_unique_id="fake-unique",
+            type="regular",
+            width=512,
+            height=512,
+            is_animated=False,
+            is_video=False,
+            emoji=emoji,
+        ),
+    ).as_(AsyncMock())
+
+
+async def test_a_sticker_in_the_rules_reaction_prompt_is_the_rules_answer():
+    """The two halves of one behaviour, from two branches: the stickers area's DM
+    check yields while another prompt is open, and the rules prompt accepts a
+    sticker. Only the union decides who takes it, so it is tested here."""
+    taken = await deliver(
+        "message", _admin_sticker("🔥"), FakeState(AdminStates.awaiting_rule_react)
+    )
+    assert taken is not None and taken.startswith("rules."), taken
+    # The control: with no prompt open the same sticker is the stickers area's check.
+    taken = await deliver("message", _admin_sticker("🔥"), FakeState())
+    assert taken is not None and taken.startswith("admin_sticker."), taken
+
+
+_STICKER_CHECK = "admin_sticker.handle_admin_sticker_check"
+
+_STICKER_TAKER: dict[str | None, str] = {
+    None: _STICKER_CHECK,
+    AdminStates.awaiting_setting_value.state: _STICKER_CHECK,
+    AdminStates.awaiting_sticker_edit.state: _STICKER_CHECK,
+    AdminStates.awaiting_sticker_score.state: "admin_sticker.handle_sticker_explicitness_input",
+    AdminStates.awaiting_sticker.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_config.state: _STICKER_CHECK,
+    AdminStates.awaiting_kb_organizer.state: _STICKER_CHECK,
+    AdminStates.awaiting_system_prompt.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_words.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_text.state: _STICKER_CHECK,
+    AdminStates.awaiting_rule_react.state: "rules.handle_rule_react_input",
+    AdminStates.awaiting_rule_who.state: _STICKER_CHECK,
+    AdminStates.awaiting_response_chance.state: _STICKER_CHECK,
+}
+"""Who takes a sticker the admin sends in the DM, by the prompt open at the time.
+
+A prompt that reads a sticker as its answer keeps it; any other prompt has no
+use for one, and the sticker gets the stickers area's check, exactly as with no
+prompt open. The organizer prompt reads a FORWARD (below); a sticker of the
+admin's own is neither a forward nor a @username."""
+
+
+@pytest.mark.parametrize("state", [None, *_ALL_STATES])
+async def test_a_sticker_in_the_dm_goes_to_whoever_reads_it(state: str | None):
+    assert set(_STICKER_TAKER) == {None, *_ALL_STATES}, "a state without a row"
+    taken = await deliver("message", _admin_sticker("🔥"), FakeState(state))
+    assert taken is not None and not taken.startswith("media."), taken
+    assert taken == _STICKER_TAKER[state]
+    if state is not None:
+        assert (taken == _STICKER_CHECK) == (STICKER_ANSWERS.get(state) != "any")
+
+
+def _forwarded_sticker() -> Message:
+    from aiogram.types import MessageOriginUser, User
+
+    return _admin_sticker("🔥").model_copy(
+        update={
+            "forward_origin": MessageOriginUser(
+                date=datetime(2026, 11, 7, 11, 0, tzinfo=UTC),
+                sender_user=User(id=900001, is_bot=False, first_name="Тестовый"),
+            )
+        }
+    )
+
+
+async def test_a_forwarded_sticker_in_the_organizer_prompt_names_the_organizer():
+    """A forward names its sender whatever it carries: the organizer prompt's."""
+    taken = await deliver(
+        "message", _forwarded_sticker(), FakeState(AdminStates.awaiting_kb_organizer)
+    )
+    assert taken == "admin_kb.handle_kb_organizer_add_reply"
+    # The control: with no prompt open, the same forward is the stickers check.
+    assert await deliver("message", _forwarded_sticker(), FakeState()) == _STICKER_CHECK
+
+
+def _reply_to_card(text: str) -> Message:
+    from aiogram.types import Chat, User
+
+    from tests.unit.screen_routing import ADMIN_ID
+
+    card = Message(
+        message_id=7,
+        date=datetime(2026, 11, 7, 11, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=1, is_bot=True, first_name="Bot"),
+        text="🖼 Стикер",
+    )
+    msg, _ = admin_text(text)
+    return msg.model_copy(update={"reply_to_message": card})
+
+
+@pytest.mark.parametrize("text", ["✖️ Отмена", "Отмена", "✖️ Cancel", "Cancel"])
+async def test_a_reply_cancel_to_a_sticker_card_is_the_cards_answer(text: str):
+    """A REPLY «Отмена» was typed under a card; a reply-keyboard tap is never a
+    reply. Only the plain one is the leftover keyboard's."""
+    assert await deliver("message", _reply_to_card(text), FakeState()) == (
+        "admin_sticker.handle_admin_sticker_reply"
+    )
+    msg, _ = admin_text(text)
+    assert await deliver("message", msg, FakeState()) == "fsm_cancel.handle_leftover_cancel"

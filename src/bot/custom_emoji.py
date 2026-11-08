@@ -3,7 +3,8 @@
 ``CustomEmoji`` is a SESSION request middleware, so it sees every outgoing call. It rewrites a
 call only when the module is on and the message is a *screen*: its inline keyboard carries a
 callback of the admin panel, the rules editor, help or the knowledge base
-(``SCREEN_PREFIXES``). Model replies, transcripts, summaries and greetings carry no such
+(``SCREEN_PREFIXES``), or it opens or closes a reply keyboard — the bot shows one only in an
+admin prompt (the organizer picker), and a prompt with its answers is a screen too. Model replies, transcripts, summaries and greetings carry no such
 keyboard and go out byte for byte as before (only the fence below is removed, and only the bot
 ever writes it).
 
@@ -13,6 +14,9 @@ On a screen:
   picture as ``icon_custom_emoji_id`` and loses the glyph; so does a numbered row button
   ``"3 ❌"``, which keeps only its number. A label that is only a glyph keeps
   it (a client without icons would show an empty button); URL buttons are left alone;
+- a reply-keyboard button is treated the same way. Its text is what the client SENDS on a tap,
+  so the handler matching it must accept the label with and without the glyph
+  (``bare_label``) — the glyph is gone when the module is on and present when it is off;
 - in HTML text, a glyph of the MARKS set at the start of a line (after opening tags) becomes
   ``<tg-emoji>`` with the glyph as its fallback. Glyphs mid-line, and anything inside
   ``<blockquote>``, ``<code>`` or ``<pre>``, stay plain: that is where chat titles, quoted
@@ -26,8 +30,11 @@ or off.
 Sets are read once at startup with getStickerSet from ``CUSTOM_EMOJI_BUTTONS`` and
 ``CUSTOM_EMOJI_MARKS``. A set belongs to the bot that uploaded it, so the dev bot and the
 production bot each need their own copy. Unset or unreadable: the module is off. A send
-Telegram refuses because of a custom emoji is resent plain once and the module turns off
-until restart.
+Telegram refuses because of a custom emoji is resent plain once and logged
+(``custom_emoji_refused``). One refusal is one message's fault (a glyph edited out of the set
+while the bot runs, a mark Telegram will not take where it landed), so the module stays on for
+every other screen; ``REFUSALS_TO_OFF`` refusals in a row mean it is the account or the sets,
+and the module turns off until restart. A rich send that goes through starts the count again.
 """
 
 from __future__ import annotations
@@ -45,7 +52,13 @@ from aiogram.client.session.middlewares.base import (
 from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.methods import Response, TelegramMethod
 from aiogram.methods.base import TelegramType
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +69,8 @@ _VS16: Final = "️"
 # Glyphs the screens use for a meaning the set draws under another glyph.
 ALIASES: Final = {"◀": "⬅", "🔄": "🔁", "⚫": "⚪", "📝": "✏"}
 _REFUSAL_WORDS: Final = ("document_invalid", "emoji", "icon", "can't parse entities")
+REFUSALS_TO_OFF: Final = 3
+"""Rich sends refused in a row before the module turns off; one is one message's fault."""
 _TAG: Final = re.compile(r"(<[^>]*>)")
 _RAW_TAGS: Final = frozenset({"blockquote", "code", "pre", "tg-emoji", "a"})
 
@@ -66,6 +81,18 @@ def fence(label: str) -> str:
     """Mark a button label built from data so a leading emoji in it is never made an icon."""
     # Every glyph of the sets sits above U+2000; letters, digits and "-100…" ids do not.
     return FENCE + label if label and ord(label[0]) >= 0x2000 and not label[0].isalpha() else label
+
+
+def bare_label(text: str) -> str:
+    """A button label without its leading glyph: what a reply button sends once it has an icon.
+
+    ``"✖️ Отмена"`` and ``"Отмена"`` both give ``"Отмена"``. Compare a reply-keyboard tap
+    through this, never the raw label.
+    """
+    i = 0
+    while i < len(text) and ord(text[i]) >= 0x2000 and not text[i].isalnum():
+        i += 1
+    return text[i:].lstrip() if i else text
 
 
 def _strip(glyph: str) -> str:
@@ -81,6 +108,7 @@ class CustomEmoji(BaseRequestMiddleware):
         self._line: re.Pattern[str] | None = None
         self.on = False
         self.off_reason = "unset"
+        self.refused_in_a_row = 0
 
     async def load(self, bot: Bot, buttons_set: str | None, marks_set: str | None) -> None:
         """Read both sets; any failure leaves the module off with a reason, never stops the bot."""
@@ -117,6 +145,7 @@ class CustomEmoji(BaseRequestMiddleware):
         self._line = self._pattern(self._marks, r"^([ \t]*)({}){}?+")
         self.on = True
         self.off_reason = ""
+        self.refused_in_a_row = 0
         logger.info("custom_emoji_on", buttons=len(self._buttons), marks=len(self._marks))
 
     @staticmethod
@@ -147,13 +176,28 @@ class CustomEmoji(BaseRequestMiddleware):
         if rich is plain:
             return await make_request(bot, plain)
         try:
-            return await make_request(bot, rich)
+            response = await make_request(bot, rich)
         except TelegramBadRequest as exc:
             if not any(word in exc.message.lower() for word in _REFUSAL_WORDS):
                 raise
+            # Resend first: a refusal the plain send hits too (broken HTML) is not the icons'.
             response = await make_request(bot, plain)
-            self._off(f"refused: {exc.message}")
+            self._refused(method, exc.message)
             return response
+        self.refused_in_a_row = 0
+        return response
+
+    def _refused(self, method: TelegramMethod[Any], reason: str) -> None:
+        """Count a rich send Telegram refused and the plain resend took; off at the limit."""
+        self.refused_in_a_row += 1
+        logger.warning(
+            "custom_emoji_refused",
+            method=method.__api_method__,
+            reason=reason[:200],
+            in_a_row=self.refused_in_a_row,
+        )
+        if self.refused_in_a_row >= REFUSALS_TO_OFF:
+            self._off(f"refused {self.refused_in_a_row} times in a row: {reason}")
 
     # ── the rewrite ──────────────────────────────────────────────────────
 
@@ -179,6 +223,10 @@ class CustomEmoji(BaseRequestMiddleware):
             rows = [[self._button(b, rich=rich) for b in row] for row in markup.inline_keyboard]
             if rows != markup.inline_keyboard:
                 update["reply_markup"] = markup.model_copy(update={"inline_keyboard": rows})
+        elif isinstance(markup, ReplyKeyboardMarkup) and rich:
+            reply_rows = [[self._reply_button(b) for b in row] for row in markup.keyboard]
+            if reply_rows != markup.keyboard:
+                update["reply_markup"] = markup.model_copy(update={"keyboard": reply_rows})
         return method.model_copy(update=update) if update else method
 
     def _text(self, text: str) -> str:
@@ -232,8 +280,24 @@ class CustomEmoji(BaseRequestMiddleware):
             update={"text": label, "icon_custom_emoji_id": self._buttons[glyph]}
         )
 
+    def _reply_button(self, button: KeyboardButton | str) -> KeyboardButton | str:
+        # Only the leading-glyph form: a reply button has no row numbers.
+        if isinstance(button, str) or self._lead is None or button.icon_custom_emoji_id:
+            return button
+        lead = self._lead.match(button.text)
+        if lead is None:
+            return button
+        return button.model_copy(
+            update={
+                "text": button.text[lead.end() :],
+                "icon_custom_emoji_id": self._buttons[lead.group(1)],
+            }
+        )
+
 
 def _is_screen(markup: object) -> bool:
+    if isinstance(markup, ReplyKeyboardMarkup | ReplyKeyboardRemove):
+        return True
     if not isinstance(markup, InlineKeyboardMarkup):
         return False
     return any(

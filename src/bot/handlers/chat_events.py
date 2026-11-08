@@ -14,6 +14,9 @@ from aiogram.types import ChatMemberUpdated, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.access_requests import AccessRequest, AccessRequestService, SubmitResult
+from src.bot.screens import entry
+from src.bot.screens.i18n import lang_of
+from src.bot.screens.render import render_text
 from src.database.repositories.chat_migration import ChatMigrationRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
@@ -41,6 +44,22 @@ _PRESENT_STATUSES = frozenset({"member", "administrator", "creator", "restricted
 # card for a "chat" that is one person's DM. A stranger who actually writes
 # still produces a card through the message path.
 _WHITELISTABLE_CHAT_TYPES = frozenset({"group", "supergroup", "channel"})
+
+# Where the bot says hello on joining an unapproved chat. Not a channel: a
+# channel post goes out to every subscriber under the channel's name.
+_GREETED_CHAT_TYPES = frozenset({"group", "supergroup"})
+# `submit()` outcomes after which the chat is told "wait for approval": the
+# ones where the rejection check RAN and passed, so the promise can be kept.
+# None is the happy path. "db_error": the queue row failed, but the admins got
+# the card and the chat is filed again by the next message in it.
+# "keyboard_error": the row is in the panel's list, only the card's buttons
+# are missing. An allow-list, so an outcome added later is silent until
+# someone decides otherwise. Silent: "cooldown" (removed and re-added inside
+# the window — one hello per window, as one admin card), "rejected" (an admin
+# already said no; "wait for approval" would be a promise nobody keeps) and
+# "error" (submit failed before or during the rejection check, so the chat may
+# be a rejected one, and possibly no admin was told).
+_GREET_AFTER: frozenset[str | None] = frozenset({None, "db_error", "keyboard_error"})
 
 # What a supergroup re-key leaves on the OLD chat_id, named in full so the gap
 # is a log field rather than an assumption. `custom_rules` was silently in this
@@ -113,6 +132,12 @@ async def handle_my_chat_member(
     then REMOVED, comes back disabled and therefore files a fresh request. That
     is re-consent on purpose — auto-restoring would let anyone who can add the
     bot re-enable a chat with no admin in the loop.
+
+    When a request is filed for a group, the group itself hears one line —
+    "I will start once the bot's admin approves this chat" — unless the chat
+    is a channel, was rejected before, is inside the notification cooldown, or
+    the request could not be filed at all (see ``_GREETED_CHAT_TYPES`` and
+    ``_GREET_AFTER``).
     """
     chat = event.chat
     status = event.new_chat_member.status
@@ -149,7 +174,8 @@ async def handle_my_chat_member(
         already_enabled = bool(row.get("enabled")) if row else False
 
         result = SubmitResult()
-        if joined and whitelistable and not already_enabled:
+        requested = joined and whitelistable and not already_enabled
+        if requested:
             result = await access_requests.submit(
                 AccessRequest(
                     chat_id=chat.id,
@@ -164,6 +190,14 @@ async def handle_my_chat_member(
                 ),
                 bot=bot,
             )
+
+        greeted = False
+        if (
+            requested
+            and (chat.type or "") in _GREETED_CHAT_TYPES
+            and result.suppressed in _GREET_AFTER
+        ):
+            greeted = await _greet(bot, chat.id, row.get("language") if row else None)
 
         # Every field states an outcome that was actually observed. The old line
         # here claimed the chat was "awaiting whitelist approval" while nothing
@@ -181,7 +215,25 @@ async def handle_my_chat_member(
             access_request_id=result.attempt_id,
             notified=result.notified,
             suppressed=result.suppressed,
+            greeted=greeted,
         )
+
+
+async def _greet(bot: Bot, chat_id: int, language: object) -> bool:
+    """Tell a newly joined chat that the bot waits for approval; True if it was sent.
+
+    Without it the bot sits in the member list and answers nothing, which
+    reads as broken. The chat's own language: the chat reads it, not the admin.
+    A failure is logged and swallowed — the admin card has already gone out,
+    and a group that does not let the bot write has nothing to read anyway.
+    """
+    screen = entry.group_added(lang_of(language if isinstance(language, str) else None))
+    try:
+        await bot.send_message(chat_id, render_text(screen), parse_mode="HTML")
+    except Exception:
+        logger.warning("group_added_greeting_failed", chat_id=chat_id, exc_info=True)
+        return False
+    return True
 
 
 @router.message(F.migrate_to_chat_id | F.migrate_from_chat_id)
@@ -247,6 +299,7 @@ async def handle_chat_migration(
             rules_moved=outcome.rules_moved,
             aliases_moved=outcome.aliases_moved,
             members_moved=outcome.members_moved,
+            organizer_names_moved=outcome.organizer_names_moved,
             not_moved=NOT_MOVED,
         )
     elif outcome.status == "target_occupied":

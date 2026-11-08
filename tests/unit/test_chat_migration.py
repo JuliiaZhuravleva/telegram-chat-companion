@@ -56,7 +56,15 @@ class TestMigrate:
     async def test_moves_settings_and_facts(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 0", "UPDATE 0", "UPDATE 0"]
+        conn.execute.side_effect = [
+            "UPDATE 1",
+            "UPDATE 12",
+            "UPDATE 0",
+            "UPDATE 0",
+            "UPDATE 0",
+            "INSERT 0 0",
+            "DELETE 0",
+        ]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
@@ -124,23 +132,54 @@ class TestMigrate:
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
         """The count is the only in-prod signal that the third table moved."""
-        conn.execute.side_effect = ["UPDATE 1", "UPDATE 12", "UPDATE 4", "UPDATE 2", "UPDATE 7"]
+        conn.execute.side_effect = [
+            "UPDATE 1",
+            "UPDATE 12",
+            "UPDATE 4",
+            "UPDATE 2",
+            "UPDATE 7",
+            "INSERT 0 3",
+            "DELETE 3",
+        ]
 
         outcome = await repo.migrate(OLD_ID, NEW_ID)
 
         assert outcome.rules_moved == 4
         assert outcome.members_moved == 7
+        assert outcome.organizer_names_moved == 3
 
     @pytest.mark.asyncio
-    async def test_all_five_tables_move_in_one_transaction(
+    async def test_moves_organizer_names_and_clears_the_old_id(
         self, repo: ChatMigrationRepository, conn: MagicMock
     ) -> None:
-        """A half-applied move leaves settings, knowledge, rules, names and
-        membership on different ids."""
+        """The organizer ids move with ``chat_settings``; their names must too.
+
+        Left behind, an organizer Telegram cannot name shows as «участник <id>».
+        The newer name wins where the new id already has one; the collision
+        itself is measured in the integration test.
+        """
+        await repo.migrate(OLD_ID, NEW_ID)
+
+        statements = [call.args for call in conn.execute.call_args_list]
+        upsert = [a for a in statements if "INSERT INTO kb_organizer_names" in a[0]]
+        delete = [a for a in statements if "DELETE FROM kb_organizer_names" in a[0]]
+        assert upsert and delete, f"kb_organizer_names did not move; statements were: {statements}"
+        assert "ON CONFLICT (chat_id, user_id)" in upsert[0][0]
+        assert "updated_at < EXCLUDED.updated_at" in upsert[0][0]
+        assert upsert[0][1:] == (OLD_ID, NEW_ID)
+        assert delete[0][1:] == (OLD_ID,)
+        assert statements.index(upsert[0]) < statements.index(delete[0])
+
+    @pytest.mark.asyncio
+    async def test_all_six_tables_move_in_one_transaction(
+        self, repo: ChatMigrationRepository, conn: MagicMock
+    ) -> None:
+        """A half-applied move leaves settings, knowledge, rules, names,
+        membership and organizer names on different ids."""
         await repo.migrate(OLD_ID, NEW_ID)
 
         conn.transaction.assert_called_once()
-        assert conn.execute.await_count == 5
+        assert conn.execute.await_count == 7  # five updates, the names' upsert and delete
 
     @pytest.mark.asyncio
     async def test_locks_the_source_row_before_deciding(
@@ -192,7 +231,8 @@ class TestMigrate:
 
 class TestRowsAffected:
     @pytest.mark.parametrize(
-        ("tag", "expected"), [("UPDATE 3", 3), ("UPDATE 0", 0), ("", 0), (None, 0), ("UPDATE", 0)]
+        ("tag", "expected"),
+        [("UPDATE 3", 3), ("UPDATE 0", 0), ("INSERT 0 3", 3), ("", 0), (None, 0), ("UPDATE", 0)],
     )
     def test_parses_the_command_tag(self, tag: str | None, expected: int) -> None:
         assert _rows_affected(tag) == expected
@@ -362,3 +402,19 @@ class TestHandlerIsFilteredNotBodyGuarded:
         ]
         assert len(registered) == 1, "migration handler must be registered on dp.message"
         assert registered[0].filters, "must be filtered at registration, not in the body"
+
+
+@pytest.mark.asyncio
+async def test_the_migration_log_counts_the_organizer_names_moved() -> None:
+    """The move is visible in production logs, next to the other counts."""
+    migration_repo = AsyncMock()
+    migration_repo.migrate = AsyncMock(
+        return_value=MigrationOutcome(status="migrated", members_moved=2, organizer_names_moved=3)
+    )
+    with capture_logs() as logs:
+        await handle_chat_migration(
+            _make_message(chat_id=OLD_ID, to_id=NEW_ID, from_id=None), migration_repo, MagicMock()
+        )
+    (line,) = [e for e in logs if str(e.get("event", "")).startswith("Chat migrated")]
+    assert line["organizer_names_moved"] == 3
+    assert line["members_moved"] == 2

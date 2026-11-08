@@ -13,6 +13,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
+from src.bot.screens.stickers import pack_key
 from src.database.repositories.stickers import StickerRepository
 
 # ---------------------------------------------------------------------------
@@ -694,7 +695,7 @@ class TestClearAnalysisSetListView:
 
 
 class TestAdminNotifications:
-    """save_notification / get_notification_by_reply / get_latest_sticker_msg.
+    """save_notification / get_notification_by_reply / get_card_sticker_msg / release_card.
 
     Regression for the 2026-08-02 prod incident: these methods hit
     admin_sticker_notifications, which existed only in hand-patched dev
@@ -749,42 +750,195 @@ class TestAdminNotifications:
         assert row is None
 
     @pytest.mark.asyncio
-    async def test_latest_sticker_msg_returns_newest(
+    async def test_reply_lookup_takes_the_newest_card(self, repo: StickerRepository) -> None:
+        """One message re-rendered for another sticker: the reply means the latest one."""
+        await repo.save_notification(
+            file_unique_id="notif-older",
+            admin_id=111,
+            message_id=3502,
+            sticker_msg_id=0,
+            chat_id=111,
+        )
+        await repo.save_notification(
+            file_unique_id="notif-newer",
+            admin_id=111,
+            message_id=3502,
+            sticker_msg_id=0,
+            chat_id=111,
+        )
+        row = await repo.get_notification_by_reply(chat_id=111, reply_to_message_id=3502)
+        assert row is not None
+        assert row["file_unique_id"] == "notif-newer"
+
+    @pytest.mark.asyncio
+    async def test_save_is_idempotent_for_the_same_card(
         self, repo: StickerRepository, db_conn: asyncpg.Connection
     ) -> None:
-        old_id = await repo.save_notification(
+        """A card re-rendered in place records itself on every render: one row, not many."""
+        first = await repo.save_notification(
             file_unique_id="notif-004",
             admin_id=222,
             message_id=4002,
             sticker_msg_id=4001,
             chat_id=222,
         )
-        # NOW() is transaction-stable, so backdate the first row explicitly
-        # to make the ORDER BY created_at DESC deterministic.
-        await db_conn.execute(
-            "UPDATE admin_sticker_notifications"
-            " SET created_at = created_at - interval '1 minute' WHERE id = $1",
-            old_id,
-        )
-        await repo.save_notification(
-            file_unique_id="notif-005",
+        again = await repo.save_notification(
+            file_unique_id="notif-004",
             admin_id=222,
-            message_id=5002,
-            sticker_msg_id=5001,
+            message_id=4002,
+            sticker_msg_id=0,
             chat_id=222,
         )
-        assert await repo.get_latest_sticker_msg(admin_id=222, chat_id=222) == 5001
+        assert again == first
+        count = await db_conn.fetchval(
+            "SELECT count(*) FROM admin_sticker_notifications WHERE chat_id = 222"
+        )
+        assert count == 1
+        # The re-render did not overwrite the sticker the card was sent with.
+        assert await repo.get_card_sticker_msg(chat_id=222, message_id=4002) == 4001
 
     @pytest.mark.asyncio
-    async def test_latest_sticker_msg_ignores_zero_and_other_admins(
-        self, repo: StickerRepository
-    ) -> None:
+    async def test_card_sticker_msg_is_scoped_to_that_card(self, repo: StickerRepository) -> None:
+        """Another card's sticker — a notification that arrived meanwhile — is never returned."""
+        await repo.save_notification(
+            file_unique_id="notif-005",
+            admin_id=333,
+            message_id=5002,
+            sticker_msg_id=5001,
+            chat_id=333,
+        )
         await repo.save_notification(
             file_unique_id="notif-006",
             admin_id=333,
             message_id=6002,
-            sticker_msg_id=0,  # filtered out by sticker_msg_id > 0
+            sticker_msg_id=6001,
             chat_id=333,
         )
-        assert await repo.get_latest_sticker_msg(admin_id=333, chat_id=333) is None
-        assert await repo.get_latest_sticker_msg(admin_id=444, chat_id=444) is None
+        await repo.save_notification(
+            file_unique_id="notif-007",
+            admin_id=333,
+            message_id=7002,
+            sticker_msg_id=0,  # a card without a sticker of ours
+            chat_id=333,
+        )
+        assert await repo.get_card_sticker_msg(chat_id=333, message_id=5002) == 5001
+        assert await repo.get_card_sticker_msg(chat_id=333, message_id=6002) == 6001
+        assert await repo.get_card_sticker_msg(chat_id=333, message_id=7002) is None
+        assert await repo.get_card_sticker_msg(chat_id=333, message_id=9999) is None
+        assert await repo.get_card_sticker_msg(chat_id=444, message_id=5002) is None
+
+    @pytest.mark.asyncio
+    async def test_release_card_forgets_the_card_but_not_its_sticker(
+        self, repo: StickerRepository
+    ) -> None:
+        """The message now shows a list: a reply to it is no correction any more.
+
+        A reply to the sticker message itself still is — for a notification
+        card that sticker stays in the chat.
+        """
+        await repo.save_notification(
+            file_unique_id="notif-008",
+            admin_id=555,
+            message_id=8002,
+            sticker_msg_id=8001,
+            chat_id=555,
+        )
+        await repo.save_notification(
+            file_unique_id="notif-009",
+            admin_id=555,
+            message_id=9002,
+            sticker_msg_id=9001,
+            chat_id=555,
+        )
+
+        await repo.release_card(chat_id=555, message_id=8002)
+
+        assert await repo.get_notification_by_reply(chat_id=555, reply_to_message_id=8002) is None
+        assert await repo.get_card_sticker_msg(chat_id=555, message_id=8002) is None
+        by_sticker = await repo.get_notification_by_reply(chat_id=555, reply_to_message_id=8001)
+        assert by_sticker is not None
+        assert by_sticker["file_unique_id"] == "notif-008"
+        # The other card is untouched.
+        assert await repo.get_card_sticker_msg(chat_id=555, message_id=9002) == 9001
+
+    @pytest.mark.asyncio
+    async def test_release_of_an_unknown_message_is_a_no_op(self, repo: StickerRepository) -> None:
+        await repo.release_card(chat_id=556, message_id=1)
+
+
+# ---------------------------------------------------------------------------
+# Packs addressed by key, and the analysed count on the pack list
+# ---------------------------------------------------------------------------
+
+
+class TestPackKeyAndCounts:
+    """The pack list's buttons carry ``pack_key(set_name)``; SQL must find the pack by it."""
+
+    @pytest.mark.asyncio
+    async def test_get_set_by_key_finds_the_pack_python_keyed(
+        self, repo: StickerRepository
+    ) -> None:
+        long_name = "long_pack_" + "k" * 54  # 64 characters, Telegram's ceiling
+        assert len(long_name) == 64
+        await repo.upsert_sticker_set(set_name=long_name, set_title="Long pack", total_count=3)
+        await repo.upsert_sticker_set(set_name="key_other_pack", set_title="Other", total_count=1)
+
+        row = await repo.get_set_by_key(pack_key(long_name))
+
+        assert row is not None
+        assert row["set_name"] == long_name
+        assert row["set_title"] == "Long pack"
+
+    @pytest.mark.asyncio
+    async def test_unknown_key_returns_none(self, repo: StickerRepository) -> None:
+        await repo.upsert_sticker_set(set_name="key_known_pack", total_count=1)
+        assert await repo.get_set_by_key("000000000000") is None
+
+    @pytest.mark.asyncio
+    async def test_analyzed_count_excludes_failed_and_unanalysed(
+        self, repo: StickerRepository
+    ) -> None:
+        await repo.upsert_sticker_set(set_name="cnt_pack", set_title="Counted", total_count=10)
+        await repo.save_sticker(
+            file_unique_id="cnt-001",
+            file_id="f-cnt-001",
+            set_name="cnt_pack",
+            visual_description="analysed",
+        )
+        await repo.save_sticker(
+            file_unique_id="cnt-002",
+            file_id="f-cnt-002",
+            set_name="cnt_pack",
+            visual_description="described but flagged",
+            analysis_failed=True,
+        )
+        await repo.save_sticker(
+            file_unique_id="cnt-003",
+            file_id="f-cnt-003",
+            set_name="cnt_pack",
+        )
+
+        rows = await repo.get_all_sets_with_stats(limit=50, offset=0)
+
+        pack = next(r for r in rows if r["set_name"] == "cnt_pack")
+        assert pack["learned_count"] == 3
+        assert pack["analyzed_count"] == 1
+        assert pack["total_count"] == 10
+
+    @pytest.mark.asyncio
+    async def test_pages_are_stable_when_counts_tie(self, repo: StickerRepository) -> None:
+        """Two packs with the same count never swap between pages."""
+        for name in ("tie_b", "tie_a", "tie_c"):
+            await repo.upsert_sticker_set(set_name=name, total_count=1)
+
+        names: list[str] = []
+        offset = 0
+        while True:
+            page = await repo.get_all_sets_with_stats(limit=1, offset=offset)
+            if not page:
+                break
+            names.append(page[0]["set_name"])
+            offset += 1
+
+        tied = [n for n in names if n.startswith("tie_")]
+        assert tied == ["tie_a", "tie_b", "tie_c"]

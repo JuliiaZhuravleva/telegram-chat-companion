@@ -1,10 +1,9 @@
-"""Admin notification sender for abuse events."""
+"""Admin notification sender: the access card for a chat that is not allowed yet."""
 
 from __future__ import annotations
 
 import contextlib
 import json
-from html import escape
 from typing import Any
 
 import structlog
@@ -12,24 +11,22 @@ from aiogram.types import InlineKeyboardMarkup
 
 from src.database.repositories.bot_config import BotConfigRepository
 from src.utils import parse_admin_ids
-from src.utils.telegram import build_chat_url
 
 logger = structlog.get_logger(__name__)
 
+# Only the type this service sends. The stored settings may still carry other
+# keys (``jailbreak``, ``blacklist``, ``ai_fallback``) from senders that were
+# removed; they are left where they are and read by nothing here.
 _NOTIFICATION_DEFAULTS: dict[str, Any] = {
-    "sticker": "on",
     "unauthorized": True,
-    "jailbreak": True,
-    "blacklist": True,
-    "ai_fallback": True,
 }
 
 
 class AbuseNotificationService:
-    """Send notifications to admin about abuse events.
+    """Deliver the access card to the bot's admins.
 
-    Notification types: jailbreak, blacklist, ai_fallback, unauthorized.
-    Runs in parallel with main response — never blocks user.
+    One notification type: ``unauthorized``. Runs in parallel with the main
+    response — never blocks the user.
 
     Admin IDs are resolved from bot_config at call time (not at construction),
     so changes to admin_ids take effect immediately.
@@ -54,103 +51,19 @@ class AbuseNotificationService:
         merged = {**_NOTIFICATION_DEFAULTS, **notifications}
         return bool(merged.get(notification_type, True))
 
-    async def notify_jailbreak(
-        self,
-        *,
-        chat_id: int,
-        user_id: int,
-        username: str | None,
-        pattern_description: str | None,
-        severity: int | None,
-        bot: Any = None,
-    ) -> None:
-        """Notify admins about a jailbreak attempt."""
-        if bot is None:
-            return
-
-        if not await self._is_notification_enabled("jailbreak"):
-            return
-
-        admin_ids = await self._get_admin_ids()
-        if not admin_ids:
-            return
-
-        text = (
-            f"⚠️ Jailbreak attempt\n"
-            f"Chat: <code>{chat_id}</code>\n"
-            f"User: {escape(username) if username else f'<code>{user_id}</code>'}\n"
-            f"Pattern: {escape(pattern_description) if pattern_description else 'unknown'}\n"
-            f"Severity: {severity or 'N/A'}"
-        )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, text)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin",
-                    admin_id=admin_id,
-                    error_type=type(exc).__name__,
-                )
-
-    async def notify_blacklist(
-        self,
-        *,
-        chat_id: int,
-        user_id: int,
-        username: str | None,
-        content: str,
-        timeout_hours: float,
-        bot: Any = None,
-    ) -> None:
-        """Notify admins about a blacklist trigger."""
-        if bot is None:
-            return
-
-        if not await self._is_notification_enabled("blacklist"):
-            return
-
-        admin_ids = await self._get_admin_ids()
-        if not admin_ids:
-            return
-
-        text = (
-            f"🚫 Blacklist triggered\n"
-            f"Chat: <code>{chat_id}</code>\n"
-            f"User: {escape(username) if username else f'<code>{user_id}</code>'}\n"
-            f"Content: {escape(content[:50])}\n"
-            f"Timeout: {timeout_hours:.1f}h"
-        )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, text)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin",
-                    admin_id=admin_id,
-                    error_type=type(exc).__name__,
-                )
-
     async def notify_unauthorized(
         self,
         *,
         chat_id: int,
-        chat_title: str | None,
-        chat_type: str | None = None,
-        chat_username: str | None = None,
-        user_id: int | None,
-        user_first_name: str | None = None,
-        user_last_name: str | None = None,
-        user_username: str | None = None,
-        message_text: str | None = None,
-        reason: str = "message",
+        text: str,
         bot: Any = None,
         reply_markup: InlineKeyboardMarkup | None = None,
-        # Legacy compat
-        username: str | None = None,
     ) -> bool:
-        """Tell the admins a chat wants in. Returns whether anyone was told.
+        """Deliver an access card to every bot admin. Returns whether anyone got it.
+
+        The card is built by the caller (``src/bot/access_requests.py``, from
+        ``screens/cards.py``) in the admin's language; this service never
+        imports the screen layer.
 
         The return value is load-bearing, not decoration: there are three ways
         this sends nothing at all — no bot object, the `unauthorized`
@@ -168,19 +81,6 @@ class AbuseNotificationService:
         if not admin_ids:
             return False
 
-        text = self._format_unauthorized(
-            chat_id=chat_id,
-            chat_title=chat_title,
-            chat_type=chat_type,
-            chat_username=chat_username,
-            user_id=user_id,
-            user_first_name=user_first_name or username,
-            user_last_name=user_last_name,
-            user_username=user_username,
-            message_text=message_text,
-            reason=reason,
-        )
-
         sent = False
         for admin_id in admin_ids:
             try:
@@ -195,110 +95,7 @@ class AbuseNotificationService:
                 logger.warning(
                     "Failed to notify admin",
                     admin_id=admin_id,
+                    chat_id=chat_id,
                     error_type=type(exc).__name__,
                 )
         return sent
-
-    @staticmethod
-    def _format_unauthorized(
-        *,
-        chat_id: int,
-        chat_title: str | None,
-        chat_type: str | None,
-        chat_username: str | None,
-        user_id: int | None,
-        user_first_name: str | None,
-        user_last_name: str | None,
-        user_username: str | None,
-        message_text: str | None,
-        reason: str = "message",
-    ) -> str:
-        """Build the detailed HTML card for a chat waiting on approval.
-
-        The heading follows `reason`: a card produced by the bot being ADDED to
-        a chat is not an access *attempt*, and calling it one sends the admin
-        looking for a message that does not exist.
-        """
-        heading = (
-            "➕ <b>Bot added to a new chat</b>"
-            if reason == "added"
-            else "🔒 <b>Unauthorized access</b>"
-        )
-        lines: list[str] = [heading, ""]
-
-        # -- Chat info --
-        chat_label = escape(chat_title) if chat_title else str(chat_id)
-        # For private-chat unauthorized notifications, the "User" block below
-        # already carries a tg://user?id= link — suppress the duplicate here
-        # by not passing chat_type when it's "private".
-        url = build_chat_url(
-            chat_id,
-            chat_type if chat_type != "private" else None,
-            chat_username,
-        )
-        chat_display = f'<a href="{url}">{chat_label}</a>' if url else chat_label
-        if chat_type:
-            chat_display += f" ({escape(chat_type)})"
-        lines.append(f"<b>Chat:</b> {chat_display}")
-        lines.append(f"<b>Chat ID:</b> <code>{chat_id}</code>")
-
-        lines.append("")
-
-        # -- User info --
-        full_name = escape(user_first_name) if user_first_name else ""
-        if user_last_name:
-            full_name += f" {escape(user_last_name)}"
-        full_name = full_name.strip() or "unknown"
-
-        if user_id:
-            lines.append(f'<b>User:</b> <a href="tg://user?id={user_id}">{full_name}</a>')
-            lines.append(f"<b>User ID:</b> <code>{user_id}</code>")
-        else:
-            lines.append(f"<b>User:</b> {full_name}")
-
-        if user_username:
-            lines.append(f"<b>Username:</b> @{escape(user_username)}")
-
-        # -- Message preview --
-        if message_text:
-            lines.append(f"\n<b>Message:</b> {escape(message_text[:100])}")
-
-        return "\n".join(lines)
-
-    async def notify_ai_fallback(
-        self,
-        *,
-        chat_id: int,
-        primary_provider: str,
-        fallback_provider: str,
-        error: str,
-        bot: Any = None,
-    ) -> None:
-        """Notify admins when AI primary provider failed and fallback was used."""
-        if bot is None:
-            return
-
-        if not await self._is_notification_enabled("ai_fallback"):
-            return
-
-        admin_ids = await self._get_admin_ids()
-        if not admin_ids:
-            return
-
-        text = (
-            f"🔄 AI fallback activated\n"
-            f"Chat: <code>{chat_id}</code>\n"
-            f"Primary: {primary_provider} (failed)\n"
-            f"Fallback: {fallback_provider}\n"
-            f"Error: {error[:100]}"
-        )
-
-        for admin_id in admin_ids:
-            try:
-                await bot.send_message(admin_id, text, parse_mode=None)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to notify admin",
-                    admin_id=admin_id,
-                    error_type=type(exc).__name__,
-                )

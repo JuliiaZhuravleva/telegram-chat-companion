@@ -2,7 +2,7 @@
 
 `handlers/media.py` grew as a partial copy of `handlers/message.py`, and the
 copy drifted: three things present in the text path never reached it — the
-relevancy gate, the spend-limit warning and the AI-chosen sticker. The first
+relevancy gate, the spend-limit check and the AI-chosen sticker. The first
 was a live defect (random replies to captioned photos bypassed the relevance
 check entirely), the other two were silent feature gaps.
 
@@ -380,11 +380,16 @@ async def finish_reply(
     """Everything that must happen after a reply is sent, in the right order.
 
     Order is load-bearing: ``post_send`` is what writes the cost row, so the
-    spend check has to run after it or it reads a stale total and the warning
+    spend check has to run after it or it reads a stale total and the card
     is always one message late.
 
+    The spend check tells the bot admins in their DM, once per UTC day
+    (``SpendLimitService.notify_admins_if_exceeded``). It used to post a
+    warning into this chat under every reply for the rest of the day — to
+    members who can do nothing about it.
+
     The photo path previously did only ``post_send``, so an AI-chosen sticker
-    was computed and dropped, and the daily spend warning never fired for a
+    was computed and dropped, and the daily spend check never ran for a
     photo reply — a limit that silently does not apply to part of the traffic
     is worse than no limit, because it still reads as enforced.
 
@@ -407,13 +412,13 @@ async def finish_reply(
 
     await pipeline.post_send(result, bot_message_id=sent_message_id)
 
-    warning = await spend_limit_svc.get_warning_if_exceeded(chat_config.language)
-    if warning:
-        try:
-            await message.answer(warning)
-        except Exception as exc:
-            logger.warning(
-                "Failed to send spend limit warning",
-                chat_id=message.chat.id,
-                error_type=type(exc).__name__,
-            )
+    try:
+        await spend_limit_svc.notify_admins_if_exceeded(message.bot)
+    except Exception as exc:
+        # The service never raises; this guards the reply path against a
+        # stand-in that does (and against the next refactor of the service).
+        logger.warning(
+            "Spend limit check failed",
+            chat_id=chat_config.chat_id,
+            error_type=type(exc).__name__,
+        )

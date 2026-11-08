@@ -241,7 +241,11 @@ class TestRecovery:
         decision, cleared = checker._decide_alert(healthy, CONFIG, prior)
 
         assert decision == "recovered"
-        assert cleared == ["AI calls failed outright in last 15 min: embeddings x47"]
+        assert [row["message"] for row in cleared] == [
+            "AI calls failed outright in last 15 min: embeddings x47"
+        ]
+        # The key travels with it: the all-clear is worded from the key.
+        assert [row["key"] for row in cleared] == ["ai_failure:embeddings"]
 
     def test_a_broken_check_is_not_a_clean_check(self, checker, clock):
         """The worst regression this change could introduce: a false all-clear.
@@ -451,20 +455,55 @@ class TestAlertContents:
         assert "<script>" not in text
         assert "&lt;script&gt;" in text
         # Control: the escaping must not also eat our own markup.
-        assert "<b>Status:</b>" in text
+        assert "<b>Перебои в работе бота</b>" in text
 
     def test_reminder_is_marked_as_one(self):
         plain = HealthChecker._format_alert(_result(_embedding_issue()))
         reminder = HealthChecker._format_alert(_result(_embedding_issue()), reminder=True)
 
-        assert "напоминание" not in plain
-        assert "напоминание" in reminder
+        assert "всё ещё" not in plain
+        assert reminder.startswith("⚠️ <b>Перебои всё ещё идут</b>")
 
     def test_recovery_message_lists_what_cleared(self):
-        text = HealthChecker._format_recovery(["embeddings were failing"])
+        text = HealthChecker._format_recovery([{"message": "embeddings were failing"}])
 
-        assert "Recovered" in text
-        assert "embeddings were failing" in text
+        assert text.startswith("💚 <b>Бот снова здоров</b>")
+        # A row with no key it can word is named by its stored message.
+        assert "✓ embeddings were failing" in text
+
+    @pytest.mark.parametrize(
+        ("key", "ru", "en"),
+        [
+            ("db", "База данных отвечает", "The database answers"),
+            (
+                "ai_fallback",
+                "Основной ИИ отвечает без запасного",
+                "The main AI answers without the fallback",
+            ),
+            (
+                "ai_failure:transcription:ClientError:x",
+                "Вызовы ИИ проходят: расшифровка",
+                "AI calls go through: transcription",
+            ),
+        ],
+    )
+    def test_the_all_clear_is_worded_from_the_key_in_the_admin_language(self, key, ru, en):
+        row = {"severity": "warning", "message": "English text from the checker", "key": key}
+
+        ru_text = HealthChecker._format_recovery([row], lang="ru")
+        en_text = HealthChecker._format_recovery([row], lang="en")
+
+        assert f"✓ {ru}" in ru_text
+        assert f"✓ {en}" in en_text
+        assert "English text from the checker" not in ru_text + en_text
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_alert_keeps_its_button_on_the_last_piece(self, checker, bot):
+        await checker._send_alert(_result(_embedding_issue(detail="я" * 6000)), CONFIG)
+
+        markups = [c.kwargs["reply_markup"] for c in bot.send_message.await_args_list]
+        assert markups[-1] is not None
+        assert all(m is None for m in markups[:-1])
 
 
 class TestLongProviderErrors:
@@ -619,7 +658,7 @@ class TestTheDecisionActuallyReachesTelegram:
         await checker._persist_result(_result(_embedding_issue()), CONFIG)
 
         bot.send_message.assert_awaited_once()
-        assert "Bot Health Alert" in bot.send_message.await_args.args[1]
+        assert "<b>Перебои в работе бота</b>" in bot.send_message.await_args.args[1]
 
     @pytest.mark.asyncio
     async def test_an_all_clear_is_sent_with_the_recovery_wording(self, checker, pool, bot, clock):
@@ -637,8 +676,8 @@ class TestTheDecisionActuallyReachesTelegram:
 
         bot.send_message.assert_awaited_once()
         sent = bot.send_message.await_args.args[1]
-        assert "Recovered" in sent
-        assert "Bot Health Alert" not in sent
+        assert "снова здоров" in sent
+        assert "Перебои" not in sent
 
     @pytest.mark.asyncio
     async def test_what_is_stored_is_what_the_fingerprint_reads(self, checker, pool, bot, clock):
@@ -697,7 +736,9 @@ class TestTheDecisionActuallyReachesTelegram:
 
         assert result.status == HealthStatus.CRITICAL
         bot.send_message.assert_awaited_once()
-        assert "Database connectivity failed" in bot.send_message.await_args.args[1]
+        assert (
+            "База данных недоступна: запросы не выполняются" in bot.send_message.await_args.args[1]
+        )
 
 
 class TestStoredRowsFromOlderVersions:
@@ -733,4 +774,4 @@ class TestStoredRowsFromOlderVersions:
         decision, cleared = checker._decide_alert(_result(), CONFIG, poisoned)
 
         assert decision == "recovered"
-        assert cleared == ["real one"]
+        assert [row["message"] for row in cleared] == ["real one"]

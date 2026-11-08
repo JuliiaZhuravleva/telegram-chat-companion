@@ -6,6 +6,8 @@ from typing import Any
 
 import asyncpg
 
+from src.utils import parse_user_id_list
+
 # Columns that can be written via upsert / set_field.
 # Maps Python field names to SQL column names (they happen to match).
 _WRITABLE_COLUMNS: frozenset[str] = frozenset(
@@ -52,6 +54,62 @@ _WRITABLE_COLUMNS: frozenset[str] = frozenset(
         "community_templates",
     }
 )
+
+
+# `kb_organizer_ids` as the writers below build on it: the stored list when it is
+# a JSON array of numbers, else an empty one. An add on top of a value that
+# `parse_user_id_list` reads as "nobody" would store a list that still reads as
+# nobody; starting from an empty one stores the person. The two disagree on one
+# shape: digit strings (["123"]), which the parser reads as ids and these writers
+# drop. No writer has ever stored strings (every one wrote json.dumps(list[int])),
+# so it is latent; a writer that starts storing strings must change this first.
+_ORGANIZERS = (
+    "(CASE WHEN jsonb_typeof(kb_organizer_ids) = 'array'"
+    " AND NOT jsonb_path_exists(kb_organizer_ids, '$[*] ? (@.type() != \"number\")')"
+    " THEN kb_organizer_ids ELSE '[]'::jsonb END)"
+)
+
+# Each writer is ONE UPDATE that computes the new list from the row it locks, so
+# two writes that race (aiogram runs one admin's taps concurrently) both land:
+# the second waits for the first and reads its result. A read in Python followed
+# by a write lost one of them. Each RETURNs the list now stored; no row -> None.
+_ADD_ORGANIZER = f"""
+    UPDATE chat_settings
+       SET kb_organizer_ids = CASE
+           WHEN {_ORGANIZERS} @> jsonb_build_array($2::bigint) THEN {_ORGANIZERS}
+           ELSE {_ORGANIZERS} || jsonb_build_array($2::bigint)
+       END
+     WHERE chat_id = $1
+    RETURNING kb_organizer_ids
+"""  # noqa: S608 -- local constant
+
+_REMOVE_ORGANIZER = f"""
+    UPDATE chat_settings
+       SET kb_organizer_ids = COALESCE(
+           (SELECT jsonb_agg(e ORDER BY n)
+              FROM jsonb_array_elements({_ORGANIZERS}) WITH ORDINALITY AS t(e, n)
+             WHERE e <> to_jsonb($2::bigint)),
+           '[]'::jsonb)
+     WHERE chat_id = $1
+    RETURNING kb_organizer_ids
+"""  # noqa: S608 -- local constant
+
+# The position is clamped to the list as it is now; NULL appends.
+_RESTORE_ORGANIZER = f"""
+    UPDATE chat_settings
+       SET kb_organizer_ids = CASE
+           WHEN {_ORGANIZERS} @> jsonb_build_array($2::bigint) THEN {_ORGANIZERS}
+           ELSE jsonb_insert(
+               {_ORGANIZERS},
+               ARRAY[LEAST(COALESCE($3::int, 2147483647),
+                           jsonb_array_length({_ORGANIZERS}))::text],
+               to_jsonb($2::bigint))
+       END
+     WHERE chat_id = $1
+    RETURNING kb_organizer_ids
+"""  # noqa: S608 -- local constant
+
+_INT4_MAX = 2_147_483_647
 
 
 class ChatSettingsRepository:
@@ -152,6 +210,35 @@ class ChatSettingsRepository:
             effective,
         )
         return None if stored is None else bool(stored)
+
+    async def add_kb_organizer(self, chat_id: int, user_id: int) -> list[int] | None:
+        """Add ``user_id`` to the chat's organizers unless already there.
+
+        Returns the list now stored, ``None`` when the chat has no row (it
+        was never seen, or a group-to-supergroup migration re-keyed it): the
+        caller must not report an add then.
+        """
+        raw = await self._pool.fetchval(_ADD_ORGANIZER, chat_id, user_id)
+        return None if raw is None else parse_user_id_list(raw)
+
+    async def remove_kb_organizer(self, chat_id: int, user_id: int) -> list[int] | None:
+        """Take ``user_id`` out of the chat's organizers; the list now stored, or ``None``."""
+        raw = await self._pool.fetchval(_REMOVE_ORGANIZER, chat_id, user_id)
+        return None if raw is None else parse_user_id_list(raw)
+
+    async def restore_kb_organizer(
+        self, chat_id: int, user_id: int, position: int | None
+    ) -> list[int] | None:
+        """Put ``user_id`` back at ``position`` (the undo after a remove).
+
+        The position is clamped to the list as it is now, ``None`` appends, and
+        someone already back stays where they are. Returns the list now stored,
+        or ``None`` when the chat has no row.
+        """
+        if position is not None:
+            position = min(max(position, 0), _INT4_MAX)
+        raw = await self._pool.fetchval(_RESTORE_ORGANIZER, chat_id, user_id, position)
+        return None if raw is None else parse_user_id_list(raw)
 
     async def ensure_exists(
         self,

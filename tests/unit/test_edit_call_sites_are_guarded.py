@@ -53,28 +53,11 @@ EDIT_METHODS = frozenset(
 # was detected by the scan and then silently filtered out. Pinning the number
 # means a new one has to be declared, which is a code review.
 DELIBERATE_RAW_EDITS: dict[tuple[str, str], tuple[int, str]] = {
-    ("admin.py", "_edit_verify_screen"): (1, "hand-rolled not-modified guard, predates the helper"),
-    ("admin.py", "handle_health"): (1, "hand-rolled not-modified guard, predates the helper"),
-    ("admin.py", "_render_wl_chats"): (1, "hand-rolled not-modified guard, predates the helper"),
-    ("admin.py", "_render_wl_rejected"): (
+    ("admin_chat_panel.py", "_drop_prompt_keyboard"): (
         1,
-        "hand-rolled not-modified guard, predates the helper",
-    ),
-    ("admin_sticker.py", "handle_run_analysis"): (
-        2,
-        "swallows ANY TelegramBadRequest and continues — the progress edit is cosmetic "
-        "and must never abort the analysis (ADR-0003 lifecycle)",
-    ),
-    ("admin_sticker.py", "handle_admin_sticker_dm_analyze"): (
-        3,
-        "same edit-in-place lifecycle as handle_run_analysis; the progress edit failing "
-        "must not abort the analysis",
-    ),
-    ("admin_sticker.py", "handle_clear_ask"): (1, "contextlib.suppress already in place"),
-    ("admin_sticker.py", "handle_clear"): (1, "contextlib.suppress already in place"),
-    ("callbacks.py", "handle_summary_callback"): (
-        1,
-        "broad except that logs; summary refresh is best-effort",
+        "cosmetic: takes the buttons off an earlier prompt by message id (there is no "
+        "Message object to hand safe_edit_reply_markup); a message too old or already "
+        "gone must not stop the value from being saved, so TelegramBadRequest is suppressed",
     ),
     ("progress.py", "finish"): (
         1,

@@ -16,8 +16,12 @@ import structlog
 from aiogram import Bot
 from aiogram.client.default import Default
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import InlineKeyboardMarkup, Message
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+)
+from aiogram.types import ChatMemberRestricted, InlineKeyboardMarkup, Message
 
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.messages import MessageRepository
@@ -76,6 +80,46 @@ async def is_bot_chat_admin(bot: Bot, chat_id: int, bot_id: int) -> bool:
         )
         return False
     return member.status in _ADMIN_STATUSES
+
+
+_GONE_STATUSES = frozenset({ChatMemberStatus.LEFT, ChatMemberStatus.KICKED})
+
+
+async def is_bot_in_chat(bot: Bot, chat_id: int, bot_id: int) -> bool | None:
+    """Live-check whether the bot is still a member of a chat.
+
+    Three answers, as `is_user_chat_admin` gives, and for the same reason:
+    ``False`` is a verdict (left or kicked, restricted out of the chat, or
+    Telegram refusing with Forbidden or Bad Request: "bot is not a member",
+    "chat not found", or answering that the group moved to a supergroup), ``None`` means the API did not answer (network, a 5xx,
+    flood control) and nothing is known. A caller that acts only when the bot
+    is present writes ``is True``.
+
+    Nothing records the bot's own removal durably except ``enabled = false``
+    (`chat_events.handle_my_chat_member`), which a turned-off chat already has,
+    so asking Telegram is the only way to tell "off" from "off and gone".
+    """
+    try:
+        member = await bot.get_chat_member(chat_id, bot_id)
+    except TelegramMigrateToChat as exc:
+        # The group became a supergroup under a new id: this id is dead for good, so
+        # "try again" would loop. aiogram raises this before mapping a 400 to BadRequest.
+        logger.info(
+            "bot_not_in_chat",
+            chat_id=chat_id,
+            migrated_to=exc.migrate_to_chat_id,
+            error=str(exc),
+        )
+        return False
+    except (TelegramBadRequest, TelegramForbiddenError) as exc:
+        logger.info("bot_not_in_chat", chat_id=chat_id, error=str(exc))
+        return False
+    except Exception as exc:
+        logger.warning("bot_membership_check_failed", chat_id=chat_id, error=str(exc))
+        return None
+    if member.status in _GONE_STATUSES:
+        return False
+    return not (isinstance(member, ChatMemberRestricted) and not member.is_member)
 
 
 async def is_user_chat_admin(bot: Bot, chat_id: int, user_id: int) -> bool | None:

@@ -47,6 +47,9 @@ def _make_fsm_message(
     msg.voice = None
     msg.video_note = None
     msg.photo = None
+    # An unset MagicMock attribute is truthy, and admin_kb's organizer picker
+    # filters on `F.users_shared` — a real Message has it None.
+    msg.users_shared = None
     msg.reply_to_message = MagicMock() if reply_to else None
     msg.message_id = 1
     msg.chat = MagicMock()
@@ -55,11 +58,15 @@ def _make_fsm_message(
     msg.from_user = MagicMock()
     msg.from_user.id = ADMIN_ID
     msg.reply = AsyncMock()
-    msg.answer = AsyncMock()
+    msg.answer = AsyncMock(return_value=MagicMock(message_id=2))
+    msg.bot = MagicMock()
+    msg.bot.edit_message_reply_markup = AsyncMock()
 
     state = MagicMock()
     state.get_data = AsyncMock(return_value={"tol_chat_id": CHAT_ID, "tol_lang": "ru"})
     state.clear = AsyncMock()
+    state.update_data = AsyncMock()
+    state.get_state = AsyncMock(return_value=RAW_STATE)
 
     chat_settings_repo = MagicMock()
     chat_settings_repo.get = AsyncMock(return_value={"chat_title": "Chat"})
@@ -133,7 +140,7 @@ class TestToleranceFsmEscape:
         chat_settings_repo = data["chat_settings_repo"]
         assert isinstance(chat_settings_repo, MagicMock)
         chat_settings_repo.set_field.assert_not_awaited()
-        msg.reply.assert_not_awaited()  # no «Нужно число…» re-prompt
+        msg.answer.assert_not_awaited()  # no «Нужно число…» re-prompt
         state.clear.assert_not_awaited()  # state intact, dialog resumable
 
     @pytest.mark.asyncio
@@ -147,7 +154,7 @@ class TestToleranceFsmEscape:
         result = await panel_router.propagate_event("message", msg, **data)
 
         assert result is not UNHANDLED
-        msg.reply.assert_awaited_once()
+        msg.answer.assert_awaited_once()
         state.clear.assert_not_awaited()
 
     @pytest.mark.asyncio

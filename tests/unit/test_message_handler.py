@@ -154,7 +154,7 @@ def message_deps(make_message):
     relevancy_gate.evaluate = AsyncMock(return_value=MagicMock(should_respond=True))
 
     spend_limit_svc = MagicMock()
-    spend_limit_svc.get_warning_if_exceeded = AsyncMock(return_value=None)
+    spend_limit_svc.notify_admins_if_exceeded = AsyncMock(return_value=0)
 
     # main grew this dependency (R-5 silent-reaction path); the indicator tests
     # never reach it, but the handler signature requires it.
@@ -938,7 +938,7 @@ class TestHandleTextMessageReplyToTranscription:
             return_value=GateDecision(should_respond=True, tier="fast_rules", reason="t")
         )
         spend_limit_svc = MagicMock()
-        spend_limit_svc.get_warning_if_exceeded = AsyncMock(return_value=None)
+        spend_limit_svc.notify_admins_if_exceeded = AsyncMock(return_value=0)
         abuse_checker = MagicMock()
         abuse_checker.is_in_cooldown = AsyncMock(return_value=False)
 

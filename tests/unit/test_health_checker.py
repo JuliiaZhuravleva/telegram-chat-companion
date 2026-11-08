@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.services.health.checker import HealthChecker
+from src.bot.screens import cards
+from src.services.health import diagnosis
+from src.services.health.checker import (
+    HealthChecker,
+    ai_failure_issue,
+    db_issue,
+    fallback_issue,
+)
 from src.services.health.models import HealthCheckResult, HealthIssue, HealthStatus
 
 # ---------------------------------------------------------------------------
@@ -127,25 +135,39 @@ class TestFormatAlert:
             db_ok=False,
             messages_30m=12,
             fallbacks_15m=3,
-            issues=[
-                HealthIssue(
-                    severity=HealthStatus.CRITICAL,
-                    message="Database connectivity failed: connection refused",
-                ),
-                HealthIssue(
-                    severity=HealthStatus.WARNING,
-                    message="AI fallback activated 3 time(s) in last 15 min",
-                ),
-            ],
+            issues=[db_issue("connection"), fallback_issue(3)],
         )
 
         text = HealthChecker._format_alert(result)
 
-        assert "CRITICAL" in text
-        assert "Bot Health Alert" in text
-        assert "Database connectivity failed" in text
-        assert "fallback" in text.lower()
-        assert "Messages (30m): 12" in text
+        assert text.startswith("🔥 <b>Сбой бота</b> · 15:30 UTC")
+        assert "🔥 База данных недоступна: нет соединения" in text
+        assert "⚠️ Запасной ИИ включался 3 раза за 15 минут" in text
+        assert "За 30 минут сообщений: 12, запасной ИИ за 15 минут: 3" in text
+
+    def test_the_whole_card_is_in_the_admin_language(self):
+        result = HealthCheckResult(
+            status=HealthStatus.CRITICAL,
+            checked_at=datetime(2026, 2, 10, 15, 30, tzinfo=UTC),
+            messages_30m=12,
+            issues=[db_issue("query"), fallback_issue(1)],
+        )
+
+        text = HealthChecker._format_alert(result, lang="en")
+
+        assert text.startswith("🔥 <b>The bot is failing</b>")
+        assert "Messages in 30 min: 12" in text
+        assert "The database is unreachable: queries fail" in text
+        assert "The fallback AI stepped in 1 time in 15 min" in text
+
+    def test_a_plain_issue_without_facts_shows_its_message(self):
+        """Only `_run_check`'s own issues carry facts; anything else keeps its text."""
+        result = HealthCheckResult(
+            status=HealthStatus.CRITICAL,
+            issues=[HealthIssue(severity=HealthStatus.CRITICAL, message="Database down")],
+        )
+
+        assert "Database down" in HealthChecker._format_alert(result, lang="en")
 
     def test_warning_alert_format(self):
         result = HealthCheckResult(
@@ -162,7 +184,7 @@ class TestFormatAlert:
 
         text = HealthChecker._format_alert(result)
 
-        assert "WARNING" in text
+        assert text.startswith("⚠️ <b>Перебои в работе бота</b>")
 
 
 # ---------------------------------------------------------------------------
@@ -245,9 +267,9 @@ class TestPersistResult:
 
 class TestSendAlert:
     @pytest.mark.asyncio
-    async def test_sends_to_first_admin_only(self, checker, bot):
-        """Only the first admin in the list should receive the alert."""
-        config = {"admin_ids": "111,222,333"}
+    async def test_sends_to_every_admin(self, checker, bot):
+        """Every bot admin gets the card, with the status button under it."""
+        config = {"admin_ids": "111,222,333", "admin_settings": {"lang": "en"}}
         result = HealthCheckResult(
             status=HealthStatus.WARNING,
             issues=[
@@ -255,11 +277,36 @@ class TestSendAlert:
             ],
         )
 
-        await checker._send_alert(result, config)
+        assert await checker._send_alert(result, config) is True
 
-        bot.send_message.assert_awaited_once()
-        call_args = bot.send_message.call_args
-        assert call_args[0][0] == 111  # first admin
+        assert [c.args[0] for c in bot.send_message.await_args_list] == [111, 222, 333]
+        markup = bot.send_message.await_args.kwargs["reply_markup"]
+        assert [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row] == [
+            ("📊 Status", "adm_health:en")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_one_admin_failing_does_not_silence_the_others(self, checker, bot):
+        config = {"admin_ids": "111,222"}
+        bot.send_message.side_effect = [RuntimeError("blocked"), None]
+        result = HealthCheckResult(
+            status=HealthStatus.WARNING,
+            issues=[HealthIssue(severity=HealthStatus.WARNING, message="test")],
+        )
+
+        assert await checker._send_alert(result, config) is True
+        assert [c.args[0] for c in bot.send_message.await_args_list] == [111, 222]
+
+    @pytest.mark.asyncio
+    async def test_nobody_reached_is_not_delivered(self, checker, bot):
+        config = {"admin_ids": "111,222"}
+        bot.send_message.side_effect = RuntimeError("flood control")
+        result = HealthCheckResult(
+            status=HealthStatus.WARNING,
+            issues=[HealthIssue(severity=HealthStatus.WARNING, message="test")],
+        )
+
+        assert await checker._send_alert(result, config) is False
 
     @pytest.mark.asyncio
     async def test_handles_empty_admin_ids(self, checker, bot):
@@ -287,8 +334,7 @@ class TestSendAlert:
 
         await checker._send_alert(result, config)
 
-        bot.send_message.assert_awaited_once()
-        assert bot.send_message.call_args[0][0] == 111
+        assert [c.args[0] for c in bot.send_message.await_args_list] == [111, 222]
 
 
 # ---------------------------------------------------------------------------
@@ -383,3 +429,87 @@ class TestAIFailureCheck:
 
         assert result.db_ok is True
         assert result.status == HealthStatus.HEALTHY
+
+
+class TestTheCardFromTheRealCheck:
+    """The card an admin reads is built from what `_run_check` raised -- here
+    through the real check and the real `diagnosis` hints, not hand-made issues.
+
+    The defect this pins: the frame was translated, the problem lines were the
+    checker's English and the 💡 hints `diagnosis`'s Russian, so neither
+    language got a card in its own language.
+    """
+
+    CREDITS = "Your prepayment credits are depleted. See https://ai.studio/projects"
+    PER_DAY = "Quota exceeded for metric generate_content requests per day"
+
+    @pytest.fixture(autouse=True)
+    def _a_bad_cycle(self, pool):
+        pool.fetchval.side_effect = [1, 5, 2]  # db ok, messages, two fallbacks
+        pool.fetch.return_value = [
+            _failure_row("transcription", 5, error=self.CREDITS),
+            _failure_row("embeddings", 3, error=self.PER_DAY),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_russian_card_has_no_checker_english(self, pool, bot):
+        result = await HealthChecker(pool=pool, bot=bot)._run_check()
+
+        text = HealthChecker._format_alert(result, lang="ru")
+
+        for english in ("AI calls failed", "AI fallback activated", "holding since", "time(s)"):
+            assert english not in text, english
+        assert "Вызовы ИИ не прошли за 15 минут: расшифровка ×5 (gemini), с " in text
+        assert "(2 ч 0 мин)" in text
+        assert "Запасной ИИ включался 2 раза за 15 минут" in text
+        assert "💡 Кредиты провайдера кончились" in text
+        # The provider's own words are shown as they came.
+        assert self.CREDITS.split(" See")[0] in text
+
+    @pytest.mark.asyncio
+    async def test_english_card_has_no_cyrillic(self, pool, bot):
+        result = await HealthChecker(pool=pool, bot=bot)._run_check()
+
+        text = HealthChecker._format_alert(result, lang="en")
+
+        assert re.search("[А-Яа-яЁё]", text) is None, text
+        assert "AI calls failed outright in 15 min: transcription ×5 (gemini), since " in text
+        assert "(2h 0m)" in text
+        assert "💡 Provider credits have run out" in text
+        assert "https://ai.studio/projects" in text
+
+    @pytest.mark.asyncio
+    async def test_what_is_stored_and_compared_did_not_change(self, pool, bot):
+        """Rewording the card must not reword `health_log` or the fingerprint,
+        or every open problem alerts once more after the deploy."""
+        result = await HealthChecker(pool=pool, bot=bot)._run_check()
+
+        by_task = {i.key.split(":")[1]: i for i in result.issues if i.key.startswith("ai_failure")}
+        transcription = by_task["transcription"]
+        assert transcription.message.startswith(
+            "AI calls failed outright in last 15 min: transcription x5 (gemini), holding since "
+        )
+        assert transcription.fingerprint() == (
+            "warning:ai_failure:transcription:RateLimitError:" + diagnosis.hint_for(self.CREDITS)
+        )
+        fallback = next(i for i in result.issues if i.key == "ai_fallback")
+        assert fallback.message == "AI fallback activated 2 time(s) in last 15 min"
+        assert fallback.fingerprint() == "warning:ai_fallback"
+        assert db_issue("query").message == "Database connectivity failed: query error"
+        assert db_issue("query").fingerprint() == "critical:db"
+
+    def test_every_diagnosis_hint_has_an_english_line(self):
+        for _pattern, hint in diagnosis._HINTS:
+            english = cards.hint_line("en", hint)
+            assert english and re.search("[А-Яа-яЁё]", english) is None, hint
+            assert cards.hint_line("ru", hint) == hint
+
+    def test_a_failure_row_without_since_or_provider(self):
+        issue = ai_failure_issue(
+            {"task_type": "vision", "count": 1, "provider": None, "error_message": None}
+        )
+        result = HealthCheckResult(status=HealthStatus.WARNING, issues=[issue])
+
+        assert "⚠️ Вызовы ИИ не прошли за 15 минут: картинки ×1\n" in (
+            HealthChecker._format_alert(result) + "\n"
+        )

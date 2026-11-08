@@ -1,4 +1,4 @@
-"""Command handlers: /start, /help, /summary, /remember, /kb."""
+"""Command handlers: /start, /help, /summary, /remember, /kb, /callme, and the group panel hint."""
 
 from __future__ import annotations
 
@@ -13,13 +13,19 @@ from typing import Any
 import structlog
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import CallbackQuery, Chat, InlineKeyboardMarkup, Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.keyboards.admin_kb import kb_undo_keyboard, kb_view_keyboard
-from src.bot.keyboards.help import help_keyboard
+from src.bot.filters.admin import IsAdmin
+from src.bot.handlers.callbacks import bot_username
+from src.bot.keyboards.kb import kb_undo_keyboard
 from src.bot.progress import ProgressNotice
+from src.bot.screens import cards, entry
+from src.bot.screens.hub import show_hub
+from src.bot.screens.i18n import Lang, lang_of
+from src.bot.screens.model import Screen
+from src.bot.screens.render import render_text, show, to_markup
 from src.bot.utils import is_user_chat_admin, resolve_display_name, safe_edit_text
 from src.database.repositories.aliases import AliasRepository, AliasWriteOutcome
 from src.database.repositories.bot_config import BotConfigRepository
@@ -38,7 +44,6 @@ from src.services.knowledge.capture import (
     split_directives,
 )
 from src.services.modules.summary import SummaryService
-from src.services.text.formatter import markdown_to_html
 from src.services.text.prompt_builder import MAX_FACT_CHARS
 from src.utils import parse_admin_ids, parse_user_id_list
 from src.utils.aliases import (
@@ -261,53 +266,6 @@ def _format_kb_date(value: Any) -> str:
 
 # --- i18n ---
 
-_HELP_TEXT = {
-    "ru": (
-        "🤖 **Чат-компаньон**\n\n"
-        "Я — участник чата, а не просто бот-команда.\n"
-        "Обращайтесь по триггер-слову или отвечайте на мои сообщения.\n\n"
-        "**Возможности:**\n"
-        "{features}\n\n"
-        "**Как пользоваться:**\n"
-        "- Напишите триггер-слово ({triggers}) в сообщении\n"
-        "- Ответьте на моё сообщение\n"
-        "- Иногда я отвечаю случайно 😉"
-    ),
-    "en": (
-        "🤖 **Chat Companion**\n\n"
-        "I'm a chat participant, not just a command bot.\n"
-        "Mention a trigger word or reply to my messages.\n\n"
-        "**Features:**\n"
-        "{features}\n\n"
-        "**How to use:**\n"
-        "- Write a trigger word ({triggers}) in your message\n"
-        "- Reply to one of my messages\n"
-        "- Sometimes I reply randomly 😉"
-    ),
-}
-
-_FEATURES = {
-    "ru": {
-        "chat": "💬 Общение — отвечаю на сообщения с помощью ИИ",
-        "voice": "🎤 Транскрибация голосовых сообщений",
-        "video_notes": "📹 Транскрибация видеосообщений",
-        "summary": "📋 Саммари чата (/summary)",
-        "memory": "🧠 Память — запоминаю контекст разговора",
-    },
-    "en": {
-        "chat": "💬 Chat — I respond to messages using AI",
-        "voice": "🎤 Voice message transcription",
-        "video_notes": "📹 Video note transcription",
-        "summary": "📋 Chat summary (/summary)",
-        "memory": "🧠 Memory — I remember conversation context",
-    },
-}
-
-_START_TEXT = {
-    "ru": "Привет! Я чат-компаньон. Напишите /help для списка возможностей.",
-    "en": "Hello! I'm a chat companion. Type /help to see what I can do.",
-}
-
 _SUMMARY_DM_TEXT = {
     "ru": "📋 {command} доступен только в групповых чатах.",
     "en": "📋 {command} is only available in group chats.",
@@ -333,16 +291,6 @@ _SUMMARY_TOO_FEW = {
         "/summary needs at least {min} (up to {max})."
     ),
 }
-# The angle brackets are HTML entities on purpose: the bot's default parse_mode
-# is HTML, so a literal "<число …>" makes Telegram reject the whole sendMessage
-# with 'Unsupported start tag "число"' and the user gets no reply at all — the
-# validation message silently fails exactly when it is needed. Verified against
-# the live Bot API; a unit test cannot see it, because message.reply is mocked.
-_SUMMARY_INVALID_COUNT = {
-    "ru": "🤔 Не понял количество сообщений. Формат: /summary &lt;число от {min} до {max}&gt;.",
-    "en": "🤔 Couldn't parse the message count. Format: /summary &lt;number from {min} to {max}&gt;.",
-}
-
 _SUMMARY_COUNT_ARG_RE = re.compile(r"\d+")
 
 
@@ -364,53 +312,120 @@ def _parse_summary_count(message_text: str | None) -> int | None:
     return int(arg)
 
 
-def _build_feature_list(config: ChatConfig, language: str) -> str:
-    """Build dynamic feature list based on enabled features."""
-    lang = language if language in _FEATURES else "ru"
-    features = _FEATURES[lang]
-    lines: list[str] = []
-
-    lines.append(f"• {features['chat']}")
-
-    if config.transcribe_voice:
-        lines.append(f"• {features['voice']}")
-    if config.transcribe_video_notes:
-        lines.append(f"• {features['video_notes']}")
-    if config.save_messages:
-        lines.append(f"• {features['summary']}")
-    if config.rag_enabled:
-        lines.append(f"• {features['memory']}")
-
-    return "\n".join(lines)
+def _chat_lang(chat_config: ChatConfig) -> Lang:
+    return lang_of(chat_config.language)
 
 
-@router.message(Command("start"))
-async def handle_start(message: Message, chat_config: ChatConfig) -> None:
-    """Handle /start command."""
-    lang = chat_config.language if chat_config.language in _START_TEXT else "ru"
-    await message.answer(_START_TEXT[lang])
+async def _admin_lang(bot_config_repo: BotConfigRepository) -> Lang:
+    """The panel language: what a bot admin reads in their DM, whatever the chat speaks."""
+    try:
+        return cards.admin_lang(await bot_config_repo.get("admin_settings"))
+    except Exception:
+        logger.warning("admin_lang_unreadable", exc_info=True)
+        return "ru"
 
 
-@router.message(Command("help"))
-async def handle_help(message: Message, chat_config: ChatConfig) -> None:
-    """Handle /help command — dynamic feature list with summary buttons."""
-    lang = chat_config.language if chat_config.language in _HELP_TEXT else "ru"
-    user_id = message.from_user.id if message.from_user else 0
+async def _reply_screen(message: Message, screen: Screen) -> None:
+    """Send ``screen`` as a reply to ``message`` — a group answer stays tied to its command."""
+    await message.reply(render_text(screen), parse_mode="HTML", reply_markup=to_markup(screen))
 
-    features = _build_feature_list(chat_config, lang)
-    triggers = ", ".join(chat_config.trigger_words)
 
-    text = _HELP_TEXT[lang].format(features=features, triggers=triggers)
-    html = markdown_to_html(text)
-
-    keyboard = help_keyboard(
-        user_id,
-        save_messages=chat_config.save_messages,
-        language=lang,
-        chat_type=message.chat.type,
+def _help_group(message: Message, chat_config: ChatConfig) -> Screen:
+    lang = _chat_lang(chat_config)
+    return entry.help_group(
+        lang,
+        user_id=message.from_user.id if message.from_user else 0,
+        trigger=entry.pick_trigger(chat_config.trigger_words, lang),
+        voice=chat_config.transcribe_voice,
+        video_notes=chat_config.transcribe_video_notes,
+        memory=chat_config.rag_enabled or chat_config.chunks_enabled,
+        summary=chat_config.save_messages,
+        kb=chat_config.kb_enabled,
     )
 
-    await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
+
+# Registered before the plain /start below: aiogram stops at the first handler
+# whose filters match, and a plain CommandStart() matches "/start admin" too.
+@router.message(
+    CommandStart(deep_link=True, magic=F.args == entry.PANEL_DEEP_LINK),
+    F.chat.type == "private",
+    IsAdmin(),
+)
+async def handle_start_panel(
+    message: Message,
+    bot_config_repo: FromDishka[BotConfigRepository],
+    **kwargs: Any,
+) -> None:
+    """``/start admin`` — the group hint's link — opens the panel for a bot admin.
+
+    Anyone else falls through to the plain /start below and gets the member
+    screen: the link is public, the panel is not.
+    """
+    await show_hub(message, await _admin_lang(bot_config_repo), data=kwargs)
+
+
+@router.message(CommandStart(), F.chat.type == "private")
+async def handle_start(
+    message: Message,
+    chat_config: ChatConfig,
+    bot_config_repo: FromDishka[BotConfigRepository],
+    bot: Bot | None = None,
+    **kwargs: Any,
+) -> None:
+    """``/start`` in a DM: the panel button for a bot admin, the add-me link for anyone else."""
+    if kwargs.get("is_admin"):
+        screen = entry.start_admin(await _admin_lang(bot_config_repo))
+    else:
+        screen = entry.start_member(_chat_lang(chat_config), bot_username=await bot_username(bot))
+    await show(message, screen)
+
+
+@router.message(CommandStart(), F.chat.type.in_({"group", "supergroup"}))
+async def handle_start_group(message: Message, chat_config: ChatConfig) -> None:
+    """``/start@bot`` in a group: there is nothing to start there, so it shows what /help shows."""
+    await show(message, _help_group(message, chat_config))
+
+
+@router.message(Command("help"), F.chat.type == "private")
+async def handle_help_dm(
+    message: Message,
+    chat_config: ChatConfig,
+    bot_config_repo: FromDishka[BotConfigRepository],
+    bot: Bot | None = None,
+    **kwargs: Any,
+) -> None:
+    """``/help`` in a DM: what the bot does in groups, with the add-me link."""
+    admin = bool(kwargs.get("is_admin"))
+    lang = await _admin_lang(bot_config_repo) if admin else _chat_lang(chat_config)
+    screen = entry.help_dm(
+        lang,
+        trigger=entry.pick_trigger(chat_config.trigger_words, lang),
+        bot_username=await bot_username(bot),
+        admin=admin,
+    )
+    await show(message, screen)
+
+
+@router.message(Command("help"), F.chat.type.in_({"group", "supergroup"}))
+async def handle_help(message: Message, chat_config: ChatConfig) -> None:
+    """``/help`` in a group: only what this chat has switched on, summary buttons, close."""
+    await show(message, _help_group(message, chat_config))
+
+
+# The admin router is included before this one and owns /admin and /settings in
+# private chats. These two only reach here from a group, where the panel cannot
+# open: the bot admin gets a link that opens it in the DM.
+@router.message(
+    Command("admin", "settings"),
+    F.chat.type.in_({"group", "supergroup"}),
+    IsAdmin(),
+)
+async def handle_admin_in_group(
+    message: Message, chat_config: ChatConfig, bot: Bot | None = None
+) -> None:
+    """``/admin`` or ``/settings`` in a group from a bot admin: the panel lives in the DM."""
+    screen = entry.admin_hint(_chat_lang(chat_config), bot_username=await bot_username(bot))
+    await _reply_screen(message, screen)
 
 
 async def _reject_if_saving_disabled(message: Message, chat_config: ChatConfig, lang: str) -> bool:
@@ -463,6 +478,21 @@ async def _deliver_summary(
         await notice.fail(fail_msg)
 
 
+async def _reply_summary_invalid(message: Message, lang: Lang) -> None:
+    """``/summary abc`` or above the maximum: the two counts as buttons, the shape to type.
+
+    The buttons carry the sender's id, so only they can press them — the
+    same owner rule as the summary buttons under /help.
+    """
+    screen = entry.summary_invalid(
+        lang,
+        user_id=message.from_user.id if message.from_user else 0,
+        low=_SUMMARY_MIN_COUNT,
+        high=_SUMMARY_MAX_COUNT,
+    )
+    await _reply_screen(message, screen)
+
+
 @router.message(Command("summary"), F.chat.type.in_({"group", "supergroup"}))
 async def handle_summary(
     message: Message,
@@ -477,7 +507,7 @@ async def handle_summary(
     ``_SUMMARY_MAX_COUNT``). In forum chats, summarizes only messages from
     the current topic, regardless of the requested count.
     """
-    lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
+    lang = _chat_lang(chat_config)
 
     if await _reject_if_saving_disabled(message, chat_config, lang):
         return
@@ -485,9 +515,7 @@ async def handle_summary(
     try:
         requested_count = _parse_summary_count(message.text)
     except ValueError:
-        await message.reply(
-            _SUMMARY_INVALID_COUNT[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
-        )
+        await _reply_summary_invalid(message, lang)
         return
 
     if requested_count is None:
@@ -498,9 +526,7 @@ async def handle_summary(
         )
         return
     elif requested_count > _SUMMARY_MAX_COUNT:
-        await message.reply(
-            _SUMMARY_INVALID_COUNT[lang].format(min=_SUMMARY_MIN_COUNT, max=_SUMMARY_MAX_COUNT)
-        )
+        await _reply_summary_invalid(message, lang)
         return
     else:
         count = requested_count
@@ -528,7 +554,7 @@ async def handle_summary500(
     ``/summary500 300`` would be asking two different counts at once and the
     parameterized form (``/summary 300``) already covers that.
     """
-    lang = chat_config.language if chat_config.language in _SUMMARY_INVALID_COUNT else "ru"
+    lang = _chat_lang(chat_config)
 
     if await _reject_if_saving_disabled(message, chat_config, lang):
         return
@@ -1204,13 +1230,28 @@ def _slice_page(
     return facts[start : start + page_size], total_pages
 
 
-async def _render_kb_dm(
-    bot: Bot | None, chat_id: int, facts: list[dict[str, Any]], lang: str, page: int
-) -> tuple[str, InlineKeyboardMarkup | None]:
-    page_facts, total_pages = _slice_page(facts, page, _KB_PAGE_SIZE_DM)
+# The pager is a row of buttons now, so `_fit_message` gets no footer; its
+# reserve (80 parsed characters) still holds the title line `entry._kb` puts on
+# top and the "… and N more" line.
 
-    title = "📚 <b>База знаний чата</b>" if lang == "ru" else "📚 <b>Chat Knowledge Base</b>"
-    header = [title, ""]
+
+def _kb_chat_name(chat: Chat) -> str | None:
+    """The DM heading's name: the chat's title, or None when it has none.
+
+    A private chat has no title, and its heading does not name the person:
+    ``entry.kb_dm(private=True)`` says «личный чат» instead.
+    """
+    return chat.title if isinstance(chat.title, str) else None
+
+
+async def _render_kb_dm(
+    bot: Bot | None, chat: Chat, facts: list[dict[str, Any]], lang: Lang, page: int
+) -> Screen:
+    chat_id = chat.id
+    page = max(0, page)
+    page_facts, total_pages = _slice_page(facts, page, _KB_PAGE_SIZE_DM)
+    page = min(page, total_pages - 1)
+
     cache: dict[int, str] = {}
     current_topic: str | None = None
     # One block per fact, so a fact is never separated from its own provenance
@@ -1229,41 +1270,33 @@ async def _render_kb_dm(
         block.append(f"  <i>{updated_label} {date_str}, {html_escape(author)}</i>")
         blocks.append(block)
 
-    footer = ["", f"◀️ {page + 1}/{total_pages} ▶️"] if total_pages > 1 else []
-
-    # Built as explicit HTML rather than through `markdown_to_html`. That helper
-    # *interprets* Markdown after escaping, so a fact containing `**` or a lone
-    # `_` — ordinary in captured text — comes back with crossing tags that
-    # Telegram rejects, taking the whole page down for one bad fact. A display
-    # name can do the same.
-    keyboard = (
-        kb_view_keyboard(lang, page=page, total_pages=total_pages) if total_pages > 1 else None
+    # Explicit HTML rather than `markdown_to_html`: that helper *interprets*
+    # Markdown after escaping, so a fact containing `**` or a lone `_` —
+    # ordinary in captured text — comes back with crossing tags that Telegram
+    # rejects, taking the whole page down for one bad fact. A display name can
+    # do the same.
+    body = _fit_message(blocks, lang, header=[], footer=[]).strip()
+    return entry.kb_dm(
+        lang,
+        title=_kb_chat_name(chat),
+        total=len(facts),
+        body=body,
+        page=page,
+        pages=total_pages,
+        private=chat.type == "private",
     )
-    body = _fit_message(blocks, lang, header=header, footer=footer)
-    return body.strip(), keyboard
 
 
-def _render_kb_group(
-    facts: list[dict[str, Any]], lang: str, page: int
-) -> tuple[str, InlineKeyboardMarkup | None]:
+def _render_kb_group(facts: list[dict[str, Any]], lang: Lang, page: int) -> Screen:
+    page = max(0, page)
     page_facts, total_pages = _slice_page(facts, page, _KB_PAGE_SIZE_GROUP)
-    total = len(facts)
-
-    header = (
-        f"📚 База знаний ({total} факт(а/ов)):"
-        if lang == "ru"
-        else f"📚 Knowledge base ({total} facts):"
-    )
+    page = min(page, total_pages - 1)
     # Facts are raw user input; the bot-wide default parse_mode is HTML, so
     # unescaped '&'/'<' would break rendering or inject markup. `_fact_line`
     # escapes and caps.
     blocks = [[f"• {_fact_line(fact, lang)}"] for fact in page_facts]
-    footer = [f"◀️ {page + 1}/{total_pages} ▶️"] if total_pages > 1 else []
-
-    keyboard = (
-        kb_view_keyboard(lang, page=page, total_pages=total_pages) if total_pages > 1 else None
-    )
-    return _fit_message(blocks, lang, header=[header], footer=footer), keyboard
+    body = _fit_message(blocks, lang, header=[], footer=[])
+    return entry.kb_group(lang, total=len(facts), body=body, page=page, pages=total_pages)
 
 
 @router.message(Command("kb"), F.chat.type == "private")
@@ -1272,8 +1305,8 @@ async def handle_kb_view_dm(
     chat_config: ChatConfig,
     knowledge_repo: FromDishka[KnowledgeRepository],
 ) -> None:
-    """``/kb`` in DM: bold-title, topic-sectioned, paginated (5/page)."""
-    lang = chat_config.language if chat_config.language in _KB_EMPTY_DM else "ru"
+    """``/kb`` in DM: the DM's own facts by topic, with who and when; 5 per page."""
+    lang = _chat_lang(chat_config)
 
     if not chat_config.kb_enabled:
         await message.answer(_KB_DISABLED[lang])
@@ -1285,8 +1318,7 @@ async def handle_kb_view_dm(
         await message.answer(_KB_EMPTY_DM[lang])
         return
 
-    html, keyboard = await _render_kb_dm(message.bot, message.chat.id, facts, lang, 0)
-    await message.answer(html, parse_mode="HTML", reply_markup=keyboard)
+    await show(message, await _render_kb_dm(message.bot, message.chat, facts, lang, 0))
 
 
 @router.message(Command("kb"), F.chat.type.in_({"group", "supergroup"}))
@@ -1295,8 +1327,8 @@ async def handle_kb_view_group(
     chat_config: ChatConfig,
     knowledge_repo: FromDishka[KnowledgeRepository],
 ) -> None:
-    """``/kb`` in group: terse flat list, no provenance, paginated (8/page)."""
-    lang = chat_config.language if chat_config.language in _KB_EMPTY_GROUP else "ru"
+    """``/kb`` in a group: one line per fact, no provenance; 8 per page."""
+    lang = _chat_lang(chat_config)
 
     if not chat_config.kb_enabled:
         await message.answer(_KB_DISABLED[lang])
@@ -1308,8 +1340,7 @@ async def handle_kb_view_group(
         await message.answer(_KB_EMPTY_GROUP[lang])
         return
 
-    text, keyboard = _render_kb_group(facts, lang, 0)
-    await message.answer(text, reply_markup=keyboard)
+    await show(message, _render_kb_group(facts, lang, 0))
 
 
 @router.callback_query(F.data.startswith("kb_view:"))
@@ -1335,8 +1366,10 @@ async def handle_kb_view_page(
         await callback.answer()
         return
 
+    # An unreadable page is an old button: it opens the first page, which is
+    # what the stale rule asks for — the current screen, never a dead alert.
     parts = (callback.data or "").split(":")
-    lang = parts[1] if len(parts) > 1 and parts[1] in ("ru", "en") else "ru"
+    lang = lang_of(parts[1] if len(parts) > 1 else None)
     try:
         page = int(parts[2]) if len(parts) > 2 else 0
     except ValueError:
@@ -1353,13 +1386,10 @@ async def handle_kb_view_page(
         return
 
     if callback.message.chat.type == "private":
-        html, keyboard = await _render_kb_dm(callback.bot, chat_id, facts, lang, page)
-        await safe_edit_text(callback.message, html, parse_mode="HTML", reply_markup=keyboard)
+        screen = await _render_kb_dm(callback.bot, callback.message.chat, facts, lang, page)
     else:
-        text, keyboard = _render_kb_group(facts, lang, page)
-        await safe_edit_text(callback.message, text, reply_markup=keyboard)
-
-    await callback.answer()
+        screen = _render_kb_group(facts, lang, page)
+    await show(callback, screen)
 
 
 # --- /callme: what this chat calls you (TD-150) ------------------------------
@@ -1375,32 +1405,7 @@ _CALLME_DM_NOTICE = {
     ),
 }
 
-_CALLME_USAGE = {
-    "ru": (
-        "<b>Как боту вас звать</b>\n"
-        "<code>/callme Костя</code> — бот будет звать вас так\n"
-        "<code>/callme -</code> — убрать имя\n"
-        "Админы чата могут задать имя другому: ответом на его сообщение "
-        "или <code>/callme @ник Костя</code>."
-    ),
-    "en": (
-        "<b>What the bot should call you</b>\n"
-        "<code>/callme Kostya</code> — the bot will use this name\n"
-        "<code>/callme -</code> — remove it\n"
-        "Chat admins can name someone else: reply to their message, "
-        "or <code>/callme @handle Kostya</code>."
-    ),
-}
-
-_CALLME_CURRENT = {
-    "ru": "Сейчас бот зовёт вас <b>{name}</b>.",
-    "en": "Right now the bot calls you <b>{name}</b>.",
-}
 _CALLME_SET = {"ru": "Готово — теперь вы <b>{name}</b>.", "en": "Done — you are <b>{name}</b> now."}
-_CALLME_SET_OTHER = {
-    "ru": "Готово — бот будет звать {who} <b>{name}</b>.",
-    "en": "Done — the bot will call {who} <b>{name}</b>.",
-}
 _CALLME_UNCHANGED = {
     "ru": "Бот и так зовёт вас <b>{name}</b>.",
     "en": "The bot already calls you <b>{name}</b>.",
@@ -1461,19 +1466,6 @@ class _CallmeTarget:
 _CALLME_CHECK_FAILED = {
     "ru": "Не смог проверить права в этом чате — попробуйте ещё раз.",
     "en": "Could not check your rights in this chat — please try again.",
-}
-
-_CALLME_CURRENT_OTHER = {
-    "ru": "Сейчас бот зовёт {who} <b>{name}</b>.",
-    "en": "Right now the bot calls {who} <b>{name}</b>.",
-}
-_CALLME_CLEARED_OTHER = {
-    "ru": "Убрал имя для {who} — бот снова зовёт по аккаунту.",
-    "en": "Removed the name for {who} — the bot is back to their account name.",
-}
-_CALLME_NOTHING_TO_CLEAR_OTHER = {
-    "ru": "У {who} и не было имени.",
-    "en": "{who} did not have a name set.",
 }
 
 _CALLME_REJECTION_COPY = {
@@ -1545,7 +1537,7 @@ async def handle_callme(
     as real as an unauthorised rename. Every confirmation names who was
     renamed, so a surprise is visible in the same breath.
     """
-    lang = chat_config.language if chat_config.language in _CALLME_USAGE else "ru"
+    lang = _chat_lang(chat_config)
     sender = message.from_user
     if sender is None:  # channel post or anonymous admin -- nobody to name
         return
@@ -1686,8 +1678,8 @@ async def handle_callme(
             )
 
     if renaming_somebody_else:
-        await message.reply(
-            _CALLME_SET_OTHER[lang].format(who=html_escape(target.display), name=safe_name)
+        await _reply_screen(
+            message, entry.callme_other(lang, who=target.display, name=parsed.display)
         )
     else:
         await message.reply(_CALLME_SET[lang].format(name=safe_name))
@@ -1698,7 +1690,7 @@ async def _reply_callme_usage(
     alias_repo: AliasRepository,
     chat_id: int,
     target: _CallmeTarget,
-    lang: str,
+    lang: Lang,
     *,
     about_sender: bool,
 ) -> None:
@@ -1720,16 +1712,12 @@ async def _reply_callme_usage(
             user_id=target.user_id,
             exc_info=True,
         )
-    text = _CALLME_USAGE[lang]
-    if current:
-        safe = html_escape(current)
-        head = (
-            _CALLME_CURRENT[lang].format(name=safe)
-            if about_sender
-            else _CALLME_CURRENT_OTHER[lang].format(who=html_escape(target.display), name=safe)
-        )
-        text = f"{head}\n\n{text}"
-    await message.reply(text)
+    # The two buttons act on whoever presses them, so the builder drops them
+    # when the reply is about somebody else.
+    screen = entry.callme_usage(
+        lang, current=current, other=None if about_sender else target.display
+    )
+    await _reply_screen(message, screen)
 
 
 async def _clear_callme(
@@ -1737,7 +1725,7 @@ async def _clear_callme(
     alias_repo: AliasRepository,
     chat_id: int,
     target: _CallmeTarget,
-    lang: str,
+    lang: Lang,
     *,
     about_sender: bool,
 ) -> None:
@@ -1748,16 +1736,14 @@ async def _clear_callme(
     request now outranks any alternate (see ``AliasRepository.set_primary``),
     a leftover alternate can no longer block anybody from claiming that name.
     """
-    who = html_escape(target.display)
     try:
         view = build_alias_view(await alias_repo.load_active(chat_id))
         current = view.primary_by_user.get(target.user_id)
         if not current:
-            await message.reply(
-                _CALLME_NOTHING_TO_CLEAR[lang]
-                if about_sender
-                else _CALLME_NOTHING_TO_CLEAR_OTHER[lang].format(who=who)
-            )
+            if about_sender:
+                await message.reply(_CALLME_NOTHING_TO_CLEAR[lang])
+            else:
+                await _reply_screen(message, entry.callme_nothing_other(lang))
             return
         await alias_repo.retire(chat_id, current)
     except Exception as exc:
@@ -1770,6 +1756,7 @@ async def _clear_callme(
         )
         await message.reply(_CALLME_FAILED[lang])
         return
-    await message.reply(
-        _CALLME_CLEARED[lang] if about_sender else _CALLME_CLEARED_OTHER[lang].format(who=who)
-    )
+    if about_sender:
+        await message.reply(_CALLME_CLEARED[lang])
+    else:
+        await _reply_screen(message, entry.callme_cleared_other(lang, who=target.display))

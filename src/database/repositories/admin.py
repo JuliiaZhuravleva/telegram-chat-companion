@@ -373,6 +373,29 @@ class AdminRepository:
         )
         return [dict(r) for r in rows], int(total)
 
+    async def count_attempts(self, status: str) -> int:
+        """How many attempts with ``status`` the panel lists — the number on its entry button.
+
+        Same predicate as `get_pending_attempts_page` / `get_rejected_attempts_page`
+        (attempts of an already enabled chat are not listed, so not counted):
+        a count that disagreed with the list behind it would promise rows the
+        list never shows.
+        """
+        if status not in self._VALID_STATUSES:
+            raise ValueError(f"Invalid attempt status: {status!r}")
+        total = await self._pool.fetchval(
+            """
+            SELECT COUNT(*) FROM unauthorized_attempts ua
+            WHERE ua.status = $1
+              AND NOT EXISTS (
+                  SELECT 1 FROM chat_settings cs
+                  WHERE cs.chat_id = ua.chat_id AND cs.enabled = true
+              )
+            """,
+            status,
+        )
+        return int(total or 0)
+
     async def has_rejected_attempt(self, chat_id: int) -> bool:
         """True if the chat has any attempt with status='rejected'.
 

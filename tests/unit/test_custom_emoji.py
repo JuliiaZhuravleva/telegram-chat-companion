@@ -6,12 +6,27 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import structlog
 from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    KeyboardButtonRequestUsers,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
-from src.bot.custom_emoji import FENCE, MAX_PER_MESSAGE, CustomEmoji, fence
+from src.bot.custom_emoji import (
+    FENCE,
+    MAX_PER_MESSAGE,
+    REFUSALS_TO_OFF,
+    CustomEmoji,
+    bare_label,
+    fence,
+)
 
 BTN = {"⚙": "b-settings", "⬅": "b-back", "✅": "b-on", "❌": "b-decline", "🔥": "b-alarm"}
 MARK = {"⚙": "m-settings", "✅": "m-on", "⚠": "m-warn", "🔥": "m-alarm"}
@@ -73,6 +88,23 @@ async def _send(mw: CustomEmoji, bot: MagicMock, method: Any) -> Any:
     await mw(make_request, bot, method)
     assert len(sent) == 1
     return sent[0]
+
+
+class _Refusing:
+    """``make_request`` that refuses rich sends by a custom-emoji error.
+
+    ``verdicts[i]`` is True when the i-th rich send is refused; a plain send (the
+    resend, or anything past the list) always goes through."""
+
+    def __init__(self, verdicts: list[bool]) -> None:
+        self.sent: list[Any] = []
+        self._verdicts = iter(verdicts)
+
+    async def __call__(self, _bot: Any, m: Any) -> str:
+        self.sent.append(m)
+        if m.text.startswith("<tg-emoji") and next(self._verdicts, False):
+            raise TelegramBadRequest(method=m, message="Bad Request: DOCUMENT_INVALID")
+        return "ok"
 
 
 def _buttons(method: Any) -> list[tuple[str, str | None]]:
@@ -245,20 +277,83 @@ class TestFailures:
         assert "RuntimeError" in mw.off_reason
 
     @pytest.mark.asyncio
-    async def test_a_refused_send_is_resent_plain_and_the_module_turns_off(self) -> None:
+    async def test_one_refused_send_is_resent_plain_and_the_icons_stay_on(self) -> None:
+        """One refusal is that message's fault: it goes out plain, is logged with
+        the method and Telegram's reason, and the next screen still gets its icons."""
         mw, bot = await _on()
         method = SendMessage(chat_id=1, text="✅ ok", reply_markup=_kb("✅ Да"))
-        sent: list[Any] = []
+        refusing = _Refusing([True])
+
+        with structlog.testing.capture_logs() as logs:
+            assert await mw(refusing, bot, method) == "ok"
+        assert refusing.sent[0].text.startswith("<tg-emoji") and refusing.sent[1] is method
+        assert mw.on, mw.off_reason
+        (refused,) = [e for e in logs if e["event"] == "custom_emoji_refused"]
+        assert refused["method"] == "sendMessage"
+        assert "DOCUMENT_INVALID" in refused["reason"] and refused["in_a_row"] == 1
+        assert not [e for e in logs if e["event"] == "custom_emoji_off"]
+
+        out = await _send(mw, bot, SendMessage(chat_id=1, text="x", reply_markup=_kb("✅ Да")))
+        assert _buttons(out) == [("Да", "b-on")]
+
+    @pytest.mark.asyncio
+    async def test_three_refusals_in_a_row_turn_the_module_off(self) -> None:
+        mw, bot = await _on()
+        refusing = _Refusing([True] * REFUSALS_TO_OFF)
+        for n in range(REFUSALS_TO_OFF):
+            assert mw.on, n
+            edit = EditMessageText(chat_id=1, message_id=n, text="✅ ok", reply_markup=_kb("✅ Да"))
+            assert await mw(refusing, bot, edit) == "ok"
+        assert REFUSALS_TO_OFF == 3
+        assert not mw.on
+        assert "3 times in a row" in mw.off_reason and "DOCUMENT_INVALID" in mw.off_reason
+        # Off: the next screen goes out once, plain.
+        out = await _send(mw, bot, SendMessage(chat_id=1, text="x", reply_markup=_kb("✅ Да")))
+        assert _buttons(out) == [("✅ Да", None)]
+
+    @pytest.mark.asyncio
+    async def test_a_rich_send_that_goes_through_starts_the_count_again(self) -> None:
+        mw, bot = await _on()
+        # Refused, refused, accepted, refused, refused: never three in a row.
+        refusing = _Refusing([True, True, False, True, True])
+        for _ in range(5):
+            method = SendMessage(chat_id=1, text="✅ ok", reply_markup=_kb("✅ Да"))
+            assert await mw(refusing, bot, method) == "ok"
+        # Each refused rich send is followed by its plain resend; the accepted one is alone.
+        assert [m.text.startswith("<tg-emoji") for m in refusing.sent] == [
+            True,
+            False,
+            True,
+            False,
+            True,
+            True,
+            False,
+            True,
+            False,
+        ]
+        assert mw.on, mw.off_reason
+        assert mw.refused_in_a_row == 2
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_the_plain_resend_hits_too_is_not_counted(self) -> None:
+        """Broken HTML fails rich and plain alike: that is the screen's fault, not the icons'.
+
+        Counting it before the resend switched the icons off for every screen after an
+        admin tapped one broken screen three times.
+        """
+        mw, bot = await _on()
 
         async def make_request(_bot: Any, m: Any) -> str:
-            sent.append(m)
-            if len(sent) == 1:
-                raise TelegramBadRequest(method=m, message="Bad Request: DOCUMENT_INVALID")
-            return "ok"
+            raise TelegramBadRequest(
+                method=m, message="Bad Request: can't parse entities: unsupported start tag"
+            )
 
-        assert await mw(make_request, bot, method) == "ok"
-        assert sent[0].text.startswith("<tg-emoji") and sent[1] is method
-        assert not mw.on and "DOCUMENT_INVALID" in mw.off_reason
+        for n in range(REFUSALS_TO_OFF):
+            method = SendMessage(chat_id=1, text=f"✅ {n}", reply_markup=_kb("✅ Да"))
+            with pytest.raises(TelegramBadRequest):
+                await mw(make_request, bot, method)
+        assert mw.on, mw.off_reason
+        assert mw.refused_in_a_row == 0
 
     @pytest.mark.asyncio
     async def test_any_other_refusal_is_raised_and_the_module_stays_on(self) -> None:
@@ -272,3 +367,74 @@ class TestFailures:
                 make_request, bot, SendMessage(chat_id=1, text="✅", reply_markup=_kb("✅ Да"))
             )
         assert mw.on
+
+
+class TestReplyKeyboards:
+    """The organizer picker's prompt carries a REPLY keyboard, its answers remove it.
+
+    Before this, ``_is_screen`` knew only inline keyboards, so the prompt and every answer
+    went out with plain emoji while the screen they came from was drawn.
+    """
+
+    @staticmethod
+    def _prompt() -> SendMessage:
+        return SendMessage(
+            chat_id=1,
+            text="⚙️ <b>Новый</b>",
+            reply_markup=ReplyKeyboardMarkup(
+                keyboard=[
+                    [
+                        KeyboardButton(
+                            text="✅ Найти",
+                            request_users=KeyboardButtonRequestUsers(request_id=1),
+                        )
+                    ],
+                    [KeyboardButton(text="❌ Отмена")],
+                    [KeyboardButton(text="без значка")],
+                ],
+                one_time_keyboard=True,
+            ),
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_reply_button_gets_the_icon_and_keeps_its_request(self) -> None:
+        mw, bot = await _on()
+        out = await _send(mw, bot, self._prompt())
+        rows = out.reply_markup.keyboard
+        assert [(b.text, b.icon_custom_emoji_id) for r in rows for b in r] == [
+            ("Найти", "b-on"),
+            ("Отмена", "b-decline"),
+            ("без значка", None),
+        ]
+        assert rows[0][0].request_users.request_id == 1
+        assert out.reply_markup.one_time_keyboard is True
+        assert out.text.startswith('<tg-emoji emoji-id="m-settings">')
+
+    @pytest.mark.asyncio
+    async def test_an_answer_that_removes_the_keyboard_is_drawn(self) -> None:
+        mw, bot = await _on()
+        out = await _send(
+            mw, bot, SendMessage(chat_id=1, text="✅ готово", reply_markup=ReplyKeyboardRemove())
+        )
+        assert out.text.startswith('<tg-emoji emoji-id="m-on">')
+        assert isinstance(out.reply_markup, ReplyKeyboardRemove)
+
+    @pytest.mark.asyncio
+    async def test_off_the_reply_keyboard_goes_out_unchanged(self) -> None:
+        mw = CustomEmoji()
+        await mw.load(_bot(), None, None)
+        method = self._prompt()
+        assert await _send(mw, _bot(), method) is method
+
+
+class TestBareLabel:
+    def test_strips_one_leading_glyph_with_its_selector(self) -> None:
+        assert bare_label("✖️ Отмена") == "Отмена"
+        assert bare_label("🔍 Найти в Telegram") == "Найти в Telegram"
+
+    def test_an_iconed_label_is_already_bare(self) -> None:
+        assert bare_label("Отмена") == "Отмена"
+
+    def test_digits_and_words_are_not_glyphs(self) -> None:
+        assert bare_label("3 ❌") == "3 ❌"
+        assert bare_label("@anya") == "@anya"

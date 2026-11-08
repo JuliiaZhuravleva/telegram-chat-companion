@@ -175,6 +175,14 @@ class RulesRepository:
 
     # -- Paginated list for admin UI --
 
+    async def count_for_chat(self, chat_id: int) -> int:
+        """Every rule of a chat, enabled or not — the number the rules list pages through."""
+        total = await self._pool.fetchval(
+            "SELECT COUNT(*) FROM custom_rules WHERE chat_id = $1",
+            chat_id,
+        )
+        return int(total or 0)
+
     async def get_rules_page(
         self, chat_id: int, page: int, per_page: int = 5
     ) -> tuple[list[dict[str, Any]], int]:

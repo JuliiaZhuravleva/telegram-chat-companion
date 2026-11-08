@@ -18,6 +18,10 @@ indistinguishable from the bug. `data["bot"]` must be present too, because
 
 from __future__ import annotations
 
+import ast
+import inspect
+import json
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -29,6 +33,7 @@ from src.bot.handlers import router as main_router
 from src.bot.handlers.fsm_cancel import router as fsm_cancel_router
 from src.bot.states.admin import AdminStates
 from src.models.chat_config import ChatConfig
+from tests.unit.kb_organizer_fakes import wire_organizer_writers, written
 
 ADMIN_ID = 555
 CHAT_ID = 555
@@ -107,9 +112,11 @@ def _make_message(
         ),
     ).as_(bot)
 
-    chat_settings_repo = MagicMock()
+    # No settings row: a chat never seen. The organizer writers then answer
+    # None, as the single UPDATE does; a test that adds an organizer stores a
+    # row first (`_connected`).
+    chat_settings_repo = wire_organizer_writers(MagicMock())
     chat_settings_repo.get = AsyncMock(return_value=None)
-    chat_settings_repo.set_field = AsyncMock()
 
     data: dict[str, object] = {
         "is_admin": is_admin,
@@ -124,6 +131,12 @@ def _make_message(
         "bot_config_repo": AsyncMock(),
         "admin_repo": _admin_repo(),
         "message_repo": AsyncMock(),
+        # The KB organizer handlers name people through it; nobody is stored.
+        "organizer_names": AsyncMock(
+            names=AsyncMock(return_value={}),
+            remember=AsyncMock(return_value=True),
+            remember_seen=AsyncMock(return_value=False),
+        ),
         "knowledge_repo": AsyncMock(),
         "sticker_repo": MagicMock(),
         "sticker_service": AsyncMock(),
@@ -143,6 +156,13 @@ def _make_message(
         "knowledge_service": AsyncMock(),
     }
     return msg, data, bot
+
+
+def _connected(data: dict[str, object], *organizer_ids: int) -> None:
+    """Give the chat the bot is adding organizers to a settings row."""
+    data["chat_settings_repo"].get = AsyncMock(  # type: ignore[attr-defined]
+        return_value={"chat_title": None, "kb_organizer_ids": json.dumps(list(organizer_ids))}
+    )
 
 
 def _admin_repo(lang: str = "ru") -> AsyncMock:
@@ -214,38 +234,124 @@ class TestCancelIsReachableFromEveryState:
         assert main_router.sub_routers.index(fsm_cancel_router) == 0
 
 
-class TestCommandsEscapeTheRuleConfigPrompt:
-    async def test_a_typed_command_is_not_swallowed(self) -> None:
-        msg, data, bot = _make_message(text="/help")
-        state = _FakeState(AdminStates.awaiting_rule_config)
+_RULE_PROMPTS = (
+    AdminStates.awaiting_rule_config,
+    AdminStates.awaiting_rule_words,
+    AdminStates.awaiting_rule_text,
+    AdminStates.awaiting_rule_react,
+)
+"""The rules area's four typed-input prompts: each one has the same filters."""
 
-        await _propagate(msg, data, state)
+_RULE_DRAFT: dict[str, object] = {
+    "rule_chat_id": -100123,
+    "lang": "ru",
+    "rule_type": "keyword_trigger",
+    "rule_words": ["реклама"],
+    "rule_match": "contains",
+    "rule_name": "реклама",
+    "rule_action": "warn_user",
+    "rule_prompt_id": None,
+}
+"""A builder draft one answer short of a rule, so any prompt's handler can act on it.
 
-        assert "Невалидный JSON. Попробуйте ещё раз." not in _sent_texts(bot)
+Without one, a prompt's handler leaves silently, and a test that a command is
+not swallowed would pass with the filters removed.
+"""
 
-    async def test_a_command_in_a_photo_caption_is_not_swallowed(self) -> None:
-        """aiogram reads a command from `text or caption`.
 
-        So `/help` under a photo is a real command — and `~F.text.startswith("/")`
-        returns True for it, because `.text` is None. Measured before the fix:
-        the rules handler consumed it and answered «Невалидный JSON». This is
-        the case the text-only guard used elsewhere in the project cannot see.
+async def _armed(prompt: State) -> _FakeState:
+    state = _FakeState(prompt)
+    await state.update_data(**_RULE_DRAFT)
+    return state
+
+
+def _with_rule_services(data: dict[str, object]) -> None:
+    """Services a created rule's card reads, awaitable like the real ones."""
+    service = MagicMock()
+    service.get_config = AsyncMock(return_value=ChatConfig(chat_id=-100123))
+    data["chat_config_service"] = service
+
+
+async def _untouched(state: _FakeState, prompt: State, data: dict[str, object]) -> bool:
+    """No rules handler acted: the prompt, its draft and the repository are as armed."""
+    return (
+        await state.get_state() == prompt.state
+        and await state.get_data() == _RULE_DRAFT
+        and not data["rules_repo"].create.await_count  # type: ignore[union-attr]
+    )
+
+
+class TestCommandsEscapeTheRulePrompts:
+    @pytest.mark.parametrize("shape", ["text", "caption"])
+    @pytest.mark.parametrize("prompt", _RULE_PROMPTS, ids=lambda s: s.state)
+    async def test_a_typed_command_ends_the_prompt_and_is_not_swallowed(
+        self, prompt: State, shape: str
+    ) -> None:
+        """A typed command leaves the prompt (`PromptExitMiddleware`) before any
+        rules filter runs: the draft goes with it, nothing is created, and the
+        command is not answered as the prompt's input. Under a photo too:
+        aiogram reads a command from `text or caption`, and so does the middleware.
         """
-        msg, data, bot = _make_message(caption="/help")
-        state = _FakeState(AdminStates.awaiting_rule_config)
+        msg, data, bot = _make_message(**{shape: "/help"})
+        _with_rule_services(data)
+        state = await _armed(prompt)
 
         await _propagate(msg, data, state)
 
+        assert await state.get_state() is None
+        assert await state.get_data() == {}
+        data["rules_repo"].create.assert_not_awaited()  # type: ignore[union-attr]
         assert "Невалидный JSON. Попробуйте ещё раз." not in _sent_texts(bot)
 
-    async def test_ordinary_text_still_reaches_the_rule_config_handler(self) -> None:
+    @pytest.mark.parametrize("shape", ["text", "caption"])
+    @pytest.mark.parametrize("prompt", _RULE_PROMPTS, ids=lambda s: s.state)
+    async def test_a_forwarded_command_is_not_swallowed(self, prompt: State, shape: str) -> None:
+        """A forward is content, so the middleware leaves the prompt armed, and the
+        rules handlers' own slash guards are what keep `/help` out of it.
+
+        aiogram reads a command from `text or caption`, so `/help` under a photo
+        is a real command — and `~F.text.startswith("/")` returns True for it,
+        because `.text` is None. Measured before the caption guard: the rules
+        handler consumed it and answered «Невалидный JSON». This is the case
+        the text-only guard used elsewhere in the project cannot see.
+        """
+        msg, data, bot = _make_message(**{shape: "/help"}, forwarded=True)
+        _with_rule_services(data)
+        state = await _armed(prompt)
+
+        await _propagate(msg, data, state)
+
+        assert await _untouched(state, prompt, data)
+        assert "Невалидный JSON. Попробуйте ещё раз." not in _sent_texts(bot)
+
+    @pytest.mark.parametrize(
+        ("prompt", "text"),
+        [
+            (AdminStates.awaiting_rule_config, "not json at all"),
+            (AdminStates.awaiting_rule_words, "реклама, купи"),
+            (AdminStates.awaiting_rule_text, "Давайте без спама"),
+            (AdminStates.awaiting_rule_react, "👍"),
+        ],
+        ids=lambda v: getattr(v, "state", None) or "text",
+    )
+    async def test_ordinary_text_still_reaches_the_prompt(self, prompt: State, text: str) -> None:
         """The paired positive: the filters must not disable the dialog itself."""
+        msg, data, bot = _make_message(text=text)
+        _with_rule_services(data)
+        state = await _armed(prompt)
+
+        await _propagate(msg, data, state)
+
+        assert not await _untouched(state, prompt, data)
+
+    async def test_invalid_json_says_so(self) -> None:
         msg, data, bot = _make_message(text="not json at all")
-        state = _FakeState(AdminStates.awaiting_rule_config)
+        state = await _armed(AdminStates.awaiting_rule_config)
 
         await _propagate(msg, data, state)
 
         assert "Невалидный JSON. Попробуйте ещё раз." in _sent_texts(bot)
+        assert await state.get_state() == AdminStates.awaiting_rule_config.state
 
 
 class TestRuleCreationRequiresAuthorityAtTheTime_Of_Writing:
@@ -266,6 +372,43 @@ class TestRuleCreationRequiresAuthorityAtTheTime_Of_Writing:
 
         data["rules_repo"].create.assert_not_awaited()  # type: ignore[union-attr]
 
+    @pytest.mark.parametrize(
+        ("prompt", "text"),
+        [
+            (AdminStates.awaiting_rule_text, "Давайте без спама"),
+            (AdminStates.awaiting_rule_react, "👍"),
+        ],
+        ids=lambda v: getattr(v, "state", None) or "text",
+    )
+    async def test_nor_the_builder_prompts(self, prompt: State, text: str) -> None:
+        """The builder's last typed answer writes a rule the same way."""
+        msg, data, bot = _make_message(text=text, is_admin=False)
+        _with_rule_services(data)
+        state = await _armed(prompt)
+
+        await _propagate(msg, data, state)
+
+        data["rules_repo"].create.assert_not_awaited()  # type: ignore[union-attr]
+
+
+def _callbacks(source: str) -> dict[str, ast.AsyncFunctionDef | ast.FunctionDef]:
+    tree = ast.parse(source)
+    return {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and any("callback_query" in ast.unparse(d) for d in node.decorator_list)
+    }
+
+
+def _unguarded(source: str, setters: Mapping[str, str]) -> list[str]:
+    """Callback handlers that neither leave a rule prompt nor are declared setters."""
+    return [
+        f"{name}() at rules.py:{node.lineno}"
+        for name, node in _callbacks(source).items()
+        if name not in setters and "_leave_config_prompt" not in ast.unparse(node)
+    ]
+
 
 class TestEveryRulesCallbackLeavesTheDialog:
     """The structural guard against the next omission.
@@ -278,51 +421,65 @@ class TestEveryRulesCallbackLeavesTheDialog:
 
     Asserting per-handler rather than by behaviour on purpose: a behavioural
     test only covers the handlers someone remembered to write one for, which is
-    the same failure mode one level up.
+    the same failure mode one level up. The handlers that SET a prompt cannot
+    start by leaving one; they are named in `rules._STATE_SETTERS`, each with
+    its reason, and the second test holds that list to what it claims.
     """
 
     def test_all_of_them_call_the_helper(self) -> None:
-        import ast
-        import inspect
-
         from src.bot.handlers import rules
 
-        tree = ast.parse(inspect.getsource(rules))
-        missing = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                continue
-            if not any("callback_query" in ast.unparse(d) for d in node.decorator_list):
-                continue
-            # The one handler that must NOT clear: it is what SETS the state.
-            if node.name == "handle_type_selected":
-                continue
-            if "_leave_config_prompt" not in ast.unparse(node):
-                missing.append(f"{node.name}() at rules.py:{node.lineno}")
+        missing = _unguarded(inspect.getsource(rules), rules._STATE_SETTERS)
 
         assert missing == [], (
-            "these rules callbacks navigate away from the rule-config prompt without "
+            "these rules callbacks navigate away from a rule prompt without "
             "ending it, so a later message is misapplied to the earlier chat:\n  "
             + "\n  ".join(missing)
         )
 
-    def test_the_state_setter_is_excluded_for_a_reason(self) -> None:
-        """Paired negative: the exclusion above must be one handler, not a hole.
-
-        If `handle_type_selected` ever started clearing, the dialog would end
-        the instant it opened — so the exclusion is load-bearing and this
-        pins it.
-        """
-        import inspect
-
-        from src.bot.handlers.rules import handle_type_selected
-
-        source = inspect.getsource(handle_type_selected)
-        assert "_leave_config_prompt" not in source
-        assert "set_state" in source, (
-            "handle_type_selected no longer sets the state — the exclusion in the "
-            "test above is now unjustified and hides whatever replaced it"
+    def test_the_guard_sees_a_handler_that_forgets(self) -> None:
+        """Known-positive control: an empty result above must mean "none", not "blind"."""
+        source = (
+            '@router.callback_query(F.data.startswith("x:"))\n'
+            "async def forgot(callback, state):\n"
+            "    await show(callback)\n"
+            '@router.callback_query(F.data.startswith("y:"))\n'
+            "async def remembered(callback, state):\n"
+            "    await _leave_config_prompt(state)\n"
+            '@router.callback_query(F.data.startswith("z:"))\n'
+            "async def sets(callback, state):\n"
+            "    await state.set_state(None)\n"
         )
+        assert _unguarded(source, {}) == ["forgot() at rules.py:2", "sets() at rules.py:8"]
+        assert _unguarded(source, {"sets": "arms a prompt"}) == ["forgot() at rules.py:2"]
+
+    def test_every_setter_is_excluded_for_a_reason(self) -> None:
+        """Paired negative: the exclusions must be setters, not holes.
+
+        Each one is a callback in the module, sets a state, and has a reason. A
+        setter that left the prompt BEFORE arming its own would end the dialog
+        the instant it opened, so the first `set_state` must come before any
+        call to the helper.
+        """
+        from src.bot.handlers import rules
+
+        callbacks = _callbacks(inspect.getsource(rules))
+        problems = []
+        for name, reason in rules._STATE_SETTERS.items():
+            node = callbacks.get(name)
+            if node is None:
+                problems.append(f"{name}: not a callback handler in rules.py")
+                continue
+            if not reason.strip():
+                problems.append(f"{name}: no reason given")
+            source = ast.unparse(node)
+            arms = source.find("set_state(AdminStates.")
+            leaves = source.find("_leave_config_prompt(")
+            if arms < 0:
+                problems.append(f"{name}: arms no prompt, so it needs no exclusion")
+            elif 0 <= leaves < arms:
+                problems.append(f"{name}: leaves the prompt before arming one")
+        assert problems == []
 
 
 class TestCancelSpeaksTheAdminsLanguage:
@@ -374,32 +531,47 @@ class TestCancelSpeaksTheAdminsLanguage:
         assert _sent_texts(bot) == ["Cancelled."]
 
 
+def _rules_callback(data: str) -> MagicMock:
+    callback = MagicMock()
+    callback.data = data
+    callback.answer = AsyncMock()
+    callback.message = MagicMock(spec=Message)
+    callback.message.chat = MagicMock()
+    callback.message.chat.type = "private"
+    callback.message.edit_text = AsyncMock()
+    return callback
+
+
+def _rules_deps() -> tuple[AsyncMock, MagicMock, MagicMock]:
+    """What a rules screen reads: the rules, the chat's merged config, its row."""
+    rules_repo = AsyncMock()
+    rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
+    service = MagicMock()
+    service.get_config = AsyncMock(return_value=ChatConfig(chat_id=-100123))
+    settings = MagicMock()
+    settings.get = AsyncMock(return_value=None)
+    return rules_repo, service, settings
+
+
 class TestNavigatingAwayEndsTheDialog:
-    async def test_going_back_to_the_rule_list_drops_the_prompt(self) -> None:
+    @pytest.mark.parametrize("prompt", _RULE_PROMPTS, ids=lambda s: s.state)
+    async def test_going_back_to_the_rule_list_drops_the_prompt(self, prompt: State) -> None:
         """Otherwise the state outlives the screen that created it.
 
         Concrete misfire: open the type prompt for chat A, tap «Назад», wander
         off, then paste any valid JSON dict into the DM an hour later — a rule
         is silently created in chat A with the type chosen back then. Neither
         /cancel nor the cancel button covers it, because the admin never
-        realises a dialog is still open.
+        realises a dialog is still open. The builder's prompts have the same
+        shape: a stray message would become a rule's words, text or reaction.
         """
         from src.bot.handlers.rules import handle_rules_list
 
-        state = _FakeState(AdminStates.awaiting_rule_config)
-        await state.update_data(rule_chat_id=-100123, rule_type="spam_detect", lang="ru")
+        state = await _armed(prompt)
 
-        callback = MagicMock()
-        callback.data = "ar_list:ru:-100123:0"
-        callback.answer = AsyncMock()
-        callback.message = MagicMock(spec=Message)
-        callback.message.chat = MagicMock()
-        callback.message.chat.type = "private"
-        callback.message.edit_text = AsyncMock()
-        rules_repo = AsyncMock()
-        rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
-
-        await handle_rules_list(callback, state, rules_repo, is_admin=True)  # type: ignore[arg-type]
+        await handle_rules_list(
+            _rules_callback("ar_list:ru:-100123:0"), state, *_rules_deps(), is_admin=True
+        )
 
         assert state.clear_calls == 1
         assert await state.get_state() is None
@@ -411,17 +583,9 @@ class TestNavigatingAwayEndsTheDialog:
 
         state = _FakeState(AdminStates.awaiting_kb_organizer)
 
-        callback = MagicMock()
-        callback.data = "ar_list:ru:-100123:0"
-        callback.answer = AsyncMock()
-        callback.message = MagicMock(spec=Message)
-        callback.message.chat = MagicMock()
-        callback.message.chat.type = "private"
-        callback.message.edit_text = AsyncMock()
-        rules_repo = AsyncMock()
-        rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
-
-        await handle_rules_list(callback, state, rules_repo, is_admin=True)  # type: ignore[arg-type]
+        await handle_rules_list(
+            _rules_callback("ar_list:ru:-100123:0"), state, *_rules_deps(), is_admin=True
+        )
 
         assert state.clear_calls == 0
         assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
@@ -434,25 +598,15 @@ class TestTheCancelButtonWorks:
         Worth its own test rather than trusting the keyboard: the prompt used
         to be rendered with no `reply_markup` at all, so `edit_text` stripped
         the keyboard the admin arrived on and the screen offered nothing to
-        press. (mypy caught a wrong-arity call to `rules_list_keyboard` here
-        that no test would have; this is the test.)
+        press. This is an old button (``ar_cancel:``) that still answers.
         """
         from src.bot.handlers.rules import handle_rule_config_cancel
 
         state = _FakeState(AdminStates.awaiting_rule_config)
         await state.update_data(rule_chat_id=-100123, rule_type="spam_detect", lang="ru")
+        callback = _rules_callback("ar_cancel:ru:-100123")
 
-        callback = MagicMock()
-        callback.data = "ar_cancel:ru:-100123"
-        callback.answer = AsyncMock()
-        callback.message = MagicMock(spec=Message)
-        callback.message.chat = MagicMock()
-        callback.message.chat.type = "private"
-        callback.message.edit_text = AsyncMock()
-        rules_repo = AsyncMock()
-        rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
-
-        await handle_rule_config_cancel(callback, state, rules_repo, is_admin=True)  # type: ignore[arg-type]
+        await handle_rule_config_cancel(callback, state, *_rules_deps(), is_admin=True)
 
         assert state.clear_calls == 1
         callback.message.edit_text.assert_awaited_once()
@@ -468,17 +622,9 @@ class TestTheCancelButtonWorks:
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
 
-        callback = MagicMock()
-        callback.data = "ar_cancel:ru:-100123"
-        callback.answer = AsyncMock()
-        callback.message = MagicMock(spec=Message)
-        callback.message.chat = MagicMock()
-        callback.message.chat.type = "private"
-        callback.message.edit_text = AsyncMock()
-        rules_repo = AsyncMock()
-        rules_repo.get_rules_page = AsyncMock(return_value=([], 0))
-
-        await handle_rule_config_cancel(callback, state, rules_repo, is_admin=True)  # type: ignore[arg-type]
+        await handle_rule_config_cancel(
+            _rules_callback("ar_cancel:ru:-100123"), state, *_rules_deps(), is_admin=True
+        )
 
         assert state.clear_calls == 0
         assert await state.get_state() == AdminStates.awaiting_kb_organizer.state
@@ -491,16 +637,12 @@ class TestTheCancelButtonWorks:
         from src.bot.handlers.rules import handle_rule_config_cancel
 
         state = _FakeState(AdminStates.awaiting_rule_config)
-        callback = MagicMock()
-        callback.data = "ar_cancel:ru:-100123"
-        callback.answer = AsyncMock()
-        callback.message = MagicMock(spec=Message)
-        callback.message.chat = MagicMock()
-        callback.message.chat.type = "private"
-        callback.message.edit_text = AsyncMock()
-        rules_repo = AsyncMock()
+        callback = _rules_callback("ar_cancel:ru:-100123")
+        rules_repo, service, settings = _rules_deps()
 
-        await handle_rule_config_cancel(callback, state, rules_repo, is_admin=False)  # type: ignore[arg-type]
+        await handle_rule_config_cancel(
+            callback, state, rules_repo, service, settings, is_admin=False
+        )
 
         rules_repo.get_rules_page.assert_not_awaited()
         callback.message.edit_text.assert_not_awaited()
@@ -519,6 +661,7 @@ class TestForwardingStillWorksForOrganizers:
         from src.bot.handlers import admin_kb
 
         msg, data, bot = _make_message(text="/kb", forwarded=True)
+        _connected(data)
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
 
@@ -532,8 +675,7 @@ class TestForwardingStillWorksForOrganizers:
             mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
             await _propagate(msg, data, state)
 
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
-        assert data["chat_settings_repo"].set_field.await_args.args[1] == "kb_organizer_ids"  # type: ignore[union-attr]
+        assert written(data["chat_settings_repo"], -100123) == [99]
 
 
 class TestCommandsEscapeTheOrganizerPrompt:
@@ -589,6 +731,7 @@ class TestCommandsEscapeTheOrganizerPrompt:
         from src.bot.handlers import admin_kb
 
         msg, data, bot = _make_message(text="@someone")
+        _connected(data)
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
         data["message_repo"].find_by_username = AsyncMock(return_value={"user_id": 77})  # type: ignore[union-attr]
@@ -597,7 +740,7 @@ class TestCommandsEscapeTheOrganizerPrompt:
             mp.setattr(admin_kb, "check_admin_direct", AsyncMock(return_value=True))
             await _propagate(msg, data, state)
 
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
+        assert written(data["chat_settings_repo"], -100123) == [77]
 
 
 class TestCancelIsNotEatenWhenItIsContent:
@@ -610,6 +753,7 @@ class TestCancelIsNotEatenWhenItIsContent:
         from src.bot.handlers import admin_kb
 
         msg, data, bot = _make_message(text="/cancel", forwarded=True)
+        _connected(data)
         state = _FakeState(AdminStates.awaiting_kb_organizer)
         await state.update_data(kb_chat_id=-100123, kb_lang="ru")
 
@@ -620,7 +764,7 @@ class TestCancelIsNotEatenWhenItIsContent:
         assert "Отменено." not in _sent_texts(bot), (
             "a forwarded message reading /cancel was treated as the cancel command"
         )
-        data["chat_settings_repo"].set_field.assert_awaited_once()  # type: ignore[union-attr]
+        assert written(data["chat_settings_repo"], -100123) == [99]
 
 
 class TestDemotionDoesNotStrandTheOrganizerPrompt:
@@ -644,6 +788,7 @@ class TestDemotionDoesNotStrandTheOrganizerPrompt:
                 data["bot_config_repo"],  # type: ignore[arg-type]
                 data["message_repo"],  # type: ignore[arg-type]
                 state,  # type: ignore[arg-type]
+                data["organizer_names"],  # type: ignore[arg-type]
             )
 
         assert state.clear_calls == 1

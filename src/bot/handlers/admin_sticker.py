@@ -1,19 +1,27 @@
-"""Admin sticker management handlers.
+"""Admin sticker management: the pack catalogue, a sticker's card, its score.
 
 Handles:
-- Admin reply to sticker notification → merge description
-- Sticker wizard callbacks (adm_stk_*) → browse sets, view stickers, re-analyze
-- Admin sends a sticker directly in DM (B-1) → catalog check: known → show
-  description, unknown → "Проанализировать" button. Registered here (not in
+- ``adm_stk_*`` callbacks: the pack list, one pack, a sticker's card and the
+  sub-screens it turns into (score, clear, analysing, error).
+- A reply to a sticker card → merge the reply into the description.
+- An admin sending a sticker straight to the bot → catalogue check: known →
+  the card, unknown → one "🔍 Разобрать" button. Registered here (not in
   handlers/media.py) so router order (handlers/__init__.py) makes it run
-  before media.py's silent auto-learn for the admin's own DM.
+  before media.py's silent auto-learn for the admin's own DM. Only with no
+  prompt open: a sticker sent into another screen's prompt is that prompt's
+  answer, and in this module's own score prompt it gets a hint instead.
+
+Every card the bot shows about a sticker — opened from a pack, after a
+re-analysis, after a score change, the DM check, the bot's own notification —
+is remembered in ``admin_sticker_notifications`` so that a reply to it is read
+as a description correction. Leaving a card for a list forgets it again.
 """
 
 from __future__ import annotations
 
 import contextlib
-import html as html_lib
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import structlog
@@ -22,71 +30,60 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from dishka import AsyncContainer
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.filters.admin import IsAdmin
-from src.bot.keyboards.admin_sticker import (
-    _EXPLICITNESS_PRESETS,
-    _status_badge,
-    sticker_clear_confirm_keyboard,
-    sticker_detail_keyboard,
-    sticker_dm_check_keyboard,
-    sticker_explicitness_cancel_keyboard,
-    sticker_reanalyze_retry_keyboard,
-    sticker_set_detail_keyboard,
-    sticker_sets_keyboard,
+from src.bot.screens.i18n import Lang, lang_of
+from src.bot.screens.model import Screen
+from src.bot.screens.render import page_slice, render_text, show, to_markup
+from src.bot.screens.routes import parse
+from src.bot.screens.stale import show_stale
+from src.bot.screens.stickers import (
+    ALERT_RESEND,
+    GONE_PACK,
+    GONE_STICKER,
+    NOTICE_ANALYZED,
+    NOTICE_CLEARED,
+    NOTICE_LEARNED,
+    NOTICE_RESCORED,
+    NOTICE_SCORE,
+    PER_PAGE,
+    PRESETS,
+    PackPage,
+    SetsPage,
+    StickerFacts,
+    build_stk_analyzing,
+    build_stk_card,
+    build_stk_clear_ask,
+    build_stk_error,
+    build_stk_reply,
+    build_stk_score,
+    build_stk_score_in,
+    build_stk_set,
+    build_stk_sets,
+    build_stk_unknown,
+    facts_from_row,
+    pack_key,
+    pack_rows,
+    rescore_without_score,
 )
-from src.bot.states.admin import AdminStates
-from src.bot.utils import check_admin_direct, safe_edit_text
+from src.bot.states.admin import AdminStates, takes_a_sticker
+from src.bot.utils import check_admin_direct, safe_edit_reply_markup
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.stickers import StickerRepository
 from src.services.modules.sticker import StickerLearningService
-from src.services.modules.sticker.tolerance import format_explicitness_line
-from src.utils import parse_admin_ids
 from src.utils.telegram import TelegramFileError, download_telegram_file, typing_indicator
 
 logger = structlog.get_logger(__name__)
 
 router = Router(name="admin_sticker")
 
-
-# ── Helper ──────────────────────────────────────────────────────────────
-
-
-def _get_lang(raw: str | None) -> str:
-    return raw if raw in ("ru", "en") else "ru"
+_PACK_KEY_RE = re.compile(r"[0-9a-f]{12}")
+_PAGE_RE = re.compile(r"-?\d{1,6}")
 
 
-async def _check_admin(kwargs: dict[str, Any], user_id: int | None = None) -> bool:
-    """Verify admin status via Dishka container (for handlers without FromDishka params).
-
-    Args:
-        kwargs: Handler kwargs (must contain dishka_container).
-        user_id: Optional user ID to check. If None, tries to get from kwargs['event_from_user'].
-    """
-    container: AsyncContainer | None = kwargs.get("dishka_container")
-    if container is None:
-        return False
-
-    bot_config_repo = await container.get(BotConfigRepository)
-    admin_ids_raw = await bot_config_repo.get("admin_ids")
-
-    # Get user ID from parameter or kwargs
-    if user_id is None:
-        user_obj = kwargs.get("event_from_user")
-        if user_obj is None:
-            return False
-        uid = user_obj.id if hasattr(user_obj, "id") else int(user_obj)
-    else:
-        uid = user_id
-
-    return uid in parse_admin_ids(admin_ids_raw)
-
-
-def _is_private(callback: CallbackQuery) -> bool:
-    return isinstance(callback.message, Message) and callback.message.chat.type == "private"
+# ── Helpers ─────────────────────────────────────────────────────────────
 
 
 async def _resolve_default_tolerance_level(bot_config_repo: BotConfigRepository) -> float:
@@ -109,19 +106,262 @@ async def _resolve_default_tolerance_level(bot_config_repo: BotConfigRepository)
 
 # Regex to extract file_unique_id from notification text (🆔 line)
 _STICKER_ID_RE = re.compile(r"🆔\s*([A-Za-z0-9_-]+)")
+_FUID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
+# The buttons every sticker card carries (`_card_rows`), each ``prefix:lang:fuid``.
+_CARD_BUTTON_PREFIXES = ("adm_stk_reanalyze:", "adm_stk_clr_ask:", "adm_stk_score:")
+
+
+def _fuid_from_buttons(markup: object) -> str | None:
+    """The sticker a card's own buttons point at, or None for any other keyboard."""
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return None
+    for row in markup.inline_keyboard:
+        for button in row:
+            data = button.callback_data or ""
+            if not data.startswith(_CARD_BUTTON_PREFIXES):
+                continue
+            fields = parse(data, 2)
+            if fields is not None and _FUID_RE.fullmatch(fields[1]):
+                return fields[1]
+    return None
+
+
+def _is_about_a_sticker(reply_msg: Message) -> bool:
+    """Whether a replied-to message is a sticker or one of the sticker screens.
+
+    Only then is «which sticker?» the right answer to a reply nobody resolved:
+    a reply to the spend card, a KB screen or the bot's own AI answer is not a
+    description correction, and telling the admin one failed would be false.
+    """
+    if reply_msg.sticker is not None:
+        return True
+    markup = reply_msg.reply_markup
+    if not isinstance(markup, InlineKeyboardMarkup):
+        return False
+    return any(
+        (button.callback_data or "").startswith("adm_stk")
+        for row in markup.inline_keyboard
+        for button in row
+    )
 
 
 def _extract_file_unique_id_from_reply(reply_msg: Message) -> str | None:
-    """Try to extract file_unique_id from replied-to message text or caption."""
+    """The sticker a replied-to card is about, read off the message itself.
+
+    The fallback for a card whose record is missing: the 🆔 line in its text
+    or caption (a detailed card), else its buttons — a brief card has no 🆔
+    line, but every card's buttons carry the sticker's id.
+    """
     for content in (reply_msg.text, reply_msg.caption):
         if content:
             match = _STICKER_ID_RE.search(content)
             if match:
                 return match.group(1)
-    return None
+    return _fuid_from_buttons(reply_msg.reply_markup)
 
 
-# ── Admin reply to sticker notification ──────────────────────────────────
+def _lang_hint(callback: CallbackQuery) -> Lang:
+    """The language token of a payload that did not parse, for the stale screen."""
+    fields = (callback.data or "").split(":")
+    return lang_of(fields[1] if len(fields) > 1 else None)
+
+
+async def _facts_of(
+    row: Mapping[str, Any],
+    sticker_repo: StickerRepository,
+    admin_repo: AdminRepository,
+    bot_config_repo: BotConfigRepository,
+) -> StickerFacts:
+    """Everything a card shows about one ``sticker_knowledge`` row."""
+    pack = None
+    set_name = row.get("set_name")
+    if set_name:
+        pack = await sticker_repo.get_sticker_set(str(set_name))
+    tolerance = await _resolve_default_tolerance_level(bot_config_repo)
+    notifications = await admin_repo.get_notification_settings(bot_config_repo)
+    return facts_from_row(
+        row,
+        tolerance=tolerance,
+        detailed=notifications.get("sticker") == "detailed",
+        pack=dict(pack) if pack else None,
+    )
+
+
+async def _card_facts(
+    fuid: str,
+    sticker_repo: StickerRepository,
+    admin_repo: AdminRepository,
+    bot_config_repo: BotConfigRepository,
+) -> StickerFacts | None:
+    """`_facts_of` the sticker, or None when it is no longer in the catalogue."""
+    row = await sticker_repo.get_by_file_unique_id(fuid)
+    if row is None:
+        return None
+    return await _facts_of(dict(row), sticker_repo, admin_repo, bot_config_repo)
+
+
+async def _remember(
+    sticker_repo: StickerRepository,
+    msg: Message | None,
+    fuid: str,
+    admin_id: int | None,
+    *,
+    sticker_msg_id: int = 0,
+) -> None:
+    """Record ``msg`` as a card about ``fuid``, so a reply to it edits the description.
+
+    Idempotent: re-showing a card in the same message keeps the one row.
+    Best-effort — the card is already on screen, and losing the record only
+    costs the reply shortcut for that message.
+    """
+    if msg is None or admin_id is None:
+        return
+    try:
+        await sticker_repo.save_notification(
+            file_unique_id=fuid,
+            admin_id=admin_id,
+            message_id=msg.message_id,
+            sticker_msg_id=sticker_msg_id,
+            chat_id=msg.chat.id,
+        )
+    except Exception:
+        logger.warning("sticker card not remembered", file_unique_id=fuid, exc_info=True)
+
+
+async def _leave_card(callback: CallbackQuery, sticker_repo: StickerRepository) -> None:
+    """The message under this button stops being a sticker card.
+
+    A card opened from a pack sits under the sticker the bot sent for it;
+    that sticker goes with it. Only that card's own sticker, and only when the
+    card is not a reply: the bot's notification and the DM check reply to a
+    sticker the admin may still want, and nothing else in the chat is touched.
+    Then the record is released, so a reply to what is now a list is not read
+    as a description correction.
+    """
+    msg = callback.message
+    if not isinstance(msg, Message):
+        return
+    try:
+        sticker_msg_id = await sticker_repo.get_card_sticker_msg(msg.chat.id, msg.message_id)
+        if sticker_msg_id and msg.reply_to_message is None and callback.bot is not None:
+            with contextlib.suppress(TelegramBadRequest):
+                await callback.bot.delete_message(chat_id=msg.chat.id, message_id=sticker_msg_id)
+        await sticker_repo.release_card(msg.chat.id, msg.message_id)
+    except Exception:
+        logger.warning("sticker card not released", message_id=msg.message_id, exc_info=True)
+
+
+async def _disarm(state: FSMContext) -> None:
+    """Drop an open score prompt: any other sticker button means the admin moved on.
+
+    Only the score prompt's own state — a prompt owned by another screen is
+    not this module's to clear.
+    """
+    if await state.get_state() == AdminStates.awaiting_sticker_score.state:
+        await state.clear()
+
+
+async def _restore_score(
+    sticker_repo: StickerRepository, fuid: str, score: float, manual: bool
+) -> bool:
+    """Put back the score a failed re-score had already dropped; False when that failed.
+
+    A re-score resets the score before it analyses, and an unscored sticker is
+    never sent — so a failed analysis must not leave it that way.
+    """
+    try:
+        if manual:
+            return await sticker_repo.set_manual_explicitness_score(fuid, score)
+        await sticker_repo.update_explicitness_score(fuid, score)
+        return True
+    except Exception:
+        logger.error("sticker score not restored", file_unique_id=fuid, exc_info=True)
+        return False
+
+
+async def _put_back(
+    sticker_repo: StickerRepository, fuid: str, prior_score: tuple[float, bool] | None
+) -> tuple[float | None, bool]:
+    """Restore the score a re-score dropped: ``(kept value, lost)``; ``(None, False)``
+    when there was none to restore."""
+    if prior_score is None:
+        return None, False
+    score, manual = prior_score
+    if await _restore_score(sticker_repo, fuid, score, manual):
+        return score, False
+    return None, True
+
+
+async def _sets_screen(
+    lang: Lang,
+    sticker_repo: StickerRepository,
+    page: int = 0,
+    *,
+    notice_raw: str | None = None,
+) -> Screen:
+    total = await sticker_repo.count_sets()
+    page, pages, offset = page_slice(total, page, PER_PAGE)
+    records = await sticker_repo.get_all_sets_with_stats(limit=PER_PAGE, offset=offset)
+    data = SetsPage(
+        packs=pack_rows([dict(r) for r in records]), total=total, page=page, pages=pages
+    )
+    return build_stk_sets(lang, data, notice_raw=notice_raw)
+
+
+async def _pack_screen(
+    lang: Lang,
+    sticker_repo: StickerRepository,
+    pack: Mapping[str, Any],
+    page: int,
+) -> Screen:
+    name = str(pack["set_name"])
+    total = await sticker_repo.count_stickers_in_set(name)
+    page, pages, offset = page_slice(total, page, PER_PAGE)
+    records = await sticker_repo.get_stickers_in_set(name, limit=PER_PAGE, offset=offset)
+    stickers = tuple(facts_from_row(dict(r), pack=pack) for r in records)
+    data = PackPage(
+        key=pack_key(name),
+        title=str(pack.get("set_title") or name),
+        count=total,
+        stickers=stickers,
+        page=page,
+        pages=pages,
+    )
+    return build_stk_set(lang, data)
+
+
+async def _show_gone(
+    callback: CallbackQuery,
+    lang: Lang,
+    sticker_repo: StickerRepository,
+    notice_raw: str,
+    *,
+    answered: bool = False,
+) -> None:
+    """The sticker or pack a button points at is gone: the pack list says so."""
+    await _leave_card(callback, sticker_repo)
+    await show(
+        callback,
+        await _sets_screen(lang, sticker_repo, notice_raw=notice_raw),
+        answered=answered,
+    )
+
+
+async def _strip_prompt(message: Message, prompt_id: Any) -> None:
+    """Take the ✖️ button off the score prompt the admin has just answered.
+
+    The prompt is not the message the update came with, so it is addressed by
+    id; a prompt already gone or already bare is not an error.
+    """
+    if not isinstance(prompt_id, int) or message.bot is None:
+        return
+    prompt = Message(message_id=prompt_id, date=message.date, chat=message.chat).as_(message.bot)
+    with contextlib.suppress(TelegramBadRequest):
+        await safe_edit_reply_markup(prompt, reply_markup=None)
+
+
+# ── Admin reply to a sticker card ───────────────────────────────────────
 
 
 # StateFilter(None): this router precedes every FSM-owning router, so while
@@ -149,14 +389,16 @@ async def handle_admin_sticker_reply(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],
     sticker_service: FromDishka[StickerLearningService],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
     bot: Bot,
     message_thread_id: int | None = None,
 ) -> None:
-    """Admin replies to sticker notification → merge description."""
+    """Admin replies to a sticker card → merge the reply into the description."""
     if not message.reply_to_message or not message.text:
         return
 
-    # Look up notification by reply (primary: DB, fallback: text parsing)
+    # Look up the card by reply (primary: DB, fallback: the 🆔 line, then its buttons)
     notif = await sticker_repo.get_notification_by_reply(
         message.chat.id,
         message.reply_to_message.message_id,
@@ -169,6 +411,20 @@ async def handle_admin_sticker_reply(
         file_unique_id = _extract_file_unique_id_from_reply(message.reply_to_message)
 
     if not file_unique_id:
+        about_a_sticker = _is_about_a_sticker(message.reply_to_message)
+        logger.info(
+            "sticker reply matched no card",
+            reply_to=message.reply_to_message.message_id,
+            admin_id=message.from_user.id if message.from_user else None,
+            about_a_sticker=about_a_sticker,
+        )
+        if not about_a_sticker:
+            return
+        # Silence here would read as "the bot ignored my correction": this
+        # handler has already consumed the update (aiogram), so nobody else
+        # will answer it either.
+        lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
+        await message.reply(render_text(build_stk_reply(lang, "unknown")), parse_mode="HTML")
         return
 
     logger.debug(
@@ -182,572 +438,362 @@ async def handle_admin_sticker_reply(
     if not admin_text:
         return
 
-    # Merge description via AI (fallback: save note directly)
+    lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
+
+    # Merge description via AI (fallback: the note is saved as it is)
     try:
         async with typing_indicator(bot, message.chat.id, message_thread_id):
             new_desc = await sticker_service.merge_admin_description(file_unique_id, admin_text)
     except ValueError as e:
-        if str(e) == "content_filter":
-            await message.reply(
-                "Фильтр контента заблокировал запрос. Попробуй переформулировать текст.",
-            )
-        else:
-            await message.reply("Произошла ошибка. Попробуй ещё раз.")
+        failed = build_stk_reply(lang, "content_filter" if str(e) == "content_filter" else "failed")
+        await message.reply(render_text(failed), parse_mode="HTML")
         return
     except Exception:
         logger.exception("Sticker merge failed", file_unique_id=file_unique_id)
         new_desc = None
 
-    if new_desc:
-        await message.reply(
-            f"Описание обновлено:\n<i>{html_lib.escape(new_desc)}</i>",
-            parse_mode="HTML",
-        )
-    else:
-        await message.reply(
-            "AI не смог объединить описание. Заметка сохранена. "
-            "Попробуй ещё раз или используй Re-analyze.",
-        )
+    screen = (
+        build_stk_reply(lang, "ok", new_desc) if new_desc else build_stk_reply(lang, "note_saved")
+    )
+    await message.reply(render_text(screen), parse_mode="HTML")
 
 
-# ── Set list ─────────────────────────────────────────────────────────────
+# ── Pack list and one pack ──────────────────────────────────────────────
 
 
-@router.callback_query(F.data.startswith("adm_stk_sets:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_sets:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_sticker_sets(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
-    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Browse sticker sets with pagination."""
-    if not _is_private(callback):
-        await callback.answer()
+    """The pack list, a page at a time; also the way back from a card without a pack."""
+    fields = parse(callback.data, 2)
+    if fields is None or not _PAGE_RE.fullmatch(fields[1]):
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    page = int(parts[2]) if len(parts) > 2 else 0
-    per_page = 10
-
-    total = await sticker_repo.count_sets()
-    sets_records = await sticker_repo.get_all_sets_with_stats(
-        limit=per_page, offset=page * per_page
-    )
-    sets = [dict(r) for r in sets_records]
-
-    if not sets:
-        text = "Нет изученных стикерпаков" if lang == "ru" else "No learned sticker packs"
-    else:
-        text = f"Стикерпаки ({total}):" if lang == "ru" else f"Sticker packs ({total}):"
-
-    keyboard = sticker_sets_keyboard(sets, lang=lang, page=page, total=total, per_page=per_page)
-
-    if isinstance(callback.message, Message):
-        await safe_edit_text(callback.message, text, reply_markup=keyboard)
-    await callback.answer()
+    lang = lang_of(fields[0])
+    await _disarm(state)
+    await _leave_card(callback, sticker_repo)
+    await show(callback, await _sets_screen(lang, sticker_repo, int(fields[1])))
 
 
-# ── Set detail ───────────────────────────────────────────────────────────
-
-
-async def _build_set_view(
+async def _open_pack(
+    callback: CallbackQuery,
+    lang: Lang,
     sticker_repo: StickerRepository,
-    set_name: str,
-    lang: str,
+    pack: Mapping[str, Any] | None,
     page: int,
-    per_page: int = 10,
-) -> tuple[str, InlineKeyboardMarkup]:
-    """Build text + keyboard for a sticker set detail view."""
-    total = await sticker_repo.count_stickers_in_set(set_name)
-    sticker_records = await sticker_repo.get_stickers_in_set(
-        set_name, limit=per_page, offset=page * per_page
-    )
-    stickers = [dict(r) for r in sticker_records]
-
-    text = f"<b>{html_lib.escape(set_name)}</b> ({total} stickers)"
-    keyboard = sticker_set_detail_keyboard(
-        stickers,
-        set_name=set_name,
-        lang=lang,
-        page=page,
-        total=total,
-        per_page=per_page,
-    )
-    return text, keyboard
+) -> None:
+    if pack is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_PACK(lang))
+        return
+    await _leave_card(callback, sticker_repo)
+    await show(callback, await _pack_screen(lang, sticker_repo, dict(pack), page))
 
 
-@router.callback_query(F.data.startswith("adm_stk_set:"))
-async def handle_sticker_set_view(
+@router.callback_query(
+    F.data.startswith("adm_stk_pk:"), F.message.chat.type == "private", IsAdmin()
+)
+async def handle_sticker_pack(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
-    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """View stickers in a specific set."""
-    if not _is_private(callback):
-        await callback.answer()
+    """One pack, addressed by the short key of its name (names overflow a button)."""
+    fields = parse(callback.data, 3)
+    if fields is None or not _PACK_KEY_RE.fullmatch(fields[1]) or not _PAGE_RE.fullmatch(fields[2]):
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    set_name = parts[2] if len(parts) > 2 else ""
-    page = int(parts[3]) if len(parts) > 3 else 0
-
-    if not set_name:
-        await callback.answer("Missing set name", show_alert=True)
-        return
-
-    text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
-
-    if isinstance(callback.message, Message):
-        await safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=keyboard)
-    await callback.answer()
+    lang = lang_of(fields[0])
+    await _disarm(state)
+    pack = await sticker_repo.get_set_by_key(fields[1])
+    await _open_pack(callback, lang, sticker_repo, pack, int(fields[2]))
 
 
-# ── Back from sticker detail (cleanup sticker message) ──────────────────
-
-
-@router.callback_query(F.data.startswith("adm_stk_back:"))
-async def handle_sticker_back(
+@router.callback_query(
+    F.data.startswith("adm_stk_set:"), F.message.chat.type == "private", IsAdmin()
+)
+async def handle_sticker_set_legacy(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
-    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Navigate back from sticker detail, cleaning up sticker + description messages."""
-    if not _is_private(callback):
-        await callback.answer()
+    """A pack button sent before packs were addressed by key: the name itself."""
+    fields = parse(callback.data, 3)
+    if fields is None or not _PAGE_RE.fullmatch(fields[2]):
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    # adm_stk_back:{lang}:{set_name}:{page}
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    set_name = parts[2] if len(parts) > 2 else ""
-    page = int(parts[3]) if len(parts) > 3 else 0
-
-    if not set_name:
-        await callback.answer("Missing set name", show_alert=True)
-        return
-
-    # Delete the sticker message via DB lookup (not callback_data)
-    admin_id = callback.from_user.id if callback.from_user else None
-    if admin_id and isinstance(callback.message, Message) and callback.message.bot:
-        sticker_msg_id = await sticker_repo.get_latest_sticker_msg(
-            admin_id,
-            callback.message.chat.id,
-        )
-        if sticker_msg_id:
-            with contextlib.suppress(Exception):
-                await callback.message.bot.delete_message(
-                    chat_id=callback.message.chat.id,
-                    message_id=sticker_msg_id,
-                )
-
-    # Delete the description message (the one with this callback)
-    if isinstance(callback.message, Message):
-        with contextlib.suppress(Exception):
-            await callback.message.delete()
-
-    # Send fresh set list
-    text, keyboard = await _build_set_view(sticker_repo, set_name, lang, page)
-
-    if isinstance(callback.message, Message):
-        await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
-    await callback.answer()
+    lang = lang_of(fields[0])
+    await _disarm(state)
+    pack = await sticker_repo.get_sticker_set(fields[1])
+    await _open_pack(callback, lang, sticker_repo, pack, int(fields[2]))
 
 
-# ── Sticker detail ──────────────────────────────────────────────────────
+# ── A sticker's card ────────────────────────────────────────────────────
 
 
-def _build_detail_text(
-    sticker: dict[str, Any],
-    file_unique_id: str,
-    lang: str,
-    tolerance_level: float,
-) -> str:
-    """Build the HTML detail body for a single sticker.
+@router.callback_query(
+    F.data.startswith("adm_stk_view:"), F.message.chat.type == "private", IsAdmin()
+)
+async def handle_sticker_view(
+    callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """Open a sticker from its pack: the sticker itself, then its card under it.
 
-    Shared by the detail view and the post-clear re-render so both render the
-    sticker identically — including the ⏳ not-analyzed badge when the visual
-    description is absent.
-
-    ``tolerance_level`` (A-1): threaded in by every caller via
-    ``_resolve_default_tolerance_level()`` (or, for a card tied to a real
-    chat, that chat's own resolved ``ChatConfig.tolerance_level``) so the
-    оценка откровенности line's pass/fail verdict is computed the same way
-    everywhere.
+    A text message cannot hold a sticker, so the pack list gives way to two new
+    messages; the card remembers its sticker so leaving the card removes both.
     """
-    lines = [f"🆔 <code>{html_lib.escape(file_unique_id)}</code>"]
-    if sticker["visual_description"]:
-        lines.append(f"<b>Описание:</b> {html_lib.escape(sticker['visual_description'])}")
-    else:
-        lines.append(f"<b>{html_lib.escape(_status_badge(sticker, lang, short=False))}</b>")
-    if sticker["emotion"]:
-        lines.append(f"<b>Эмоция:</b> {html_lib.escape(sticker['emotion'])}")
-    if sticker["character_or_meme"]:
-        lines.append(f"<b>Персонаж:</b> {html_lib.escape(sticker['character_or_meme'])}")
-    if sticker["suggested_contexts"]:
-        contexts = ", ".join(html_lib.escape(c) for c in sticker["suggested_contexts"])
-        lines.append(f"<b>Контексты:</b> {contexts}")
-    lines.append(f"<b>Использований:</b> {sticker['total_uses']} (бот: {sticker['bot_uses']})")
-    lines.append(f"<b>Emoji:</b> {html_lib.escape(sticker['emoji'] or '—')}")
-    lines.append(f"<b>Animated:</b> {sticker['is_animated']}")
-    lines.append(f"<b>Video:</b> {sticker['is_video']}")
-    # Explicitness line (A-1) only once the sticker has been through vision
-    # analysis at all — an entirely un-analyzed sticker's explicitness_score
-    # is always NULL too (same vision call, ADR-0008 Decision 4), and the
-    # ⏳/⚠️ status badge above already covers that state; repeating "не
-    # оценён" here would just be noise on a card the PRD asked to keep tight.
-    if sticker["visual_description"]:
-        lines.append(
-            format_explicitness_line(
-                sticker.get("explicitness_score"),
-                tolerance_level,
-                lang,
-                is_manual=bool(sticker.get("explicitness_is_manual", False)),
-            )
-        )
-    if sticker.get("admin_notes"):
-        lines.append(f"<b>Заметки:</b> <i>{html_lib.escape(sticker['admin_notes'])}</i>")
-    lines.append("\n<i>Ответь на это сообщение текстом, чтобы уточнить описание стикера.</i>")
-    return "\n".join(lines)
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
+        return
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+
+    row = await sticker_repo.get_by_file_unique_id(fuid)
+    if row is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
+        return
+    record = dict(row)
+    facts = await _facts_of(record, sticker_repo, admin_repo, bot_config_repo)
+
+    await callback.answer()
+    sticker_msg: Message | None = None
+    if isinstance(callback.message, Message):
+        await _leave_card(callback, sticker_repo)
+        with contextlib.suppress(TelegramBadRequest):
+            await callback.message.delete()
+        with contextlib.suppress(TelegramBadRequest):
+            sticker_msg = await callback.message.answer_sticker(str(record["file_id"]))
+    msg = await show(callback, build_stk_card(lang, facts), answered=True, new_message=True)
+    await _remember(
+        sticker_repo,
+        msg,
+        fuid,
+        callback.from_user.id,
+        sticker_msg_id=sticker_msg.message_id if sticker_msg else 0,
+    )
 
 
-@router.callback_query(F.data.startswith("adm_stk_view:"))
-async def handle_sticker_detail(
+@router.callback_query(
+    F.data.startswith("adm_stk_card:"), F.message.chat.type == "private", IsAdmin()
+)
+async def handle_sticker_card(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """View details of a single sticker."""
-    if not _is_private(callback):
-        await callback.answer()
+    """Back to the card from one of its sub-screens, in the same message."""
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
-        return
-
-    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
-    if not sticker:
-        await callback.answer("Sticker not found", show_alert=True)
-        return
-
-    tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-    text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
-
-    if isinstance(callback.message, Message):
-        # Clean up previous sticker message (if any) to prevent orphans
-        admin_id = callback.from_user.id if callback.from_user else None
-        if admin_id and callback.message.bot:
-            old_sticker_msg_id = await sticker_repo.get_latest_sticker_msg(
-                admin_id,
-                callback.message.chat.id,
-            )
-            if old_sticker_msg_id:
-                with contextlib.suppress(Exception):
-                    await callback.message.bot.delete_message(
-                        chat_id=callback.message.chat.id,
-                        message_id=old_sticker_msg_id,
-                    )
-
-        # Delete the old message (set list or previous detail) so sticker
-        # and description appear adjacent as new messages.
-        with contextlib.suppress(Exception):
-            await callback.message.delete()
-
-        # Send sticker, then description right after
-        sticker_msg = None
-        with contextlib.suppress(Exception):
-            sticker_msg = await callback.message.answer_sticker(sticker["file_id"])
-
-        keyboard = sticker_detail_keyboard(
-            file_unique_id,
-            lang=lang,
-            set_name=sticker["set_name"],
-            explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
-        )
-        desc_msg = await callback.message.answer(text, parse_mode="HTML", reply_markup=keyboard)
-
-        # Save notification so admin can reply to edit description
-        admin_id = callback.from_user.id if callback.from_user else None
-        if admin_id:
-            with contextlib.suppress(Exception):
-                await sticker_repo.save_notification(
-                    file_unique_id=file_unique_id,
-                    admin_id=admin_id,
-                    message_id=desc_msg.message_id,
-                    sticker_msg_id=sticker_msg.message_id if sticker_msg else 0,
-                    chat_id=callback.message.chat.id,
-                )
-    await callback.answer()
+    msg = await show(callback, build_stk_card(lang, facts))
+    await _remember(sticker_repo, msg, fuid, callback.from_user.id)
 
 
-# ── Clear analysis (confirm + commit) ───────────────────────────────────
+# ── Clear the analysis ──────────────────────────────────────────────────
 
 
-@router.callback_query(F.data.startswith("adm_stk_clr_ask:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_clr_ask:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_clear_ask(
     callback: CallbackQuery,
-    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Show confirm dialog before clearing sticker analysis."""
-    if not _is_private(callback):
-        await callback.answer()
+    """Ask before clearing; "keep it" goes back to the card in the same message."""
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
-        return
-
-    text = (
-        "Очистить анализ? Описание, эмоция, персонаж и контексты будут сброшены. "
-        "Ручные заметки и статистика использований сохранятся."
-        if lang == "ru"
-        else "Clear analysis? Description, emotion, character and contexts will be reset. "
-        "Admin notes and usage counters are preserved."
-    )
-    keyboard = sticker_clear_confirm_keyboard(file_unique_id, lang=lang)
-
-    if isinstance(callback.message, Message):
-        with contextlib.suppress(Exception):
-            await callback.message.edit_text(text, reply_markup=keyboard)
-    await callback.answer()
+    await _disarm(state)
+    await show(callback, build_stk_clear_ask(lang_of(fields[0]), fields[1]))
 
 
-@router.callback_query(F.data.startswith("adm_stk_clr:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_clr:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_clear(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Clear all vision-generated fields for a sticker."""
-    if not _is_private(callback):
-        await callback.answer()
+    """Clear the vision fields; notes, usage and the score stay."""
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+    if await sticker_repo.get_by_file_unique_id(fuid) is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
+    await sticker_repo.clear_analysis(fuid)
+    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    await sticker_repo.clear_analysis(file_unique_id)
-
-    # Re-render the detail in place so the admin lands back on the (now
-    # ⏳ not-analyzed) sticker detail instead of being stranded on the confirm
-    # prompt. Matches the edit-in-place idiom used by handle_run_analysis.
-    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
-    if sticker and isinstance(callback.message, Message):
-        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-        text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
-        keyboard = sticker_detail_keyboard(
-            file_unique_id,
-            lang=lang,
-            set_name=sticker["set_name"],
-            explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
-        )
-        with contextlib.suppress(TelegramBadRequest):
-            await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
-
-    msg = "Анализ очищен" if lang == "ru" else "Analysis cleared"
-    await callback.answer(msg, show_alert=True)
+    msg = await show(callback, build_stk_card(lang, facts, notice=NOTICE_CLEARED(lang)))
+    await _remember(sticker_repo, msg, fuid, callback.from_user.id)
 
 
-# ── Manual explicitness override (A-4, ADR-0009) ────────────────────────
-
-_EXPLICITNESS_PROMPT = {
-    "ru": "Введите оценку откровенности стикера (0.0–1.0):",
-    "en": "Enter the sticker's explicitness score (0.0–1.0):",
-}
-_EXPLICITNESS_NO_ROW = {
-    "ru": "Стикер не найден в каталоге — оценка не изменена.",
-    "en": "Sticker not found in the catalog — score unchanged.",
-}
-_EXPLICITNESS_INVALID = {
-    "ru": "Нужно число от 0.0 до 1.0. Попробуйте ещё раз.",
-    "en": "Enter a number between 0.0 and 1.0. Try again.",
-}
-_EXPLICITNESS_SAVED = {
-    "ru": "Оценка откровенности установлена вручную: {value}",
-    "en": "Explicitness score manually set: {value}",
-}
-_EXPLICITNESS_CANCELLED = {"ru": "Отменено", "en": "Cancelled"}
-_EXPLICITNESS_RESET = {
-    "ru": "Сброшено к автоматической оценке (не оценён до следующего анализа)",
-    "en": "Reset to automatic (not scored until the next analysis)",
-}
+# ── Explicitness ────────────────────────────────────────────────────────
 
 
-async def _render_and_show_detail(
+@router.callback_query(
+    F.data.startswith("adm_stk_score:"), F.message.chat.type == "private", IsAdmin()
+)
+async def handle_sticker_score(
     callback: CallbackQuery,
-    sticker_repo: StickerRepository,
-    bot_config_repo: BotConfigRepository,
-    lang: str,
-    file_unique_id: str,
+    sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Re-render the sticker detail card in place (shared by the preset/
-    reset/cancel callbacks below) -- same edit-in-place idiom as
-    ``handle_clear``.
-    """
-    if not isinstance(callback.message, Message):
+    """The explicitness screen: five presets, a typed number, a fresh automatic score."""
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
-    if not sticker:
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-    tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-    text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
-    keyboard = sticker_detail_keyboard(
-        file_unique_id,
-        lang=lang,
-        set_name=sticker["set_name"],
-        explicitness_is_manual=bool(sticker.get("explicitness_is_manual", False)),
-    )
-    # safe_edit_text, not a blanket suppress(TelegramBadRequest): the DB write
-    # has already happened and the caller is about to announce success, so a
-    # re-render that fails for any *other* reason (message too long once a long
-    # visual_description and admin_notes are on the card, message gone) must
-    # surface rather than leave a stale card under a "saved" toast.
-    await safe_edit_text(callback.message, text, parse_mode="HTML", reply_markup=keyboard)
+    await show(callback, build_stk_score(lang, facts))
 
 
-@router.callback_query(F.data.startswith("adm_stk_expset:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_expset:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_sticker_explicitness_preset(
     callback: CallbackQuery,
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     state: FSMContext,
+    **kwargs: Any,
 ) -> None:
     """Set a preset explicitness value with one tap (ADR-0009 Decision 7,
     closing paragraph) -- the button already fixes a known-valid value, so
-    no FSM input is needed.
+    no FSM input is needed. The card comes back with a line saying so.
 
-    It still has to *clear* the FSM, though: the "✏️ Указать число" prompt is
-    sent as a new message, so the card above it keeps its preset buttons live.
-    An admin who opens the prompt and then taps a preset instead would leave
+    It still has to drop the score prompt, though: an older score screen
+    elsewhere in the chat keeps its preset buttons live. An admin who opens the
+    "type a number" prompt and then taps a preset instead would leave
     ``awaiting_sticker_score`` set, and the next plain DM text — a description
     correction, say — would be eaten by the score-input handler (which also
-    outranks ``handle_admin_sticker_reply``'s ``StateFilter(None)``).
+    outranks ``handle_admin_sticker_reply``'s ``StateFilter(None)``). Only that
+    state (`_disarm`): another screen's prompt stays open.
     """
-    if not _is_private(callback):
-        await callback.answer()
+    fields = parse(callback.data, 3)
+    index = int(fields[2]) if fields is not None and fields[2].isdigit() else -1
+    if fields is None or not 0 <= index < len(PRESETS):
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
+    lang, fuid = lang_of(fields[0]), fields[1]
+    value = PRESETS[index]
+
+    await _disarm(state)
+    if not await sticker_repo.set_manual_explicitness_score(fuid, value):
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
+    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    try:
-        value = _EXPLICITNESS_PRESETS[int(parts[3])]
-    except (ValueError, IndexError):
-        await callback.answer("Invalid preset", show_alert=True)
-        return
-
-    await state.clear()
-    if not await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
-        await callback.answer(_EXPLICITNESS_NO_ROW[lang], show_alert=True)
-        return
-    await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
-
-    msg = f"Оценка: {value:.2f} (вручную)" if lang == "ru" else f"Score: {value:.2f} (manual)"
-    await callback.answer(msg)
+    notice = NOTICE_SCORE(lang).format(v=f"{value:.2f}")
+    msg = await show(callback, build_stk_card(lang, facts, notice=notice))
+    await _remember(sticker_repo, msg, fuid, callback.from_user.id)
 
 
-@router.callback_query(F.data.startswith("adm_stk_expedit:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_expedit:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_sticker_explicitness_edit_prompt(
     callback: CallbackQuery,
+    sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Prompt for a free-text explicitness value (ADR-0009 Decision 7).
+    """Prompt for a typed explicitness value (ADR-0009 Decision 7), in place
+    of the score screen.
 
     Builds against ``AdminStates.awaiting_sticker_score`` rather than the
     two already-spoken-for scaffold states (see the state's own docstring).
+    The prompt's id is kept so the answer can take its ✖️ button away.
     """
-    if not _is_private(callback):
-        await callback.answer()
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
-        return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
+    lang, fuid = lang_of(fields[0]), fields[1]
+    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        await _disarm(state)
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
 
-    await state.set_state(AdminStates.awaiting_sticker_score)
-    await state.update_data(exp_file_unique_id=file_unique_id, exp_lang=lang)
-
-    await callback.answer()
-    if isinstance(callback.message, Message):
-        await callback.message.answer(
-            _EXPLICITNESS_PROMPT[lang],
-            reply_markup=sticker_explicitness_cancel_keyboard(file_unique_id, lang=lang),
+    # A card opened from a pack sits under the sticker the bot sent for it, and
+    # the typed answer brings the card back as a NEW message: that card has to
+    # inherit the sticker, or leaving it strands the sticker in the DM. Not for
+    # a card that is a reply (a notification, the DM check) — its sticker is
+    # the admin's, and the new card, not being a reply, would delete it.
+    sticker_msg = 0
+    if isinstance(callback.message, Message) and callback.message.reply_to_message is None:
+        sticker_msg = (
+            await sticker_repo.get_card_sticker_msg(
+                callback.message.chat.id, callback.message.message_id
+            )
+            or 0
         )
+    await state.set_state(AdminStates.awaiting_sticker_score)
+    await state.update_data(exp_file_unique_id=fuid, exp_lang=lang, exp_sticker_msg=sticker_msg)
+    msg = await show(callback, build_stk_score_in(lang, facts))
+    if msg is not None:
+        await state.update_data(exp_prompt_id=msg.message_id)
 
 
 @router.message(
     AdminStates.awaiting_sticker_score,
     F.chat.type == "private",
     ~F.text.startswith("/"),
+    ~F.caption.startswith("/"),
 )
 async def handle_sticker_explicitness_input(
     message: Message,
     state: FSMContext,
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
 ) -> None:
     """Validate and persist the manually-typed explicitness score
@@ -758,254 +804,297 @@ async def handle_sticker_explicitness_input(
     Escape hatches: admin commands pass through untouched
     (``~F.text.startswith("/")``), and the prompt carries a dedicated
     cancel button.
+
+    Each answer is one new message: the repeated prompt, or the card. The
+    previous prompt loses its ✖️ so only one live way out exists.
+
+    A sticker, a photo or any other answer without text is not a wrong number:
+    the prompt comes back saying the number goes in as text, and how to leave.
     """
     data = await state.get_data()
     file_unique_id = data.get("exp_file_unique_id")
-    lang = _get_lang(data.get("exp_lang"))
+    lang = lang_of(data.get("exp_lang"))
+    prompt_id = data.get("exp_prompt_id")
     if not file_unique_id:
         await state.clear()
         return
 
-    if not await check_admin_direct(
-        bot_config_repo, message.from_user.id if message.from_user else None
-    ):
+    admin_id = message.from_user.id if message.from_user else None
+    if not await check_admin_direct(bot_config_repo, admin_id):
         await state.clear()
         return
 
+    not_text = message.text is None
     raw = (message.text or "").strip().replace(",", ".")
+    value: float | None
     try:
         value = float(raw)
     except ValueError:
-        await message.reply(
-            _EXPLICITNESS_INVALID[lang],
-            reply_markup=sticker_explicitness_cancel_keyboard(file_unique_id, lang=lang),
-        )
-        return
-    if not 0.0 <= value <= 1.0:
-        await message.reply(
-            _EXPLICITNESS_INVALID[lang],
-            reply_markup=sticker_explicitness_cancel_keyboard(file_unique_id, lang=lang),
-        )
+        value = None
+
+    if value is None or not 0.0 <= value <= 1.0:
+        facts = await _card_facts(file_unique_id, sticker_repo, admin_repo, bot_config_repo)
+        await _strip_prompt(message, prompt_id)
+        if facts is None:
+            await state.clear()
+            gone = await _sets_screen(lang, sticker_repo, notice_raw=GONE_STICKER(lang))
+            await show(message, gone)
+            return
+        again = build_stk_score_in(lang, facts, invalid=True, not_text=not_text)
+        msg = await show(message, again)
+        if msg is not None:
+            await state.update_data(exp_prompt_id=msg.message_id)
         return
 
     await state.clear()
-    if not await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
-        await message.reply(_EXPLICITNESS_NO_ROW[lang])
+    await _strip_prompt(message, prompt_id)
+    facts = None
+    if await sticker_repo.set_manual_explicitness_score(file_unique_id, value):
+        facts = await _card_facts(file_unique_id, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        gone = await _sets_screen(lang, sticker_repo, notice_raw=GONE_STICKER(lang))
+        await show(message, gone)
         return
-
-    await message.reply(_EXPLICITNESS_SAVED[lang].format(value=f"{value:.2f}"))
-
-    sticker = await sticker_repo.get_by_file_unique_id(file_unique_id)
-    if sticker:
-        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-        text = _build_detail_text(sticker, file_unique_id, lang, tolerance_level)
-        keyboard = sticker_detail_keyboard(
-            file_unique_id,
-            lang=lang,
-            set_name=sticker["set_name"],
-            explicitness_is_manual=True,
-        )
-        await message.answer(text, parse_mode="HTML", reply_markup=keyboard)
+    notice = NOTICE_SCORE(lang).format(v=f"{value:.2f}")
+    msg = await show(message, build_stk_card(lang, facts, notice=notice))
+    sticker_msg_id = data.get("exp_sticker_msg")
+    await _remember(
+        sticker_repo,
+        msg,
+        file_unique_id,
+        admin_id,
+        sticker_msg_id=sticker_msg_id if isinstance(sticker_msg_id, int) else 0,
+    )
 
 
-@router.callback_query(F.data.startswith("adm_stk_expcancel:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_expcancel:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_sticker_explicitness_cancel(
     callback: CallbackQuery,
-    state: FSMContext,
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
     """Escape hatch for ``awaiting_sticker_score`` -- the input handler
     keeps the state set on invalid input (reject-not-clamp), so cancelling
-    must be reachable without typing a valid float. Turns the prompt bubble
-    into a fresh detail card, same idiom as
-    ``admin_chat_panel.handle_chat_panel_tolerance_cancel``.
+    must be reachable without typing a valid float. The prompt turns back
+    into the score screen it came from. Only this prompt's state is dropped
+    (`_disarm`): a stale ✖️ tapped while another screen's prompt is open
+    leaves that prompt alone.
     """
-    if not _is_private(callback):
-        await callback.answer()
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+    facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+    if facts is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    await state.clear()
-    await callback.answer(_EXPLICITNESS_CANCELLED[lang])
-    if file_unique_id:
-        await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
+    await show(callback, build_stk_score(lang, facts))
 
 
-@router.callback_query(F.data.startswith("adm_stk_expreset:"))
-async def handle_sticker_explicitness_reset(
+# ── Analysis ────────────────────────────────────────────────────────────
+
+
+async def _analyse_into_card(
     callback: CallbackQuery,
-    sticker_repo: FromDishka[StickerRepository],
-    bot_config_repo: FromDishka[BotConfigRepository],
-    state: FSMContext,
+    lang: Lang,
+    fuid: str,
+    bot: Bot,
+    sticker_service: StickerLearningService,
+    sticker_repo: StickerRepository,
+    admin_repo: AdminRepository,
+    bot_config_repo: BotConfigRepository,
+    *,
+    notice: str,
+    dm: bool = False,
+    rescore: bool = False,
+    prior_score: tuple[float, bool] | None = None,
 ) -> None:
-    """Reset a manual score back to automatic (ADR-0009 Decision 5) -- NULLs
-    both the value and the flag; the card re-renders as "не оценён" until
-    the next (re-)analysis, reusing A-1's existing unscored rendering.
+    """Run one re-analysis behind the ⏳ placeholder, then the card or the error.
 
-    Clears the FSM for the same reason the preset buttons do: this row stays
-    tappable on a card sitting above an open "введите число" prompt.
+    The callback must already be answered: the vision call takes seconds. An
+    unexpected exception is an error screen too — the placeholder has no
+    buttons, so leaving it would strand the admin.
+
+    ``rescore``: this analysis is the second half of a re-score, so the error
+    screen's Retry repeats the re-score, not a bare re-analysis.
+
+    ``prior_score`` (value, set by hand): the score that re-score had already
+    dropped. On failure it is put back, and the error screen says whether
+    that worked. So it is when the analysis succeeds without a usable score:
+    the card then says the score was not recalculated, never "recalculated".
     """
-    if not _is_private(callback):
-        await callback.answer()
+    await show(callback, build_stk_analyzing(lang), answered=True)
+    reason: str | None
+    try:
+        result = await sticker_service.reanalyze(bot, fuid)
+        reason = None if result.ok else result.reason
+        ok = result.ok
+    except Exception:
+        logger.error("sticker re-analysis crashed", file_unique_id=fuid, exc_info=True)
+        ok, reason = False, "internal"
+    if not ok:
+        kept, lost = await _put_back(sticker_repo, fuid, prior_score)
+        error = build_stk_error(
+            lang, fuid, reason, dm=dm, score_kept=kept, score_lost=lost, retry_rescore=rescore
+        )
+        await show(callback, error, answered=True)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
+    # Everything after the analysis is guarded too: the placeholder is still
+    # on screen, without buttons, and the callback is already answered.
+    try:
+        facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+        notice_raw: str | None = None
+        if rescore and facts is not None and facts.score is None:
+            # The analysis ran but gave no usable score (the field omitted,
+            # cut off, or out of range): save_sticker kept the NULL the reset
+            # wrote, and an unscored sticker is never sent. Same as a failure.
+            kept, lost = await _put_back(sticker_repo, fuid, prior_score)
+            if kept is not None:
+                facts = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+            notice_raw = rescore_without_score(lang, kept=kept, lost=lost)
+            logger.warning(
+                "sticker re-score gave no score", file_unique_id=fuid, kept=kept, lost=lost
+            )
+        if facts is None:
+            await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang), answered=True)
+            return
+        card = build_stk_card(
+            lang,
+            facts,
+            notice=None if notice_raw is not None else notice,
+            notice_raw=notice_raw,
+        )
+        msg = await show(callback, card, answered=True)
+    except Exception:
+        logger.error("sticker card after analysis failed", file_unique_id=fuid, exc_info=True)
+        error = build_stk_error(lang, fuid, "internal", dm=dm, retry_rescore=rescore)
+        await show(callback, error, answered=True)
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
-        return
-
-    await state.clear()
-    if not await sticker_repo.reset_explicitness_to_auto(file_unique_id):
-        await callback.answer(_EXPLICITNESS_NO_ROW[lang], show_alert=True)
-        return
-    await _render_and_show_detail(callback, sticker_repo, bot_config_repo, lang, file_unique_id)
-    await callback.answer(_EXPLICITNESS_RESET[lang])
+    await _remember(sticker_repo, msg, fuid, callback.from_user.id)
 
 
-# ── Localized failure-reason copy ───────────────────────────────────────
-
-_REANALYZE_REASON_COPY: dict[str, dict[str, str]] = {
-    "download": {"ru": "Ошибка загрузки", "en": "Download error"},
-    "vision": {"ru": "Ошибка API", "en": "API error"},
-    "content_filter": {"ru": "Контент заблокирован", "en": "Content blocked"},
-    "empty": {"ru": "Пустой ответ", "en": "Empty response"},
-}
-
-
-# ── Run analysis now ────────────────────────────────────────────────────
-
-
-@router.callback_query(F.data.startswith("adm_stk_reanalyze:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_reanalyze:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_run_analysis(
     callback: CallbackQuery,
+    bot: Bot,
     sticker_service: FromDishka[StickerLearningService],
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Run vision analysis on a sticker right now (admin action).
-
-    Lifecycle (edit-in-place):
-    1. Edit message → ⏳ Анализирую… (hide buttons) before blocking vision call.
-    2. Call reanalyze().
-    3. Edit message → ✅ Анализ обновлён + new description + restored buttons,
-       OR ⚠️ Ошибка анализа: <reason> + Retry button.
-
-    Edge-cases:
-    - If the ⏳ edit fails (e.g. network glitch), log and continue — still emit result.
-    - TelegramBadRequest "message is not modified" on any status edit is suppressed.
-    - Double-tap: first tap removes the buttons; second tap hits an unmodified message
-      (suppressed) or arrives after the analysis has already finished.
-    """
-    if not _is_private(callback):
-        await callback.answer()
+    """Analyse the sticker again (or for the first time); the card waits under ⏳."""
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+    if await sticker_repo.get_by_file_unique_id(fuid) is None:
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
         return
-
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not file_unique_id:
-        await callback.answer("Missing sticker ID", show_alert=True)
-        return
-
-    if not (isinstance(callback.message, Message) and callback.message.bot):
-        await callback.answer("Bot unavailable", show_alert=True)
-        return
-
-    # Dismiss the callback spinner immediately
     await callback.answer()
+    await _analyse_into_card(
+        callback,
+        lang,
+        fuid,
+        bot,
+        sticker_service,
+        sticker_repo,
+        admin_repo,
+        bot_config_repo,
+        notice=NOTICE_ANALYZED(lang),
+    )
 
-    # ── ⏳ in-progress edit: hide buttons so the admin knows work is underway ──
-    in_progress_text = "⏳ Анализирую…" if lang == "ru" else "⏳ Analyzing…"
-    try:
-        await callback.message.edit_text(
-            in_progress_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+
+@router.callback_query(
+    F.data.startswith("adm_stk_expreset:"), F.message.chat.type == "private", IsAdmin()
+)
+async def handle_sticker_explicitness_reset(
+    callback: CallbackQuery,
+    bot: Bot,
+    sticker_service: FromDishka[StickerLearningService],
+    sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
+    bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
+) -> None:
+    """Recalculate the score: drop the manual value and analyse once more.
+
+    Resetting alone (ADR-0009 Decision 5) would leave the score empty, and an
+    empty score means the bot never sends the sticker — so the reset is
+    followed by the one re-analysis that writes a fresh automatic score.
+
+    If that analysis fails, or succeeds without a usable score, the score it
+    replaced is put back: the reset alone would leave the sticker unscored,
+    i.e. never sent, behind a screen that says nothing about it. The error
+    screen's Retry comes back here: a plain re-analysis would keep a score
+    that was put back as set by hand.
+
+    Drops the score prompt for the same reason the preset buttons do: this row
+    stays tappable on a score screen elsewhere in the chat. Only that state.
+    """
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
+        return
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
+    row = await sticker_repo.get_by_file_unique_id(fuid)
+    prior: tuple[float, bool] | None = None
+    if row is not None and row.get("explicitness_score") is not None:
+        prior = (
+            float(row["explicitness_score"]),
+            bool(row.get("explicitness_is_manual") or False),
         )
-    except TelegramBadRequest as exc:
-        # "message is not modified" = double-tap; another network issue = log + continue
-        logger.warning(
-            "handle_run_analysis: in-progress edit failed, continuing analysis",
-            file_unique_id=file_unique_id,
-            error=str(exc),
-        )
-
-    # ── Blocking vision call ─────────────────────────────────────────────────
-    result = await sticker_service.reanalyze(callback.message.bot, file_unique_id)
-
-    # ── Build result text + keyboard ─────────────────────────────────────────
-    if result.ok:
-        # Fetch the updated sticker record to show its new description
-        updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
-        desc_part = ""
-        set_name: str | None = None
-        is_manual = False
-        if updated:
-            set_name = str(updated["set_name"]) if updated.get("set_name") else None
-            is_manual = bool(updated.get("explicitness_is_manual", False))
-            raw_desc = updated.get("visual_description")
-            if raw_desc:
-                desc_part = f"\n<b>Описание:</b> {html_lib.escape(str(raw_desc))}"
-                # A-1: same explicitness line as every other DM sticker card,
-                # only once the fresh analysis actually produced a description.
-                # A-4: a sticky manual override (ADR-0009 Decision 4) survives
-                # this re-analysis unchanged -- is_manual reflects that.
-                tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-                explicitness_line = format_explicitness_line(
-                    updated.get("explicitness_score"),
-                    tolerance_level,
-                    lang,
-                    is_manual=is_manual,
-                )
-                desc_part = f"{desc_part}\n{explicitness_line}"
-        result_text = (
-            f"✅ Анализ обновлён{desc_part}" if lang == "ru" else f"✅ Analysis updated{desc_part}"
-        )
-        keyboard = sticker_detail_keyboard(
-            file_unique_id, lang=lang, set_name=set_name, explicitness_is_manual=is_manual
-        )
-    else:
-        reason_key = result.reason or "empty"
-        reason_copy = _REANALYZE_REASON_COPY.get(reason_key, _REANALYZE_REASON_COPY["empty"])
-        reason_label = reason_copy.get(lang, reason_copy["ru"])
-        result_text = (
-            f"⚠️ Ошибка анализа: {reason_label}"
-            if lang == "ru"
-            else f"⚠️ Analysis error: {reason_label}"
-        )
-        keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
-
-    # ── Edit message with result (suppress "not modified" on double-tap) ─────
-    with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)
+    if row is None or not await sticker_repo.reset_explicitness_to_auto(fuid):
+        await _show_gone(callback, lang, sticker_repo, GONE_STICKER(lang))
+        return
+    await callback.answer()
+    await _analyse_into_card(
+        callback,
+        lang,
+        fuid,
+        bot,
+        sticker_service,
+        sticker_repo,
+        admin_repo,
+        bot_config_repo,
+        notice=NOTICE_RESCORED(lang),
+        rescore=True,
+        prior_score=prior,
+    )
 
 
-# ── DM sticker check (admin sends a sticker directly, no command) ───────
+# ── Admin sends a sticker straight to the bot ───────────────────────────
 
 
-@router.message(F.sticker, F.chat.type == "private", IsAdmin())
+def _no_prompt_takes_it(message: Message, raw_state: str | None = None) -> bool:
+    """No open prompt reads this sticker as its answer (`STICKER_ANSWERS`).
+
+    This router runs before every other FSM-owning router. A prompt that takes
+    a sticker (the rules reaction prompt; a forward in the organizer prompt; in
+    this module the score prompt, whose `handle_sticker_explicitness_input` is
+    registered above) keeps it. Any other prompt has no use for a sticker, and
+    letting it fall through would hand it to the media router's silent learn:
+    it gets the check here, exactly as with no prompt open, and the prompt stays
+    open. ``raw_state`` is what `PromptExitMiddleware` clears, by the same name.
+    """
+    return not takes_a_sticker(raw_state, forwarded=message.forward_origin is not None)
+
+
+@router.message(F.sticker, F.chat.type == "private", IsAdmin(), _no_prompt_takes_it)
 async def handle_admin_sticker_check(
     message: Message,
     sticker_repo: FromDishka[StickerRepository],
@@ -1017,126 +1106,114 @@ async def handle_admin_sticker_check(
     Registered on the admin_sticker router, which handlers/__init__.py wires
     in BEFORE the media router — so this consumes the update first and
     handlers/media.py's silent auto-learn (handle_sticker_message) never
-    fires for an admin's own DM check. Known sticker → the existing detail
-    view (same renderer as the sets browser). Unknown → an explicit
-    "🔍 Проанализировать" button; analysis only runs on that tap, never
-    silently (ADR-0003 — analysis stays a visible, synchronous admin action).
+    fires for an admin's own DM check. Known sticker → the card (same
+    renderer as the pack browser). Unknown → an explicit "🔍 Разобрать"
+    button; analysis only runs on that tap, never silently (ADR-0003 —
+    analysis stays a visible, synchronous admin action).
     """
     sticker = message.sticker
     if sticker is None:
         return
 
-    lang = _get_lang(await admin_repo.get_admin_language(bot_config_repo))
+    lang = lang_of(await admin_repo.get_admin_language(bot_config_repo))
 
     existing = await sticker_repo.get_by_file_unique_id(sticker.file_unique_id)
     if existing:
-        tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-        text = _build_detail_text(existing, sticker.file_unique_id, lang, tolerance_level)
-        keyboard = sticker_detail_keyboard(
-            sticker.file_unique_id,
-            lang=lang,
-            set_name=existing["set_name"],
-            explicitness_is_manual=bool(existing.get("explicitness_is_manual", False)),
+        facts = await _facts_of(dict(existing), sticker_repo, admin_repo, bot_config_repo)
+        card = build_stk_card(lang, facts)
+        msg = await message.reply(
+            render_text(card), reply_markup=to_markup(card), parse_mode="HTML"
         )
-        await message.reply(text, parse_mode="HTML", reply_markup=keyboard)
+        await _remember(
+            sticker_repo,
+            msg,
+            sticker.file_unique_id,
+            message.from_user.id if message.from_user else None,
+        )
         return
 
-    text = (
-        "Такого стикера ещё нет в базе."
-        if lang == "ru"
-        else "This sticker isn't in the catalog yet."
-    )
     # Reply (not answer): handle_admin_sticker_dm_analyze() below reads the
     # sticker back off callback.message.reply_to_message on the button tap —
     # no extra cache or DB row needed to carry file_id/set_name/emoji across
     # the tap (nothing to persist per ADR-0003's transient-UI-state stance).
-    await message.reply(
-        text, reply_markup=sticker_dm_check_keyboard(sticker.file_unique_id, lang=lang)
-    )
+    unknown = build_stk_unknown(lang, sticker.file_unique_id, sticker.emoji)
+    await message.reply(render_text(unknown), reply_markup=to_markup(unknown), parse_mode="HTML")
 
 
-@router.callback_query(F.data.startswith("adm_stk_dmchk:"))
+@router.callback_query(
+    F.data.startswith("adm_stk_dmchk:"), F.message.chat.type == "private", IsAdmin()
+)
 async def handle_admin_sticker_dm_analyze(
     callback: CallbackQuery,
+    bot: Bot,
     sticker_service: FromDishka[StickerLearningService],
     sticker_repo: FromDishka[StickerRepository],
+    admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
+    state: FSMContext,
+    **kwargs: Any,
 ) -> None:
-    """Run vision analysis for a sticker checked via DM that wasn't known yet.
+    """Analyse a sticker the admin sent to the bot; also the Retry of its error.
 
-    Mirrors handle_run_analysis()'s edit-in-place lifecycle (ADR-0003), but
-    there is no existing sticker_knowledge row to re-analyze: the Sticker
-    object (file_id, emoji, set_name, ...) comes from the message this
-    prompt replied to, not from a DB lookup.
+    The Sticker object (file_id, emoji, set_name, ...) comes from the message
+    this reply is attached to, not from a DB lookup: on first contact there
+    is no ``sticker_knowledge`` row yet. By the time Retry is tapped there may
+    be one (a failed first analysis is stored), and then this is a plain
+    re-analysis.
     """
-    if not _is_private(callback):
-        await callback.answer()
+    fields = parse(callback.data, 2)
+    if fields is None:
+        await show_stale(callback, _lang_hint(callback), data=kwargs, state=state)
         return
-    if not await check_admin_direct(
-        bot_config_repo, callback.from_user.id if callback.from_user else None
-    ):
-        await callback.answer("Not authorized", show_alert=True)
-        return
+    lang, fuid = lang_of(fields[0]), fields[1]
+    await _disarm(state)
 
-    parts = (callback.data or "").split(":")
-    lang = _get_lang(parts[1] if len(parts) > 1 else None)
-    file_unique_id = parts[2] if len(parts) > 2 else ""
-
-    if not (isinstance(callback.message, Message) and callback.message.bot):
-        await callback.answer("Bot unavailable", show_alert=True)
-        return
-
-    reply_msg = callback.message.reply_to_message
+    reply_msg = callback.message.reply_to_message if isinstance(callback.message, Message) else None
     sticker = reply_msg.sticker if reply_msg else None
-    if sticker is None or sticker.file_unique_id != file_unique_id:
-        await callback.answer(
-            "Стикер недоступен, пришли его ещё раз"
-            if lang == "ru"
-            else "Sticker unavailable, please resend it",
-            show_alert=True,
-        )
+    if sticker is None or sticker.file_unique_id != fuid:
+        await callback.answer(ALERT_RESEND(lang), show_alert=True)
         return
 
-    # Dismiss the callback spinner immediately
     await callback.answer()
 
-    # ── ⏳ in-progress edit: hide buttons so the admin knows work is underway ──
-    in_progress_text = "⏳ Анализирую…" if lang == "ru" else "⏳ Analyzing…"
-    try:
-        await callback.message.edit_text(
-            in_progress_text,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[]),
+    existing = await sticker_repo.get_by_file_unique_id(fuid)
+    if existing is not None:
+        record = dict(existing)
+        if record.get("visual_description") and not record.get("analysis_failed"):
+            facts = await _facts_of(record, sticker_repo, admin_repo, bot_config_repo)
+            msg = await show(callback, build_stk_card(lang, facts), answered=True)
+            await _remember(sticker_repo, msg, fuid, callback.from_user.id)
+            return
+        await _analyse_into_card(
+            callback,
+            lang,
+            fuid,
+            bot,
+            sticker_service,
+            sticker_repo,
+            admin_repo,
+            bot_config_repo,
+            notice=NOTICE_ANALYZED(lang),
+            dm=True,
         )
-    except TelegramBadRequest as exc:
-        logger.warning(
-            "handle_admin_sticker_dm_analyze: in-progress edit failed, continuing analysis",
-            file_unique_id=file_unique_id,
-            error=str(exc),
-        )
-
-    # ── Download + learn ──────────────────────────────────────────────────
-    try:
-        image_data = await download_telegram_file(callback.message.bot, sticker.file_id)
-    except TelegramFileError:
-        logger.warning(
-            "handle_admin_sticker_dm_analyze: download failed",
-            file_unique_id=file_unique_id,
-        )
-        reason_copy = _REANALYZE_REASON_COPY["download"]
-        result_text = (
-            f"⚠️ Ошибка анализа: {reason_copy['ru']}"
-            if lang == "ru"
-            else f"⚠️ Analysis error: {reason_copy['en']}"
-        )
-        with contextlib.suppress(TelegramBadRequest):
-            await callback.message.edit_text(
-                result_text,
-                parse_mode="HTML",
-                reply_markup=sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang),
-            )
         return
 
-    learning_result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+    await show(callback, build_stk_analyzing(lang), answered=True)
+    try:
+        image_data = await download_telegram_file(bot, sticker.file_id)
+    except TelegramFileError:
+        logger.warning("handle_admin_sticker_dm_analyze: download failed", file_unique_id=fuid)
+        await show(callback, build_stk_error(lang, fuid, "download", dm=True), answered=True)
+        return
+
+    try:
+        learning_result = await sticker_service.learn(sticker=sticker, image_data=image_data)
+    except Exception:
+        logger.error(
+            "handle_admin_sticker_dm_analyze: learn crashed", file_unique_id=fuid, exc_info=True
+        )
+        await show(callback, build_stk_error(lang, fuid, "internal", dm=True), answered=True)
+        return
 
     # Best-effort sticker-set registration so the admin panel's "browse by
     # set" stays consistent for manually-checked stickers too — parity with
@@ -1148,7 +1225,7 @@ async def handle_admin_sticker_dm_analyze(
         try:
             existing_set = await sticker_repo.get_sticker_set(sticker.set_name)
             if not existing_set:
-                tg_set = await callback.message.bot.get_sticker_set(sticker.set_name)
+                tg_set = await bot.get_sticker_set(sticker.set_name)
                 await sticker_repo.upsert_sticker_set(
                     set_name=tg_set.name,
                     set_title=tg_set.title,
@@ -1163,32 +1240,25 @@ async def handle_admin_sticker_dm_analyze(
                 set_name=sticker.set_name,
             )
 
-    # ── Build result text + keyboard (mirrors handle_run_analysis) ─────────
     if learning_result.analysis_failed:
-        reason_key = learning_result.failure_reason or "empty"
-        reason_copy = _REANALYZE_REASON_COPY.get(reason_key, _REANALYZE_REASON_COPY["empty"])
-        reason_label = reason_copy.get(lang, reason_copy["ru"])
-        result_text = (
-            f"⚠️ Ошибка анализа: {reason_label}"
-            if lang == "ru"
-            else f"⚠️ Analysis error: {reason_label}"
-        )
-        keyboard = sticker_reanalyze_retry_keyboard(file_unique_id, lang=lang)
-    else:
-        updated = await sticker_repo.get_by_file_unique_id(file_unique_id)
-        # ADR-0009 Decision 6 edge case: a freshly-learned duplicate can
-        # inherit an existing manual score+flag from its canonical row, so
-        # this first-ever card for the file can legitimately already show
-        # the "(вручную)" badge -- not a bug, see the ADR's own note.
-        is_manual = bool(updated.get("explicitness_is_manual", False)) if updated else False
-        if updated:
-            tolerance_level = await _resolve_default_tolerance_level(bot_config_repo)
-            result_text = _build_detail_text(updated, file_unique_id, lang, tolerance_level)
-        else:
-            result_text = "✅ Анализ завершён" if lang == "ru" else "✅ Analysis complete"
-        keyboard = sticker_detail_keyboard(
-            file_unique_id, lang=lang, set_name=sticker.set_name, explicitness_is_manual=is_manual
-        )
+        error = build_stk_error(lang, fuid, learning_result.failure_reason, dm=True)
+        await show(callback, error, answered=True)
+        return
 
-    with contextlib.suppress(TelegramBadRequest):
-        await callback.message.edit_text(result_text, parse_mode="HTML", reply_markup=keyboard)
+    # ADR-0009 Decision 6 edge case: a freshly-learned duplicate can
+    # inherit an existing manual score+flag from its canonical row, so
+    # this first-ever card for the file can legitimately already show
+    # the "(вручную)" badge -- not a bug, see the ADR's own note.
+    # Guarded like _analyse_into_card: the ⏳ placeholder has no buttons.
+    try:
+        learned = await _card_facts(fuid, sticker_repo, admin_repo, bot_config_repo)
+        if learned is None:
+            await show(callback, build_stk_error(lang, fuid, None, dm=True), answered=True)
+            return
+        card = build_stk_card(lang, learned, notice=NOTICE_LEARNED(lang))
+        msg = await show(callback, card, answered=True)
+    except Exception:
+        logger.error("sticker card after analysis failed", file_unique_id=fuid, exc_info=True)
+        await show(callback, build_stk_error(lang, fuid, "internal", dm=True), answered=True)
+        return
+    await _remember(sticker_repo, msg, fuid, callback.from_user.id)

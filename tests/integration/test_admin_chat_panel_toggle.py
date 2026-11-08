@@ -30,6 +30,7 @@ from aiogram.types import Message
 
 from src.bot.handlers.admin_chat_panel import handle_chat_panel_toggle
 from src.config import BotSettings
+from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.services.chat_config import ChatConfigService
@@ -72,6 +73,11 @@ async def bot_config_repo(db_conn: asyncpg.Connection) -> BotConfigRepository:
 
 
 @pytest_asyncio.fixture
+async def admin_repo(db_conn: asyncpg.Connection) -> AdminRepository:
+    return AdminRepository(db_conn)  # type: ignore[arg-type]
+
+
+@pytest_asyncio.fixture
 async def service(
     chat_settings_repo: ChatSettingsRepository, bot_config_repo: BotConfigRepository
 ) -> ChatConfigService:
@@ -100,11 +106,14 @@ class TestToggleWriteReachesRepository:
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
         service: ChatConfigService,
+        admin_repo: AdminRepository,
     ) -> None:
         await chat_settings_repo.ensure_exists(CHAT_ID, "Chat", "group")
         callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag")  # rag_enabled
 
-        await handle_chat_panel_toggle(callback, chat_settings_repo, bot_config_repo, service)
+        await handle_chat_panel_toggle(
+            callback, chat_settings_repo, bot_config_repo, service, admin_repo
+        )
 
         row = await chat_settings_repo.get(CHAT_ID)
         assert row is not None
@@ -117,6 +126,7 @@ class TestToggleWriteReachesRepository:
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
         service: ChatConfigService,
+        admin_repo: AdminRepository,
     ) -> None:
         await chat_settings_repo.ensure_exists(CHAT_ID, "Chat", "group")
         await handle_chat_panel_toggle(
@@ -124,12 +134,14 @@ class TestToggleWriteReachesRepository:
             chat_settings_repo,
             bot_config_repo,
             service,
+            admin_repo,
         )
         await handle_chat_panel_toggle(
             _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag"),
             chat_settings_repo,
             bot_config_repo,
             service,
+            admin_repo,
         )
 
         row = await chat_settings_repo.get(CHAT_ID)
@@ -192,6 +204,30 @@ class TestToggleWriteReachesRepository:
         result = await chat_settings_repo.toggle_bool_field(-999_000_111, "rag_enabled", True)
         assert result is None
 
+    @pytest.mark.asyncio
+    async def test_a_tap_for_a_chat_without_a_row_lands_on_the_real_chat_list(
+        self,
+        chat_settings_repo: ChatSettingsRepository,
+        bot_config_repo: BotConfigRepository,
+        service: ChatConfigService,
+        admin_repo: AdminRepository,
+    ) -> None:
+        """The handler's side of that contract: nothing is written, and the
+        admin sees the chat list read from the real database, with the line
+        that the chat has gone, as every other panel screen does."""
+        await chat_settings_repo.ensure_exists(OTHER_CHAT_ID, "Other", "group")
+        await chat_settings_repo.upsert(OTHER_CHAT_ID, enabled=True)  # the list shows enabled ones
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:rag")
+
+        await handle_chat_panel_toggle(
+            callback, chat_settings_repo, bot_config_repo, service, admin_repo
+        )
+
+        assert await chat_settings_repo.get(CHAT_ID) is None
+        text = callback.message.edit_text.await_args.args[0]
+        assert text.startswith("<i>Этого чата нет в настройках")
+        assert "Other" in str(callback.message.edit_text.await_args.kwargs["reply_markup"])
+
 
 # ---------------------------------------------------------------------------
 # Cache invalidation
@@ -211,6 +247,7 @@ class TestToggleInvalidatesCache:
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
         service: ChatConfigService,
+        admin_repo: AdminRepository,
     ) -> None:
         """Warm the cache first -- exactly what opening the panel does just
         before a tap -- then assert the very next read reflects the flip
@@ -225,6 +262,7 @@ class TestToggleInvalidatesCache:
             chat_settings_repo,
             bot_config_repo,
             service,
+            admin_repo,
         )
 
         config = await service.get_config(CHAT_ID)
@@ -236,6 +274,7 @@ class TestToggleInvalidatesCache:
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
         service: ChatConfigService,
+        admin_repo: AdminRepository,
     ) -> None:
         """Per-chat ``invalidate(chat_id)`` must be scoped -- toggling one
         chat's field must not evict another chat's already-cached entry
@@ -250,36 +289,48 @@ class TestToggleInvalidatesCache:
             chat_settings_repo,
             bot_config_repo,
             service,
+            admin_repo,
         )
 
         assert service.is_cached(OTHER_CHAT_ID)
 
 
 # ---------------------------------------------------------------------------
-# Decision 2 boundary, re-verified against a real (non-mocked) repo
+# The knowledge base switch, now a panel toggle, against a real repo
 # ---------------------------------------------------------------------------
 
 
-class TestToggleRejectsLinkOnlyFieldAgainstRealRepo:
+class TestKnowledgeBaseTogglesThroughThePanelAgainstRealRepo:
     @pytest.mark.asyncio
-    async def test_kb_enabled_code_never_reaches_chat_settings_write(
+    async def test_kb_enabled_code_now_reaches_chat_settings_write(
         self,
         chat_settings_repo: ChatSettingsRepository,
         bot_config_repo: BotConfigRepository,
         service: ChatConfigService,
+        admin_repo: AdminRepository,
     ) -> None:
-        """KB's own toggle handler (admin_kb.py) owns this write, not the
-        generic panel toggle -- the row must stay untouched even though this
-        is a real repository, not a mock asserting call args."""
+        """Inverted on purpose. This used to prove the panel could never write
+        ``kb_enabled`` (ADR-0010: the switch lived only in admin_kb.py). The
+        switch now sits in the chat's memory section and toggles through the
+        same ``toggle_bool_field`` as every other switch; the superseding note
+        is in docs/admin-dm-internals.md. What must hold against a real
+        database: a fresh row carries NULL (the column has no DEFAULT), the
+        panel flips it from the value the chat actually runs with, and the
+        service serves the new value after the write."""
         await chat_settings_repo.ensure_exists(CHAT_ID, "Chat", "group")
         before = await chat_settings_repo.get(CHAT_ID)
+        assert before is not None
+        assert before["kb_enabled"] is None
+        assert (await service.get_config(CHAT_ID)).kb_enabled is False
 
+        callback = _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:kb")
         await handle_chat_panel_toggle(
-            _make_callback(f"adm_pnl_tgl:ru:{CHAT_ID}:kb"),
-            chat_settings_repo,
-            bot_config_repo,
-            service,
+            callback, chat_settings_repo, bot_config_repo, service, admin_repo
         )
 
         after = await chat_settings_repo.get(CHAT_ID)
-        assert after == before
+        assert after is not None
+        assert after["kb_enabled"] is True
+        assert (await service.get_config(CHAT_ID)).kb_enabled is True
+        text = callback.message.edit_text.await_args.args[0]
+        assert text.startswith("<i>✓ Включено: База знаний</i>")
