@@ -335,6 +335,27 @@ class TestFailures:
         assert mw.refused_in_a_row == 2
 
     @pytest.mark.asyncio
+    async def test_a_refusal_the_plain_resend_hits_too_is_not_counted(self) -> None:
+        """Broken HTML fails rich and plain alike: that is the screen's fault, not the icons'.
+
+        Counting it before the resend switched the icons off for every screen after an
+        admin tapped one broken screen three times.
+        """
+        mw, bot = await _on()
+
+        async def make_request(_bot: Any, m: Any) -> str:
+            raise TelegramBadRequest(
+                method=m, message="Bad Request: can't parse entities: unsupported start tag"
+            )
+
+        for n in range(REFUSALS_TO_OFF):
+            method = SendMessage(chat_id=1, text=f"✅ {n}", reply_markup=_kb("✅ Да"))
+            with pytest.raises(TelegramBadRequest):
+                await mw(make_request, bot, method)
+        assert mw.on, mw.off_reason
+        assert mw.refused_in_a_row == 0
+
+    @pytest.mark.asyncio
     async def test_any_other_refusal_is_raised_and_the_module_stays_on(self) -> None:
         mw, bot = await _on()
 

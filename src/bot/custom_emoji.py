@@ -180,8 +180,10 @@ class CustomEmoji(BaseRequestMiddleware):
         except TelegramBadRequest as exc:
             if not any(word in exc.message.lower() for word in _REFUSAL_WORDS):
                 raise
+            # Resend first: a refusal the plain send hits too (broken HTML) is not the icons'.
+            response = await make_request(bot, plain)
             self._refused(method, exc.message)
-            return await make_request(bot, plain)
+            return response
         self.refused_in_a_row = 0
         return response
 
