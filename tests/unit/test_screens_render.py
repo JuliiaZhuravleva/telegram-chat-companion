@@ -8,18 +8,22 @@ would have gone to Telegram.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest
-from aiogram.methods import EditMessageText, SendMessage
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.methods import AnswerCallbackQuery, EditMessageText, SendMessage
 from aiogram.types import (
+    CallbackQuery,
+    ErrorEvent,
     InaccessibleMessage,
     InlineKeyboardMarkup,
     Message,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    Update,
 )
 
 from src.bot.screens.model import Button, ReplyButton, Screen
@@ -207,6 +211,128 @@ async def test_an_inline_query_button_has_no_message():
     with patch("src.bot.screens.render._is_callback", return_value=True):
         assert await show(callback, _screen()) is None
     callback.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback", [False, True], ids=["edit", "new message"])
+async def test_the_answer_comes_after_the_screen(fallback: bool):
+    """The toast is the last thing the tap does: the screen is already there."""
+    callback = _callback()
+    order = MagicMock()
+    order.attach_mock(callback.message.edit_text, "edit")
+    order.attach_mock(callback.message.answer, "send")
+    order.attach_mock(callback.answer, "answer")
+    if fallback:
+        callback.message.edit_text.side_effect = _cannot_edit()
+    await show(callback, _screen(), toast="Сохранено")
+    names = [name for name, *_ in order.mock_calls]
+    assert names == (["edit", "send", "answer"] if fallback else ["edit", "answer"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refuse",
+    ["network on the edit", "the edit and the new message both refused"],
+)
+async def test_a_screen_that_could_not_be_delivered_leaves_the_query_unanswered(refuse: str):
+    """Telegram takes one answer per query: answering first would leave the
+    error handler's alert nowhere to go, and the tap would end in silence."""
+    callback = _callback()
+    if refuse.startswith("network"):
+        callback.message.edit_text.side_effect = TelegramNetworkError(
+            method=MagicMock(), message="timeout"
+        )
+        expected: type[Exception] = TelegramNetworkError
+    else:
+        callback.message.edit_text.side_effect = _cannot_edit()
+        callback.message.answer.side_effect = TelegramBadRequest(
+            method=MagicMock(), message="Bad Request: can't parse entities: x"
+        )
+        expected = TelegramBadRequest
+    with pytest.raises(expected):
+        await show(callback, _screen(), toast="Сохранено")
+    callback.answer.assert_not_awaited()
+
+
+class _TelegramBot:
+    """A bot double that keeps every request and answers a query only once, as Telegram does."""
+
+    def __init__(self, *, edit_error: Exception | None = None) -> None:
+        self.sent: list[Any] = []
+        self._edit_error = edit_error
+        self.mock = AsyncMock(side_effect=self._call)
+
+    async def _call(self, method: Any, *_: object, **__: object) -> object:
+        self.sent.append(method)
+        if isinstance(method, AnswerCallbackQuery):
+            if sum(isinstance(m, AnswerCallbackQuery) for m in self.sent) > 1:
+                raise TelegramBadRequest(
+                    method=method,
+                    message="Bad Request: query is too old and response timeout expired "
+                    "or query ID is invalid",
+                )
+            return True
+        if isinstance(method, EditMessageText) and self._edit_error is not None:
+            raise self._edit_error
+        return True
+
+    def answers(self) -> list[AnswerCallbackQuery]:
+        return [m for m in self.sent if isinstance(m, AnswerCallbackQuery)]
+
+
+def _real_tap(bot: AsyncMock, data: str) -> CallbackQuery:
+    from aiogram.types import Chat, User
+
+    from tests.unit.screen_routing import ADMIN_ID
+
+    anchor = Message(
+        message_id=3,
+        date=datetime(2026, 11, 7, 12, 0, tzinfo=UTC),
+        chat=Chat(id=ADMIN_ID, type="private"),
+        from_user=User(id=1, is_bot=True, first_name="Bot"),
+        text="Экран",
+    ).as_(bot)
+    return CallbackQuery(
+        id="q1",
+        from_user=User(id=ADMIN_ID, is_bot=False, first_name="Admin"),
+        chat_instance="ci",
+        data=data,
+        message=anchor,
+    ).as_(bot)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tap_ends_in_the_error_handlers_alert():
+    """The hub button through the real router, its edit lost to the network, then
+    the global error handler as the dispatcher calls it: the admin sees its alert,
+    the only answer the query gets."""
+    from src.bot.errors import _ERROR_ALERT, handle_unexpected_error
+    from tests.unit.screen_routing import FakeState, deliver
+
+    bot = _TelegramBot(edit_error=TelegramNetworkError(method=MagicMock(), message="timeout"))
+    tap = _real_tap(bot.mock, "adm_menu:ru")
+    with pytest.raises(TelegramNetworkError) as raised:
+        await deliver("callback_query", tap, FakeState(), call=True, bot=bot.mock)
+    assert [type(m).__name__ for m in bot.sent] == ["EditMessageText"]
+
+    update = Update(update_id=1, callback_query=tap)
+    await handle_unexpected_error(ErrorEvent(update=update, exception=raised.value))
+    (answer,) = bot.answers()
+    assert (answer.text, answer.show_alert) == (_ERROR_ALERT, True)
+
+
+@pytest.mark.asyncio
+async def test_a_tap_that_lands_is_answered_once_after_its_screen():
+    """The control: the same tap with Telegram up edits the hub, then answers."""
+    from tests.unit.screen_routing import FakeState, deliver
+
+    bot = _TelegramBot()
+    await deliver(
+        "callback_query", _real_tap(bot.mock, "adm_menu:ru"), FakeState(), call=True, bot=bot.mock
+    )
+    assert [type(m).__name__ for m in bot.sent] == ["EditMessageText", "AnswerCallbackQuery"]
+    (answer,) = bot.answers()
+    assert answer.text is None and not answer.show_alert
 
 
 # ---------------------------------------------------------------------------

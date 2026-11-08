@@ -43,14 +43,18 @@ from __future__ import annotations
 
 import structlog
 from aiogram import F, Router
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, Filter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.custom_emoji import bare_label
 from src.bot.filters.admin import IsAdmin
 from src.bot.keyboards.admin_kb import ORG_CANCEL_LABEL
+from src.bot.middleware.prompt_exit import CLOSED_BY_CANCEL, close_prompt_message
+from src.bot.screens.i18n import lang_of
+from src.bot.screens.render import take_reply_keyboard_away
+from src.bot.states.admin import REPLY_KEYBOARD_PROMPTS, reply_keyboard_up, take_prompt_message
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
 
@@ -73,6 +77,25 @@ _LEFTOVER_CANCEL: frozenset[str] = frozenset(bare_label(v) for v in ORG_CANCEL_L
 
 def _is_leftover_cancel(text: str) -> bool:
     return bare_label(text) in _LEFTOVER_CANCEL
+
+
+class _LeftoverKeyboard(Filter):
+    """No prompt armed, or one armed while a reply keyboard it did not put up
+    is still under the input.
+
+    The first is where a tap on another screen leaves the keyboard. The second
+    is the same keyboard one step later: the admin opened another prompt, whose
+    message has inline buttons only, and tapped the «Отмена» still on screen.
+    Without a keyboard up (`reply_keyboard_up`) the word is that prompt's
+    answer: «Отмена» is a word a rule may well be asked to watch for. In the
+    prompts that put the keyboard up (`REPLY_KEYBOARD_PROMPTS`) the button is
+    their own handler's to answer.
+    """
+
+    async def __call__(self, message: Message, raw_state: str | None = None) -> bool:
+        if raw_state is None:
+            return True
+        return reply_keyboard_up(message.chat.id) and raw_state not in REPLY_KEYBOARD_PROMPTS
 
 
 @router.message(
@@ -108,11 +131,7 @@ async def handle_cancel(
     F.chat.type == "private",
     F.forward_origin.is_(None),
     F.text.func(_is_leftover_cancel),
-    # Only with no prompt armed, which is where a tap on another screen leaves
-    # the keyboard. In its own prompt the button is admin_kb's to answer, and
-    # in any other prompt the word is that prompt's answer: «Отмена» is a word
-    # a rule may well be asked to watch for.
-    StateFilter(None),
+    _LeftoverKeyboard(),
     # A tap on a reply-keyboard button is never a reply. A REPLY «Отмена» is
     # typed under one of the bot's messages, and that message's handler reads
     # it: an admin's reply to a sticker card is the card's answer
@@ -128,13 +147,14 @@ async def handle_leftover_cancel(
     admin_repo: FromDishka[AdminRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
 ) -> None:
-    """«✖️ Отмена» from the organizer prompt's reply keyboard after the prompt ended.
+    """«✖️ Отмена» from a prompt's reply keyboard after that prompt ended.
 
-    A tap on another screen's button ends that prompt, and a reply keyboard
-    cannot be taken away by an edit, so it outlives the prompt
-    (`src/bot/middleware/prompt_exit.py`). Its
-    «Отмена» then means what /cancel means, and is answered the same way,
-    keyboard removed — not passed on to the bot as a chat message.
+    A tap on another screen's button, or another command, ends the organizer
+    prompt or the rules person search, and a reply keyboard cannot be taken
+    away by an edit, so it outlives the prompt
+    (`src/bot/middleware/prompt_exit.py`). Its «Отмена» then means what /cancel
+    means, and is answered the same way, keyboard removed — not passed on to
+    the bot as a chat message, nor to the prompt armed since as its answer.
     """
     await _cancel(message, state, admin_repo, bot_config_repo, via="leftover keyboard")
 
@@ -155,9 +175,15 @@ async def _cancel(
     # Also takes away a reply keyboard a prompt left (the organizer picker):
     # a one-time keyboard only hides, it stays behind the input's icon. The
     # bot has no standing reply menu to lose by this.
-    await message.answer(
-        texts.get(lang, texts["ru"]), parse_mode=None, reply_markup=ReplyKeyboardRemove()
-    )
+    await take_reply_keyboard_away(message, texts.get(lang, texts["ru"]), parse_mode=None)
+    # The message that asked would still be asking: closed like one a tap
+    # elsewhere ended, saying it was cancelled.
+    if current is not None:
+        held = take_prompt_message(message.chat.id, current)
+        if held is not None:
+            await close_prompt_message(
+                message.bot, held, current, lang_of(lang), reason=CLOSED_BY_CANCEL
+            )
 
     logger.info(
         "FSM dialog cancelled by the user",

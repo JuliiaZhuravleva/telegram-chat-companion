@@ -25,7 +25,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiogram.types import (
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     SharedUser,
     UsersShared,
@@ -37,7 +39,7 @@ from src.bot.keyboards.admin_kb import ORG_PICK_REQUEST_ID
 from src.bot.screens import orgs
 from src.bot.screens.routes import cb
 from src.bot.screens.samples import fake
-from src.bot.states.admin import AdminStates
+from src.bot.states.admin import AdminStates, note_screen, reply_keyboard_up
 from src.database.repositories.admin import AdminRepository
 from tests.unit.kb_organizer_fakes import wire_organizer_writers, written
 from tests.unit.screen_routing import ADMIN_ID, FakeState, admin_tap, deliver
@@ -285,12 +287,18 @@ async def test_an_add_from_the_prompt_on_a_chat_with_no_row(arrives: Any, lang: 
     admin_repo, container = _chat_list()
     data["dishka_container"] = container
     state = await _prompt(GROUP, lang)
+    # The prompt's own keyboard is up, as `show` notes it when the prompt opens.
+    up = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="✖️ Отмена")]])
+    note_screen(msg, "org.add", "prompt", markup=up)
+    assert reply_keyboard_up(msg.chat.id)
 
     await _propagate(msg, data, state)
 
     settings = data["chat_settings_repo"]
     settings.add_kb_organizer.assert_awaited_once()  # type: ignore[attr-defined]
     assert written(settings, GROUP) is None
+    # Taken away, and forgotten with it: «Отмена» typed later is an answer again.
+    assert not reply_keyboard_up(msg.chat.id)
     # The forward/@username reader clears the prompt before its admin check
     # too, so the count is not one: the state at the end is what matters.
     assert await state.get_state() is None

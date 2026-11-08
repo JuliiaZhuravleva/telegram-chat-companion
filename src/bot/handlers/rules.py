@@ -48,7 +48,7 @@ from aiogram import F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Filter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.custom_emoji import bare_label
@@ -57,7 +57,7 @@ from src.bot.screens import rules as screens
 from src.bot.screens.deps import resolve, state_of
 from src.bot.screens.i18n import Tr, lang_of
 from src.bot.screens.model import Screen
-from src.bot.screens.render import CANCEL, page_slice, show
+from src.bot.screens.render import CANCEL, page_slice, show, take_reply_keyboard_away
 from src.bot.screens.routes import REQUEST_IDS, cb, parse
 from src.bot.screens.sections import shows_common
 from src.bot.screens.stale import show_stale
@@ -973,7 +973,7 @@ _FIND_LABELS: Final = frozenset(bare_label(screens.FIND(lang)) for lang in ("ru"
 async def _leave_find(message: Message, line: str) -> None:
     """Take the search keyboard away on a short line of its own (a message
     carrying ``ReplyKeyboardRemove`` cannot carry inline buttons too)."""
-    await message.answer(line, parse_mode=None, reply_markup=ReplyKeyboardRemove())
+    await take_reply_keyboard_away(message, line, parse_mode=None)
 
 
 @router.message(

@@ -1,6 +1,7 @@
 """FSM states for the admin panel: the buttons each prompt calls its own, the
 screens it shows, the screen its message goes back to once it is closed, the
-message showing it now, and the prompts that take a sticker as their answer."""
+message showing it now, the chats with a reply keyboard still up, and the
+prompts that take a sticker as their answer."""
 
 import html
 import re
@@ -10,6 +11,7 @@ from types import MappingProxyType
 from typing import Final, Literal
 
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 
 class AdminStates(StatesGroup):
@@ -221,6 +223,9 @@ class PromptMessage:
     home_key: str | None = None
     """The id its `PromptHome` button needs, off the screen's own buttons; None
     when they carry none (a reply keyboard): the closed message offers the panel."""
+    lang: str | None = None
+    """The language its own buttons carry (``prefix:lang:…``): what the message is
+    closed in when no tap names one (a typed command ended the prompt)."""
 
 
 # Process-local, one entry per chat: the FSM storage is `MemoryStorage` (what
@@ -272,6 +277,17 @@ def _home_key(markup: object) -> str | None:
     return None
 
 
+def _payload_lang(markup: object) -> str | None:
+    """The language a prompt's inline buttons carry (``prefix:lang:…``), off the
+    first button that has one."""
+    for row in getattr(markup, "inline_keyboard", None) or ():
+        for button in row:
+            parts = (getattr(button, "callback_data", None) or "").split(":")
+            if len(parts) > 1 and parts[1]:
+                return parts[1]
+    return None
+
+
 def note_screen(
     message: object,
     screen_id: str,
@@ -286,16 +302,28 @@ def note_screen(
     the recorded message means that message no longer asks for input, and the
     record goes. Anything without integer ids (a test double) is ignored.
     ``markup`` is what was sent; without it, the keyboard Telegram returned on
-    ``message`` — either gives the id the closed message's button needs.
+    ``message`` — either gives the id the closed message's button needs. A
+    reply keyboard sent, or taken away, is noted for the chat too
+    (`reply_keyboard_up`).
     """
     chat_id = getattr(getattr(message, "chat", None), "id", None)
     message_id = getattr(message, "message_id", None)
     if not isinstance(chat_id, int) or not isinstance(message_id, int):
         return
+    if isinstance(markup, ReplyKeyboardMarkup):
+        _REPLY_KEYBOARD_UP.add(chat_id)
+    elif isinstance(markup, ReplyKeyboardRemove):
+        _REPLY_KEYBOARD_UP.discard(chat_id)
     if screen_id in _PROMPT_SCREEN_IDS:
         sent = markup if markup is not None else getattr(message, "reply_markup", None)
         _ON_SCREEN[chat_id] = PromptMessage(
-            chat_id, message_id, screen_id, title_line(text), editable, _home_key(sent)
+            chat_id,
+            message_id,
+            screen_id,
+            title_line(text),
+            editable,
+            _home_key(sent),
+            _payload_lang(sent),
         )
         return
     held = _ON_SCREEN.get(chat_id)
@@ -314,6 +342,41 @@ def take_prompt_message(chat_id: int, state: str) -> PromptMessage | None:
     if held is None or held.screen_id not in PROMPT_SCREENS.get(state, ()):
         return None
     return held
+
+
+# ---------------------------------------------------------------------------
+# The reply keyboard under the input
+# ---------------------------------------------------------------------------
+
+REPLY_KEYBOARD_PROMPTS: Final[frozenset[str]] = frozenset(
+    _key(state) for state in (AdminStates.awaiting_kb_organizer, AdminStates.awaiting_rule_who)
+)
+"""The prompts that put a reply keyboard under the input (the organizer prompt,
+the rules person search): while one is armed, the keyboard up is its own.
+
+The routes test checks this against the screens each prompt shows."""
+
+# Process-local like `_ON_SCREEN`, for the same reason. Telegram cannot be asked
+# whether a chat still has a reply keyboard, and editing a message never takes
+# one away; only a message sent with `ReplyKeyboardRemove` does.
+_REPLY_KEYBOARD_UP: set[int] = set()
+
+
+def reply_keyboard_up(chat_id: int) -> bool:
+    """Whether a reply keyboard this bot sent is still under ``chat_id``'s input.
+
+    A prompt ended by a button on another screen, or by a typed command, leaves
+    its keyboard there (taking it away takes a message of its own); its
+    «✖️ Отмена» can then be tapped while another prompt is armed, and must not
+    become that prompt's answer (`src.bot.handlers.fsm_cancel`).
+    """
+    return chat_id in _REPLY_KEYBOARD_UP
+
+
+def forget_reply_keyboard(chat_id: object) -> None:
+    """``chat_id``'s reply keyboard was taken away (`render.take_reply_keyboard_away`)."""
+    if isinstance(chat_id, int):
+        _REPLY_KEYBOARD_UP.discard(chat_id)
 
 
 # ---------------------------------------------------------------------------

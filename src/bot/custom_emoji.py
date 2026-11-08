@@ -30,8 +30,11 @@ or off.
 Sets are read once at startup with getStickerSet from ``CUSTOM_EMOJI_BUTTONS`` and
 ``CUSTOM_EMOJI_MARKS``. A set belongs to the bot that uploaded it, so the dev bot and the
 production bot each need their own copy. Unset or unreadable: the module is off. A send
-Telegram refuses because of a custom emoji is resent plain once and the module turns off
-until restart.
+Telegram refuses because of a custom emoji is resent plain once and logged
+(``custom_emoji_refused``). One refusal is one message's fault (a glyph edited out of the set
+while the bot runs, a mark Telegram will not take where it landed), so the module stays on for
+every other screen; ``REFUSALS_TO_OFF`` refusals in a row mean it is the account or the sets,
+and the module turns off until restart. A rich send that goes through starts the count again.
 """
 
 from __future__ import annotations
@@ -66,6 +69,8 @@ _VS16: Final = "️"
 # Glyphs the screens use for a meaning the set draws under another glyph.
 ALIASES: Final = {"◀": "⬅", "🔄": "🔁", "⚫": "⚪", "📝": "✏"}
 _REFUSAL_WORDS: Final = ("document_invalid", "emoji", "icon", "can't parse entities")
+REFUSALS_TO_OFF: Final = 3
+"""Rich sends refused in a row before the module turns off; one is one message's fault."""
 _TAG: Final = re.compile(r"(<[^>]*>)")
 _RAW_TAGS: Final = frozenset({"blockquote", "code", "pre", "tg-emoji", "a"})
 
@@ -103,6 +108,7 @@ class CustomEmoji(BaseRequestMiddleware):
         self._line: re.Pattern[str] | None = None
         self.on = False
         self.off_reason = "unset"
+        self.refused_in_a_row = 0
 
     async def load(self, bot: Bot, buttons_set: str | None, marks_set: str | None) -> None:
         """Read both sets; any failure leaves the module off with a reason, never stops the bot."""
@@ -139,6 +145,7 @@ class CustomEmoji(BaseRequestMiddleware):
         self._line = self._pattern(self._marks, r"^([ \t]*)({}){}?+")
         self.on = True
         self.off_reason = ""
+        self.refused_in_a_row = 0
         logger.info("custom_emoji_on", buttons=len(self._buttons), marks=len(self._marks))
 
     @staticmethod
@@ -169,13 +176,28 @@ class CustomEmoji(BaseRequestMiddleware):
         if rich is plain:
             return await make_request(bot, plain)
         try:
-            return await make_request(bot, rich)
+            response = await make_request(bot, rich)
         except TelegramBadRequest as exc:
             if not any(word in exc.message.lower() for word in _REFUSAL_WORDS):
                 raise
+            # Resend first: a refusal the plain send hits too (broken HTML) is not the icons'.
             response = await make_request(bot, plain)
-            self._off(f"refused: {exc.message}")
+            self._refused(method, exc.message)
             return response
+        self.refused_in_a_row = 0
+        return response
+
+    def _refused(self, method: TelegramMethod[Any], reason: str) -> None:
+        """Count a rich send Telegram refused and the plain resend took; off at the limit."""
+        self.refused_in_a_row += 1
+        logger.warning(
+            "custom_emoji_refused",
+            method=method.__api_method__,
+            reason=reason[:200],
+            in_a_row=self.refused_in_a_row,
+        )
+        if self.refused_in_a_row >= REFUSALS_TO_OFF:
+            self._off(f"refused {self.refused_in_a_row} times in a row: {reason}")
 
     # ── the rewrite ──────────────────────────────────────────────────────
 

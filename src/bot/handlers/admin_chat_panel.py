@@ -236,12 +236,14 @@ async def _close_number_prompt(state: FSMContext | None) -> None:
     one or a percentage.
 
     ``tol.in`` and ``chance.in`` are edited in place, so the admin can leave them
-    by a button on any older panel message, or by typing ``/panel``, which no
-    middleware sees as leaving; left armed, the state would read their next text
-    as a value. Only these prompts' states are cleared here. The instruction
-    editor is not an exception: `PromptExitMiddleware` ends
+    by a button on any older panel message, or by sending ``/panel``; left armed,
+    the state would read their next text as a value. `PromptExitMiddleware` ends
+    every prompt on a foreign tap or a typed command before this runs; what it
+    lets through is a FORWARDED ``/panel`` (content, to the middleware), which
+    ``Command("panel")`` still takes. Only these prompts' states are cleared
+    here. The instruction editor is not an exception: the middleware ends
     ``awaiting_system_prompt`` and its draft on any tap outside
-    ``adm_pnl_sp:``/``spx:``/``spok:``/``spre:``, before this runs.
+    ``adm_pnl_sp:``/``spx:``/``spok:``/``spre:``.
     """
     if state is not None and await state.get_state() in _NUMBER_PROMPTS:
         await state.clear()

@@ -96,7 +96,6 @@ from aiogram.types import (
     Message,
     MessageOriginHiddenUser,
     MessageOriginUser,
-    ReplyKeyboardRemove,
 )
 from dishka.integrations.aiogram import FromDishka
 
@@ -106,7 +105,7 @@ from src.bot.keyboards.admin_kb import ORG_CANCEL_LABEL, ORG_PICK_LABEL, ORG_PIC
 from src.bot.screens import orgs
 from src.bot.screens.i18n import lang_of
 from src.bot.screens.model import Screen
-from src.bot.screens.render import page_slice, show
+from src.bot.screens.render import page_slice, show, take_reply_keyboard_away
 from src.bot.screens.routes import parse
 from src.bot.screens.stale import NO_ACCESS, show_stale
 from src.bot.states.admin import AdminStates
@@ -358,8 +357,9 @@ async def _show_card(callback: CallbackQuery, screen: Screen, chat_id: int, user
     without such settings was not tried), and ``tg://openmessage`` was tried on
     one phone only. Only an error that names a
     button or a URL is answered this way: any other would fail the bare card
-    just the same, so it propagates like every screen's. The query was answered
-    by the first try and is not answered again.
+    just the same, so it propagates like every screen's. A try that raised has
+    not answered the query (``render`` answers only once a screen is out), so
+    the retry answers it, once.
     """
     try:
         await show(callback, screen)
@@ -373,7 +373,7 @@ async def _show_card(callback: CallbackQuery, screen: Screen, chat_id: int, user
             user_id=user_id,
             error=exc.message,
         )
-        await show(callback, bare, answered=True)
+        await show(callback, bare)
 
 
 async def _names(
@@ -540,7 +540,7 @@ async def _close_prompt(
             return None
     else:
         anchor = target
-    await anchor.answer(line, reply_markup=ReplyKeyboardRemove())
+    await take_reply_keyboard_away(anchor, line)
     return anchor
 
 
@@ -1215,7 +1215,7 @@ async def handle_kb_organizer_shared(
 
     if not shared.users or chat_id is None:
         logger.info("Organizer pick is stale", has_state=chat_id is not None)
-        await message.answer(_PICK_STALE[lang], reply_markup=ReplyKeyboardRemove())
+        await take_reply_keyboard_away(message, _PICK_STALE[lang])
         return
 
     person = shared.users[0]
@@ -1262,7 +1262,7 @@ async def handle_kb_organizer_cancel_label(
         bot_config_repo, message.from_user.id if message.from_user else None
     ):
         await state.clear()
-        await message.answer(_ADD_CANCELLED[lang], reply_markup=ReplyKeyboardRemove())
+        await take_reply_keyboard_away(message, _ADD_CANCELLED[lang])
         return
     ids, title = await _load(chat_settings_repo, chat_id)
     screen = await _orgs_view(message.bot, lang, chat_id, title, ids, organizer_names)
