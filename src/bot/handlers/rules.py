@@ -1694,6 +1694,7 @@ async def handle_rule_config_input(
     # Checked here, before the prompt is claimed below: asyncpg refuses a weight
     # or "mandatory" of the wrong type at the INSERT, after `state.clear()`, and
     # the admin got no answer and no prompt to try again in.
+    _whole_floats_to_int(str(rule_type), config)
     field_error = _cfg_field_error(str(rule_type), config, lang) or _cfg_column_error(config, lang)
     if field_error is not None:
         logger.info("rule_cfg_refused", chat_id=chat_id, rule_type=rule_type)
@@ -1791,6 +1792,18 @@ _ID_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
 
 def _whole(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _whole_floats_to_int(rule_type: str, config: dict[str, Any]) -> None:
+    """``60.0`` in a number field is 60: JSON does not tell the two apart, the admin neither.
+
+    The engine read such a value before the guard existed, so refusing it would refuse a
+    rule that worked. A fractional value stays refused: the card shows whole numbers only.
+    """
+    for key in _NUMBER_FIELDS.get(rule_type, ()):
+        value = config.get(key)
+        if isinstance(value, float) and value.is_integer():
+            config[key] = int(value)
 
 
 def _cfg_field_error(rule_type: str, config: Mapping[str, Any], lang: str) -> str | None:

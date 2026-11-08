@@ -1679,13 +1679,14 @@ def _bind_like_asyncpg(**kwargs: Any) -> int:
     """`RulesRepository.create` as the database answers it, not as a mock does.
 
     ``mandatory`` is a ``BOOLEAN``: pgproto's ``bool_encode`` takes a bool and
-    nothing else. ``weight`` is an ``INT``: ``int4_encode`` truncates anything
-    with ``__int__`` (``True`` is 1, ``2.5`` is 2), refuses the rest and anything
-    past int32; None is NULL. What was refused here raised after the prompt
-    was already claimed; what was taken was stored as typed.
+    nothing else, and None is NULL (the column is nullable, no CHECK). ``weight``
+    is an ``INT``: ``int4_encode`` truncates anything with ``__int__`` (``True``
+    is 1, ``2.5`` is 2), refuses the rest and anything past int32; None is NULL.
+    What was refused here raised after the prompt was already claimed; what was
+    taken was stored as typed.
     """
     mandatory, weight = kwargs["mandatory"], kwargs["weight"]
-    if not isinstance(mandatory, bool):
+    if mandatory is not None and not isinstance(mandatory, bool):
         raise _Unbindable(f"a boolean is required (got type {type(mandatory).__name__})")
     if weight is None:
         return RULE_ID
@@ -1827,6 +1828,10 @@ class TestTheJsonEngineFields:
                 "Поле <code>interval_seconds</code> должно быть целым числом.",
             ),
             (
+                '{"type": "sticker_flood", "interval_seconds": 30.5}',
+                "Поле <code>interval_seconds</code> должно быть целым числом.",
+            ),
+            (
                 '{"type": "user_specific", "user_ids": "7"}',
                 "Поле <code>user_ids</code> должно быть списком id участников",
             ),
@@ -1880,6 +1885,7 @@ class TestTheJsonEngineFields:
             "spam-length-null",
             "flood-count-text",
             "flood-interval-list",
+            "flood-interval-fraction",
             "user-ids-text",
             "user-ids-of-text",
             "target-users-bool",
@@ -1917,6 +1923,8 @@ class TestTheJsonEngineFields:
             '"target_users": [11], "exclude_users": []}',
             '{"keywords": ["kw"], "match_type": "exact", "case_sensitive": false}',
             '{"type": "spam_detect", "user_ids": "not this type\'s field"}',
+            '{"type": "sticker_flood", "max_stickers_per_interval": 3, "interval_seconds": 60.0}',
+            '{"type": "spam_detect", "max_messages": 5.0, "time_window_seconds": 90.0}',
         ],
         ids=[
             "spam",
@@ -1926,6 +1934,8 @@ class TestTheJsonEngineFields:
             "keyword-all-fields",
             "keyword-exact",
             "another-types-field",
+            "flood-whole-float",
+            "spam-whole-floats",
         ],
     )
     async def test_every_field_typed_as_the_engine_reads_it_makes_the_rule(
