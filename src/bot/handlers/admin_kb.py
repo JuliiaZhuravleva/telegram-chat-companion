@@ -3,6 +3,15 @@
 The screens are built in ``screens/orgs.py``; this module reads and writes
 ``chat_settings.kb_organizer_ids`` and decides which screen answers what.
 
+Every write is one of ``ChatSettingsRepository``'s organizer writers, a single
+``UPDATE … RETURNING`` each, and the screen is drawn from the ids it returns.
+Taps run as concurrent tasks, and the read-modify-write this replaced lost one
+of two quick adds after both screens had said «добавлен». A writer that
+returns None matched no chat row: the group became a supergroup and its row
+moved to the new id, or the chat is gone. Nothing was stored then, so no name
+is kept and the answer is the chat list with ``CHAT_GONE``, as the chat panel
+gives.
+
 Callbacks (all ``adm_kb_*``, the chat id in the payload):
 
 - ``adm_kb_orgs:`` — the organizer list, a page of it.
@@ -63,7 +72,6 @@ of the link before it is logged (``_error_text``).
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime, timedelta
@@ -93,6 +101,7 @@ from aiogram.types import (
 from dishka.integrations.aiogram import FromDishka
 
 from src.bot.custom_emoji import bare_label
+from src.bot.handlers.admin_chat_panel import CHAT_GONE, show_chats
 from src.bot.keyboards.admin_kb import ORG_CANCEL_LABEL, ORG_PICK_LABEL, ORG_PICK_REQUEST_ID
 from src.bot.screens import orgs
 from src.bot.screens.i18n import lang_of
@@ -194,26 +203,6 @@ async def _load(repo: ChatSettingsRepository, chat_id: int) -> tuple[list[int], 
         return [], None
     title = row.get("chat_title")
     return _parse_organizer_ids(row.get("kb_organizer_ids")), title if title else None
-
-
-async def _save(repo: ChatSettingsRepository, chat_id: int, ids: list[int]) -> None:
-    await repo.set_field(chat_id, "kb_organizer_ids", json.dumps(ids))
-
-
-async def _add_organizer(
-    chat_settings_repo: ChatSettingsRepository, chat_id: int, user_id: int
-) -> tuple[bool, list[int], str | None]:
-    """Append ``user_id`` to the chat's organizers; a repeat writes nothing.
-
-    Returns ``(added, organizer ids after, chat title)``: the caller renders
-    the list from these ids instead of reading the row back.
-    """
-    ids, title = await _load(chat_settings_repo, chat_id)
-    if user_id in ids:
-        return False, ids, title
-    ids.append(user_id)
-    await _save(chat_settings_repo, chat_id, ids)
-    return True, ids, title
 
 
 # What Telegram answers `getChatMember` for someone who is not in the group, as
@@ -534,6 +523,27 @@ async def _in_prompt(state: FSMContext | None) -> bool:
     return state is not None and await state.get_state() == AdminStates.awaiting_kb_organizer.state
 
 
+async def _close_prompt(
+    target: CallbackQuery | Message, state: FSMContext, line: str
+) -> Message | None:
+    """Clear the add prompt and take the reply keyboard away on ``line``.
+
+    Returns the message to answer under next, or None when the tapped one is
+    inaccessible. What follows is a new message: one carrying
+    ``ReplyKeyboardRemove`` cannot carry inline buttons too.
+    """
+    await state.clear()
+    if isinstance(target, CallbackQuery):
+        await target.answer()
+        anchor = target.message
+        if not isinstance(anchor, Message):
+            return None
+    else:
+        anchor = target
+    await anchor.answer(line, reply_markup=ReplyKeyboardRemove())
+    return anchor
+
+
 async def _leave_prompt(
     target: CallbackQuery | Message,
     state: FSMContext,
@@ -541,18 +551,33 @@ async def _leave_prompt(
     screen: Screen,
 ) -> None:
     """End the add prompt: clear it, take the reply keyboard away on ``line``, then
-    send the organizer list as a new message (a message carrying
-    ``ReplyKeyboardRemove`` cannot carry inline buttons too)."""
-    await state.clear()
-    if isinstance(target, CallbackQuery):
-        await target.answer()
-        anchor = target.message
-        if not isinstance(anchor, Message):
-            return
-    else:
-        anchor = target
-    await anchor.answer(line, reply_markup=ReplyKeyboardRemove())
-    await show(anchor, screen)
+    send the organizer list as a new message."""
+    anchor = await _close_prompt(target, state, line)
+    if anchor is not None:
+        await show(anchor, screen)
+
+
+async def _chat_gone(
+    target: CallbackQuery | Message,
+    lang: str,
+    chat_id: int,
+    data: Mapping[str, Any],
+    *,
+    prompt: FSMContext | None = None,
+) -> None:
+    """A writer matched no chat row: nothing was stored. Say so over the chat list.
+
+    ``prompt`` is the add prompt's state when the write answered the prompt:
+    it is closed and its keyboard taken away first, and the chat list follows
+    as a new message.
+    """
+    logger.info("Organizer write found no chat row", chat_id=chat_id)
+    if prompt is None:
+        await show_chats(target, lang, notice_raw=CHAT_GONE(lang), data=data)
+        return
+    anchor = await _close_prompt(target, prompt, _ADD_CANCELLED[lang])
+    if anchor is not None:
+        await show_chats(anchor, lang, notice_raw=CHAT_GONE(lang), data=data)
 
 
 # ---------------------------------------------------------------------------
@@ -616,15 +641,17 @@ async def handle_kb_organizer_remove(
         return
     chat_id, user_id = fields
 
-    ids, title = await _load(chat_settings_repo, chat_id)
-    if user_id not in ids:
+    before, title = await _load(chat_settings_repo, chat_id)
+    if user_id not in before:
         # Already gone (a second tap, another admin): show the list as it is.
-        screen = await _orgs_view(callback.bot, lang, chat_id, title, ids, organizer_names)
+        screen = await _orgs_view(callback.bot, lang, chat_id, title, before, organizer_names)
         await show(callback, screen)
         return
-    position = ids.index(user_id)
-    ids.remove(user_id)
-    await _save(chat_settings_repo, chat_id, ids)
+    position = before.index(user_id)
+    ids = await chat_settings_repo.remove_kb_organizer(chat_id, user_id)
+    if ids is None:
+        await _chat_gone(callback, lang, chat_id, kwargs)
+        return
     logger.info("Organizer removed", chat_id=chat_id, user_id=user_id)
 
     # The stored name stays behind on purpose: ↩️ Вернуть brings it back.
@@ -662,13 +689,17 @@ async def handle_kb_organizer_undo(
     chat_id, user_id = fields
 
     ids, title = await _load(chat_settings_repo, chat_id)
-    position = ids.index(user_id) if user_id in ids else None
-    if position is None:
-        wanted = _optional_int(callback.data, 4)
-        position = len(ids) if wanted is None else min(max(wanted, 0), len(ids))
-        ids.insert(position, user_id)
-        await _save(chat_settings_repo, chat_id, ids)
+    if user_id not in ids:
+        # Back at the position the button carries (none on old buttons: the end).
+        restored = await chat_settings_repo.restore_kb_organizer(
+            chat_id, user_id, _optional_int(callback.data, 4)
+        )
+        if restored is None:
+            await _chat_gone(callback, lang, chat_id, kwargs)
+            return
+        ids = restored
         logger.info("Organizer restored", chat_id=chat_id, user_id=user_id)
+    position = ids.index(user_id)
 
     names = await _names(callback.bot, chat_id, [user_id], lang, organizer_names)
     screen = await _orgs_view(
@@ -949,16 +980,23 @@ async def handle_kb_organizer_list(
     chat_settings_repo: FromDishka[ChatSettingsRepository],
     bot_config_repo: FromDishka[BotConfigRepository],
     message_repo: FromDishka[MessageRepository],
+    state: FSMContext,
     **kwargs: Any,
 ) -> None:
     """The chat's participants, most active first: add by tapping a name instead
-    of guessing a forward or an @username. Current organizers are marked."""
+    of guessing a forward or an @username. Current organizers are marked.
+
+    The add prompt stays open over its own chat's list (the list is offered
+    from the prompt's failure answer). Another chat's list ends it, as
+    ``adm_kb_orgs:`` does: the prompt names no chat on the screen, so the
+    admin's next @username or forward would go to the chat they left.
+    """
     if not await _admin_tap(callback, bot_config_repo):
         return
     lang = _lang_of_payload(callback.data)
     head = _ints(callback.data, 1)
     if head is None:
-        await show_stale(callback, lang, data=kwargs)
+        await show_stale(callback, lang, data=kwargs, state=state)
         return
     (chat_id,) = head
     page = max(_optional_int(callback.data, 3) or 0, 0)
@@ -978,10 +1016,11 @@ async def handle_kb_organizer_list(
         rows.append(
             (uid, orgs.candidate_name(candidate.get("first_name"), candidate.get("username"), uid))
         )
-    await show(
-        callback,
-        orgs.org_list_screen(lang, chat_id, title, rows, current=ids, page=page, pages=pages),
-    )
+    screen = orgs.org_list_screen(lang, chat_id, title, rows, current=ids, page=page, pages=pages)
+    if await _in_prompt(state) and (await state.get_data()).get("kb_chat_id") != chat_id:
+        await _leave_prompt(callback, state, _ADD_CANCELLED[lang], screen)
+        return
+    await show(callback, screen)
 
 
 @router.callback_query(F.data.startswith("adm_kb_org_pick:"))
@@ -1007,9 +1046,15 @@ async def handle_kb_organizer_pick(
         return
     chat_id, user_id = fields
 
-    added, ids, title = await _add_organizer(chat_settings_repo, chat_id, user_id)
-    if not added:
+    before, title = await _load(chat_settings_repo, chat_id)
+    if user_id in before:
         await callback.answer(orgs.ALREADY_TOAST(lang))
+        return
+    ids = await chat_settings_repo.add_kb_organizer(chat_id, user_id)
+    if ids is None:
+        await _chat_gone(
+            callback, lang, chat_id, kwargs, prompt=state if await _in_prompt(state) else None
+        )
         return
     logger.info("Organizer added from the participant list", chat_id=chat_id, user_id=user_id)
 
@@ -1079,6 +1124,7 @@ async def _added(
     lang: str,
     chat_id: int,
     user_id: int,
+    data: Mapping[str, Any],
     *,
     first_name: str | None = None,
     last_name: str | None = None,
@@ -1092,7 +1138,15 @@ async def _added(
     chat. The line does not format the parts it was given on its own: then a
     pick would read «Аня Ким (@anya)» above a list row «@anya».
     """
-    added, ids, title = await _add_organizer(chat_settings_repo, chat_id, user_id)
+    ids, title = await _load(chat_settings_repo, chat_id)
+    added = user_id not in ids
+    if added:
+        written = await chat_settings_repo.add_kb_organizer(chat_id, user_id)
+        if written is None:
+            # No name is kept either: a row under a dead id is never moved.
+            await _chat_gone(message, lang, chat_id, data, prompt=state)
+            return
+        ids = written
     # Before the list is drawn, and also on a repeat add: the newest name wins.
     await store.remember(
         chat_id, user_id, first_name=first_name, last_name=last_name, username=username
@@ -1129,6 +1183,7 @@ async def handle_kb_organizer_shared(
     admin_repo: FromDishka[AdminRepository],
     state: FSMContext,
     organizer_names: FromDishka[OrganizerNameRepository],
+    **kwargs: Any,
 ) -> None:
     """The admin picked a person with «🔍 Найти в Telegram» (``request_users``).
 
@@ -1172,6 +1227,7 @@ async def handle_kb_organizer_shared(
         lang,
         chat_id,
         person.user_id,
+        kwargs,
         first_name=person.first_name,
         last_name=person.last_name,
         username=person.username,
@@ -1250,6 +1306,7 @@ async def handle_kb_organizer_add_reply(
     message_repo: FromDishka[MessageRepository],
     state: FSMContext,
     organizer_names: FromDishka[OrganizerNameRepository],
+    **kwargs: Any,
 ) -> None:
     """Resolve a forwarded message or a plain `@username` into a new organizer.
 
@@ -1301,7 +1358,7 @@ async def handle_kb_organizer_add_reply(
             return
         sender = origin.sender_user
         await _added(
-            message, state, chat_settings_repo, organizer_names, lang, chat_id, sender.id,
+            message, state, chat_settings_repo, organizer_names, lang, chat_id, sender.id, kwargs,
             first_name=sender.first_name, last_name=sender.last_name, username=sender.username,
         )  # fmt: skip
         return
@@ -1316,6 +1373,7 @@ async def handle_kb_organizer_add_reply(
         await fail("elsewhere" if elsewhere else "not_found")
         return
     await _added(
-        message, state, chat_settings_repo, organizer_names, lang, chat_id, int(found["user_id"]),
+        message, state, chat_settings_repo, organizer_names, lang, chat_id,
+        int(found["user_id"]), kwargs,
         first_name=found.get("first_name"), username=username,
     )  # fmt: skip

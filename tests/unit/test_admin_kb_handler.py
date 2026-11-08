@@ -62,6 +62,7 @@ from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
 from src.database.repositories.organizer_names import KnownName, OrganizerNameRepository
 from src.di import RepositoryProvider
+from tests.unit.kb_organizer_fakes import wire_organizer_writers, written
 from tests.unit.test_fsm_escape import _FakeState
 
 ADMIN_ID = 111
@@ -192,7 +193,8 @@ class FakeNames:
     async def remember_seen(self, chat_id: int, user_id: int) -> bool:
         assert chat_id == CHAT_ID
         self.calls.append(("remember_seen", user_id))
-        if user_id not in self.seen:
+        # The SQL is ON CONFLICT DO NOTHING: a name already stored is kept.
+        if user_id not in self.seen or user_id in self.stored:
             return False
         self.stored[user_id] = self.seen[user_id]
         return True
@@ -263,8 +265,7 @@ def _make_chat_settings_repo(
             ),
         }
     )
-    repo.set_field = AsyncMock()
-    return repo
+    return wire_organizer_writers(repo)
 
 
 def _make_message_repo(
@@ -286,12 +287,7 @@ async def _prompt_state() -> _FakeState:
 
 
 def _written(repo: MagicMock) -> list[int] | None:
-    if not repo.set_field.await_count:
-        return None
-    repo.set_field.assert_awaited_once()
-    chat_id, field, value = repo.set_field.await_args.args
-    assert (chat_id, field) == (CHAT_ID, "kb_organizer_ids")
-    return json.loads(value)
+    return written(repo, CHAT_ID)
 
 
 def _edited(callback: MagicMock) -> tuple[str, InlineKeyboardMarkup]:
@@ -364,7 +360,11 @@ GARBLED = [
     (handle_kb_organizer_remove, "adm_kb_org_rm:ru:-100:x", {}),
     (handle_kb_organizer_remove, "adm_kb_org_rm:ru:-100", {}),
     (handle_kb_organizer_undo, "adm_kb_org_undo:ru::5", {}),
-    (handle_kb_organizer_list, "adm_kb_org_list:ru:", {"message_repo": _make_message_repo()}),
+    (
+        handle_kb_organizer_list,
+        "adm_kb_org_list:ru:",
+        {"message_repo": _make_message_repo(), "state": _FakeState()},
+    ),
     (handle_kb_organizer_pick, "adm_kb_org_pick:ru:-100:", {"state": _FakeState()}),
     (handle_kb_organizer_add_prompt, "adm_kb_org_add:en", {"state": _FakeState()}),
 ]
@@ -382,7 +382,7 @@ async def test_a_payload_that_does_not_parse_shows_the_stale_screen(
     stale.assert_awaited_once()
     assert stale.await_args.args[0] is callback
     assert stale.await_args.args[1] == ("en" if ":en" in data else "ru")
-    repo.set_field.assert_not_awaited()
+    assert _written(repo) is None
     callback.message.edit_text.assert_not_awaited()
 
 
@@ -766,7 +766,9 @@ class TestParticipantList:
         ]
         message_repo = _make_message_repo(top_active_users=(candidates, 12))
 
-        await _call(handle_kb_organizer_list, callback, message_repo=message_repo)
+        await _call(
+            handle_kb_organizer_list, callback, message_repo=message_repo, state=_FakeState()
+        )
 
         message_repo.get_top_active_users.assert_awaited_once_with(CHAT_ID, 1, orgs.LIST_PER_PAGE)
         text, markup = _edited(callback)
@@ -781,7 +783,12 @@ class TestParticipantList:
     async def test_nobody_seen_says_so_and_offers_the_other_way(self) -> None:
         callback = _make_callback(f"adm_kb_org_list:ru:{CHAT_ID}:0")
 
-        await _call(handle_kb_organizer_list, callback, message_repo=_make_message_repo())
+        await _call(
+            handle_kb_organizer_list,
+            callback,
+            message_repo=_make_message_repo(),
+            state=_FakeState(),
+        )
 
         text, markup = _edited(callback)
         assert "Бот пока не видел здесь ни одного сообщения." in text
@@ -791,7 +798,9 @@ class TestParticipantList:
         callback = _make_callback(f"adm_kb_org_list:ru:{CHAT_ID}:7")
         message_repo = _make_message_repo(top_active_users=([], 5))
 
-        await _call(handle_kb_organizer_list, callback, message_repo=message_repo)
+        await _call(
+            handle_kb_organizer_list, callback, message_repo=message_repo, state=_FakeState()
+        )
 
         assert [c.args for c in message_repo.get_top_active_users.await_args_list] == [
             (CHAT_ID, 7, orgs.LIST_PER_PAGE),

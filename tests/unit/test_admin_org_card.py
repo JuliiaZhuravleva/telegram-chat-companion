@@ -54,6 +54,7 @@ from src.bot.screens.registry import load_all
 from src.bot.screens.routes import BACK_NAMES, cb
 from src.bot.screens.samples import fake
 from src.database.repositories.organizer_names import KnownName
+from tests.unit.kb_organizer_fakes import wire_organizer_writers, written
 from tests.unit.screen_routing import ADMIN_ID, FakeState, admin_tap, deliver, first_match
 
 CID = fake.CHAT_ID
@@ -249,8 +250,7 @@ class Store:
 def _settings(ids: list[int], title: str | None = TITLE) -> MagicMock:
     repo = MagicMock()
     repo.get = AsyncMock(return_value={"chat_title": title, "kb_organizer_ids": json.dumps(ids)})
-    repo.set_field = AsyncMock()
-    return repo
+    return wire_organizer_writers(repo)
 
 
 def _bot_config(admins: list[int] | None = None) -> MagicMock:
@@ -417,7 +417,7 @@ async def test_a_tap_on_a_name_opens_the_card_and_removes_nobody(drawn: list[Scr
     settings = _settings(ids)
     card = await _tap(listed.target(name), Telegram(), settings=settings)
 
-    settings.set_field.assert_not_awaited()
+    assert written(settings, CID) is None
     assert json.loads(settings.get.return_value["kb_organizer_ids"]) == ids
     assert drawn[-1].id == "org.card"
     assert card.text.startswith(f"👤 <b>@{NICK}</b> · {TITLE}")
@@ -863,8 +863,7 @@ async def test_card_then_remove_gives_the_list_with_undo() -> None:
     settings = _settings(ids)
     removed = await _tap(card.target(REMOVE), Telegram(), settings=settings)
 
-    settings.set_field.assert_awaited_once()
-    assert json.loads(settings.set_field.await_args.args[2]) == [OTHER]
+    assert written(settings, CID) == [OTHER]
     assert "↩️ Вернуть" in removed.labels
     assert removed.target("↩️ Вернуть") == cb("adm_kb_org_undo:", "ru", CID, ORG, 1)
 
@@ -882,8 +881,7 @@ async def test_a_remove_button_from_before_the_card_still_removes(
     removed = await _tap(cb("adm_kb_org_rm:", "ru", CID, ORG) + ":p", Telegram(), settings=settings)
 
     stale.assert_not_awaited()
-    settings.set_field.assert_awaited_once()
-    assert json.loads(settings.set_field.await_args.args[2]) == [OTHER]
+    assert written(settings, CID) == [OTHER]
     assert removed.target("↩️ Вернуть") == cb("adm_kb_org_undo:", "ru", CID, ORG, 1)
 
 
@@ -903,7 +901,7 @@ async def test_someone_no_longer_an_organizer_gets_the_list_with_a_line(
     assert drawn[-1].id == "orgs"
     assert orgs.NOT_ORGANIZER("ru") in tap.text
     assert bot.links == [] and bot.sent == []
-    settings.set_field.assert_not_awaited()
+    assert written(settings, CID) is None
 
 
 @pytest.mark.parametrize(
@@ -982,7 +980,7 @@ async def test_invite_makes_one_link_for_one_person_for_seven_days(
     }
     assert tap.target("🤖 Отправить от бота") == _dm()
     assert tap.target("⬅️ Организатор") == _card()
-    tap.settings.set_field.assert_not_awaited()
+    assert written(tap.settings, CID) is None
 
 
 async def test_a_long_name_is_clipped_to_telegrams_32_for_the_link_name() -> None:
@@ -1007,7 +1005,7 @@ async def test_without_the_invite_right_the_card_says_so_and_nothing_changes(
     assert orgs.NO_INVITE_RIGHT("ru") in tap.text
     assert INVITE in tap.labels, "the repair is to grant the right and tap again"
     assert bot.sent == []
-    settings.set_field.assert_not_awaited()
+    assert written(settings, CID) is None
 
 
 async def test_another_link_failure_is_logged_and_said_honestly(drawn: list[Screen]) -> None:
