@@ -16,7 +16,11 @@ import structlog
 from aiogram import Bot
 from aiogram.client.default import Default
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+)
 from aiogram.types import ChatMemberRestricted, InlineKeyboardMarkup, Message
 
 from src.database.repositories.bot_config import BotConfigRepository
@@ -87,7 +91,7 @@ async def is_bot_in_chat(bot: Bot, chat_id: int, bot_id: int) -> bool | None:
     Three answers, as `is_user_chat_admin` gives, and for the same reason:
     ``False`` is a verdict (left or kicked, restricted out of the chat, or
     Telegram refusing with Forbidden or Bad Request: "bot is not a member",
-    "chat not found"), ``None`` means the API did not answer (network, a 5xx,
+    "chat not found", or answering that the group moved to a supergroup), ``None`` means the API did not answer (network, a 5xx,
     flood control) and nothing is known. A caller that acts only when the bot
     is present writes ``is True``.
 
@@ -97,6 +101,16 @@ async def is_bot_in_chat(bot: Bot, chat_id: int, bot_id: int) -> bool | None:
     """
     try:
         member = await bot.get_chat_member(chat_id, bot_id)
+    except TelegramMigrateToChat as exc:
+        # The group became a supergroup under a new id: this id is dead for good, so
+        # "try again" would loop. aiogram raises this before mapping a 400 to BadRequest.
+        logger.info(
+            "bot_not_in_chat",
+            chat_id=chat_id,
+            migrated_to=exc.migrate_to_chat_id,
+            error=str(exc),
+        )
+        return False
     except (TelegramBadRequest, TelegramForbiddenError) as exc:
         logger.info("bot_not_in_chat", chat_id=chat_id, error=str(exc))
         return False

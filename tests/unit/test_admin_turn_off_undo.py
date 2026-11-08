@@ -23,7 +23,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramMigrateToChat,
+    TelegramNetworkError,
+)
 from aiogram.methods import GetChatMember
 from aiogram.types import (
     Chat,
@@ -493,8 +498,13 @@ _ASK = GetChatMember(chat_id=CHAT_ID, user_id=BOT_ID)
         _restricted(is_member=False),
         TelegramForbiddenError(_ASK, "Forbidden: bot was kicked from the supergroup chat"),
         TelegramBadRequest(_ASK, "Bad Request: chat not found"),
+        # A group upgraded while off: its old id answers with the new one. Before, this
+        # fell to "Telegram did not answer" and the undo offered «try again» for ever.
+        TelegramMigrateToChat(
+            _ASK, "Bad Request: group chat was upgraded to a supergroup chat", -1009999999998
+        ),
     ],
-    ids=["left", "kicked", "restricted-out", "forbidden", "bad-request"],
+    ids=["left", "kicked", "restricted-out", "forbidden", "bad-request", "migrated"],
 )
 async def test_every_answer_that_the_bot_is_gone_keeps_the_chat_off(answer: Any) -> None:
     settings, _, _, data = _world(enabled=False)
