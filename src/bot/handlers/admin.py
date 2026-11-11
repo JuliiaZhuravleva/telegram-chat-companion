@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from html import escape
 from typing import Any
@@ -97,14 +97,12 @@ from src.bot.screens.status import (
 )
 from src.bot.utils import check_admin_direct, is_bot_in_chat
 from src.bot.widgets.api import SendWidget
-from src.bot.widgets.queries import widgets_enabled
+from src.bot.widgets.queries import load_board, widgets_enabled
 from src.bot.widgets.status_board import (
     BOARD_FAILED,
     BOARD_OFF,
-    HISTORY_HOURS,
     board_caption,
     board_html,
-    board_state,
     encode,
 )
 from src.config import Settings
@@ -729,15 +727,13 @@ async def handle_board(
     if callback.message is None or callback.bot is None:
         await callback.answer()
         return
-    row = await admin_repo.get_latest_health_check()
-    history = await admin_repo.get_health_by_hour(HISTORY_HOURS)
-    now = datetime.now(UTC)
+    row, state, now = await load_board(lang, admin_repo, bot_config)
     try:
         await callback.bot(
             SendWidget(
                 chat_id=callback.message.chat.id,
                 html=board_html(lang),
-                chat_data=encode(board_state(lang, row, history, now=now)),
+                chat_data=encode(state or {}),
                 caption=board_caption(lang, row, now=now),
                 parse_mode="HTML",
                 allow_queries=True,

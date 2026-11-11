@@ -26,6 +26,8 @@ Payloads (≤ 64 B), written by ``status_board.html``:
 from __future__ import annotations
 
 import asyncio
+import warnings
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -36,16 +38,17 @@ from aiogram.methods import EditMessageCaption, TelegramMethod
 from aiogram.types import Update
 
 from src.bot.screens.i18n import lang_of
+from src.bot.utils import check_admin_direct
 from src.bot.widgets.api import AnswerWidgetQuery, EditMessageWidgetData
 from src.bot.widgets.status_board import (
     HISTORY_HOURS,
+    STALE_AFTER,
     board_caption,
     board_state,
     encode,
 )
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
-from src.utils import parse_admin_ids
 
 logger = structlog.get_logger(__name__)
 
@@ -61,16 +64,25 @@ and the next appearance of the board picks it up.
 WIDGETS_KEY: Final = "admin_widgets"
 """``bot_config`` kill switch: ``false`` stops sending boards and answering them, no release needed."""
 
-_background: set[asyncio.Task[Any]] = set()
+_inflight: asyncio.Task[Any] | None = None
+"""The check a tap started; further taps wait for it instead of queueing their own."""
+
+_UNKNOWN_UPDATE: Final = r'(?s)Detected unknown update type.*"widget_query"'
+"""aiogram's warning for this update type: it carries the whole update (the admin's name and id)."""
 
 
 async def widgets_enabled(bot_config: BotConfigRepository) -> bool:
-    """On unless ``bot_config.admin_widgets`` is ``false``; an unreadable value counts as on."""
+    """On unless ``bot_config.admin_widgets`` is ``false``.
+
+    An unreadable value counts as **off**: a kill switch that fails open does
+    nothing exactly when the database is in trouble. The text screen does not
+    depend on it.
+    """
     try:
         value = await bot_config.get(WIDGETS_KEY)
     except Exception:
         logger.warning("admin_widgets_flag_unreadable", exc_info=True)
-        return True
+        return False
     return value is not False and str(value).lower() not in {"false", "0", "off"}
 
 
@@ -81,8 +93,51 @@ def widget_query_of(update: Update) -> dict[str, Any] | bool:
 
 
 def register(dp: Dispatcher) -> None:
-    """Route ``widget_query`` updates to `handle_widget_query` (after aiogram's own listener)."""
+    """Route ``widget_query`` updates to `handle_widget_query` (after aiogram's own listener).
+
+    Also silences aiogram's "unknown update type" warning for this type only:
+    it dumps the whole update to stderr on every board view, with the admin's
+    name and id in it. Other unknown types still warn.
+    """
+    warnings.filterwarnings("ignore", message=_UNKNOWN_UPDATE, category=RuntimeWarning)
     dp.update.register(handle_widget_query, widget_query_of)
+
+
+async def stale_after(bot_config: BotConfigRepository) -> int:
+    """Seconds after which the board says "the bot has not checked itself"; 0 = never.
+
+    Three check intervals, and never under ``STALE_AFTER``: one late check is
+    not news. With checks switched off nothing is late, so the board only says
+    how old its check is.
+    """
+    try:
+        if (await bot_config.get("health_check_enabled")) is False:
+            return 0
+        interval = int(await bot_config.get("health_check_interval_seconds") or 0)
+    except Exception:
+        return STALE_AFTER
+    return max(STALE_AFTER, 3 * interval)
+
+
+async def load_board(
+    lang: str,
+    admin_repo: AdminRepository,
+    bot_config: BotConfigRepository,
+    *,
+    newer_than: int | None = None,
+) -> tuple[Mapping[str, Any] | None, dict[str, Any] | None, datetime]:
+    """``(row, state, now)`` for the board; ``state`` is None when nothing is newer than ``newer_than``.
+
+    The one place the send and the answers build a board, so the two cannot drift.
+    """
+    now = datetime.now(UTC)
+    row = await admin_repo.get_latest_health_check()
+    if newer_than is not None and board_state(lang, row, [], now=now)["r"] <= newer_than:
+        return row, None, now  # the board already shows the newest check: skip the day query
+    history = await admin_repo.get_health_by_hour(HISTORY_HOURS)
+    state = board_state(lang, row, history, now=now)
+    state["o"] = await stale_after(bot_config)
+    return row, state, now
 
 
 def allowed_updates(dp: Dispatcher) -> list[str]:
@@ -126,8 +181,8 @@ async def _respond(
     bot_config = await container.get(BotConfigRepository)
     user_id = (query.get("from") or {}).get("id")
     chat = query.get("chat") or {}
-    admins = parse_admin_ids(await bot_config.get("admin_ids"))
-    if user_id not in admins or chat.get("type") != "private":
+    is_admin = isinstance(user_id, int) and await check_admin_direct(bot_config, user_id)
+    if not is_admin or chat.get("type") != "private":
         logger.warning("widget_query_refused", user_id=user_id, chat_type=chat.get("type"))
         return encode({}, "no"), None
     if not await widgets_enabled(bot_config):
@@ -142,15 +197,13 @@ async def _respond(
     elif kind != "s":
         return None, None
 
-    admin_repo = await container.get(AdminRepository)
-    row = await admin_repo.get_latest_health_check()
-    history = await admin_repo.get_health_by_hour(HISTORY_HOURS)
-    now = datetime.now(UTC)
-    state = board_state(lang, row, history, now=now)
+    seen: int | None = None
     if kind == "s":
         seen = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
-        if state["r"] <= seen:
-            return None, None  # the board already shows the newest check
+    admin_repo = await container.get(AdminRepository)
+    row, state, now = await load_board(lang, admin_repo, bot_config, newer_than=seen)
+    if state is None:
+        return None, None
     message_id = query.get("message_id")
     chat_id = chat.get("id")
     edit = None
@@ -161,11 +214,13 @@ async def _respond(
 
 async def _check_now(health_checker: Any) -> str | None:
     """Run a check for the tap; the note code when it could not finish in time."""
+    global _inflight
     if health_checker is None:
         return "slow"
-    task = asyncio.ensure_future(health_checker.run_check_now())
-    _background.add(task)
-    task.add_done_callback(_background.discard)
+    if _inflight is None or _inflight.done():
+        # A tap while a check still runs joins it: taps must not queue checks.
+        _inflight = asyncio.ensure_future(health_checker.run_check_now())
+    task = _inflight
     try:
         await asyncio.wait_for(asyncio.shield(task), CHECK_TIMEOUT)
     except TimeoutError:

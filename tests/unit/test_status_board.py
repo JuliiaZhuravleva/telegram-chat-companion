@@ -347,3 +347,121 @@ def test_main_polls_with_widget_queries():
     source = inspect.getsource(main)
     assert "allowed_updates=allowed_updates(dp)" in source
     assert "register_widget_queries(dp)" in source
+
+
+# ---------------------------------------------------------------------------
+# Review fixes (2026-11-11)
+# ---------------------------------------------------------------------------
+
+
+def _config(**values: Any) -> MagicMock:
+    repo = MagicMock()
+    repo.get = AsyncMock(side_effect=lambda key: values.get(key))
+    return repo
+
+
+class TestReviewFixes:
+    @pytest.mark.asyncio
+    async def test_kill_switch_fails_closed(self):
+        repo = MagicMock()
+        repo.get = AsyncMock(side_effect=RuntimeError("pool exhausted"))
+        assert await Q.widgets_enabled(repo) is False
+        assert await Q.widgets_enabled(_config()) is True  # control: unset means on
+        assert await Q.widgets_enabled(_config(admin_widgets="off")) is False
+
+    @pytest.mark.asyncio
+    async def test_stale_warning_follows_the_check_interval(self):
+        assert await Q.stale_after(_config()) == B.STALE_AFTER
+        assert await Q.stale_after(_config(health_check_interval_seconds=1800)) == 5400
+        assert await Q.stale_after(_config(health_check_interval_seconds=60)) == B.STALE_AFTER
+        assert await Q.stale_after(_config(health_check_enabled=False)) == 0
+
+    @pytest.mark.asyncio
+    async def test_the_state_carries_the_stale_threshold(self):
+        container = _repos(row=_row())
+        container.by_type["BotConfigRepository"].get = AsyncMock(
+            side_effect=lambda key: {
+                "admin_ids": [ADMIN],
+                "health_check_interval_seconds": 1800,
+            }.get(key)
+        )
+        calls, _ = await _feed(_update("s:ru:0"), container)
+        assert json.loads(_answer(calls).data or "")["o"] == 5400
+
+    @pytest.mark.asyncio
+    async def test_taps_join_the_check_in_flight(self):
+        release = asyncio.Event()
+        started = 0
+
+        async def check() -> None:
+            nonlocal started
+            started += 1
+            await release.wait()
+
+        checker = MagicMock()
+        checker.run_check_now = check
+        first = asyncio.ensure_future(Q._check_now(checker))
+        second = asyncio.ensure_future(Q._check_now(checker))
+        await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.gather(first, second) == [None, None]
+        assert started == 1
+        assert await Q._check_now(checker) is None and started == 2  # a later tap checks again
+
+    @pytest.mark.asyncio
+    async def test_appear_with_the_newest_check_skips_the_day_query(self):
+        row = _row()
+        container = _repos(row=row)
+        await _feed(_update(f"s:ru:{int(row['checked_at'].timestamp())}"), container)
+        container.by_type["AdminRepository"].get_health_by_hour.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_unknown_update_warning_with_the_admins_details(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("default")
+            await _feed(_update("s:ru:0"), _repos(row=_row()))
+        assert not [w for w in caught if "widget_query" in str(w.message)]
+
+    def test_other_unknown_updates_still_warn(self):
+        import re
+
+        assert not re.match(Q._UNKNOWN_UPDATE, 'Detected unknown update type.\n{"poll_x":1}')
+        assert re.match(Q._UNKNOWN_UPDATE, 'Detected unknown update type.\n{"widget_query":{}}')
+
+    def test_strip_letters_are_not_layout_classes(self):
+        """`.s` once styled both hint lines and skipped hours: a skipped hour fell out of line."""
+        import re
+
+        css = B._page().split("</style>")[0]
+        for letter in "hwcs":
+            bare = re.findall(rf"(?:^|[}},])\s*\.{letter}\s*[{{,]", css, flags=re.M)
+            assert not bare, (letter, bare)
+
+    def test_a_note_comes_from_answers_only(self):
+        """chatDataChanged follows every answer and carries no note: it must not erase one.
+
+        Runs the page's own ``load()`` in node; GitHub's runners have node.
+        """
+        import re
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if node is None:
+            pytest.skip("node is not installed")
+        page = B.board_html("en")
+        load = re.search(r"^function load\(.*$", page, flags=re.M)
+        words = re.search(r"T=(\{.*?\});\n", page, flags=re.S)
+        assert load and words
+        script = (
+            f"const T={words.group(1)};let S={{r:0,v:'',i:[],h:''}},note='';{load.group(0)}\n"
+            'load(\'{"r":5,"v":"h","e":"slow"}\',1);const a=note;'
+            'load(\'{"r":5,"v":"h"}\');const b=note;'
+            'load(\'{"r":6,"v":"w"}\',1);'
+            "console.log(JSON.stringify([a,b,note,S.v]))"
+        )
+        out = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
+        slow = B.NOTES["slow"]("en")
+        assert json.loads(out.stdout) == [slow, slow, "", "w"]

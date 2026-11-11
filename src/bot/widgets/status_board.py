@@ -42,6 +42,9 @@ STATE_LIMIT: Final = 1024
 HTML_LIMIT: Final = 4096
 """Bytes of the page after ``zlib`` level 9, the way Telegram measures it."""
 
+STALE_AFTER: Final = 900
+"""Seconds: the least age at which the board says the bot has stopped checking itself."""
+
 ISSUES_SHOWN: Final = 3
 ISSUE_CHARS: Final = 100
 
