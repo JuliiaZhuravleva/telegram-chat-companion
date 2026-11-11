@@ -155,16 +155,30 @@ def health_text(row: Mapping[str, Any] | None, lang: str, *, now: datetime | Non
     return "\n".join(lines)
 
 
+_BOARD = Tr("📊 Доской", "📊 As a board")
+
+
 def status_screen(
-    lang: str, row: Mapping[str, Any] | None, *, now: datetime | None = None
+    lang: str,
+    row: Mapping[str, Any] | None,
+    *,
+    now: datetime | None = None,
+    board: bool = False,
 ) -> Screen:
-    """``status``, or ``status.bad`` when the last check found a warning or a failure."""
+    """``status``, or ``status.bad`` when the last check found a warning or a failure.
+
+    ``board`` adds "📊 Доской", which sends the same state as a widget
+    (``src/bot/widgets/status_board.py``); off while the kill switch is.
+    """
     bad = row is not None and str(row.get("status", "")).lower() in BAD
+    refresh = Button(_REFRESH(lang), callback=cb("adm_health:", lang, "now"))
     return Screen(
         id="status.bad" if bad else "status",
         text=health_text(row, lang, now=now),
         rows=(
-            (Button(_REFRESH(lang), callback=cb("adm_health:", lang, "now")),),
+            (refresh, Button(_BOARD(lang), callback=cb("adm_board:", lang)))
+            if board
+            else (refresh,),
             (
                 Button(_STATS(lang), callback=cb("adm_stats:", lang, "24h")),
                 Button(_COSTS(lang), callback=cb("adm_costs:", lang, "24h")),

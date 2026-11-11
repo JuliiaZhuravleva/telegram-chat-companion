@@ -1,0 +1,77 @@
+<style>
+/* The status board (src/bot/widgets/status_board.py). Labels are baked in per send as T; the state
+   (chat_data and every answer, JSON <= 1024 B) is {"r":check unix s = revision,"v":"h|w|c|s|?|",
+   "d":db ok 1/0,"m":messages 30 min,"f":fallbacks 15 min,"i":[["w|c",text]],"x":more issues,
+   "h":24 chars oldest hour first (h w c s, "." no check),"e":note code}. Appear -> request("s:<lang>:<r>"),
+   tap -> request("n:<lang>"): the bot runs a check and answers the new state. */
+body{margin:0;padding:10px 12px 12px;font-family:ui-rounded,system-ui,sans-serif;--ok:light-dark(#3E9A4E,#5DBB6A);--w:light-dark(#C98A00,#E0A82E);--c:light-dark(#D2412F,#EF6B57);--hc:var(--tg-theme-hint-color);--bg2:var(--tg-theme-secondary-bg-color);--sep:var(--tg-theme-section-separator-color,var(--bg2))}
+.t{display:flex;align-items:center;gap:10px}
+#dot{width:14px;height:14px;border-radius:7px;background:var(--sep);flex:none}
+.h #dot{background:var(--ok)}.w #dot{background:var(--w)}.c #dot{background:var(--c)}
+#v{font-size:1.15em;font-weight:700}
+#a,.s,#n,.k span{color:var(--hc);font-size:.85em}
+#a{margin:2px 0 0 24px}
+#o{color:var(--c);font-size:.9em;margin-top:6px}
+.q{display:flex;gap:6px;margin-top:6px;font-size:.92em}
+.g{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px}
+.k{background:var(--bg2);border-radius:10px;padding:7px 8px}
+.k b{display:block;font-size:1.2em}
+.k span{display:block;line-height:1.2}
+.s{margin-top:10px}
+#b{display:flex;gap:2px;margin-top:4px}
+#b i{flex:1;height:16px;border-radius:3px;background:var(--bg2)}
+#b .h{background:var(--ok)}#b .w{background:var(--w)}#b .c{background:var(--c)}#b .s{background:var(--sep)}
+.e{display:flex;justify-content:space-between}
+#go{width:100%;margin-top:10px}
+#n{margin-top:6px;min-height:1em}
+</style>
+<div class="t"><div id="dot"></div><div id="v"></div></div>
+<div id="a"></div>
+<div id="o"></div>
+<div id="i"></div>
+<div class="g"><div class="k"><b id="kd"></b><span id="ld"></span></div><div class="k"><b id="km"></b><span id="lm"></span></div><div class="k"><b id="kf"></b><span id="lf"></span></div></div>
+<div class="s" id="day"></div>
+<div id="b"></div>
+<div class="s e"><span id="d0"></span><span id="d1"></span></div>
+<button id="go"></button>
+<div id="n"></div>
+<script>
+const W=window.TelegramWidget,$=i=>document.getElementById(i),T=/*T*/{};
+let S={r:0,v:'',i:[],h:''},busy=0,note='';
+function load(t){try{const s=JSON.parse(t);note=s.e?T.e[s.e]||T.e.x:'';if(s.r!=null&&s.r>=S.r)S=s}catch(e){}}
+function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
+function ago(){const m=Math.floor((Date.now()/1e3-S.r)/60);return m<1?T.ago[0]:(m<60?m+T.ago[1]:m<2880?Math.floor(m/60)+T.ago[2]:Math.floor(m/1440)+T.ago[3])}
+function draw(){
+  const v=S.r?S.v||'?':'',on=!!S.r;
+  document.body.className=v;
+  $('v').textContent=T.v[v];
+  $('a').textContent=on?T.at+ago():'';
+  $('o').textContent=on&&Date.now()/1e3-S.r>900?T.old:'';
+  const L=$('i');L.textContent='';
+  (S.i||[]).forEach(k=>{const q=el('div','q');q.appendChild(el('span','',k[0]=='c'?'🔥':'⚠️'));q.appendChild(el('span','',k[1]));L.appendChild(q)});
+  if(S.x)L.appendChild(el('div','q s',T.more+S.x));
+  $('kd').textContent=on?(S.d?'✓':'✖'):'–';
+  $('km').textContent=on?S.m:'–';
+  $('kf').textContent=on?S.f:'–';
+  const B=$('b');B.textContent='';
+  for(let j=0;j<24;j++)B.appendChild(el('i',(S.h||'')[j]||'.'));
+  $('go').textContent=busy?T.busy:T.go;
+  $('n').textContent=note;
+}
+function go(){
+  if(!W||busy)return;
+  busy=1;note='';draw();
+  W.HapticFeedback.selectionChanged();
+  W.request('n:'+T.l).then(a=>{busy=0;if(a.result)load(a.result);draw()},e=>{busy=0;note=T.err[e.code]||T.err.FAILED;draw()});
+}
+['ld','lm','lf','day','d0','d1'].forEach(i=>$(i).textContent=T[i]);
+$('go').addEventListener('click',go);
+if(W){
+  load(W.chatData);
+  W.onEvent('chatDataChanged',()=>{load(W.chatData);draw()});
+  W.onEvent('activated',draw);
+}
+draw();
+setInterval(draw,30000);
+if(W){W.ready();if(W.chatType=='private')W.request('s:'+T.l+':'+S.r).then(a=>{if(a.result){load(a.result);draw()}},()=>{})}
+</script>

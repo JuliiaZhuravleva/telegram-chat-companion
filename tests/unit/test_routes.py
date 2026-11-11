@@ -151,6 +151,7 @@ WORST_CASE: dict[str, tuple[object, ...]] = {
     "adm_stk_expcancel:": (LANG, FUID),
     "adm_stk_expreset:": (LANG, FUID),
     "adm_health:": (LANG, "now"),
+    "adm_board:": (LANG,),
     "adm_stats:": (LANG, "30d"),
     "adm_costs:": (LANG, "30d"),
     "adm_costs_verify:": (LANG, "30d"),

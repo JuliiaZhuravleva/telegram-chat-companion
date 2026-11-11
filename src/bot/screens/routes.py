@@ -166,6 +166,8 @@ ROUTES: Final[dict[str, Route]] = {
     "adm_stk_expreset:": Route("stk.analyzing", "kept"),
     # ── status, stats, costs ──
     "adm_health:": Route("status", "kept"),
+    # Sends the status board (a widget) as a new message; the screen stays.
+    "adm_board:": Route("доска «Состояние» новым сообщением", "new"),
     "adm_stats:": Route("stats", "kept"),
     "adm_costs:": Route("costs", "kept"),
     "adm_costs_verify:": Route("costs.verify", "kept"),

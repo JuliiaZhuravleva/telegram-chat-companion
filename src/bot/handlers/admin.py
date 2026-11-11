@@ -34,13 +34,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from typing import Any
 
 import structlog
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 from dishka.integrations.aiogram import FromDishka
@@ -95,6 +96,17 @@ from src.bot.screens.status import (
     status_screen,
 )
 from src.bot.utils import check_admin_direct, is_bot_in_chat
+from src.bot.widgets.api import SendWidget
+from src.bot.widgets.queries import widgets_enabled
+from src.bot.widgets.status_board import (
+    BOARD_FAILED,
+    BOARD_OFF,
+    HISTORY_HOURS,
+    board_caption,
+    board_html,
+    board_state,
+    encode,
+)
 from src.config import Settings
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.bot_config import BotConfigRepository
@@ -668,6 +680,7 @@ async def handle_wl_on(
 async def handle_health(
     callback: CallbackQuery,
     admin_repo: FromDishka[AdminRepository],
+    bot_config: FromDishka[BotConfigRepository],
     **kwargs: Any,
 ) -> None:
     """The last recorded health check; ``…:now`` (``🔁 Обновить``) runs a fresh one first."""
@@ -688,7 +701,54 @@ async def handle_health(
             # The screen still shows the last recorded check; its time says how old.
             logger.warning("health_refresh_failed", exc_info=True)
     row = await admin_repo.get_latest_health_check()
-    await show(callback, status_screen(lang, row), answered=answered)
+    board = await widgets_enabled(bot_config)
+    await show(callback, status_screen(lang, row, board=board), answered=answered)
+
+
+@_on("adm_board:")
+async def handle_board(
+    callback: CallbackQuery,
+    admin_repo: FromDishka[AdminRepository],
+    bot_config: FromDishka[BotConfigRepository],
+    **kwargs: Any,
+) -> None:
+    """ "📊 Доской": the status as a widget, sent as a new message under the screen.
+
+    The screen stays as it is -- the board is another form of it, not a step
+    away from it. When Telegram refuses the widget (an old client, a limit),
+    the admin hears why and the text screen is still there.
+    """
+    parts = (callback.data or "").split(":")
+    if len(parts) < 2 or not parts[1]:
+        await show_stale(callback, _lang(callback), data=kwargs)
+        return
+    lang = lang_of(parts[1])
+    if not await widgets_enabled(bot_config):
+        await callback.answer(BOARD_OFF(lang), show_alert=True)
+        return
+    if callback.message is None or callback.bot is None:
+        await callback.answer()
+        return
+    row = await admin_repo.get_latest_health_check()
+    history = await admin_repo.get_health_by_hour(HISTORY_HOURS)
+    now = datetime.now(UTC)
+    try:
+        await callback.bot(
+            SendWidget(
+                chat_id=callback.message.chat.id,
+                html=board_html(lang),
+                chat_data=encode(board_state(lang, row, history, now=now)),
+                caption=board_caption(lang, row, now=now),
+                parse_mode="HTML",
+                allow_queries=True,
+            )
+        )
+    except TelegramAPIError as exc:
+        logger.warning("status_board_send_failed", error=str(exc))
+        await callback.answer(BOARD_FAILED(lang), show_alert=True)
+        return
+    logger.info("status_board_sent", user_id=callback.from_user.id)
+    await callback.answer()
 
 
 @_on("adm_stats:")
