@@ -40,11 +40,6 @@ MODEL_PRICING: dict[str, ModelPricing] = {
         input_per_1m=Decimal("0.10"),
         output_per_1m=Decimal("0.50"),
     ),
-    # OpenAI's official successor to gpt-5-nano; not a default here.
-    "gpt-5.6-luna": ModelPricing(
-        input_per_1m=Decimal("0.20"),
-        output_per_1m=Decimal("1.20"),
-    ),
     # Removed from the API 2026-12-11; kept so old response_log rows price.
     "gpt-5-nano": ModelPricing(
         input_per_1m=Decimal("0.05"),

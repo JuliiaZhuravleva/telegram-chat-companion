@@ -5,7 +5,7 @@ Defines what capabilities each provider supports,
 used for automatic fallback and feature availability checks.
 
 COST POLICY:
-  - Default models (DEFAULT_MODELS["text"]) MUST be the cheapest tier (nano/flash).
+  - Default models (DEFAULT_MODELS["text"]) MUST be the cheapest tier (luna/flash).
   - Expensive models (EXPENSIVE_MODELS) require explicit user approval.
   - Never use expensive models in configs, tests, or defaults without reason.
 """
@@ -149,7 +149,7 @@ DEPRECATED_MODELS = [
     "gemini-1.5-flash",  # already retired
     "gemini-1.5-pro",  # already retired
     "gpt-4o",  # replaced by gpt-5.2
-    "gpt-4o-mini",  # replaced by gpt-5-mini
+    "gpt-4o-mini",  # was replaced by gpt-5-mini, itself removed 2026-12-11
     "gpt-4.1",  # replaced by gpt-5.2
     # OpenAI removes these from the API on 2026-12-11 (deprecations entry of
     # 2026-06-11; the owner was mailed 2026-11-11). gpt-5-nano was the cheap

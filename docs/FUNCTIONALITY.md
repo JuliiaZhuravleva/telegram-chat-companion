@@ -67,7 +67,7 @@ For `TriggerType.RANDOM` only. Each tier short-circuits on rejection. Source: [s
 |---|---|---|---|
 | **T1 — Fast Rules** ([fast_rules.py:43-59](src/services/relevancy/fast_rules.py#L43-L59)) | Regex + length | $0 | `too_short` (<4 chars), `acknowledgment` (ok/спс/кек/лол regex), `emoji_only` (1-8 emoji chars) |
 | **T2 — Engagement** ([engagement.py:47-81](src/services/relevancy/engagement.py#L47-L81)) | 1 SQL query: `get_bot_message_stats(chat_id, limit=20)` | $0 | `bot_ratio_exceeded` (>25 % bot msgs over last 10+), `high_velocity` (>5 msgs/min), `consecutive_bot_responses` (≥2 bot msgs at conversation tail) |
-| **T3 — LLM Judge** ([llm_judge.py:51-100](src/services/relevancy/llm_judge.py#L51-L100)) | Cheap-tier LLM call (`JUDGE_MODEL` = `gpt-6-luna`, `max_tokens=4096`, `temperature=1.0`) with last 5 msgs + current msg | ~$0.0001–0.0004 | LLM returns NO |
+| **T3 — LLM Judge** ([llm_judge.py:119-217](src/services/relevancy/llm_judge.py#L119-L217)) | Cheap-tier LLM call (`JUDGE_MODEL` = `gpt-6-luna`, `max_tokens=4096`, `temperature=1.0`) with last 5 msgs + current msg | ~$0.0001–0.0004 | LLM returns NO |
 
 Every decision is logged as structured JSON: `{"event": "relevancy_gate_decision", "chat_id": ..., "should_respond": true/false, "tier": "fast_rules|engagement|llm_judge", "reason": "...", "cost_usd": 0.00002}`.
 
