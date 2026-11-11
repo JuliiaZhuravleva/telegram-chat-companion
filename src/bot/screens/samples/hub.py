@@ -252,7 +252,7 @@ def _health(status: str, **extra: Any) -> dict[str, Any]:
 
 @sample("status", section="Состояние", title="Всё работает", nav="panel")
 def status_healthy(lang: Lang) -> Screen:
-    return status_screen(lang, _health("healthy"), now=_NOW)
+    return status_screen(lang, _health("healthy"), now=_NOW, board=True)
 
 
 @sample("status", section="Состояние", title="Проверок не было", nav="panel")

@@ -452,6 +452,32 @@ class AdminRepository:
         )
         return dict(row) if row else None
 
+    async def get_health_by_hour(self, hours: int) -> list[dict[str, Any]]:
+        """The worst status of each hour that had a check, over the last ``hours``.
+
+        ``worst`` ranks ``critical`` 3, ``warning`` 2, ``healthy`` 1 and anything
+        else (``skipped``) 0, so one bad check colours its whole hour: the
+        status board shows a day at a glance, and an hour that went red for
+        five minutes is exactly the hour someone needs to see. An hour with no
+        check has no row -- the board draws it empty, which is what "the bot
+        was not checking" looks like. ``hour`` is a naive UTC timestamp.
+        """
+        rows = await self._pool.fetch(
+            """
+            SELECT date_trunc('hour', checked_at AT TIME ZONE 'UTC') AS hour,
+                   MAX(CASE status WHEN 'critical' THEN 3
+                                   WHEN 'warning' THEN 2
+                                   WHEN 'healthy' THEN 1
+                                   ELSE 0 END) AS worst
+            FROM health_log
+            WHERE checked_at > NOW() - make_interval(hours => $1)
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            hours,
+        )
+        return [dict(row) for row in rows]
+
     async def set_admin_language(self, bot_config_repo: Any, lang: str) -> None:
         """Save admin panel language to bot_config.admin_settings."""
         raw = await bot_config_repo.get("admin_settings")

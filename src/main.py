@@ -33,6 +33,8 @@ from src.bot.middleware import (
     RulesMiddleware,
     TopicMiddleware,
 )
+from src.bot.widgets.queries import allowed_updates
+from src.bot.widgets.queries import register as register_widget_queries
 from src.config import Settings
 from src.database.repositories.bot_config import BotConfigRepository
 from src.database.repositories.chat_settings import ChatSettingsRepository
@@ -238,6 +240,8 @@ async def main() -> None:
     dp.chat_member.middleware(chat_config_mw)
 
     dp.include_router(main_router)
+    # widget_query: an update type aiogram does not know yet (src/bot/widgets/queries.py).
+    register_widget_queries(dp)
 
     # Global safety net for handler exceptions (TD-062). Registered on the
     # dispatcher rather than on a router because aiogram propagates errors up
@@ -328,7 +332,7 @@ async def main() -> None:
 
     try:
         logger.info("Bot started, listening for messages...")
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=allowed_updates(dp))
     finally:
         logger.info("Shutting down...")
         # First: the command sync may still be mid-flight on this bot session,

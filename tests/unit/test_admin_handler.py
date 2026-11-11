@@ -12,6 +12,7 @@ called directly runs whatever its filters would have said.
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 from aiogram import F
 from aiogram.dispatcher.event.handler import FilterObject
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Message
 
@@ -28,6 +30,7 @@ from src.bot.filters.admin import IsAdmin
 from src.bot.handlers import admin as A
 from src.bot.handlers.admin import (
     handle_admin_command,
+    handle_board,
     handle_close,
     handle_health,
     handle_language_menu,
@@ -52,6 +55,7 @@ from src.bot.handlers.admin import (
     handle_wl_restore,
 )
 from src.bot.screens.hub import build_hub, show_hub
+from src.bot.widgets.api import SendWidget
 from src.database.repositories.admin import AdminRepository
 from src.database.repositories.response_log import ResponseLogRepository
 from src.services.chat_config import ChatConfigService
@@ -1115,6 +1119,13 @@ def _health_row(status: str = "healthy", **extra: Any) -> dict[str, Any]:
     return row
 
 
+def _flags(**values: Any) -> AsyncMock:
+    """A ``BotConfigRepository`` double: ``get(key)`` returns ``values.get(key)``."""
+    repo = AsyncMock()
+    repo.get = AsyncMock(side_effect=lambda key: values.get(key))
+    return repo
+
+
 class TestHealth:
     @pytest.mark.asyncio
     async def test_shows_the_last_recorded_check_without_running_one(self):
@@ -1125,7 +1136,7 @@ class TestHealth:
         checker.run_check_now = AsyncMock()
 
         with patch.object(A, "show", new=AsyncMock()) as show:
-            await handle_health(cb, admin_repo, health_checker=checker)
+            await handle_health(cb, admin_repo, _flags(), health_checker=checker)
 
         checker.run_check_now.assert_not_awaited()
         screen = _shown(show)
@@ -1148,7 +1159,7 @@ class TestHealth:
 
         admin_repo.get_latest_health_check = AsyncMock(side_effect=latest)
 
-        await handle_health(cb, admin_repo, health_checker=checker)
+        await handle_health(cb, admin_repo, _flags(), health_checker=checker)
 
         assert order == ["answer", "check", "read"]  # the spinner stops before the wait
         text, payloads = _edited(cb)
@@ -1163,7 +1174,7 @@ class TestHealth:
         checker = MagicMock()
         checker.run_check_now = AsyncMock(side_effect=RuntimeError("db down"))
 
-        await handle_health(cb, admin_repo, health_checker=checker)
+        await handle_health(cb, admin_repo, _flags(), health_checker=checker)
 
         assert "Всё работает" in _edited(cb)[0]
         cb.answer.assert_awaited_once_with()
@@ -1172,7 +1183,7 @@ class TestHealth:
     async def test_no_checks_yet(self):
         cb = _make_callback("adm_health:en")
 
-        await handle_health(cb, _make_admin_repo())
+        await handle_health(cb, _make_admin_repo(), _flags())
 
         assert "No checks yet" in _edited(cb)[0]
 
@@ -1186,7 +1197,7 @@ class TestHealth:
         )
 
         with patch.object(A, "show", new=AsyncMock()) as show:
-            await handle_health(cb, admin_repo)
+            await handle_health(cb, admin_repo, _flags())
 
         screen = _shown(show)
         assert screen.id == "status.bad"
@@ -1197,14 +1208,90 @@ class TestHealth:
         cb = _make_callback("adm_health:")
 
         with patch.object(A, "show_stale", new=AsyncMock()) as stale:
-            await handle_health(cb, _make_admin_repo())
+            await handle_health(cb, _make_admin_repo(), _flags())
 
         stale.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_the_board_button_follows_the_kill_switch(self):
+        admin_repo = _make_admin_repo()
+        admin_repo.get_latest_health_check = AsyncMock(return_value=_health_row())
+
+        cb = _make_callback("adm_health:ru")
+        await handle_health(cb, admin_repo, _flags())
+        assert "adm_board:ru" in _edited(cb)[1]
+
+        cb = _make_callback("adm_health:ru")
+        await handle_health(cb, admin_repo, _flags(admin_widgets=False))
+        assert not any(p.startswith("adm_board:") for p in _edited(cb)[1])
 
     def test_format_health_status_is_the_screen_text(self):
         """Kept for the alert-policy tests, which import it from here."""
         row = _health_row()
         assert A._format_health_status(row, "en") == A.health_text(row, "en")
+
+
+def _board_callback(data: str = "adm_board:ru") -> MagicMock:
+    cb = _make_callback(data)
+    cb.message.chat.id = USER_ID
+    cb.bot = AsyncMock()
+    return cb
+
+
+class TestBoard:
+    @pytest.mark.asyncio
+    async def test_sends_the_board_as_a_new_message(self):
+        cb = _board_callback()
+        admin_repo = _make_admin_repo()
+        admin_repo.get_latest_health_check = AsyncMock(return_value=_health_row("warning"))
+        admin_repo.get_health_by_hour = AsyncMock(return_value=[])
+
+        await handle_board(cb, admin_repo, _flags())
+
+        (method,), _ = cb.bot.call_args
+        assert isinstance(method, SendWidget)
+        assert method.chat_id == USER_ID
+        assert method.allow_queries is True and method.parse_mode == "HTML"
+        assert "Проверить сейчас" in method.html  # Russian words baked in
+        assert json.loads(method.chat_data)["v"] == "w"
+        assert "Есть предупреждение" in method.caption
+        admin_repo.get_health_by_hour.assert_awaited_once_with(24)
+        cb.message.edit_text.assert_not_awaited()  # the text screen stays
+        cb.answer.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_kill_switch_sends_nothing(self):
+        cb = _board_callback("adm_board:en")
+        admin_repo = _make_admin_repo()
+
+        await handle_board(cb, admin_repo, _flags(admin_widgets=False))
+
+        cb.bot.assert_not_awaited()
+        args, kwargs = cb.answer.call_args
+        assert "board is off" in args[0] and kwargs["show_alert"] is True
+
+    @pytest.mark.asyncio
+    async def test_a_refused_widget_is_said_not_swallowed(self):
+        cb = _board_callback()
+        cb.bot.side_effect = TelegramBadRequest(method=MagicMock(), message="WIDGET_TOO_LARGE")
+        admin_repo = _make_admin_repo()
+        admin_repo.get_latest_health_check = AsyncMock(return_value=None)
+        admin_repo.get_health_by_hour = AsyncMock(return_value=[])
+
+        await handle_board(cb, admin_repo, _flags())
+
+        args, kwargs = cb.answer.call_args
+        assert "Telegram не принял доску" in args[0] and kwargs["show_alert"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_language_is_stale(self):
+        cb = _board_callback("adm_board:")
+
+        with patch.object(A, "show_stale", new=AsyncMock()) as stale:
+            await handle_board(cb, _make_admin_repo(), _flags())
+
+        stale.assert_awaited_once()
+        cb.bot.assert_not_awaited()
 
 
 class TestStats:
