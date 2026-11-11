@@ -308,6 +308,40 @@ class TestWidgetQuery:
         assert json.loads(_answer(calls).data or "") == {"e": "x"}
 
     @pytest.mark.asyncio
+    async def test_a_late_answer_still_edits_the_board(self):
+        """Seen live 2026-11-11: a tap queued during a restart came 15 s+ late; the check ran."""
+        from aiogram.exceptions import TelegramBadRequest
+
+        dp = Dispatcher()
+        Q.register(dp)
+        bot = Bot("42:TEST")
+        calls: list[Any] = []
+
+        async def record(_bot: Bot, method: Any, *_a: Any, **_k: Any) -> Any:
+            calls.append(method)
+            if isinstance(method, AnswerWidgetQuery):
+                raise TelegramBadRequest(method=method, message="Bad Request: query is too old")
+            return True
+
+        checker = MagicMock()
+        checker.run_check_now = AsyncMock()
+        with patch.object(Bot, "__call__", new=record):
+            from aiogram.types import Update
+
+            await dp.feed_update(
+                bot,
+                Update.model_validate(_update("n:ru"), context={"bot": bot}),
+                dishka_container=_repos(row=_row()),
+                health_checker=checker,
+            )
+        await bot.session.close()
+        assert [type(c) for c in calls] == [
+            AnswerWidgetQuery,
+            EditMessageWidgetData,
+            EditMessageCaption,
+        ]
+
+    @pytest.mark.asyncio
     async def test_other_updates_do_not_reach_the_handler(self):
         raw = {
             "update_id": 2,

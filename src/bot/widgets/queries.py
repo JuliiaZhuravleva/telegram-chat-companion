@@ -164,9 +164,11 @@ async def handle_widget_query(_update: Update, widget_query: dict[str, Any], **d
     try:
         await bot(AnswerWidgetQuery(widget_query_id=query_id, data=answer))
     except TelegramAPIError as exc:
-        # Too late (over 15 s) or a deleted widget: the admin sees TIMEOUT.
+        # Too late (over 15 s) or a deleted widget: the admin sees TIMEOUT. The
+        # edit still goes out: a tap that arrived late (polling lag, a restart)
+        # ran a real check, and the board shows it through chatDataChanged. A
+        # deleted widget fails the edit quietly, once per query.
         logger.warning("widget_query_answer_failed", error=str(exc))
-        return
     if edit is not None:
         await _edit(bot, *edit)
 
