@@ -132,6 +132,23 @@ class TestPage:
             html = B.board_html("ru")
         assert html.count("</script>") == 1
 
+    def test_every_icon_the_page_uses_is_drawn_and_every_drawn_one_used(self):
+        # The icons are inline SVG symbols (`<symbol id="iX">`), used through
+        # `<use href="#iX">` in the markup and `ic('X')` in the script. A
+        # misspelt name draws nothing at all, silently, and Telegram reports no error.
+        import re
+
+        page = B._page()
+        drawn = set(re.findall(r'<symbol id="i(\w)"', page))
+        used = set(re.findall(r'href="#i(\w)"', page))
+        for call in re.findall(r"\bic\(([^)]*)\)", page):
+            used |= set(re.findall(r"'(\w)'", call))
+        assert drawn, "no icons found: the pattern no longer matches the page"
+        assert used - drawn == set(), "used but never drawn"
+        assert drawn - used == set(), "drawn but never used (dead bytes in a 4 KB page)"
+        # The emoji the icons replaced stay out of the page.
+        assert not re.search("[🔥⚠✓✖🔁]", B.board_html("ru"))
+
     def test_every_note_and_verdict_has_words(self):
         table = B.words("en")
         assert set(table["v"]) == {"h", "w", "c", "s", "?", ""}

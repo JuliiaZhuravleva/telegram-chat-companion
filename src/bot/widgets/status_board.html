@@ -4,15 +4,18 @@
    "d":db ok 1/0,"m":messages 30 min,"f":fallbacks 15 min,"i":[["w|c",text]],"x":more issues,
    "h":24 chars oldest hour first (h w c s, "." no check),"o":stale after s (0 never),"e":note code}. Appear -> request("s:<lang>:<r>"),
    tap -> request("n:<lang>"): the bot runs a check and answers the new state. */
-body{margin:0;padding:10px 12px 12px;font-family:ui-rounded,system-ui,sans-serif;--ok:light-dark(#3E9A4E,#5DBB6A);--w:light-dark(#C98A00,#E0A82E);--c:light-dark(#D2412F,#EF6B57);--hc:var(--tg-theme-hint-color);--bg2:var(--tg-theme-secondary-bg-color);--sep:var(--tg-theme-section-separator-color,var(--bg2))}
+body{margin:0;--ink:#3A3442;padding:10px 12px 12px;font-family:ui-rounded,system-ui,sans-serif;--ok:light-dark(#3E9A4E,#5DBB6A);--w:light-dark(#C98A00,#E0A82E);--c:light-dark(#D2412F,#EF6B57);--hc:var(--tg-theme-hint-color);--bg2:var(--tg-theme-secondary-bg-color);--sep:var(--tg-theme-section-separator-color,var(--bg2))}
 .t{display:flex;align-items:center;gap:10px}
-#dot{width:14px;height:14px;border-radius:7px;background:var(--sep);flex:none}
-.h #dot{background:var(--ok)}.w #dot{background:var(--w)}.c #dot{background:var(--c)}
+svg{width:16px;height:16px;flex:none;vertical-align:-3px;fill:none;stroke:var(--ink);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round}
+#vi svg{width:28px;height:28px;display:block}
+.k svg{float:right;width:20px;height:20px}
+#kd svg{float:none;display:block;width:1.45em;height:1.45em}
+#go svg{margin-right:6px}
 #v{font-size:1.15em;font-weight:700}
 #a,.u,#n,.k span{color:var(--hc);font-size:.85em}
-#a{margin:2px 0 0 24px}
+#a{margin:2px 0 0 38px}
 #o{color:var(--c);font-size:.9em;margin-top:6px}
-.q{display:flex;gap:6px;margin-top:6px;font-size:.92em}
+.q{display:flex;gap:6px;align-items:flex-start;margin-top:6px;font-size:.92em}
 .g{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-top:10px}
 .k{background:var(--bg2);border-radius:10px;padding:7px 8px}
 .k b{display:block;font-size:1.2em}
@@ -25,11 +28,22 @@ body{margin:0;padding:10px 12px 12px;font-family:ui-rounded,system-ui,sans-serif
 #go{width:100%;margin-top:10px}
 #n{margin-top:6px;min-height:1em}
 </style>
-<div class="t"><div id="dot"></div><div id="v"></div></div>
+<svg style="position:absolute;width:0;height:0"><defs>
+<symbol id="ih" viewBox="0 0 24 24"><path d="M12 20.5C7 17 3.5 13.8 3.5 9.6 3.5 7 5.5 5 8 5c1.7 0 3.1.9 4 2.2C12.9 5.9 14.3 5 16 5c2.5 0 4.5 2 4.5 4.6 0 4.2-3.5 7.4-8.5 10.9z" fill="#8FC9A3"/><path d="M19.6 1.6l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" fill="#F4C95D"/></symbol>
+<symbol id="iw" viewBox="0 0 24 24"><path d="M10.3 3.9a2 2 0 0 1 3.4 0l8 13.6A2 2 0 0 1 20 20.5H4a2 2 0 0 1-1.7-3z" fill="#F5C46A"/><path d="M12 9.2v4.6" stroke-width="2.4"/><circle cx="12" cy="17" r="1.3" fill="var(--ink)" stroke="none"/></symbol>
+<symbol id="ic" viewBox="0 0 24 24"><path d="M12 21.5c-4 0-6.8-2.7-6.8-6.3 0-3.2 2.1-5.1 3.4-7.2.5 1.6 1.3 2.6 2.4 3C10.6 7.5 12 4.6 14.6 2.5c-.2 3 1.4 4.8 2.8 6.6 1.1 1.4 1.9 3 1.9 5.2 0 4.2-3 7.2-7.3 7.2z" fill="#EE8C78"/><path d="M12 21.5c-1.9 0-3.2-1.3-3.2-3.1 0-1.7 1.3-2.8 2.2-4.2.4 1 1 1.5 1.6 1.7.1-1.3.6-2.4 1.5-3.2.1 1.6.8 2.4 1.3 3.3.4.6.6 1.3.6 2.1 0 2-1.6 3.4-4 3.4z" fill="#F6C66B"/></symbol>
+<symbol id="is" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="#B5B2C2"/><circle cx="12" cy="12" r="4.2" fill="var(--tg-theme-bg-color,#fff)"/></symbol>
+<symbol id="iy" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#8FC9A3"/><path d="M7.8 12.3l2.8 2.8 5.6-5.8" stroke-width="2.2"/></symbol>
+<symbol id="in" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#EE8C78"/><path d="M8.8 8.8l6.4 6.4m0-6.4l-6.4 6.4" stroke-width="2.2"/></symbol>
+<symbol id="im" viewBox="0 0 24 24"><path d="M5 4.5h14A2.5 2.5 0 0 1 21.5 7v8a2.5 2.5 0 0 1-2.5 2.5h-8L6.5 21v-3.5H5A2.5 2.5 0 0 1 2.5 15V7A2.5 2.5 0 0 1 5 4.5z" fill="#F7E1C2"/><path d="M8 11h0m4 0h0m4 0h0" stroke-width="2.6"/></symbol>
+<symbol id="if" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="#F8EEE4"/><circle cx="12" cy="12" r="6.4" fill="none" stroke="#EE8C78" stroke-width="4.6" stroke-dasharray="5 5.05" stroke-dashoffset="2.5"/><circle cx="12" cy="12" r="9" fill="none"/><circle cx="12" cy="12" r="4.1" fill="var(--tg-theme-bg-color,#fff)"/></symbol>
+<symbol id="ir" viewBox="0 0 24 24"><path d="M19.2 10.4A7.4 7.4 0 0 0 6 7.6M4.8 13.6A7.4 7.4 0 0 0 18 16.4" fill="none" stroke-width="4.6"/><path d="M19.2 10.4A7.4 7.4 0 0 0 6 7.6M4.8 13.6A7.4 7.4 0 0 0 18 16.4" fill="none" stroke="#F2A779" stroke-width="2.2"/><path d="M3.6 4.4l1.6 5.4 5.2-1.9zM20.4 19.6l-1.6-5.4-5.2 1.9z" fill="#F2A779"/></symbol>
+</defs></svg>
+<div class="t"><span id="vi"></span><div id="v"></div></div>
 <div id="a"></div>
 <div id="o"></div>
 <div id="i"></div>
-<div class="g"><div class="k"><b id="kd"></b><span id="ld"></span></div><div class="k"><b id="km"></b><span id="lm"></span></div><div class="k"><b id="kf"></b><span id="lf"></span></div></div>
+<div class="g"><div class="k"><b id="kd"></b><span id="ld"></span></div><div class="k"><svg><use href="#im"/></svg><b id="km"></b><span id="lm"></span></div><div class="k"><svg><use href="#if"/></svg><b id="kf"></b><span id="lf"></span></div></div>
 <div class="u" id="day"></div>
 <div id="b"></div>
 <div class="u e"><span id="d0"></span><span id="d1"></span></div>
@@ -39,23 +53,25 @@ body{margin:0;padding:10px 12px 12px;font-family:ui-rounded,system-ui,sans-serif
 const W=window.TelegramWidget,$=i=>document.getElementById(i),T=/*T*/{};
 let S={r:0,v:'',i:[],h:''},busy=0,note='';
 function load(t,a){try{const s=JSON.parse(t);if(a)note=s.e?T.e[s.e]||T.e.x:'';if(s.r!=null&&s.r>=S.r)S=s}catch(e){}}
+function ic(i){const d=document.createElement('span');d.innerHTML='<svg><use href="#i'+i+'"/></svg>';return d.firstChild}
 function el(t,c,x){const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
 function ago(){const m=Math.floor((Date.now()/1e3-S.r)/60);return m<1?T.ago[0]:(m<60?m+T.ago[1]:m<2880?Math.floor(m/60)+T.ago[2]:Math.floor(m/1440)+T.ago[3])}
 function draw(){
   const v=S.r?S.v||'?':'',on=!!S.r;
   document.body.className=v;
+  $('vi').textContent='';$('vi').appendChild(ic({h:'h',w:'w',c:'c'}[v]||'s'));
   $('v').textContent=T.v[v];
   $('a').textContent=on?T.at+ago():'';
   const o=S.o??900;$('o').textContent=on&&o&&Date.now()/1e3-S.r>o?T.old:'';
   const L=$('i');L.textContent='';
-  (S.i||[]).forEach(k=>{const q=el('div','q');q.appendChild(el('span','',k[0]=='c'?'🔥':'⚠️'));q.appendChild(el('span','',k[1]));L.appendChild(q)});
+  (S.i||[]).forEach(k=>{const q=el('div','q');q.appendChild(ic(k[0]=='c'?'c':'w'));q.appendChild(el('span','',k[1]));L.appendChild(q)});
   if(S.x)L.appendChild(el('div','q u',T.more+S.x));
-  $('kd').textContent=on?(S.d?'✓':'✖'):'–';
+  const D=$('kd');D.textContent=on?'':'–';if(on)D.appendChild(ic(S.d?'y':'n'));
   $('km').textContent=on?S.m:'–';
   $('kf').textContent=on?S.f:'–';
   const B=$('b');B.textContent='';
   for(let j=0;j<24;j++)B.appendChild(el('i',(S.h||'')[j]||'.'));
-  $('go').textContent=busy?T.busy:T.go;
+  const G=$('go');G.textContent='';if(!busy)G.appendChild(ic('r'));G.appendChild(document.createTextNode(busy?T.busy:T.go));
   $('n').textContent=note;
 }
 function go(){

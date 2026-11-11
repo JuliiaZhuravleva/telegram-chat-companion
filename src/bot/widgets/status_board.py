@@ -78,7 +78,7 @@ _WORDS: Final[Mapping[str, Tr]] = {
     "day": Tr("Последние 24 часа", "Last 24 hours"),
     "d0": Tr("24 ч назад", "24 h ago"),
     "d1": Tr("сейчас", "now"),
-    "go": Tr("🔁 Проверить сейчас", "🔁 Check now"),
+    "go": Tr("Проверить сейчас", "Check now"),
     "busy": Tr("Проверяю…", "Checking…"),
 }
 _AGO: Final = (
