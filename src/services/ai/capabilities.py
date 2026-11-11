@@ -5,7 +5,7 @@ Defines what capabilities each provider supports,
 used for automatic fallback and feature availability checks.
 
 COST POLICY:
-  - Default models (DEFAULT_MODELS["text"]) MUST be the cheapest tier (nano/flash).
+  - Default models (DEFAULT_MODELS["text"]) MUST be the cheapest tier (luna/flash).
   - Expensive models (EXPENSIVE_MODELS) require explicit user approval.
   - Never use expensive models in configs, tests, or defaults without reason.
 """
@@ -26,9 +26,9 @@ class ProviderCapabilities(TypedDict):
 # Capability matrix for all supported providers (January 2026)
 PROVIDER_CAPABILITIES: dict[str, ProviderCapabilities] = {
     "openai": {
-        "text_generation": True,  # gpt-5-nano, gpt-5-mini, gpt-5.2
+        "text_generation": True,  # gpt-6-luna, gpt-5.4-mini, gpt-5.2
         "embeddings": True,  # text-embedding-3-small, text-embedding-3-large
-        "vision": True,  # gpt-5-nano+ (built-in multimodal)
+        "vision": True,  # gpt-6-luna+ (built-in multimodal)
         "transcription": True,  # gpt-4o-mini-transcribe, whisper-1
         "function_calling": True,
     },
@@ -80,10 +80,10 @@ OPT_IN_PROVIDERS: frozenset[str] = frozenset({"cloudflare"})
 # "text_premium" is available but requires explicit approval.
 DEFAULT_MODELS: dict[str, dict[str, str]] = {
     "openai": {
-        "text": "gpt-5-nano",  # cheapest
+        "text": "gpt-6-luna",  # cheapest; gpt-5-nano is removed 2026-12-11
         "text_premium": "gpt-5.2",  # EXPENSIVE — requires approval
         "embeddings": "text-embedding-3-small",
-        "vision": "gpt-5-nano",  # nano has multimodal
+        "vision": "gpt-6-luna",  # luna has multimodal
         "transcription": "gpt-4o-mini-transcribe",
     },
     "gemini": {
@@ -112,7 +112,7 @@ DEFAULT_MODELS: dict[str, dict[str, str]] = {
 }
 
 # Which provider serves a model, by its name. A caller that names a model
-# (`generate_text(model="gpt-5-nano")`) means that model's provider; sending
+# (`generate_text(model="gpt-6-luna")`) means that model's provider; sending
 # the name to any other provider only buys a 404 and an error line in the log.
 MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
     "openai": ("gpt-", "o1", "o3", "o4", "text-embedding-", "whisper-"),
@@ -129,7 +129,7 @@ MODEL_PREFIXES: dict[str, tuple[str, ...]] = {
 EXPENSIVE_MODELS = [
     # OpenAI
     "gpt-5.2",
-    "gpt-5-mini",  # use gpt-5-nano instead
+    "gpt-5-mini",  # removed from the API 2026-12-11 anyway
     "gpt-5.4-mini",  # approved for sticker merge (replaced o4-mini, 2026-11-08)
     "o4-mini",  # OpenAI answers 404 "deprecated" since 2026-11-08
     # Gemini
@@ -149,8 +149,19 @@ DEPRECATED_MODELS = [
     "gemini-1.5-flash",  # already retired
     "gemini-1.5-pro",  # already retired
     "gpt-4o",  # replaced by gpt-5.2
-    "gpt-4o-mini",  # replaced by gpt-5-mini
+    "gpt-4o-mini",  # was replaced by gpt-5-mini, itself removed 2026-12-11
     "gpt-4.1",  # replaced by gpt-5.2
+    # OpenAI removes these from the API on 2026-12-11 (deprecations entry of
+    # 2026-06-11; the owner was mailed 2026-11-11). gpt-5-nano was the cheap
+    # OpenAI default and the relevancy judge -- now gpt-6-luna.
+    "gpt-5",
+    "gpt-5-nano",
+    "gpt-5-mini",
+    "gpt-5-pro",
+    "o3",
+    "o3-pro",
+    # removed 2027-04-01 (deprecations entry of 2026-10-01)
+    "gpt-5.4-nano",
 ]
 
 

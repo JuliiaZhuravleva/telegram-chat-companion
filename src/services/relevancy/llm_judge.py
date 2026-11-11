@@ -1,7 +1,7 @@
 """Tier 3: LLM-based relevancy classification.
 
-Uses the cheapest available model (gpt-5-nano) to decide whether the bot
-should jump into a group conversation. ~$0.00002 per check.
+Uses a cheap model (`JUDGE_MODEL`) to decide whether the bot should jump into
+a group conversation. ~$0.0001–0.0004 per check (live probe, 2026-11-11).
 """
 
 from __future__ import annotations
@@ -21,6 +21,14 @@ from src.services.text.prompt_sanitizer import sanitize_prompt_content
 from src.utils.senders import row_sender_label
 
 logger = structlog.get_logger(__name__)
+
+# The judge addresses OpenAI directly by model name. Was gpt-5-nano, which
+# OpenAI removes from the API on 2026-12-11. gpt-6-luna, live probe through
+# this module on 2026-11-11 (4 invented cases, one run each): every reply in
+# the verdict format, 2-7 s against nano's 13-22 s, cheaper per call because
+# it reasons in 66-590 tokens where nano spent 1300-2750. Like nano it accepts
+# only temperature=1.0.
+JUDGE_MODEL = "gpt-6-luna"
 
 # Fence #2 of the project's double fence (fence #1 is sanitize_prompt_content
 # on every interpolated field). Previously this call passed system_prompt=None,
@@ -154,8 +162,8 @@ async def llm_judge(
         result = await ai_router.generate_text(
             prompt=prompt,
             system_prompt=_JUDGE_SYSTEM_PROMPT,
-            model="gpt-5-nano",
-            # gpt-5-nano spends internal reasoning tokens out of this same
+            model=JUDGE_MODEL,
+            # The judge model spends internal reasoning tokens out of this same
             # budget. At 1024 it can burn the whole allowance thinking and
             # return empty content (finish_reason=length) -- observed live on
             # 2026-08-03, surfacing as llm_judge_failed/all_providers_failed,

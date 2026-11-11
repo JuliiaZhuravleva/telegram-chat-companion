@@ -107,6 +107,39 @@ class TestLoadYamlConfig:
                     f"Task '{task_name}' fallback uses expensive model '{fb_model}'"
                 )
 
+    def test_default_config_uses_no_retired_models(self):
+        """A model OpenAI removes stays in default.yml silently until every call
+        404s. gpt-5-nano was the text and vision fallback when its removal was
+        announced for 2026-12-11; DEPRECATED_MODELS is where such news lands."""
+        from src.services.ai.capabilities import DEPRECATED_MODELS
+        from src.services.ai.providers.openai import _DEFAULT_TEXT_MODEL
+        from src.services.relevancy.llm_judge import JUDGE_MODEL
+
+        config = load_yaml_config()
+        # _DEFAULT_TEXT_MODEL is the one that ships: the router passes
+        # model=None to a fallback provider (router.py, "fallbacks use their
+        # defaults") and analyze_image passes none at all.
+        used = {JUDGE_MODEL, _DEFAULT_TEXT_MODEL}
+        for task_config in config["ai"]["tasks"].values():
+            if task_config.get("model"):
+                used.add(task_config["model"])
+            used.update(task_config.get("fallback_models", {}).values())
+        assert "gpt-6-luna" in used, "control: the walk must see the fallback models"
+        assert not used & set(DEPRECATED_MODELS), sorted(used & set(DEPRECATED_MODELS))
+
+    def test_openai_cheap_model_sources_agree(self):
+        """The cheap OpenAI model is written in three places and only the
+        provider constant is sent; the YAML and DEFAULT_MODELS are where a
+        reader looks for the knob. Same shape as the transcription check above."""
+        from src.services.ai.capabilities import DEFAULT_MODELS
+        from src.services.ai.providers.openai import _DEFAULT_TEXT_MODEL
+
+        tasks = load_yaml_config()["ai"]["tasks"]
+        assert tasks["text_generation"]["fallback_models"]["openai"] == _DEFAULT_TEXT_MODEL
+        assert tasks["vision"]["fallback_models"]["openai"] == _DEFAULT_TEXT_MODEL
+        assert DEFAULT_MODELS["openai"]["text"] == _DEFAULT_TEXT_MODEL
+        assert DEFAULT_MODELS["openai"]["vision"] == _DEFAULT_TEXT_MODEL
+
     def test_embeddings_has_no_fallback(self):
         """S2-1: embeddings has no fallback provider, declared honestly.
 

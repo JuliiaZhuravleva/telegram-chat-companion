@@ -3,7 +3,7 @@
 Architecture:
   Tier 1  Fast rules      — zero cost, pure Python regex/length checks
   Tier 2  Engagement       — 1 SQL query, conversation-dynamics signals
-  Tier 3  LLM judge        — cheapest model (gpt-5-nano), ~$0.00002/check
+  Tier 3  LLM judge        — cheap model (`llm_judge.JUDGE_MODEL`), ~$0.0001–0.0004/check
 
 Only called for ``TriggerType.RANDOM``. Explicit triggers (TRIGGER, REPLY)
 bypass the gate entirely.

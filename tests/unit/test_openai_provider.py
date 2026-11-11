@@ -48,6 +48,17 @@ def _mock_response(
     return httpx.Response(**kwargs)
 
 
+_OK_CHAT = {
+    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+    "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+}
+# OpenAI's body, verbatim from the live 400 on 2026-11-11 (gpt-6-luna, 0.9).
+_TEMPERATURE_400 = (
+    '{\n  "error": {\n    "message": "Unsupported value: \'temperature\' does not support 0.9 '
+    'with this model. Only the default (1) value is supported.",\n    '
+    '"type": "invalid_request_error",\n    "param": "temperature"}}'
+)
+
 # -- Text Generation --
 
 
@@ -69,7 +80,7 @@ class TestGenerateText:
             result = await provider.generate_text("Say hello")
 
         assert result.text == "Hello!"
-        assert result.model == "gpt-5-nano"
+        assert result.model == "gpt-6-luna"
         assert result.provider == "openai"
         assert result.tokens_input == 15
         assert result.tokens_output == 3
@@ -607,3 +618,77 @@ class TestErrorHandling:
         ):
             with pytest.raises(AIProviderError, match="HTTP error"):
                 await provider.generate_text("Test")
+
+
+# -- Temperature: models that accept only the default --
+#
+# Until 2026-11-11 the check was the single name "gpt-5-nano": moving any role
+# to another such model turned its every call into a 400. Measured live:
+# gpt-6-luna and gpt-5.6-luna reject 0.9, gpt-5.4-mini accepts it.
+
+
+class TestDefaultTemperatureOnly:
+    @pytest.mark.parametrize(
+        "model", ["gpt-6-luna", "gpt-5.6-luna", "gpt-5-nano", "gpt-5-mini", "o4-mini"]
+    )
+    async def test_known_models_are_sent_temperature_one(self, provider, model):
+        with patch.object(
+            provider._client,
+            "post",
+            new_callable=AsyncMock,
+            return_value=_mock_response(json_data=_OK_CHAT),
+        ) as post:
+            await provider.generate_text("hi", model=model, temperature=0.9)
+
+        assert post.await_count == 1
+        assert post.call_args.kwargs["json"]["temperature"] == 1.0
+
+    async def test_a_model_that_accepts_any_value_keeps_it(self, provider):
+        """The rule must not wrongly flatten temperature for everyone."""
+        with patch.object(
+            provider._client,
+            "post",
+            new_callable=AsyncMock,
+            return_value=_mock_response(json_data=_OK_CHAT),
+        ) as post:
+            await provider.generate_text("hi", model="gpt-5.4-mini", temperature=0.4)
+
+        assert post.call_args.kwargs["json"]["temperature"] == 0.4
+
+    async def test_unknown_model_rejecting_temperature_is_retried_at_one(self, provider):
+        responses = [
+            _mock_response(status_code=400, text=_TEMPERATURE_400),
+            _mock_response(json_data=_OK_CHAT),
+        ]
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, side_effect=responses
+        ) as post:
+            result = await provider.generate_text("hi", model="gpt-7-future", temperature=0.9)
+
+        assert result.text == "ok"
+        assert post.await_count == 2
+        sent = [call.kwargs["json"]["temperature"] for call in post.await_args_list]
+        assert sent == [0.9, 1.0]
+
+    async def test_other_400_is_not_retried(self, provider):
+        bad_model = _mock_response(status_code=400, text='{"error": {"message": "bad model"}}')
+        with patch.object(
+            provider._client, "post", new_callable=AsyncMock, return_value=bad_model
+        ) as post:
+            with pytest.raises(AIProviderError, match="400"):
+                await provider.generate_text("hi", model="gpt-7-future", temperature=0.9)
+
+        assert post.await_count == 1
+
+    async def test_rejection_at_one_is_not_retried(self, provider):
+        """At 1.0 the retry would send the same request again: give up."""
+        with patch.object(
+            provider._client,
+            "post",
+            new_callable=AsyncMock,
+            return_value=_mock_response(status_code=400, text=_TEMPERATURE_400),
+        ) as post:
+            with pytest.raises(AIProviderError):
+                await provider.generate_text("hi", model="gpt-7-future", temperature=1.0)
+
+        assert post.await_count == 1
