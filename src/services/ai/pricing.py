@@ -34,6 +34,18 @@ class ModelPricing:
 # Last verified: 2026-02-10
 MODEL_PRICING: dict[str, ModelPricing] = {
     # --- OpenAI ---
+    # Verified 2026-11-11 on developers.openai.com/api/docs/pricing (standard
+    # tier, short context <=272K input). gpt-6-luna replaces gpt-5-nano.
+    "gpt-6-luna": ModelPricing(
+        input_per_1m=Decimal("0.10"),
+        output_per_1m=Decimal("0.50"),
+    ),
+    # OpenAI's official successor to gpt-5-nano; not a default here.
+    "gpt-5.6-luna": ModelPricing(
+        input_per_1m=Decimal("0.20"),
+        output_per_1m=Decimal("1.20"),
+    ),
+    # Removed from the API 2026-12-11; kept so old response_log rows price.
     "gpt-5-nano": ModelPricing(
         input_per_1m=Decimal("0.05"),
         output_per_1m=Decimal("0.40"),

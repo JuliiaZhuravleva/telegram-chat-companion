@@ -36,7 +36,7 @@ ai:
       fallback:
         - "openai"
       fallback_models:
-        openai: "gpt-5-nano"               # cheapest OpenAI text model
+        openai: "gpt-6-luna"               # cheapest OpenAI text model (gpt-5-nano removed 2026-12-11)
       max_tokens: 500
       temperature: 0.9
 
@@ -63,13 +63,13 @@ ai:
       fallback:
         - "openai"
       fallback_models:
-        openai: "gpt-5-nano"               # nano has multimodal, no need for gpt-5.2
+        openai: "gpt-6-luna"               # luna has multimodal, no need for gpt-5.2
       max_tokens: 200
 
     # relevancy_check task removed (S2-9, TD-058): AIRouter.generate_text() has no
     # per-task routing parameter, so this section was never read -- provider,
     # max_tokens and temperature here were all ignored. llm_judge.py addresses
-    # OpenAI directly via an explicit model="gpt-5-nano" override (the documented
+    # OpenAI directly via an explicit model=JUDGE_MODEL override (the documented
     # provider-addressing idiom, CLAUDE.md "Critical Patterns") and passes its own
     # max_tokens=4096/temperature=1.0. Re-add once generate_text() gains real
     # per-task routing (TD-058) -- until then a key here is a knob that does

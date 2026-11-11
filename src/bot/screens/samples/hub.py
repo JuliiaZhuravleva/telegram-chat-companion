@@ -302,7 +302,7 @@ def stats(lang: Lang) -> Screen:
 @sample("costs", section="Состояние", title="С вызовами", nav="panel")
 def costs_full(lang: Lang) -> Screen:
     by_model = [
-        {"model": "gpt-5-nano", "total_cost": Decimal("0.0213"), "call_count": 41},
+        {"model": "gpt-6-luna", "total_cost": Decimal("0.0213"), "call_count": 41},
         {"model": "gemini-3-flash", "total_cost": Decimal("0.0102"), "call_count": 18},
         {"model": "gpt-4o-mini-transcribe", "total_cost": Decimal("0.0090"), "call_count": 3},
     ]

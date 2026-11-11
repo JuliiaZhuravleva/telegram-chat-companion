@@ -107,6 +107,22 @@ class TestLoadYamlConfig:
                     f"Task '{task_name}' fallback uses expensive model '{fb_model}'"
                 )
 
+    def test_default_config_uses_no_retired_models(self):
+        """A model OpenAI removes stays in default.yml silently until every call
+        404s. gpt-5-nano was the text and vision fallback when its removal was
+        announced for 2026-12-11; DEPRECATED_MODELS is where such news lands."""
+        from src.services.ai.capabilities import DEPRECATED_MODELS
+        from src.services.relevancy.llm_judge import JUDGE_MODEL
+
+        config = load_yaml_config()
+        used = {JUDGE_MODEL}
+        for task_config in config["ai"]["tasks"].values():
+            if task_config.get("model"):
+                used.add(task_config["model"])
+            used.update(task_config.get("fallback_models", {}).values())
+        assert "gpt-6-luna" in used, "control: the walk must see the fallback models"
+        assert not used & set(DEPRECATED_MODELS), sorted(used & set(DEPRECATED_MODELS))
+
     def test_embeddings_has_no_fallback(self):
         """S2-1: embeddings has no fallback provider, declared honestly.
 

@@ -67,7 +67,7 @@ For `TriggerType.RANDOM` only. Each tier short-circuits on rejection. Source: [s
 |---|---|---|---|
 | **T1 — Fast Rules** ([fast_rules.py:43-59](src/services/relevancy/fast_rules.py#L43-L59)) | Regex + length | $0 | `too_short` (<4 chars), `acknowledgment` (ok/спс/кек/лол regex), `emoji_only` (1-8 emoji chars) |
 | **T2 — Engagement** ([engagement.py:47-81](src/services/relevancy/engagement.py#L47-L81)) | 1 SQL query: `get_bot_message_stats(chat_id, limit=20)` | $0 | `bot_ratio_exceeded` (>25 % bot msgs over last 10+), `high_velocity` (>5 msgs/min), `consecutive_bot_responses` (≥2 bot msgs at conversation tail) |
-| **T3 — LLM Judge** ([llm_judge.py:51-100](src/services/relevancy/llm_judge.py#L51-L100)) | Cheap-tier LLM call (`gpt-5-nano`, `max_tokens=1024`, `temperature=1.0`) with last 5 msgs + current msg | ~$0.00002 | LLM returns NO |
+| **T3 — LLM Judge** ([llm_judge.py:51-100](src/services/relevancy/llm_judge.py#L51-L100)) | Cheap-tier LLM call (`JUDGE_MODEL` = `gpt-6-luna`, `max_tokens=4096`, `temperature=1.0`) with last 5 msgs + current msg | ~$0.0001–0.0004 | LLM returns NO |
 
 Every decision is logged as structured JSON: `{"event": "relevancy_gate_decision", "chat_id": ..., "should_respond": true/false, "tier": "fast_rules|engagement|llm_judge", "reason": "...", "cost_usd": 0.00002}`.
 
@@ -526,14 +526,14 @@ From [src/models/chat_config.py](src/models/chat_config.py) and `config/default.
 
 | Task | Primary | Model | Fallback chain |
 |---|---|---|---|
-| `text_generation` | gemini | `gemini-3-flash-preview` | openai (`gpt-5-nano`) → deepseek (`deepseek-v3.2`) |
+| `text_generation` | gemini | `gemini-3-flash-preview` | openai (`gpt-6-luna`) → deepseek (`deepseek-v3.2`) |
 | `embeddings` | gemini | `gemini-embedding-001` (768 d, free) | *(no fallback — S2-1: no comparable 768-dim OpenAI model without truncating the embedding space)* |
-| `vision` | gemini | `gemini-3-flash-preview` | openai (`gpt-5-nano`) → grok (`grok-2-vision-1212`) |
+| `vision` | gemini | `gemini-3-flash-preview` | openai (`gpt-6-luna`) → grok (`grok-2-vision-1212`) |
 | `transcription` | openai | `whisper-1` | *(no fallback — only provider)* |
 
 `RelevancyGate`'s LLM judge (`llm_judge.py`) is not a routed task: `generate_text()` has no
 per-task parameter, so it rides `text_generation`'s chain and addresses OpenAI directly via
-an explicit `model="gpt-5-nano"` override (CLAUDE.md's documented provider-addressing idiom —
+an explicit `model=JUDGE_MODEL` (`gpt-6-luna`) override (CLAUDE.md's documented provider-addressing idiom —
 "pass `model=…` to target a specific provider, non-matching providers 404 and fall through"),
 passing its own `max_tokens=4096`/`temperature=1.0`. A `relevancy_check` section in
 `config/default.yml` used to suggest otherwise; it was dead (never read) and was removed in

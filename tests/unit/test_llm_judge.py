@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.services.ai.base import AIProviderError, TextGenerationResult
-from src.services.relevancy.llm_judge import llm_judge
+from src.services.relevancy.llm_judge import JUDGE_MODEL, llm_judge
 
 
 def _make_router(text: str = "YES", provider: str = "openai") -> AsyncMock:
@@ -16,7 +16,7 @@ def _make_router(text: str = "YES", provider: str = "openai") -> AsyncMock:
     router.generate_text = AsyncMock(
         return_value=TextGenerationResult(
             text=text,
-            model="gpt-5-nano",
+            model=JUDGE_MODEL,
             provider=provider,
             tokens_input=100,
             tokens_output=10,
@@ -258,8 +258,23 @@ class TestLlmJudgeSuggestedEmoji:
         assert result.suggested_emoji is None
 
     @pytest.mark.asyncio
+    async def test_router_is_asked_for_the_judge_model(self) -> None:
+        """The call site, not the constant: a literal left at the call would
+        keep asking for gpt-5-nano after 2026-12-11 and fail every check closed."""
+        router = _make_router("NO")
+        await llm_judge("test", [], router)
+        assert router.generate_text.call_args.kwargs["model"] == "gpt-6-luna"
+
+    @pytest.mark.asyncio
+    async def test_judge_calls_are_priced(self) -> None:
+        """An unpriced model writes NULL cost_usd and the spend cap under-counts."""
+        router = _make_router("NO")
+        result = await llm_judge("test", [], router)
+        assert result.cost_usd is not None and result.cost_usd > 0
+
+    @pytest.mark.asyncio
     async def test_token_budget_survives_internal_reasoning(self) -> None:
-        """gpt-5-nano spends reasoning tokens out of `max_tokens`.
+        """The judge model spends reasoning tokens out of `max_tokens`.
 
         At 1024 it exhausted the budget thinking and returned empty content
         (finish_reason=length) -- observed live 2026-08-03. That fails the gate

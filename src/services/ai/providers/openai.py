@@ -26,6 +26,39 @@ logger = structlog.get_logger(__name__)
 
 _BASE_URL = "https://api.openai.com/v1"
 
+# gpt-5-nano is removed from the API on 2026-12-11 (OpenAI deprecations,
+# entry of 2026-06-11). gpt-6-luna: newer and cheaper than the official
+# successor gpt-5.6-luna, and itself not scheduled for removal (2026-11-11).
+_DEFAULT_TEXT_MODEL = "gpt-6-luna"
+
+# -- Temperature -------------------------------------------------------
+#
+# Several models reject any temperature but the default with a 400
+# ("Unsupported value: 'temperature' does not support 0.9 with this model.
+# Only the default (1) value is supported."). Measured against the live API:
+# gpt-5-nano, gpt-5-mini (2026-11-08), gpt-6-luna and gpt-5.6-luna
+# (2026-11-11). gpt-5.4-mini accepts any value. The list is NOT a whitelist we
+# can keep complete -- it used to be the single name "gpt-5-nano", so swapping
+# the model under any role turned its every call into a 400. Hence the second
+# line of defence in `generate_text`: one retry at 1.0 when OpenAI says exactly
+# this, logged so the model can be added here.
+_DEFAULT_TEMPERATURE_ONLY_PREFIXES = ("o1", "o3", "o4", "gpt-5-nano", "gpt-5-mini")
+_DEFAULT_TEMPERATURE_ONLY_SUFFIXES = ("-luna",)
+_TEMPERATURE_REJECTED_MARKERS = ("'temperature'", "Only the default (1) value is supported")
+
+
+def _default_temperature_only(model: str) -> bool:
+    """True when ``model`` is known to accept only ``temperature=1.0``."""
+    return model.startswith(_DEFAULT_TEMPERATURE_ONLY_PREFIXES) or model.endswith(
+        _DEFAULT_TEMPERATURE_ONLY_SUFFIXES
+    )
+
+
+def _is_temperature_rejection(error: AIProviderError) -> bool:
+    """True for OpenAI's 400 refusing a non-default temperature."""
+    text = str(error)
+    return " 400:" in text and all(marker in text for marker in _TEMPERATURE_REJECTED_MARKERS)
+
 
 # -- Upload filename ---------------------------------------------------
 #
@@ -160,13 +193,11 @@ class OpenAIProvider(AIProvider):
         **kwargs: Any,
     ) -> TextGenerationResult:
         """Generate text using OpenAI Chat Completions API."""
-        model = model or "gpt-5-nano"
+        model = model or _DEFAULT_TEXT_MODEL
 
-        # Some models only support temperature=1.0:
-        # - gpt-5-nano (cheapest tier)
-        # - reasoning models (o1*, o3*, o4* — e.g. o4-mini)
-        is_reasoning = model.startswith(("o1", "o3", "o4"))
-        if (model == "gpt-5-nano" or is_reasoning) and temperature != 1.0:
+        # Some models only support temperature=1.0 -- see
+        # `_DEFAULT_TEMPERATURE_ONLY_PREFIXES` for the measured list.
+        if _default_temperature_only(model) and temperature != 1.0:
             logger.warning(
                 "Model only supports temperature=1.0, adjusting",
                 model=model,
@@ -190,7 +221,22 @@ class OpenAIProvider(AIProvider):
         if kwargs.get("response_mime_type") == "application/json":
             payload["response_format"] = {"type": "json_object"}
 
-        response = await self._request(f"{_BASE_URL}/chat/completions", payload)
+        try:
+            response = await self._request(f"{_BASE_URL}/chat/completions", payload)
+        except AIProviderError as exc:
+            if payload["temperature"] == 1.0 or not _is_temperature_rejection(exc):
+                raise
+            # A model missing from the measured list. A 400 is not billed, so
+            # one retry costs nothing -- and without it the role is dead.
+            logger.warning(
+                "openai_temperature_rejected_retrying",
+                model=model,
+                requested_temperature=payload["temperature"],
+            )
+            # A new dict, not a mutation: the first request stays what was sent.
+            response = await self._request(
+                f"{_BASE_URL}/chat/completions", {**payload, "temperature": 1.0}
+            )
 
         choices = response.get("choices", [])
         if not choices:
@@ -268,7 +314,7 @@ class OpenAIProvider(AIProvider):
         **kwargs: Any,
     ) -> VisionResult:
         """Analyze image using OpenAI Responses API."""
-        model = model or "gpt-5-nano"
+        model = model or _DEFAULT_TEXT_MODEL
         mime_type = kwargs.get("mime_type", "image/jpeg")
 
         b64_data = base64.b64encode(image_data).decode("utf-8")
