@@ -76,6 +76,7 @@ async def _send_one(
     html_text: str,
     reply_to_message_id: int | None,
     language: str,
+    continuation: bool = False,
 ) -> Message | None:
     """Send `html_text`, quoting `reply_to_message_id`, surviving its deletion.
 
@@ -89,12 +90,24 @@ async def _send_one(
     the chat can see what happened rather than reading an answer that appears
     to address nobody.
 
+    A `continuation` (part two onwards of a split answer) quotes the source
+    for threading only, so it asks Telegram to drop the quote rather than
+    reject the send: the deletion note belongs on the head of the answer, and
+    repeating it on every later piece would be noise.
+
     Returns the sent `Message`, or None if it could not be delivered at all --
     callers must still run their post-send bookkeeping in that case, because
     the AI call has already been made and its cost has to be recorded whether
     or not the text reached the chat.
     """
     try:
+        if continuation and reply_to_message_id is not None:
+            return await message.answer(
+                html_text,
+                parse_mode="HTML",
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True,
+            )
         return await message.answer(
             html_text,
             parse_mode="HTML",
@@ -166,9 +179,15 @@ async def send_html_parts(
 ) -> list[Message]:
     """Send pre-split pieces as consecutive messages; return the ones that landed.
 
-    Only the first piece quotes the source. Telegram renders consecutive
-    messages from the same sender as one block, and quoting the same message
-    three times reads as three separate answers to it.
+    **Every piece quotes the source**, not only the first. It used to be the
+    first alone (quoting one message three times looked like three answers),
+    and that was a delivery defect, not a style choice: in a channel's
+    discussion group a reply is the ONLY thing that puts a message into a
+    post's comment thread -- `sendMessage` has no thread parameter outside
+    forums. An unquoted continuation went to the group's main feed, so under
+    the post readers saw "Расшифровка (1/2)" and never part two (found
+    2026-11-12 on a nine-minute voice post). The "(n/m)" header already says
+    the pieces belong together.
 
     Stops at the first piece that cannot be delivered rather than sending the
     tail on its own: a reply whose opening is missing is harder to read than a
@@ -192,13 +211,14 @@ async def send_html_parts(
     """
     sent: list[Message] = []
     for index, part in enumerate(parts):
-        quote = reply_to_message_id if index == 0 else None
+        quote = reply_to_message_id
         try:
             delivered = await _send_one(
                 message=message,
                 html_text=part,
                 reply_to_message_id=quote,
                 language=language,
+                continuation=index > 0 or already_delivered,
             )
         except Exception as exc:
             too_long = isinstance(exc, TelegramBadRequest) and any(
@@ -373,6 +393,7 @@ async def finish_reply(
     message: Message,
     result: PipelineResult,
     sent_message_id: int | None,
+    reply_to_message_id: int | None,
     chat_config: ChatConfig,
     pipeline: TextProcessingPipeline,
     spend_limit_svc: SpendLimitService,
@@ -399,10 +420,20 @@ async def finish_reply(
     make an undeliverable answer invisible to ``SpendLimitService`` and to
     /costs — under-reporting real spend, which is the one direction a spend
     limit must never fail in.
+
+    ``reply_to_message_id`` is the message the text answer quoted, and the
+    sticker quotes it too, for the reason every split piece does (see
+    `send_html_parts`): in a channel's comment thread an unquoted send lands
+    in the group's main feed, not under the post. ``allow_sending_without_reply``
+    makes a source deleted in the meantime cost the quote, not the sticker.
     """
     if result.sticker_file_id:
         try:
-            await message.answer_sticker(result.sticker_file_id)
+            await message.answer_sticker(
+                result.sticker_file_id,
+                reply_to_message_id=reply_to_message_id,
+                allow_sending_without_reply=True,
+            )
         except Exception as exc:
             logger.warning(
                 "Failed to send AI-chosen sticker",

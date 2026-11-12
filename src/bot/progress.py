@@ -202,7 +202,9 @@ class ProgressNotice:
                     # like a first-element failure to send_html_parts and it
                     # would unwind the handler with part one visible.
                     already_delivered=True,
-                    reply_to_message_id=None,
+                    # Quoted like the placeholder was: in a channel's comment
+                    # thread an unquoted continuation lands outside it.
+                    reply_to_message_id=self._reply_to,
                     language=language,
                 )
                 self._placeholder = None

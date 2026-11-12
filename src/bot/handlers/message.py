@@ -143,6 +143,7 @@ async def handle_text_message(
         message=message,
         result=result,
         sent_message_id=sent.message_id if sent else None,
+        reply_to_message_id=reply_to,
         chat_config=chat_config,
         pipeline=pipeline,
         spend_limit_svc=spend_limit_svc,
