@@ -45,7 +45,7 @@ class FakeMessage:
     async def answer(self, text: str, **kwargs) -> FakeSent:
         is_quoted = kwargs.get("reply_to_message_id") is not None
         if is_quoted and self.quoted_answer_error is not None:
-            # What Telegram does (measured live 2026-11-12 on the dev bot): with
+            # The Bot API's documented contract (not probed live here): with
             # `allow_sending_without_reply` the send goes out, just unquoted.
             if not kwargs.get("allow_sending_without_reply"):
                 raise self.quoted_answer_error
