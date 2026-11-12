@@ -13,6 +13,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.progress import MIN_SECONDS_TO_ANNOUNCE, ProgressNotice
 from src.bot.reply_flow import (
+    answer_quote_target,
     finish_reply,
     relevancy_allows_reply,
     send_quoted_reply,
@@ -570,7 +571,7 @@ async def handle_photo_message(
         if result is None or not result.should_respond or not result.html_text:
             return
 
-        reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
+        reply_to = answer_quote_target(message, trigger_type)
 
         # Send to correct topic in forum chats
         # Note: message.answer() inherits message_thread_id from the original message

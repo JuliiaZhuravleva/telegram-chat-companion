@@ -9,7 +9,12 @@ from aiogram import Bot, F, Router
 from aiogram.types import Message
 from dishka.integrations.aiogram import FromDishka
 
-from src.bot.reply_flow import finish_reply, relevancy_allows_reply, send_quoted_reply
+from src.bot.reply_flow import (
+    answer_quote_target,
+    finish_reply,
+    relevancy_allows_reply,
+    send_quoted_reply,
+)
 from src.bot.utils import extract_reply_context, should_respond
 from src.database.repositories.messages import MessageRepository
 from src.models.chat_config import ChatConfig
@@ -121,8 +126,9 @@ async def handle_text_message(
         )
         return
 
-    # Random responses don't quote the triggering message
-    reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
+    # Random responses don't quote the triggering message -- except inside a
+    # reply thread (a comment under a channel post), which they would leave.
+    reply_to = answer_quote_target(message, trigger_type)
 
     # Send to correct topic in forum chats
     # Note: message.answer() inherits message_thread_id from the original message

@@ -70,6 +70,45 @@ _REPLY_TARGET_GONE_MARKERS = (
 _TOO_LONG_MARKERS = ("message is too long", "message_too_long", "text is too long")
 
 
+def in_reply_thread(message: Message) -> bool:
+    """Whether ``message`` sits in a thread that only a reply can reach.
+
+    A comment under a channel post (in the channel's discussion group) and a
+    reply chain in an ordinary supergroup are both threads Telegram keeps
+    together by the reply link alone: the Bot API's ``message_thread_id`` is
+    honoured for forum topics only, and aiogram's ``Message.answer`` passes it
+    only when ``is_topic_message``. A message sent there WITHOUT a quote lands
+    in the group's main feed -- under a blog post it is simply not there.
+
+    Forums are excluded on purpose: ``answer()`` already routes into the topic,
+    and inside a topic Telegram sets ``reply_to_message`` to the topic's root
+    even when nobody replied to anything.
+
+    Reads the raw ``message_thread_id`` off the message, not TopicMiddleware's
+    kwarg -- that one is nulled for every non-forum chat, which is exactly the
+    case this asks about.
+    """
+    # `is True`, not truthiness: Telegram sends `is_forum` only for forums, and
+    # anything but a real True (None, absent) means an ordinary group.
+    if message.chat.is_forum is True:
+        return False
+    return message.reply_to_message is not None or message.message_thread_id is not None
+
+
+def answer_quote_target(message: Message, trigger_type: TriggerType) -> int | None:
+    """The message an answer to ``message`` quotes, or None for no quote.
+
+    An invited answer (mention, trigger word, reply) always quotes. An
+    unsolicited RANDOM one stays unquoted in the open feed -- quoting a message
+    nobody addressed to the bot reads as pointing at its author -- but quotes
+    inside a reply thread, because there an unquoted message leaves the thread
+    (owner's decision, 2026-11-12).
+    """
+    if trigger_type != TriggerType.RANDOM or in_reply_thread(message):
+        return message.message_id
+    return None
+
+
 async def _send_one(
     *,
     message: Message,

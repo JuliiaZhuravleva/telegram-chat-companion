@@ -155,8 +155,16 @@ async def _send_new(
     screen_id: str,
     parse_mode: str | None | Default,
     disable_web_page_preview: bool | None | Default,
+    reply_to_message_id: int | None = None,
 ) -> Message:
-    """Send ``text`` as a new message in ``anchor``'s chat, splitting it when too long."""
+    """Send ``text`` as a new message in ``anchor``'s chat, splitting it when too long.
+
+    ``reply_to_message_id`` quotes that message on every piece. A source deleted
+    meanwhile costs the quote, never the screen (``allow_sending_without_reply``).
+    """
+    quote: dict[str, Any] = {}
+    if reply_to_message_id is not None:
+        quote = {"reply_to_message_id": reply_to_message_id, "allow_sending_without_reply": True}
     length = parsed_length(text)
     if length > TELEGRAM_MESSAGE_LIMIT:
         # Builders cap their lists so this never happens; the rules test checks
@@ -167,7 +175,10 @@ async def _send_new(
         head, text = parts[:-1], parts[-1]
         if isinstance(anchor, Message):
             await send_html_parts(
-                message=anchor, parts=head, reply_to_message_id=None, language="ru"
+                message=anchor,
+                parts=head,
+                reply_to_message_id=reply_to_message_id,
+                language="ru",
             )
         else:
             for part in head:
@@ -177,7 +188,21 @@ async def _send_new(
         parse_mode=parse_mode,
         reply_markup=markup,
         disable_web_page_preview=disable_web_page_preview,
+        **quote,
     )
+
+
+def _command_quote(message: Message) -> int | None:
+    """The message a screen answering ``message`` quotes: the command, in a group.
+
+    A group answer stays tied to its command -- and in a channel's discussion
+    group the quote is the only thing that keeps it under the post: unquoted it
+    lands in the group's main feed. A DM has nothing to keep apart, so no quote.
+    """
+    chat = getattr(message, "chat", None)
+    if chat is not None and chat.type in ("group", "supergroup"):
+        return message.message_id
+    return None
 
 
 async def show_markup(
@@ -253,6 +278,7 @@ async def _deliver(
             screen_id=screen_id,
             parse_mode=parse_mode,
             disable_web_page_preview=disable_web_page_preview,
+            reply_to_message_id=_command_quote(message),
         )
 
     callback: CallbackQuery = target  # type: ignore[assignment]  # narrowed by _is_callback

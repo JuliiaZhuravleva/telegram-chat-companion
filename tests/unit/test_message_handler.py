@@ -1048,3 +1048,36 @@ class TestAiStickerQuotesWhatTheAnswerQuoted:
 
         assert message.answer.await_args.kwargs.get("reply_to_message_id") is None
         assert message.answer_sticker.await_args.kwargs.get("reply_to_message_id") is None
+
+    @pytest.mark.asyncio
+    async def test_an_unsolicited_answer_in_a_comment_thread_quotes(
+        self, message_deps, make_message
+    ):
+        """A RANDOM answer to a comment under a channel post quotes it, sticker too.
+
+        Unquoted it went to the discussion group's main feed and never appeared
+        under the post. The open-feed control above stays unquoted.
+        """
+        post = MagicMock()
+        post.message_id = 10
+        post.from_user = None  # a channel post forwarded into the discussion group
+        post.sender_chat = MagicMock(id=-100777, type="channel", title="Blog", username=None)
+        post.author_signature = None
+        post.is_automatic_forward = True
+        post.text = "the post"
+        post.caption = None
+        message = make_message(
+            text="just chatting",
+            chat_id=-100123,
+            message_id=42,
+            reply_to_message=post,
+            message_thread_id=10,
+        )
+        message.quote = None  # no manual quote; a bare mock is not a string
+        message.answer = AsyncMock(return_value=MagicMock(message_id=43))
+        message.answer_sticker = AsyncMock()
+        message_deps["message"] = message
+        message = await self._run(message_deps, TriggerType.RANDOM)
+
+        assert message.answer.await_args.kwargs.get("reply_to_message_id") == 42
+        assert message.answer_sticker.await_args.kwargs.get("reply_to_message_id") == 42

@@ -1290,8 +1290,9 @@ class TestHandleKbView:
 
         await handle_kb_view_group(msg, cfg, repo)
 
-        msg.answer.assert_awaited_once()
-        text = msg.answer.call_args[0][0]
+        # Quoted: under a channel post an unquoted notice leaves the comments.
+        msg.reply.assert_awaited_once()
+        text = msg.reply.call_args[0][0]
         assert "отключена" in text
         assert "секрет" not in text
         repo.get_active_facts.assert_not_awaited()
@@ -1321,8 +1322,8 @@ class TestHandleKbView:
 
         await handle_kb_view_group(msg, _make_chat_config(), repo)
 
-        msg.answer.assert_awaited_once()
-        assert "пуста" in msg.answer.call_args[0][0]
+        msg.reply.assert_awaited_once()
+        assert "пуста" in msg.reply.call_args[0][0]
 
     @pytest.mark.asyncio
     async def test_group_renders_fact_text_and_hides_the_predicate(self) -> None:
@@ -1345,6 +1346,10 @@ class TestHandleKbView:
         # Positive half first: the absence assertion below cannot pass vacuously.
         assert "встречаемся в кафе Луна" in text
         assert "m1001" not in text
+        # Quoted, so under a channel post the list stays in the comments; a
+        # deleted command costs the quote, not the list.
+        assert msg.answer.call_args.kwargs.get("reply_to_message_id") == CMD_MESSAGE_ID
+        assert msg.answer.call_args.kwargs.get("allow_sending_without_reply") is True
 
     @pytest.mark.asyncio
     async def test_group_escapes_html_in_facts(self) -> None:

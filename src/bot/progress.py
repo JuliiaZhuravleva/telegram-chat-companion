@@ -91,8 +91,15 @@ class ProgressNotice:
             return self
         self._started = time.monotonic()
         try:
+            # A source deleted before this goes out costs the quote, not the
+            # placeholder. Losing the placeholder would route the result through
+            # send_html_parts' first-part path, which prefixes a "source
+            # deleted" note -- right for audio, odd on a /summary someone
+            # tidied away.
             self._placeholder = await self._message.answer(
-                self._text, reply_to_message_id=self._reply_to
+                self._text,
+                reply_to_message_id=self._reply_to,
+                allow_sending_without_reply=True if self._reply_to is not None else None,
             )
         except Exception as exc:
             # Losing the placeholder must not lose the operation it announces.

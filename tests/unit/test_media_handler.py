@@ -45,6 +45,10 @@ def _make_message(
     msg.text = text
     msg.caption = caption
     msg.reply_to_message = None
+    # Raw thread id as Telegram sent it, and an ordinary (non-forum) group: a
+    # bare MagicMock in either would read as "this message is in a thread".
+    msg.message_thread_id = None
+    msg.chat.is_forum = None
     # A person writing as themselves (src/utils/senders.py): a bare MagicMock
     # attribute is truthy and would read as an automatic channel forward.
     msg.sender_chat = None
@@ -1335,6 +1339,25 @@ async def test_random_photo_reply_proceeds_when_gate_allows():
     deps["relevancy_gate"].evaluate.assert_awaited_once()
     deps["pipeline"].process.assert_awaited_once()
     deps["message"].answer.assert_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_comments", "quoted"),
+    [pytest.param(False, False, id="open-feed"), pytest.param(True, True, id="under-a-post")],
+)
+async def test_an_unsolicited_photo_answer_quotes_only_inside_a_thread(in_comments, quoted):
+    """Unquoted in the open feed (unchanged); quoted under a channel post, or the
+    answer leaves the post's comments for the discussion group's main feed."""
+    deps = _photo_deps_for_random_reply(gate_allows=True)
+    message = deps["message"]
+    if in_comments:
+        message.message_thread_id = 10
+
+    await _run_photo_handler(deps)
+
+    expected = message.message_id if quoted else None
+    assert message.answer.await_args.kwargs.get("reply_to_message_id") == expected
 
 
 @pytest.mark.asyncio
