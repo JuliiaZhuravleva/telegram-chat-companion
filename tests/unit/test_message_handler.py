@@ -988,3 +988,96 @@ class TestHandleTextMessageReplyToTranscription:
         deps["pipeline"].process.assert_awaited_once()
         assert deps["pipeline"].process.call_args.kwargs["trigger_type"] == TriggerType.REPLY
         deps["message"].answer.assert_awaited_once()
+
+
+class TestAiStickerQuotesWhatTheAnswerQuoted:
+    """The AI-chosen sticker follows the text answer into the same thread.
+
+    It used to be sent unquoted. In a channel's discussion group a reply is the
+    only thing that places a message under a post, so the sticker landed in the
+    group's main feed while the text it belonged to sat in the comments.
+    """
+
+    @staticmethod
+    async def _run(message_deps, trigger_type):
+        message_deps["pipeline"].process = AsyncMock(
+            return_value=PipelineResult(
+                should_respond=True,
+                html_text="Hello there!",
+                trigger_type=trigger_type,
+                response_type=ResponseType.NORMAL,
+                sticker_file_id="STICKER",
+            )
+        )
+        with patch("src.bot.handlers.message.typing_indicator") as mock_indicator:
+            mock_indicator.return_value.__aenter__ = AsyncMock(return_value=None)
+            mock_indicator.return_value.__aexit__ = AsyncMock(return_value=False)
+            await handle_text_message(
+                message_deps["message"],
+                message_deps["chat_config"],
+                message_deps["pipeline"],
+                message_deps["message_repo"],
+                message_deps["relevancy_gate"],
+                message_deps["spend_limit_svc"],
+                message_deps["abuse_checker"],
+                message_deps["bot"],
+            )
+        return message_deps["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_quoted_answer_brings_its_sticker_along(self, message_deps):
+        message = await self._run(message_deps, TriggerType.TRIGGER)
+
+        text_quote = message.answer.await_args.kwargs.get("reply_to_message_id")
+        sticker = message.answer_sticker.await_args
+        assert text_quote == 42
+        assert sticker.kwargs.get("reply_to_message_id") == 42
+        # A source deleted meanwhile must cost the quote, not the sticker.
+        assert sticker.kwargs.get("allow_sending_without_reply") is True
+
+    @pytest.mark.asyncio
+    async def test_an_unquoted_answer_keeps_its_sticker_unquoted(self, message_deps, make_message):
+        """Control: RANDOM answers deliberately quote nothing; the sticker must
+        not start quoting on its own."""
+        # No trigger word and no reply: the handler itself classifies it RANDOM.
+        message = make_message(text="just chatting", chat_id=-100123, message_id=42)
+        message.answer = AsyncMock(return_value=MagicMock(message_id=43))
+        message.answer_sticker = AsyncMock()
+        message_deps["message"] = message
+        message = await self._run(message_deps, TriggerType.RANDOM)
+
+        assert message.answer.await_args.kwargs.get("reply_to_message_id") is None
+        assert message.answer_sticker.await_args.kwargs.get("reply_to_message_id") is None
+
+    @pytest.mark.asyncio
+    async def test_an_unsolicited_answer_in_a_comment_thread_quotes(
+        self, message_deps, make_message
+    ):
+        """A RANDOM answer to a comment under a channel post quotes it, sticker too.
+
+        Unquoted it went to the discussion group's main feed and never appeared
+        under the post. The open-feed control above stays unquoted.
+        """
+        post = MagicMock()
+        post.message_id = 10
+        post.from_user = None  # a channel post forwarded into the discussion group
+        post.sender_chat = MagicMock(id=-100777, type="channel", title="Blog", username=None)
+        post.author_signature = None
+        post.is_automatic_forward = True
+        post.text = "the post"
+        post.caption = None
+        message = make_message(
+            text="just chatting",
+            chat_id=-100123,
+            message_id=42,
+            reply_to_message=post,
+            message_thread_id=10,
+        )
+        message.quote = None  # no manual quote; a bare mock is not a string
+        message.answer = AsyncMock(return_value=MagicMock(message_id=43))
+        message.answer_sticker = AsyncMock()
+        message_deps["message"] = message
+        message = await self._run(message_deps, TriggerType.RANDOM)
+
+        assert message.answer.await_args.kwargs.get("reply_to_message_id") == 42
+        assert message.answer_sticker.await_args.kwargs.get("reply_to_message_id") == 42

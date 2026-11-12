@@ -104,6 +104,15 @@ class TestPartialDelivery:
         )
 
         assert [m.message_id for m in sent] == [43, 44, 45]
-        # Only the first quotes the source; the rest read as continuations.
+        # EVERY piece quotes the source. In a channel's discussion group a
+        # reply is the only thing that puts a message into a post's comment
+        # thread; an unquoted continuation went to the main feed instead, and
+        # readers of the comments saw part one and never part two.
         quotes = [c.kwargs.get("reply_to_message_id") for c in message.answer.await_args_list]
-        assert quotes == [42, None, None]
+        assert quotes == [42, 42, 42]
+        # Only the head may be REJECTED for a vanished source (and so carry the
+        # "original was deleted" note); continuations just lose the quote.
+        optional = [
+            c.kwargs.get("allow_sending_without_reply") for c in message.answer.await_args_list
+        ]
+        assert optional == [None, True, True]

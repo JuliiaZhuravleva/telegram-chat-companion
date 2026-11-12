@@ -293,3 +293,18 @@ async def test_a_summary_that_raises_releases_the_button() -> None:
     again = _summary_service("<b>x</b>")
     await handle_summary_callback(_make_callback(), config, again)
     again.generate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_the_summary_quotes_the_card_its_button_sits_on() -> None:
+    """Quoted, the summary stays in the card's thread.
+
+    Under a channel post the card sits in the comments; an unquoted summary
+    landed in the discussion group's main feed instead.
+    """
+    callback = _make_callback()
+    service = _summary_service("<b>Кратко</b>")
+
+    await handle_summary_callback(callback, _make_chat_config(save_messages=True), service)
+
+    assert callback.message.answer.await_args.kwargs.get("reply_to_message_id") == 500

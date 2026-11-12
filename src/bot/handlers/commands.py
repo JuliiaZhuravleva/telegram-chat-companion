@@ -433,9 +433,9 @@ async def _reject_if_saving_disabled(message: Message, chat_config: ChatConfig, 
     if chat_config.save_messages:
         return False
     if lang == "ru":
-        await message.answer("Сохранение сообщений отключено для этого чата.")
+        await message.reply("Сохранение сообщений отключено для этого чата.")
     else:
-        await message.answer("Message saving is disabled for this chat.")
+        await message.reply("Message saving is disabled for this chat.")
     return True
 
 
@@ -461,7 +461,11 @@ async def _deliver_summary(
     # happened: the old fallback deleted the placeholder and re-sent the very
     # same body that Telegram had just rejected, so a long summary destroyed
     # its own progress message and then raised, leaving the chat with nothing.
-    async with ProgressNotice(message, text=processing) as notice:
+    # Quoting the command keeps the summary under it -- in a channel's
+    # discussion group that is the only way it stays in the post's comments.
+    async with ProgressNotice(
+        message, text=processing, reply_to_message_id=message.message_id
+    ) as notice:
         # Topic-filtered summary in forum chats
         html = await summary_service.generate(
             message.chat.id,
@@ -1331,13 +1335,13 @@ async def handle_kb_view_group(
     lang = _chat_lang(chat_config)
 
     if not chat_config.kb_enabled:
-        await message.answer(_KB_DISABLED[lang])
+        await message.reply(_KB_DISABLED[lang])
         return
 
     facts = await knowledge_repo.get_active_facts(message.chat.id)
 
     if not facts:
-        await message.answer(_KB_EMPTY_GROUP[lang])
+        await message.reply(_KB_EMPTY_GROUP[lang])
         return
 
     await show(message, _render_kb_group(facts, lang, 0))

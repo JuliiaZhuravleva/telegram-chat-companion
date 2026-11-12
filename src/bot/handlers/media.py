@@ -13,6 +13,7 @@ from dishka.integrations.aiogram import FromDishka
 
 from src.bot.progress import MIN_SECONDS_TO_ANNOUNCE, ProgressNotice
 from src.bot.reply_flow import (
+    answer_quote_target,
     finish_reply,
     relevancy_allows_reply,
     send_quoted_reply,
@@ -411,6 +412,7 @@ async def _maybe_answer_transcript(
         message=message,
         result=result,
         sent_message_id=sent.message_id,
+        reply_to_message_id=message.message_id,
         chat_config=chat_config,
         pipeline=pipeline,
         spend_limit_svc=spend_limit_svc,
@@ -569,7 +571,7 @@ async def handle_photo_message(
         if result is None or not result.should_respond or not result.html_text:
             return
 
-        reply_to = message.message_id if trigger_type != TriggerType.RANDOM else None
+        reply_to = answer_quote_target(message, trigger_type)
 
         # Send to correct topic in forum chats
         # Note: message.answer() inherits message_thread_id from the original message
@@ -587,6 +589,7 @@ async def handle_photo_message(
             message=message,
             result=result,
             sent_message_id=sent.message_id if sent else None,
+            reply_to_message_id=reply_to,
             chat_config=chat_config,
             pipeline=pipeline,
             spend_limit_svc=spend_limit_svc,

@@ -154,7 +154,19 @@ code path and cannot be reached from a chat. Two consequences worth knowing:
 one-line note at the top (`⚠️ Исходное сообщение удалено.`) so the chat can see why it
 stands alone. `send_quoted_reply()` in `src/bot/reply_flow.py` owns this; an unrelated
 send failure is re-raised rather than relabelled, and cost logging runs even when the reply
-cannot be delivered at all.
+cannot be delivered at all. The note goes on the first part only: later parts of a split
+answer drop the quote silently (`allow_sending_without_reply`).
+
+**Every part of a split answer quotes the source**, not just the first (fixed 2026-11-12).
+In a channel's discussion group the reply link is the only thing that puts a bot message
+under a post — the Bot API's `message_thread_id` is honoured for forum topics only — so an
+unquoted part 2 landed in the group's main feed and a blog reader saw part 1 alone. The same
+rule now covers the AI-chosen sticker, `/summary` (placeholder and every part), the summary
+button under `/help`, the saving-disabled notice, and group `/help`, `/start`, `/kb` (via
+`show()`, which quotes a command in a group and never in a DM). **RANDOM answers** stay
+unquoted in the open feed but quote when the message is already in a reply thread — a
+comment under a post or a reply chain (`answer_quote_target()` in `src/bot/reply_flow.py`;
+forums excluded, `answer()` routes into the topic there).
 
 ### 2.6 Sticker Intelligence
 

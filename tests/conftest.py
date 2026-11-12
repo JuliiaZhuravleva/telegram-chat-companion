@@ -257,6 +257,7 @@ def make_message():
         user_id: int = 12345,
         message_id: int = 1,
         reply_to_message: Any = None,
+        message_thread_id: int | None = None,
     ) -> MagicMock:
         message = MagicMock()
         message.text = text
@@ -265,6 +266,8 @@ def make_message():
 
         message.chat = MagicMock()
         message.chat.id = chat_id
+        # An ordinary group. Telegram sends `is_forum` only for forums.
+        message.chat.is_forum = None
 
         message.from_user = MagicMock()
         message.from_user.id = user_id
@@ -278,6 +281,10 @@ def make_message():
         message.author_signature = None
 
         message.reply_to_message = reply_to_message
+        # Raw, as Telegram sent it: set on a reply chain or a comment under a
+        # channel post even in a non-forum group. A bare MagicMock here would
+        # read as "this message is in a thread" (src/bot/reply_flow.py).
+        message.message_thread_id = message_thread_id
 
         message.reply = AsyncMock()
 

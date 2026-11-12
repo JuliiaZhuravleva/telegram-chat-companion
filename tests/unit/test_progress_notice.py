@@ -16,7 +16,8 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.methods import SendMessage
 
 from src.bot.progress import MIN_SECONDS_TO_ANNOUNCE, ProgressNotice
 
@@ -44,7 +45,12 @@ class FakeMessage:
     async def answer(self, text: str, **kwargs) -> FakeSent:
         is_quoted = kwargs.get("reply_to_message_id") is not None
         if is_quoted and self.quoted_answer_error is not None:
-            raise self.quoted_answer_error
+            # Measured on the dev bot 2026-11-12: without the flag Telegram
+            # rejects ("message to be replied not found"); with
+            # `allow_sending_without_reply` the send goes out, just unquoted.
+            if not kwargs.get("allow_sending_without_reply"):
+                raise self.quoted_answer_error
+            is_quoted = False
         if self.answer_error is not None:
             raise self.answer_error
         self.sent.append(text)
@@ -307,3 +313,27 @@ class TestTheFailureSurvivesTheSourceBeingDeleted:
 
         assert message.quoted == [True]
         assert len(message.sent) == 1, "one message, not one per attempt"
+
+
+class TestThePlaceholderSurvivesItsSourceBeingDeleted:
+    """A /summary deleted by its author before the "⏳" goes out.
+
+    Without `allow_sending_without_reply` the placeholder was lost, and the
+    result then went through the first-part path that prefixes a "source
+    deleted" note -- meant for audio, odd on a command someone tidied away.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_posts_unquoted_and_the_result_carries_no_note(self) -> None:
+        message = FakeMessage()
+        message.quoted_answer_error = TelegramBadRequest(
+            method=SendMessage(chat_id=-100123, text="x"),
+            message="Bad Request: message to be replied not found",
+        )
+        async with ProgressNotice(message, text="⏳", reply_to_message_id=42) as notice:
+            pass
+
+        assert notice.placeholder is not None, "the placeholder must survive"
+        assert message.quoted == [False]
+        await notice.finish(["<b>one</b>"], language="ru")
+        assert not [t for t in message.sent if "удалено" in t]

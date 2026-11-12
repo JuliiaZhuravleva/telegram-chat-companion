@@ -147,7 +147,11 @@ async def handle_summary_callback(
         # None unless the chat is a real forum — reading it raw off the bot's own
         # message picks up the thread id Telegram stamps on linked-channel
         # discussion comments, silently narrowing the summary (TD-102).
-        async with ProgressNotice(msg, text=_GENERATING(lang_of(lang))) as notice:
+        # Quoting the card the button sits on keeps the summary in the card's
+        # thread -- under a channel post, unquoted, it would land in the feed.
+        async with ProgressNotice(
+            msg, text=_GENERATING(lang_of(lang)), reply_to_message_id=msg.message_id
+        ) as notice:
             html = await summary_service.generate(
                 msg.chat.id,
                 count=count,

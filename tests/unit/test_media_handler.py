@@ -45,6 +45,10 @@ def _make_message(
     msg.text = text
     msg.caption = caption
     msg.reply_to_message = None
+    # Raw thread id as Telegram sent it, and an ordinary (non-forum) group: a
+    # bare MagicMock in either would read as "this message is in a thread".
+    msg.message_thread_id = None
+    msg.chat.is_forum = None
     # A person writing as themselves (src/utils/senders.py): a bare MagicMock
     # attribute is truthy and would read as an automatic channel forward.
     msg.sender_chat = None
@@ -1338,6 +1342,25 @@ async def test_random_photo_reply_proceeds_when_gate_allows():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("in_comments", "quoted"),
+    [pytest.param(False, False, id="open-feed"), pytest.param(True, True, id="under-a-post")],
+)
+async def test_an_unsolicited_photo_answer_quotes_only_inside_a_thread(in_comments, quoted):
+    """Unquoted in the open feed (unchanged); quoted under a channel post, or the
+    answer leaves the post's comments for the discussion group's main feed."""
+    deps = _photo_deps_for_random_reply(gate_allows=True)
+    message = deps["message"]
+    if in_comments:
+        message.message_thread_id = 10
+
+    await _run_photo_handler(deps)
+
+    expected = message.message_id if quoted else None
+    assert message.answer.await_args.kwargs.get("reply_to_message_id") == expected
+
+
+@pytest.mark.asyncio
 async def test_declined_random_reply_still_analyses_but_skips_generation():
     """What the gate does and does not save, pinned deliberately.
 
@@ -1386,7 +1409,13 @@ async def test_ai_chosen_sticker_is_sent_on_the_photo_path():
 
     await _run_photo_handler(deps)
 
-    deps["message"].answer_sticker.assert_awaited_once_with("sticker-123")
+    # Quoting the photo, as the text answer did: in a channel's comment
+    # thread an unquoted sticker lands in the main feed, not under the post.
+    deps["message"].answer_sticker.assert_awaited_once_with(
+        "sticker-123",
+        reply_to_message_id=deps["message"].message_id,
+        allow_sending_without_reply=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -1626,6 +1655,41 @@ async def test_every_part_of_a_split_transcription_is_linked_to_its_audio():
     assert len(recorded) == len(parts) > 1
     for call in recorded:
         assert call.kwargs["source_message_id"] == deps["message"].message_id
+
+
+@pytest.mark.parametrize(
+    "duration",
+    [
+        pytest.param(372, id="with-placeholder"),  # part 1 is the edited placeholder
+        pytest.param(3, id="without-placeholder"),  # every part is a fresh send
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_part_of_a_split_transcription_replies_to_its_audio(duration):
+    """Found 2026-11-12 on a nine-minute voice post in a channel's comments.
+
+    Only the first part used to quote the voice message. In a discussion group
+    a reply is what puts a message into a post's comment thread (`sendMessage`
+    has no thread parameter outside forums), so part two went to the group's
+    main feed and readers under the post saw "(1/2)" and nothing after it.
+    """
+    deps = _make_voice_deps(transcript="слово " * 1500, duration=duration)
+    source_id = deps["message"].message_id
+
+    await _run_voice_handler(deps)
+
+    message = deps["message"]
+    # Everything that reached the chat as a fresh send -- the placeholder when
+    # there is one, then every part not delivered by editing it.
+    fresh = [c for c in message.answer.await_args_list if c.args]
+    fresh_parts = [c for c in fresh if _HEADER_LABEL in c.args[0]]
+    all_parts = [b for b in _sent_texts(message) if _HEADER_LABEL in b]
+    assert len(all_parts) > 1, "the transcript must actually have been split"
+    # Edited parts inherit the quote of the message they were edited from.
+    assert len(fresh) == len(all_parts), "one fresh send per part (placeholder included)"
+    assert fresh_parts, "at least one continuation must have been a fresh send"
+    for call in fresh:
+        assert call.kwargs.get("reply_to_message_id") == source_id, call.args[0][:40]
 
 
 @pytest.mark.asyncio

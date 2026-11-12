@@ -258,8 +258,11 @@ class TestHandleSummaryCount:
         await handle_summary(msg, chat_config=cfg, summary_service=service)
 
         service.generate.assert_not_awaited()
-        msg.answer.assert_awaited_once()
-        msg.reply.assert_not_awaited()
+        # One quoted refusal, and it is the saving notice -- not the count
+        # validation screen, which would also arrive as a reply.
+        msg.reply.assert_awaited_once()
+        assert "отключено" in msg.reply.call_args[0][0]
+        msg.answer.assert_not_awaited()
 
 
 class TestHandleSummary500:
@@ -311,7 +314,9 @@ class TestHandleSummary500:
         await handle_summary500(msg, chat_config=cfg, summary_service=service)
 
         service.generate.assert_not_awaited()
-        msg.answer.assert_awaited_once()
+        # Quoted: under a channel post an unquoted notice leaves the comments.
+        msg.reply.assert_awaited_once()
+        msg.answer.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_dm_answers_group_only_naming_this_command(self) -> None:
@@ -452,3 +457,18 @@ class TestSummaryDelivery:
         )
 
         placeholder.edit_text.assert_awaited_once_with("<b>Summary</b>", parse_mode="HTML")
+
+
+@pytest.mark.asyncio
+async def test_the_summary_placeholder_quotes_the_command() -> None:
+    """The "⏳" that becomes the summary quotes /summary, so under a channel
+    post it stays in the comments instead of landing in the group's feed."""
+    msg = _make_message(chat_type="supergroup", text="/summary")
+    msg.message_id = 77
+    msg.answer = AsyncMock(return_value=_make_placeholder())
+
+    await handle_summary(
+        msg, chat_config=_make_chat_config(), summary_service=_make_summary_service()
+    )
+
+    assert msg.answer.await_args_list[0].kwargs.get("reply_to_message_id") == 77
